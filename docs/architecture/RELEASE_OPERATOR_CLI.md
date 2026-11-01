@@ -78,6 +78,14 @@ apply instead.
   `schema_version`, result structure, error registry and numeric exit
   codes must be reconciled with the three-program cross-CLI contract before
   release. Never invent an independently incompatible numeric map.
+- **Signer path selection:** `environment check --signer-key-file ABSOLUTE_PATH`
+  and `candidate sign VERSION --passphrase-fd FD --signer-key-file ABSOLUTE_PATH`
+  accept an optional, invocation-local path to the owner PEM. Omission
+  retains the existing HOME-relative default. Require normalized absolute
+  paths, trusted non-symlink parent directories, and a singly linked regular
+  owner file with mode `0600`; never persist or echo the pathname in a
+  diagnostic JSON result. The file contents and passphrase are not CLI
+  arguments; only the explicit `candidate sign` action may unlock a PEM.
 - **Human output:** results on stdout, failures and warnings on stderr.
   The operator CLI must not prompt, spawn a TUI, elevate via `sudo`,
   ask for a passphrase implicitly, or echo credentials.
