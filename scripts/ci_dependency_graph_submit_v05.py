@@ -366,7 +366,7 @@ def main() -> None:
         value = base64.b64encode(raw).decode("ascii")
         require(len(value) < 70000, "Oversized GitHub Actions handoff")
         with args.github_output.open("a", encoding="utf-8") as out:
-            out.write(f"snapshot_b64={value}\\n".replace("\\n", "\n"))
+            out.write(f"snapshot_b64={value}\n")
     if args.publish:
         submit(snapshots, args.sha)
     else:

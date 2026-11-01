@@ -214,7 +214,7 @@ def test_workflow_uses_strict_job_scoped_write_boundary():
     assert re.findall(r"^\s+contents: write$", active, flags=re.MULTILINE) == [
         "      contents: write"
     ]
-    assert active.count("contents: read") == 3
+    assert active.count("contents: read") == 4
     assert "pull_request_target:" not in active
     assert "workflow_run:" not in active
     assert "github.event_name == 'push'" in active
@@ -231,6 +231,9 @@ def test_workflow_uses_strict_job_scoped_write_boundary():
     assert "snapshot_b64: ${{ steps.validate.outputs.snapshot_b64 }}" in preflight
     assert '--github-output "$GITHUB_OUTPUT"' in preflight
     assert "actions/checkout@" in preflight and "actions/download-artifact@" in preflight
+    handoff = active.split("  handoff-verify:\n", 1)[1].split("  publish:\n", 1)[0]
+    assert "contents: read" in handoff and "uses:" not in handoff
+    assert "SNAPSHOT_B64: ${{ needs.preflight.outputs.snapshot_b64 }}" in handoff
     assert "uses:" not in publish
     assert "actions/checkout@" not in publish and "actions/download-artifact@" not in publish
     assert "SNAPSHOT_B64: ${{ needs.preflight.outputs.snapshot_b64 }}" in publish
@@ -492,14 +495,16 @@ def test_unprivileged_preflight_exports_complete_atomic_payload(monkeypatch, tmp
     import sys
     from scripts import ci_dependency_graph_submit_v05 as module
 
+    graphs_dir = tmp_path / "graphs"
+    graphs_dir.mkdir()
     for target in TARGETS:
-        (tmp_path / f"dependency-graph-preview-{target}.json").write_text(
+        (graphs_dir / f"dependency-graph-preview-{target}.json").write_text(
             json.dumps(_graph(target))
         )
     output = tmp_path / "workflow-output"
     output.touch()
     monkeypatch.setattr(sys, "argv", ["preflight", "--source", str(ROOT),
-                        "--directory", str(tmp_path), "--sha", SHA,
+                        "--directory", str(graphs_dir), "--sha", SHA,
                         "--github-output", str(output)])
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     module.main()

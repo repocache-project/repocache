@@ -96,6 +96,48 @@ jobs:
             --source . --directory "$RUNNER_TEMP/graphs" --sha "$GITHUB_SHA" \
             --github-output "$GITHUB_OUTPUT"
 
+  # PR-only read-only job demonstrates that the real GitHub Actions job
+  # output survives the cross-job handoff. No write token or third-party Actions.
+  handoff-verify:
+    name: Verify unprivileged cross-job snapshot handoff
+    if: github.event_name == 'pull_request' && github.repository == 'teixemf/repocache'
+    needs: [preflight]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Refuse missing, truncated, stale or incomplete job output
+        shell: bash
+        env:
+          SNAPSHOT_B64: ${{ needs.preflight.outputs.snapshot_b64 }}
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import base64
+          import json
+          import os
+          import sys
+          data = os.environ.get("SNAPSHOT_B64", "")
+          if not (0 < len(data) < 70000):
+              sys.exit("FAIL: GitHub Actions omitted or truncated the job output")
+          try:
+              payload = json.loads(base64.b64decode(data, validate=True))
+          except (ValueError, UnicodeError):
+              sys.exit("FAIL: malformed job output")
+          expected = {
+              "deps/requirements-debian13-py313.txt",
+              "deps/requirements-almalinux10-py312.txt",
+              "deps/requirements-build-v05.txt",
+          }
+          if (payload.get("sha") != os.environ["GITHUB_SHA"]
+                  or payload.get("ref") != "refs/heads/main"
+                  or set(payload.get("manifests", {})) != expected):
+              sys.exit("FAIL: incomplete or stale cross-job handoff")
+          print("PASS: complete exact-SHA three-manifest job output transported "
+                "across distinct read-only GitHub Actions jobs; NO API call")
+          PY
+
   publish:
     name: Submit exact verified snapshots (protected main only)
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'teixemf/repocache'
