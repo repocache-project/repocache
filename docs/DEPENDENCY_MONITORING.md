@@ -172,12 +172,20 @@ In the proposed `.github/workflows/dependency-graph-submit-v05.yml`:
 - Only a separate job triggered by `push` on protected `main` receives
   `contents: write`. PR compute jobs retain `contents: read` and
   `persist-credentials: false`; no `pull_request_target` or `workflow_run`.
-- The publisher validates both artifact inventories, source-lock/manifest
-  hashes, direct and transitively related PURLs, scopes, exact source SHA
-  and current main branch head before ONE atomic snapshot POST. A moved
-  branch, changed graph edge count, mismatched build scopes, API errors
-  or missing artifacts fail closed. Token is provided to its last step only;
-  the API client refuses proxies and HTTP redirects.
+- The publisher compares the complete **canonical per-parent adjacency**
+  against source-controlled, independently reviewed v0.5.0 wheel metadata,
+  not merely a total of 14 edges. Native Debian and AlmaLinux validation
+  and hosted producers must match this exact same adjacency contract.
+- The publisher independently validates the source locks, monitor hashes,
+  build/runtime scopes, manifest identities, and current main SHA before
+  one complete snapshot POST. Unknown relationships or moved SHA fail closed.
+- Although the token is explicitly passed only to the final script step,
+  GitHub Actions exposes the `github.token` context to earlier Actions
+  **within the privileged job**. The full-SHA-pinned checkout/download
+  Actions and the GitHub-hosted publisher runner are trusted components;
+  a compromised publisher runner may access the write-scoped token.
+  Token exposure is a residual Medium risk, not eliminated by the YAML.
+  The API client forbids proxies and HTTP redirects.
 - The three reviewed source manifests remain separate GitHub graph entries:
   `deps/requirements-debian13-py313.txt`,
   `deps/requirements-almalinux10-py312.txt` and
