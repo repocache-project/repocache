@@ -82,10 +82,14 @@ jobs:
                 echo "Wrong native Python version: $observed" >&2
                 exit 1
               }
-              /usr/bin/python3 -B -m pytest -q -p no:cacheprovider \
+              /usr/bin/python3 -B -m pytest -q -rs -p no:cacheprovider \
                 tests/test_release_operator.py \
                 tests/test_release_operator_state_fd.py \
                 tests/test_draft_release_gate.py
+              # Actual read-only executable invocation, not just in-process mocks.
+              # Missing candidate state MUST not count as accepted or published.
+              PYTHONPATH=/source/workstation/src /usr/bin/python3 -B \
+                -m repocache_release.cli candidate status v0.5.0 --json
             '
       - name: Report acceptance boundary
         if: always()
