@@ -136,6 +136,41 @@ def read_snapshots(source: Path, directory: Path, sha: str) -> list[dict]:
     return result
 
 
+def combine_snapshots(snapshots: list[dict]) -> dict:
+    """Submit all three logical manifests atomically in one API request."""
+    require(len(snapshots) == 2, "Expected exactly two target profiles")
+    profiles = {snapshot["job"]["correlator"]: snapshot for snapshot in snapshots}
+    require(set(profiles) == {
+        "repocache-v05-wheelmeta-debian13-py313",
+        "repocache-v05-wheelmeta-almalinux10-py312",
+    }, "Missing or duplicated target profile")
+    left, right = snapshots
+    require(left["sha"] == right["sha"] and left["ref"] == right["ref"]
+            and left["detector"] == right["detector"],
+            "Inconsistent profile commit or detector")
+    build = "deps/requirements-build-v05.txt"
+    require(left["manifests"][build] == right["manifests"][build],
+            "Conflicting build-only dependency metadata")
+    manifests = {build: left["manifests"][build]}
+    for snapshot in snapshots:
+        for path, manifest in snapshot["manifests"].items():
+            if path != build:
+                require(path not in manifests, "Duplicated runtime profile")
+                manifests[path] = manifest
+    require(set(manifests) == {
+        "deps/requirements-debian13-py313.txt",
+        "deps/requirements-almalinux10-py312.txt", build,
+    }, "Missing approved per-profile manifest")
+    return {
+        "version": 0, "sha": left["sha"], "ref": "refs/heads/main",
+        "job": {"correlator": "repocache-v05-wheelmeta-two-target",
+                "id": left["sha"]},
+        "detector": left["detector"],
+        "scanned": max(left["scanned"], right["scanned"]),
+        "manifests": manifests,
+    }
+
+
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         raise GraphRefused("Refused GitHub API redirect")
@@ -188,17 +223,18 @@ def submit(snapshots: list[dict], sha: str) -> None:
             "Refusing graph publication outside exact main push")
     token = os.environ.get("GITHUB_TOKEN", "")
     require(bool(token) and len(token) <= 4096, "Missing job-scoped token")
-    # Prevalidate *both* snapshots before doing any network mutation.
-    for snapshot in snapshots:
-        branch = github_api(token, f"/repos/{REPOSITORY}/branches/main")
-        require(branch.get("commit", {}).get("sha") == sha,
-                "Protected main advanced since graph collection; refuse stale submission")
-        result = github_api(token, f"/repos/{REPOSITORY}/dependency-graph/snapshots",
-                            snapshot)
-        require(result.get("result") in {"SUCCESS", "ACCEPTED"},
-                "GitHub did not accept submitted dependency graph")
-        print("PASS: accepted reviewed dependency graph for " +
-              snapshot["job"]["correlator"], flush=True)
+    # Prevalidate and combine both target-specific manifests plus the build
+    # manifest. One atomic POST avoids partially publishing one target.
+    combined = combine_snapshots(snapshots)
+    branch = github_api(token, f"/repos/{REPOSITORY}/branches/main")
+    require(branch.get("commit", {}).get("sha") == sha,
+            "Protected main advanced since graph collection; refuse stale submission")
+    result = github_api(token, f"/repos/{REPOSITORY}/dependency-graph/snapshots",
+                        combined)
+    require(result.get("result") in {"SUCCESS", "ACCEPTED"},
+            "GitHub did not accept submitted dependency graph")
+    print("PASS: accepted both locked profiles and scoped build inventory",
+          flush=True)
 
 
 def main() -> None:
