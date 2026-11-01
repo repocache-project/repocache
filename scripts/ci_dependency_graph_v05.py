@@ -87,7 +87,11 @@ def metadata_from_wheel(path: Path, name: str, version: str, sha256: str) -> lis
         require(len(members) <= 2000 and
                 sum(i.file_size for i in members) <= 40_000_000,
                 "Unbounded wheel ZIP contents")
-        # Vendored metadata inside setuptools is not the wheel distribution.\n        found = [i for i in members\n                 if i.filename.count("/") == 1\n                 and i.filename.endswith(".dist-info/METADATA")]\n        require(len(found) == 1 and found[0].file_size <= 200_000,
+        # Vendored metadata inside setuptools is not the wheel distribution.
+        found = [i for i in members
+                 if i.filename.count("/") == 1
+                 and i.filename.endswith(".dist-info/METADATA")]
+        require(len(found) == 1 and found[0].file_size <= 200_000,
                 "Missing, ambiguous or oversized wheel METADATA")
         raw = archive.read(found[0])
     msg = BytesParser().parsebytes(raw)
