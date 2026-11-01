@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import sys
 import time
 from pathlib import Path
@@ -491,6 +492,54 @@ def config_check(ctx: typer.Context) -> None:
     console.print(Text(result["stderr"] or result["stdout"]))
     if not result["ok"]:
         raise typer.Exit(1)
+
+
+
+@config_app.command("validate")
+def config_validate(
+    ctx: typer.Context,
+    file: Path = typer.Option(..., "--file", help="Read-only server-install v1 JSON input"),
+    json_output: bool = typer.Option(False, "--json", help="One bounded v1 JSON result"),
+) -> None:
+    """Validate a complete proposed server configuration without applying it."""
+    from repocache.server_install_v1 import (
+        MAX_DOCUMENT_BYTES, InstallInputError, parse_install_bytes,
+    )
+
+    # Open a bounded regular file without following a final symlink; never
+    # invoke install, NGINX, systemctl, network code or any privileged helper.
+    # Nonblocking open avoids hanging on untrusted FIFO/special paths.
+    flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(file, flags)
+        with os.fdopen(fd, "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise OSError("Not a regular file")
+            payload = stream.read(MAX_DOCUMENT_BYTES + 1)
+    except (OSError, ValueError):
+        _cli_error(ctx, "CONFIG_UNAVAILABLE", "Cannot read a regular configuration file.",
+                   status=2, local_json=json_output)
+    try:
+        candidate = parse_install_bytes(payload, for_apply=False)
+    except (InstallInputError, ValueError):
+        _cli_error(ctx, "CONFIG_INVALID", "Configuration failed strict v1 validation.",
+                   status=2, local_json=json_output)
+    summary = {
+        "ok": True, "status": "VALIDATION_ONLY",
+        "kind": "repocache.server.install",
+        "repository_count": len(candidate["repositories"]),
+        "active_intent_count": sum(
+            repo["desired_state"] == "active" for repo in candidate["repositories"]
+        ),
+        "authorizes_installation": False,
+    }
+    if _json_enabled(ctx, json_output):
+        emit_json(summary)
+    else:
+        console.print("Validated server-install v1 input (read-only; no activation).")
+        console.print(f"Repositories: {summary['repository_count']}")
+        console.print("No NGINX configuration, service or catalog has been changed.")
 
 
 @config_app.command("show")
