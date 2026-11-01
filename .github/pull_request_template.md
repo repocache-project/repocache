@@ -51,7 +51,7 @@ Follow [PR review and acceptance policy](https://github.com/teixemf/repocache/bl
 
 **Actual submitted human GitHub approvals:**
 
-**PR-specific review criterion amendment (owner link, or NONE):**
+**Independent review PASS / FAIL / NOT VERIFIED (report link and exact SHA):**
 
 **Acceptance criterion | PASS / FAIL / NOT VERIFIED | evidence:**
 
