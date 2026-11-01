@@ -39,16 +39,48 @@ def _pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _depth(value: Any, level: int = 1) -> None:
+def _depth(value: Any, level: int = 1,
+           budget: list[int] | None = None) -> None:
+    """Bound decoded-object traversal *before* exact JSON byte sizing.
+
+    Every JSON value and each string character costs at least one encoded
+    byte. Subtract these lower bounds from the 1 MiB budget, including keys.
+    This fails early for huge direct Python strings/arrays/dicts without
+    allocating a proportional serialized copy. Exact UTF-8 size follows.
+    """
     if level > MAX_DEPTH:
         _reject("JSON nesting exceeds 16 levels")
+    if budget is None:
+        budget = [MAX_DOCUMENT_BYTES]
+    budget[0] -= 1
+    if budget[0] < 0:
+        _reject("install document: decoded object exceeds 1 MiB")
     if isinstance(value, dict):
+        if len(value) > budget[0]:
+            _reject("install document: decoded object exceeds 1 MiB")
         for key, nested in value.items():
+            # Check character count before _string() allocates UTF-8 bytes.
+            # A Python dict supplied directly may contain an enormous key,
+            # even when the wire parser's input-size limit is respected.
+            if type(key) is not str:
+                _reject("JSON field name: expected string")
+            key_length = len(key)
+            if key_length > budget[0]:
+                _reject("install document: decoded object exceeds 1 MiB")
+            if key_length > 2048:
+                _reject("JSON field name: invalid length or whitespace")
             _string(key, "JSON field name", allow_empty=False)
-            _depth(nested, level + 1)
+            budget[0] -= key_length
+            _depth(nested, level + 1, budget)
     elif isinstance(value, list):
+        if len(value) > budget[0]:
+            _reject("install document: decoded object exceeds 1 MiB")
         for nested in value:
-            _depth(nested, level + 1)
+            _depth(nested, level + 1, budget)
+    elif type(value) is str:
+        budget[0] -= len(value)
+        if budget[0] < 0:
+            _reject("install document: decoded object exceeds 1 MiB")
     elif type(value) is int and not -MAX_INT <= value <= MAX_INT:
         # Fail without formatting an attacker-controlled huge integer.
         _reject("install document: integer exceeds signed 64-bit range")
@@ -212,6 +244,21 @@ def _layout_identity(kind: str, layout: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _repository_identity(kind: str, origin: tuple[str, int, str],
+                         layout: dict[str, Any]) -> str:
+    """Canonical stable source/layout identity; trust keys are mutable policy.
+
+    Both strict validation and repository planning MUST use this same
+    identity contract. Replacing a release/GPG trust reference requires an
+    explicit policy update, never a new repository identity. Duplicate source
+    definitions with distinct key files remain duplicates.
+    """
+    normalized = _layout_identity(kind, layout)
+    normalized.pop("release_key_refs" if kind == "apt" else "gpg_key_refs")
+    return json.dumps([kind, *origin, normalized],
+                      sort_keys=True, separators=(",", ":"))
+
+
 def _predecoded_size(document: Any) -> None:
     """The compact UTF-8 representation of an object must fit the 1 MiB cap.
 
@@ -219,12 +266,17 @@ def _predecoded_size(document: Any) -> None:
     entry points independently enforce the original payload's exact size.
     """
     try:
-        size = len(json.dumps(document, ensure_ascii=False, allow_nan=False,
-                              separators=(",", ":")).encode("utf-8"))
+        encoder = json.JSONEncoder(ensure_ascii=False, allow_nan=False,
+                                   separators=(",", ":"))
+        size = 0
+        for piece in encoder.iterencode(document):
+            size += len(piece.encode("utf-8"))
+            if size > MAX_DOCUMENT_BYTES:
+                _reject("install document: decoded object exceeds 1 MiB")
+    except InstallInputError:
+        raise
     except (TypeError, ValueError, UnicodeError, OverflowError, RecursionError):
         _reject("install document: invalid JSON-compatible object")
-    if size > MAX_DOCUMENT_BYTES:
-        _reject("install document: decoded object exceeds 1 MiB")
 
 
 def _paths_overlap(first: str, second: str) -> bool:
@@ -385,9 +437,9 @@ def validate_install_document(document: Any, *, for_apply: bool = False) -> dict
             _integer(overrides["max_size_bytes"], "cache_overrides.max_size_bytes", 1)
         # HTTPS origin normalizes DNS case and default port. URI path and
         # repository tokens remain case-sensitive; unordered arrays are sets.
-        identity = json.dumps([repo["kind"], hostname, effective_port, url_path,
-                               _layout_identity(repo["kind"], repo["layout"])],
-                              sort_keys=True, separators=(",", ":"))
+        identity = _repository_identity(
+            repo["kind"], (hostname, effective_port, url_path), repo["layout"]
+        )
         if identity in identities:
             _reject("repositories: duplicate canonical repository identity")
         identities.add(identity)
