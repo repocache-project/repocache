@@ -17,9 +17,53 @@ import sys
 import urllib.error
 import urllib.request
 
-from ci_dependency_graph_v05 import (
-    GIT_SHA, GraphRefused, TARGETS, normalize, parse_lock, require,
+# An independent standard-library validator: this write-scoped job must not
+# depend on pip, install Python wheels, or execute the producer's requirements.
+TARGETS = {"debian13-py313": (3, 13), "almalinux10-py312": (3, 12)}
+GIT_SHA = re.compile(r"[a-f0-9]{40}\Z")
+LOCK_ROW = re.compile(r"([a-z][a-z0-9_]*) (\d+(?:\.\d+){2}) ([a-f0-9]{64})\Z")
+PIN_ROW = re.compile(
+    r"([a-z][a-z0-9-]*)==(\d+(?:\.\d+){2}) --hash=sha256:([a-f0-9]{64})\Z"
 )
+
+
+class GraphRefused(ValueError):
+    """Reject a non-source-verified dependency submission."""
+
+
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        raise GraphRefused(message)
+
+
+def parse_lock(content: str) -> dict[str, tuple[str, str]]:
+    require(bool(content) and content.endswith("\n") and len(content) <= 16384,
+            "Invalid source wheel lock")
+    found = {}
+    for line in content.splitlines():
+        match = LOCK_ROW.fullmatch(line)
+        require(match is not None, "Malformed source lock")
+        name, version, digest = match.groups()
+        key = name.replace("_", "-")
+        require(key not in found, "Duplicate source lock entry")
+        found[key] = (version, digest)
+    return found
+
+
+def verify_monitor(content: str, pins: dict[str, tuple[str, str]]) -> None:
+    require(bool(content) and content.endswith("\n") and len(content) <= 16384,
+            "Invalid monitor manifest")
+    observed = {}
+    for line in content.splitlines():
+        if line.startswith("#"):
+            continue
+        match = PIN_ROW.fullmatch(line)
+        require(match is not None, "Unsafe manifest pin")
+        name, version, digest = match.groups()
+        require(name not in observed, "Duplicate monitor pin")
+        observed[name] = (version, digest)
+    require(observed == pins, "Manifest/source-locked hashes differ")
+
 
 REPOSITORY = "teixemf/repocache"
 DETECTOR = "repocache-verified-wheel-metadata"
@@ -90,6 +134,10 @@ def validate_snapshot(snapshot: object, source: Path, target: str, sha: str) -> 
     build = parse_lock((source / "deps/build-wheels.lock").read_text("utf-8"))
     require(len(runtime) == 12 and len(build) == 2 and not (runtime.keys() & build.keys()),
             "Unreviewed source lock inventory")
+    verify_monitor((source / f"deps/requirements-{target}.txt").read_text("utf-8"),
+                   runtime)
+    verify_monitor((source / "deps/requirements-build-v05.txt").read_text("utf-8"),
+                   build)
     names = {
         f"deps/requirements-{target}.txt": (runtime, {"rich", "textual", "typer"}, "runtime"),
         "deps/requirements-build-v05.txt": (build, set(build), "development"),
