@@ -160,7 +160,8 @@ def validate_snapshot(snapshot: object, source: Path, target: str, sha: str) -> 
     require(isinstance(snapshot, dict) and set(snapshot) == {
         "version", "sha", "ref", "job", "detector", "scanned", "manifests",
     }, "Unexpected snapshot schema")
-    require(snapshot["version"] == 0 and snapshot["sha"] == sha
+    require(type(snapshot["version"]) is int and snapshot["version"] == 0
+            and snapshot["sha"] == sha
             and snapshot["ref"] == "refs/heads/main",
             "Snapshot is not for the exact protected main SHA")
     job = snapshot["job"]
@@ -203,6 +204,19 @@ def validate_snapshot(snapshot: object, source: Path, target: str, sha: str) -> 
     return snapshot
 
 
+def strict_json_pairs(pairs: list[tuple[str, object]]) -> dict:
+    """Do not silently normalize duplicate keys in untrusted wheel artifacts."""
+    result: dict = {}
+    for key, value in pairs:
+        require(key not in result, "Duplicate snapshot JSON key")
+        result[key] = value
+    return result
+
+
+def reject_json_constant(value: str) -> None:
+    raise GraphRefused("Noncanonical snapshot JSON constant")
+
+
 def read_snapshots(source: Path, directory: Path, sha: str) -> list[dict]:
     require(source.is_dir() and directory.is_dir() and not directory.is_symlink(),
             "Invalid snapshot source/directory")
@@ -217,7 +231,11 @@ def read_snapshots(source: Path, directory: Path, sha: str) -> list[dict]:
         require(path.is_file() and not path.is_symlink() and path.stat().st_size < 50000,
                 "Unsafe snapshot artifact")
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(
+                path.read_text(encoding="utf-8"),
+                object_pairs_hook=strict_json_pairs,
+                parse_constant=reject_json_constant,
+            )
         except (ValueError, UnicodeError) as exc:
             raise GraphRefused("Unparseable snapshot JSON") from exc
         result.append(validate_snapshot(data, source, target, sha))

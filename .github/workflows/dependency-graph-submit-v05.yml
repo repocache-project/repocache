@@ -189,6 +189,26 @@ jobs:
               "typing-extensions": (),
           }
           REVIEWED_BUILD_EDGES = {"setuptools": (), "wheel": ()}
+          # Locked name AND exact version are independently checked inside
+          # the write-token job, not merely asserted by the read-only producer.
+          REVIEWED_RUNTIME_VERSIONS = {
+              "annotated-doc": "0.0.5",
+              "linkify-it-py": "2.2.0",
+              "markdown-it-py": "4.2.0",
+              "mdit-py-plugins": "0.6.1",
+              "mdurl": "0.1.2",
+              "platformdirs": "4.13.5",
+              "pygments": "2.21.0",
+              "rich": "15.0.0",
+              "shellingham": "1.5.4",
+              "textual": "8.2.8",
+              "typer": "0.27.3",
+              "typing-extensions": "4.16.0",
+          }
+          REVIEWED_BUILD_VERSIONS = {
+              "setuptools": "80.9.0",
+              "wheel": "0.45.1",
+          }
           
           
           class Refused(ValueError):
@@ -206,6 +226,10 @@ jobs:
                   require(key not in result, "Duplicate JSON key")
                   result[key] = value
               return result
+
+
+          def reject_json_constant(value):
+              raise Refused("Noncanonical JSON constant")
           
           
           class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -245,7 +269,8 @@ jobs:
               require(status == (201 if payload is not None else 200),
                       "Unexpected GitHub API response status")
               try:
-                  result = json.loads(body, object_pairs_hook=unique_pairs)
+                  result = json.loads(body, object_pairs_hook=unique_pairs,
+                                        parse_constant=reject_json_constant)
               except (ValueError, UnicodeError):
                   raise Refused("Malformed API response") from None
               require(isinstance(result, dict), "API response is not an object")
@@ -271,15 +296,23 @@ jobs:
                   raise Refused("Invalid snapshot handoff encoding") from None
               require(0 < len(raw) < 50000, "Invalid snapshot handoff length")
               try:
-                  payload = json.loads(raw, object_pairs_hook=unique_pairs)
+                  payload = json.loads(raw, object_pairs_hook=unique_pairs,
+                                         parse_constant=reject_json_constant)
               except (ValueError, UnicodeError):
                   raise Refused("Invalid snapshot handoff JSON") from None
               require(isinstance(payload, dict) and set(payload) == {
                   "version", "sha", "ref", "job", "detector", "scanned", "manifests",
               }, "Unexpected snapshot handoff schema")
-              require(payload["version"] == 0 and payload["sha"] == sha
+              require(type(payload["version"]) is int
+                      and payload["version"] == 0 and payload["sha"] == sha
                       and payload["ref"] == "refs/heads/main",
                       "Snapshot handoff commit or branch mismatch")
+              require(isinstance(payload["scanned"], str)
+                      and re.fullmatch(
+                          r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:"
+                          r"[0-9]{2}:[0-9]{2}(?:[.][0-9]+)?Z",
+                          payload["scanned"],
+                      ) is not None, "Noncanonical UTC scan timestamp")
               require(payload["job"] == {
                   "id": sha, "correlator": "repocache-v05-wheelmeta-two-target",
               }, "Unexpected snapshot job identity")
@@ -291,11 +324,12 @@ jobs:
               require(isinstance(manifests, dict) and set(manifests) == NAMES,
                       "Incomplete snapshot handoff")
               for path, manifest in manifests.items():
-                  require(isinstance(manifest, dict) and
-                          manifest.get("name") == path and
-                          manifest.get("file") == {"source_location": path} and
-                          isinstance(manifest.get("resolved"), dict),
-                          "Unsafe snapshot handoff manifest")
+                  require(isinstance(manifest, dict) and set(manifest) == {
+                      "name", "file", "resolved",
+                  } and manifest.get("name") == path
+                      and manifest.get("file") == {"source_location": path}
+                      and isinstance(manifest.get("resolved"), dict),
+                      "Unsafe snapshot handoff manifest")
                   build = path == "deps/requirements-build-v05.txt"
                   resolved = manifest["resolved"]
                   require(len(resolved) == (2 if build else 12),
@@ -313,6 +347,17 @@ jobs:
                       purls[match.group(1)] = purl
                   require(set(purls) == set(expected),
                           "Source-lock package identity mismatch in handoff")
+                  approved_versions = (
+                      REVIEWED_BUILD_VERSIONS if build
+                      else REVIEWED_RUNTIME_VERSIONS
+                  )
+                  require(set(approved_versions) == set(expected),
+                          "Publisher reviewed versions/edges out of sync")
+                  for name, version in approved_versions.items():
+                      require(
+                          purls[name] == f"pkg:pypi/{name}@{version}",
+                          "Unapproved source-locked package version",
+                      )
                   for name, children in expected.items():
                       purl = purls[name]
                       node = resolved[purl]

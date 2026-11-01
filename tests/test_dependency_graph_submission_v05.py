@@ -521,7 +521,11 @@ def test_unprivileged_preflight_exports_complete_atomic_payload(monkeypatch, tmp
     "success", "accepted", "stale", "missing", "wrong-sha",
     "wrong-ref", "wrong-repo", "pr", "bad-json", "bad-base64",
     "bad-manifest", "bad-scope", "bad-edge", "forged-in-lock-edge",
-    "missing-token",
+    "forged-locked-version", "forged-build-version", "extra-manifest-field",
+    "bad-scanned-type", "bad-scanned-format", "bool-version", "json-nan",
+    "duplicate-json-key", "missing-token",
+    "api-http-202", "api-bad-json", "api-nonobject", "api-oversized",
+    "api-http-error", "api-transport-error", "api-redirect",
 ])
 def test_actionless_write_job_refuses_bad_states(
     monkeypatch, situation, capsys
@@ -550,7 +554,36 @@ def test_actionless_write_job_refuses_bad_states(
             children.append("pkg:pypi/shellingham@1.5.4")
             children.sort()
             assert sum(len(item["dependencies"]) for item in resolved.values()) == 14
-    encoded = base64.b64encode(json.dumps(payload).encode()).decode()
+    if situation in ("forged-locked-version", "forged-build-version"):
+        manifest = ("deps/requirements-build-v05.txt"
+                    if situation == "forged-build-version"
+                    else "deps/requirements-debian13-py313.txt")
+        resolved = payload["manifests"][manifest]["resolved"]
+        old = ("pkg:pypi/setuptools@80.9.0" if situation == "forged-build-version"
+               else "pkg:pypi/platformdirs@4.13.5")
+        new = ("pkg:pypi/setuptools@99.99.99" if situation == "forged-build-version"
+               else "pkg:pypi/platformdirs@99.99.99")
+        record = resolved.pop(old)
+        record["package_url"] = new
+        resolved[new] = record
+        for node in resolved.values():
+            node["dependencies"] = sorted(
+                new if child == old else child for child in node["dependencies"]
+            )
+    if situation == "extra-manifest-field":
+        payload["manifests"]["deps/requirements-build-v05.txt"]["injected"] = "x"
+    if situation == "bad-scanned-type":
+        payload["scanned"] = 20261101
+    elif situation == "bad-scanned-format":
+        payload["scanned"] = "not-a-UTC-timestamp"
+    elif situation == "bool-version":
+        payload["version"] = False
+    elif situation == "json-nan":
+        payload["scanned"] = float("nan")
+    raw_payload = json.dumps(payload).encode()
+    if situation == "duplicate-json-key":
+        raw_payload = b'{"version": 0,' + raw_payload[1:]
+    encoded = base64.b64encode(raw_payload).decode()
     if situation == "missing":
         encoded = ""
     elif situation == "bad-json":
@@ -582,15 +615,47 @@ def test_actionless_write_job_refuses_bad_states(
             assert n == 20001
             return self.body
     class Opener:
+        def __init__(self, handlers):
+            assert any(
+                isinstance(h, urllib.request.ProxyHandler) and not h.proxies
+                for h in handlers
+            )
+            self.handlers = handlers
+
         def open(self, request, timeout):
             calls.append((request.full_url, request.get_method(), request.data))
             assert timeout == 30
+            if situation == "api-transport-error":
+                raise urllib.error.URLError("mock-token-never-log")
+            if situation == "api-http-error":
+                raise urllib.error.HTTPError(
+                    request.full_url, 403, "mock-token-never-log", {}, None,
+                )
+            if situation == "api-redirect":
+                redirect = next(
+                    h for h in self.handlers if h.__class__.__name__ == "NoRedirect"
+                )
+                redirect.redirect_request(
+                    request, None, 302, "redirect", {},
+                    "https://attacker.invalid/token",
+                )
+                raise AssertionError("Redirect must be refused")
             if request.data is None:
                 branch_sha = "0" * 40 if situation == "stale" else SHA
                 return Response(200, json.dumps({"commit": {"sha": branch_sha}}).encode())
+            if situation == "api-http-202":
+                return Response(202, b'{"result":"SUCCESS"}')
+            if situation == "api-bad-json":
+                return Response(201, b'{"result":')
+            if situation == "api-nonobject":
+                return Response(201, b'[]')
+            if situation == "api-oversized":
+                return Response(201, b' ' * 20001)
             response = "ACCEPTED" if situation == "accepted" else "SUCCESS"
             return Response(201, json.dumps({"result": response}).encode())
-    monkeypatch.setattr(urllib.request, "build_opener", lambda *args: Opener())
+    monkeypatch.setattr(
+        urllib.request, "build_opener", lambda *handlers: Opener(handlers)
+    )
 
     if situation == "success":
         exec(compile(_publisher_code(), "actionless-publisher", "exec"), {})
@@ -604,11 +669,35 @@ def test_actionless_write_job_refuses_bad_states(
         output = capsys.readouterr()
         assert "mock-token-never-log" not in output.out + output.err
         assert "PASS:" not in output.out
-        if situation in ("stale", "accepted"):
+        if situation in ("stale", "accepted", "api-http-202",
+                         "api-bad-json", "api-nonobject", "api-oversized"):
             assert len(calls) == (1 if situation == "stale" else 2)
+        elif situation in ("api-http-error", "api-transport-error", "api-redirect"):
+            assert len(calls) == 1
         else:
             assert not calls
 
 
 def test_actionless_publisher_inline_python_compiles():
     compile(_publisher_code(), "actionless-publisher", "exec")
+
+
+@pytest.mark.parametrize("attack", ["duplicate-version-key", "nan-scanned", "bool-version"])
+def test_preflight_refuses_noncanonical_source_artifact(tmp_path, attack):
+    """The read-only preflight must not collapse forged artifact JSON fields."""
+    import json
+    directory = tmp_path / "graphs"
+    directory.mkdir()
+    for target in TARGETS:
+        snapshot = _graph(target)
+        if attack == "bool-version" and target == TARGETS[0]:
+            snapshot["version"] = False
+        raw = json.dumps(snapshot)
+        if target == TARGETS[0] and attack == "duplicate-version-key":
+            raw = '{"version": 0,' + raw[1:]
+        if target == TARGETS[0] and attack == "nan-scanned":
+            snapshot["scanned"] = float("nan")
+            raw = json.dumps(snapshot)
+        (directory / f"dependency-graph-preview-{target}.json").write_text(raw)
+    with pytest.raises(GraphRefused):
+        read_snapshots(ROOT, directory, SHA)

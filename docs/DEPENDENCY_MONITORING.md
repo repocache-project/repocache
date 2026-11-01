@@ -183,8 +183,12 @@ In the proposed `.github/workflows/dependency-graph-submit-v05.yml`:
 - The separate **write-scoped publisher executes no third-party Actions**
   (`uses:`), no checkout, no artifact downloads, no package installation and
   no source-controlled Python. Its one inline, standard-library-only Python
-  step validates the output's SHA, source branch, detector, manifest inventory
-  and scopes; checks live protected `main`; then submits one atomic snapshot.
+  step independently checks **all source-approved exact package names and
+  versions** for the 12 runtime and two build dependencies, every reviewed
+  adjacency, canonical JSON schema, bounded UTC timestamp, SHA, source branch,
+  detector, inventory and scopes; checks live protected `main`; then
+  submits one atomic snapshot. Changes to reviewed source locks require the
+  matching inline immutable version contract to be explicitly re-reviewed.
   It requires HTTP 201 plus an explicit `result: SUCCESS`, forbids proxies
   and redirects and never logs its token.
 - GitHub-hosted runner and reviewed inline workflow source remain part of the
