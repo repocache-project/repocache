@@ -26,6 +26,10 @@ def document() -> dict:
 
 
 def plan(source: dict, operation: str, **kwargs) -> dict:
+    if operation == "add" and "reserved_ids" not in kwargs:
+        # Tests simulate a complete reservation snapshot containing live IDs.
+        # Unlike the future state engine, this helper has NO trusted ledger.
+        kwargs["reserved_ids"] = {repo["id"] for repo in source["repositories"]}
     return plan_repository_change(
         source, current_generation=0, operation=operation, **kwargs
     )
@@ -260,3 +264,162 @@ def test_auto_id_does_not_accept_explicit_identifier():
         propose_automatic_repository_id(
             source, candidate, current_generation=0,
             reserved_ids={repo["id"] for repo in source["repositories"]})
+
+
+def test_explicit_add_requires_reservation_snapshot():
+    before = document()
+    candidate = new_apt(before)
+    with pytest.raises(RepositoryPlanError, match="snapshot required"):
+        plan_repository_change(before, current_generation=0,
+                               operation="add", proposed_repository=candidate)
+    with pytest.raises(RepositoryPlanError, match="live repository not reserved"):
+        plan(before, "add", proposed_repository=candidate, reserved_ids=set())
+
+
+def test_explicit_add_rejects_historical_id_after_removal():
+    before = document()
+    old_id = before["repositories"][0]["id"]
+    removed = plan(before, "remove", repository_id=old_id)["candidate_document"]
+    reserved = {repo["id"] for repo in before["repositories"]}
+    with pytest.raises(RepositoryPlanError, match="historically reserved"):
+        plan(removed, "add", proposed_repository=copy.deepcopy(before["repositories"][0]),
+             reserved_ids=reserved)
+    changed = copy.deepcopy(before["repositories"][0])
+    changed["upstream"]["base_url"] = "https://mirror.example.invalid/other/"
+    with pytest.raises(RepositoryPlanError, match="historically reserved"):
+        plan(removed, "add", proposed_repository=changed, reserved_ids=reserved)
+    added = new_apt(removed)
+    outcome = plan(removed, "add", proposed_repository=added, reserved_ids=reserved)
+    assert outcome["status"] == "PLAN_ONLY"
+    assert outcome["id_eligibility"] == "CALLER_SNAPSHOT_ONLY"
+    assert outcome["changed"] is True
+
+
+@pytest.mark.parametrize("field", ["allowed_hosts", "cache_overrides", "desired_state"])
+def test_auto_id_matching_identity_different_configuration_must_conflict(field):
+    before = document()
+    proposal = copy.deepcopy(before["repositories"][0])
+    del proposal["id"]
+    if field == "allowed_hosts":
+        proposal["upstream"]["allowed_hosts"].append("extra.example.invalid")
+    elif field == "cache_overrides":
+        proposal["cache_overrides"]["inactive_seconds"] = 60
+    else:
+        proposal["desired_state"] = "active"
+    with pytest.raises(RepositoryPlanError, match="matching identity has different configuration"):
+        propose_automatic_repository_id(
+            before, proposal, current_generation=0,
+            reserved_ids={repo["id"] for repo in before["repositories"]})
+
+
+@pytest.mark.parametrize("field", ["allowed_hosts", "cache_overrides", "desired_state"])
+def test_explicit_add_matching_id_different_configuration_must_conflict(field):
+    before = document()
+    proposal = copy.deepcopy(before["repositories"][0])
+    if field == "allowed_hosts":
+        proposal["upstream"]["allowed_hosts"].append("extra.example.invalid")
+    elif field == "cache_overrides":
+        proposal["cache_overrides"]["inactive_seconds"] = 60
+    else:
+        proposal["desired_state"] = "active"
+    with pytest.raises(RepositoryPlanError, match="already in use"):
+        plan(before, "add", proposed_repository=proposal)
+
+
+def test_semantically_equal_reordered_sets_are_idempotent():
+    before = document()
+    current = before["repositories"][0]
+    current["layout"]["architectures"].append("arm64")
+    current["upstream"]["allowed_hosts"].append("extra.example.invalid")
+    proposed = copy.deepcopy(current)
+    proposed["layout"]["architectures"].reverse()
+    proposed["upstream"]["allowed_hosts"].reverse()
+    proposed["upstream"]["allowed_hosts"][0] = "EXTRA.EXAMPLE.INVALID"
+    proposed["upstream"]["base_url"] = "https://MIRROR.EXAMPLE.INVALID:443/debian/"
+    proposed.pop("cache_overrides")
+    assert plan(before, "add", proposed_repository=proposed)["changed"] is False
+    assert plan(before, "update", repository_id=current["id"],
+                proposed_repository=proposed)["changed"] is False
+    del proposed["id"]
+    outcome = propose_automatic_repository_id(
+        before, proposed, current_generation=0,
+        reserved_ids={repo["id"] for repo in before["repositories"]})
+    assert outcome["existing"] is True
+    assert outcome["repository_id"] == current["id"]
+
+
+@pytest.mark.parametrize("operation", ["add", "update", "automatic"])
+def test_malformed_proposals_rejected_before_deepcopy(operation):
+    before = document()
+    candidate = new_apt(before, "debian-extra" if operation != "update"
+                        else "debian-trixie-main")
+    if operation == "automatic":
+        candidate.pop("id")
+    current = candidate["layout"]
+    for _ in range(100):
+        current = current.setdefault("malformed", {})
+    if operation == "automatic":
+        execute = lambda: propose_automatic_repository_id(
+            before, candidate, current_generation=0,
+            reserved_ids={repo["id"] for repo in before["repositories"]})
+    elif operation == "update":
+        execute = lambda: plan(before, "update",
+                               repository_id="debian-trixie-main",
+                               proposed_repository=candidate)
+    else:
+        execute = lambda: plan(before, "add", proposed_repository=candidate)
+    with pytest.raises(InstallInputError, match="nesting"):
+        execute()
+
+
+@pytest.mark.parametrize("operation", ["add", "update", "automatic"])
+def test_oversized_proposals_rejected_without_copying(operation):
+    before = document()
+    candidate = new_apt(before, "debian-extra" if operation != "update"
+                        else "debian-trixie-main")
+    if operation == "automatic":
+        candidate.pop("id")
+    candidate["layout"]["suites"] = ["x" * (1024 * 1024)]
+    if operation == "automatic":
+        execute = lambda: propose_automatic_repository_id(
+            before, candidate, current_generation=0,
+            reserved_ids={repo["id"] for repo in before["repositories"]})
+    elif operation == "update":
+        execute = lambda: plan(before, "update",
+                               repository_id="debian-trixie-main",
+                               proposed_repository=candidate)
+    else:
+        execute = lambda: plan(before, "add", proposed_repository=candidate)
+    with pytest.raises(InstallInputError, match="1 MiB"):
+        execute()
+
+
+def test_auto_id_duplicate_semantic_inputs_differ_only_on_whitelisted_policy():
+    before = document()
+    existing = before["repositories"][0]
+    candidate = copy.deepcopy(existing)
+    del candidate["id"]
+    candidate["cache_overrides"] = {}
+    assert propose_automatic_repository_id(
+        before, candidate, current_generation=0,
+        reserved_ids={repo["id"] for repo in before["repositories"]})["existing"] is True
+    candidate["cache_overrides"] = {"inactive_seconds": 100}
+    with pytest.raises(RepositoryPlanError, match="use update"):
+        propose_automatic_repository_id(
+            before, candidate, current_generation=0,
+            reserved_ids={repo["id"] for repo in before["repositories"]})
+
+
+def test_all_add_operations_report_non_authoritative_id_eligibility():
+    before = document()
+    for candidate in (new_apt(before), copy.deepcopy(before["repositories"][0])):
+        outcome = plan(before, "add", proposed_repository=candidate)
+        assert outcome["id_eligibility"] == "CALLER_SNAPSHOT_ONLY"
+        assert outcome["status"] == "PLAN_ONLY"
+
+
+def test_reservations_for_non_add_are_rejected_not_treated_as_authority():
+    before = document()
+    with pytest.raises(RepositoryPlanError, match="accepted only for add"):
+        plan(before, "remove", repository_id="debian-trixie-main",
+             reserved_ids={repo["id"] for repo in before["repositories"]})
