@@ -73,6 +73,48 @@ PURL_RE = re.compile(r"pkg:pypi/([a-z0-9-]+)@([0-9]+(?:\.[0-9]+){2})\Z")
 SCANNED_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\Z")
 
 
+# Independently reviewed exact adjacency from SHA-256-verified v0.5.0
+# upstream wheel METADATA, reproduced in both native target userspaces.
+# Deliberately checked-in: do not infer edge correctness from a 14-edge count.
+# Any dependency/metadata change must update this review contract explicitly.
+REVIEWED_RUNTIME_EDGES: dict[str, tuple[str, ...]] = {
+    "annotated-doc": (),
+    "linkify-it-py": (),
+    "markdown-it-py": ("linkify-it-py", "mdurl"),
+    "mdit-py-plugins": ("markdown-it-py",),
+    "mdurl": (),
+    "platformdirs": (),
+    "pygments": (),
+    "rich": ("markdown-it-py", "pygments"),
+    "shellingham": (),
+    "textual": (
+        "markdown-it-py", "mdit-py-plugins", "platformdirs",
+        "pygments", "rich", "typing-extensions",
+    ),
+    "typer": ("annotated-doc", "rich", "shellingham"),
+    "typing-extensions": (),
+}
+REVIEWED_BUILD_EDGES: dict[str, tuple[str, ...]] = {
+    "setuptools": (), "wheel": (),
+}
+
+
+def canonical_adjacency(
+    pins: dict[str, tuple[str, str]], scope: str
+) -> dict[str, list[str]]:
+    reviewed = (REVIEWED_RUNTIME_EDGES if scope == "runtime"
+                else REVIEWED_BUILD_EDGES if scope == "development" else None)
+    require(reviewed is not None and set(reviewed) == set(pins),
+            "Wheel inventory changed from reviewed dependency edge contract")
+    return {
+        name: sorted(f"pkg:pypi/{child}@{pins[child][0]}"
+                     for child in children)
+        for name, children in reviewed.items()
+    }
+
+
+
+
 def _validate_resolved(
     actual: object, pins: dict[str, tuple[str, str]],
     roots: set[str], scope: str,
@@ -82,7 +124,7 @@ def _validate_resolved(
     expected_keys = {f"pkg:pypi/{name}@{version}"
                      for name, (version, _) in pins.items()}
     require(set(actual) == expected_keys, "Unreviewed resolved PURLs")
-    reachable = set(roots)
+    expected_edges = canonical_adjacency(pins, scope)
     for key, data in actual.items():
         require(isinstance(data, dict) and set(data) == {
             "package_url", "relationship", "scope", "dependencies",
@@ -96,6 +138,8 @@ def _validate_resolved(
         children = data["dependencies"]
         require(isinstance(children, list) and children == sorted(set(children))
                 and set(children) <= expected_keys, "Unsafe child dependency edges")
+        require(children == expected_edges[name],
+                f"Unreviewed exact wheel METADATA edge(s) for {name}")
     seen: set[str] = set()
     pending = [f"pkg:pypi/{name}@{pins[name][0]}" for name in sorted(roots)]
     while pending:
