@@ -320,8 +320,11 @@ def test_modified_signer_worktree_refused_before_reading_passphrase(monkeypatch,
         release.sign(version, 3)
 
 
-def test_local_sign_dispatch_preserves_fd_only_secret_and_no_publication(monkeypatch, tmp_path):
+@pytest.mark.parametrize("explicit_path", [False, True])
+def test_local_sign_dispatch_preserves_fd_only_secret_and_no_publication(
+        monkeypatch, tmp_path, explicit_path):
     version = "v0.5.0"
+    expected_name = "owner.pem" if explicit_path else "repocache-release-private.pem"
     release_dir = tmp_path / "candidate"
     scripts = release_dir / "checkout" / "scripts"
     assets = release_dir / "assets"
@@ -335,13 +338,13 @@ def test_local_sign_dispatch_preserves_fd_only_secret_and_no_publication(monkeyp
         "from pathlib import Path\n"
         "def sign_candidate(bundle, private, *, commit, run_id, attempt, password):\n"
         "    assert password == b'correct-secret' and run_id == '21' and attempt == '2'\n"
-        "    assert private.name == 'owner.pem'\n"
+        f"    assert private.name == {expected_name!r}\n"
         "    for suffix in ('.manifest.json', '.manifest.json.sig', '.provenance.json', '.provenance.json.sig'):\n"
         "        bundle.with_name(bundle.name + suffix).write_bytes(b'signed fixture')\n"
     )
-    keydir = tmp_path / "alternate-signing"
+    keydir = tmp_path / ("alternate-signing" if explicit_path else "repocache-signing")
     keydir.mkdir()
-    private = keydir / "owner.pem"
+    private = keydir / expected_name
     private.write_bytes(b"encrypted test fixture")
     private.chmod(0o600)
     monkeypatch.setattr(release.Path, "home", classmethod(lambda cls: tmp_path))
@@ -357,7 +360,7 @@ def test_local_sign_dispatch_preserves_fd_only_secret_and_no_publication(monkeyp
                         (("a" * 40 + "\n").encode() if "rev-parse" in args else b""))
     saved = []
     monkeypatch.setattr(release, "save_state", lambda _, data: saved.append(data))
-    assert release.sign(version, 3, str(private))["phase"] == "signed"
+    assert release.sign(version, 3, str(private) if explicit_path else None)["phase"] == "signed"
     assert len(saved) == 1
     assert saved[0]["phase"] == "signed"
     assert len(saved[0]["assets"]) == 8
@@ -860,7 +863,9 @@ def test_signer_key_file_cli_option_is_action_scoped():
 
 
 @pytest.mark.parametrize("bad", ["relative.pem", "~/key.pem", "", "/tmp/../key.pem",
-                                 "/tmp//key.pem", "/tmp/key.pem/", "/tmp/key\n.pem", "/"])
+                                 "/tmp//key.pem", "//tmp/key.pem", "/tmp/key.pem/",
+                                 "/tmp/key\n.pem", "/tmp/key\x00.pem",
+                                 "/tmp/" + chr(0xD800) + ".pem", "/"])
 def test_explicit_signer_path_refuses_ambiguous_or_relative_paths(bad):
     with pytest.raises(release.OperatorError) as caught:
         release.private_signer_path(bad)

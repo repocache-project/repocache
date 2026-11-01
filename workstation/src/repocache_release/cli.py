@@ -572,7 +572,9 @@ def private_signer_path(override: str | None = None) -> Path:
     """
     if override is None:
         return Path.home() / "repocache-signing/repocache-release-private.pem"
-    if (not override or any(ord(ch) < 32 or ord(ch) == 127 for ch in override)
+    if (not override or override.startswith("//")
+            or any(ord(ch) < 32 or ord(ch) == 127
+                   or 0xD800 <= ord(ch) <= 0xDFFF for ch in override)
             or not Path(override).is_absolute()
             or os.path.normpath(override) != override
             or ".." in Path(override).parts
