@@ -19,7 +19,7 @@ from repocache.server_install_v1 import (
     ID,
     MAX_INT,
     _host,
-    _layout_identity,
+    _repository_identity,
     _upstream,
     validate_install_document,
 )
@@ -57,12 +57,19 @@ def _reserved_snapshot(
     """Check only caller-declared reservations; NEVER assert ledger authority."""
     if type(reserved_ids) not in (set, frozenset) or len(reserved_ids) > 10000:
         raise RepositoryPlanError("reserved_ids: bounded snapshot required")
+    # Freeze a mutable caller set, preventing later in-place changes from
+    # silently changing the result *after* validation. This is not a trusted
+    # atomic ledger snapshot; the real writer must hold its own state lock.
+    try:
+        snapshot = frozenset(reserved_ids)
+    except RuntimeError as exc:
+        raise RepositoryPlanError("reserved_ids: concurrent input mutation") from None
     if any(type(item) is not str or ID.fullmatch(item) is None
-           for item in reserved_ids):
+           for item in snapshot):
         raise RepositoryPlanError("reserved_ids: invalid ID")
-    if not {item["id"] for item in base["repositories"]} <= reserved_ids:
+    if not {item["id"] for item in base["repositories"]} <= snapshot:
         raise RepositoryPlanError("reserved_ids: live repository not reserved")
-    return reserved_ids
+    return snapshot
 
 
 def _effective_configuration(repo: dict[str, Any]) -> str:
@@ -76,6 +83,11 @@ def _effective_configuration(repo: dict[str, Any]) -> str:
     return json.dumps(
         {
             "identity": _canonical_identity(repo),
+            "trust_key_refs": sorted(
+                repo["layout"][
+                    "release_key_refs" if repo["kind"] == "apt" else "gpg_key_refs"
+                ]
+            ),
             "allowed_hosts": sorted(
                 _host(host, "upstream.allowed_hosts")
                 for host in repo["upstream"]["allowed_hosts"]
@@ -184,10 +196,8 @@ def plan_repository_change(
 def _canonical_identity(repo: dict[str, Any]) -> str:
     """Match the strict v1 validator's identity, ignoring administrative state."""
     host, port, path = _upstream(repo["upstream"]["base_url"])
-    return json.dumps(
-        [repo["kind"], host, port, path,
-         _layout_identity(repo["kind"], repo["layout"])],
-        sort_keys=True, separators=(",", ":"),
+    return _repository_identity(
+        repo["kind"], (host, port, path), repo["layout"]
     )
 
 
