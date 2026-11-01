@@ -205,5 +205,5 @@ def test_workflow_uses_strict_job_scoped_write_boundary():
     assert "github.ref == 'refs/heads/main'" in active
     assert "persist-credentials: false" in active
     assert "github.token" in active
-    assert "actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131" in active
+    assert "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333" in active
     assert "merge-multiple: true" in active
