@@ -350,6 +350,8 @@ def test_graph_pr_and_main_push_cover_graph_contract_tests():
     (b'{"result":', 201, False),
     (b'{"result":"SUCCESS"}', 202, False),
     (b'{"result":"SUCCESS"}' + b' ' * 20001, 201, False),
+    (b'{"result":"SUCCESS","extension":NaN}', 201, False),
+    (b'{"result":"SUCCESS","result":"SUCCESS"}', 201, False),
 ])
 def test_github_api_transport_requires_correct_status_and_object(
     monkeypatch, body, status, accepted
@@ -526,6 +528,10 @@ def test_unprivileged_preflight_exports_complete_atomic_payload(monkeypatch, tmp
     "duplicate-json-key", "missing-token",
     "api-http-202", "api-bad-json", "api-nonobject", "api-oversized",
     "api-http-error", "api-transport-error", "api-redirect",
+    "api-nan-response", "api-duplicate-response-key", "oversized-handoff",
+    "impossible-calendar", "impossible-clock", "year-zero",
+    "invalid-leap-day", "noncanonical-microseconds",
+    "valid-leap-day", "valid-microseconds",
 ])
 def test_actionless_write_job_refuses_bad_states(
     monkeypatch, situation, capsys
@@ -580,10 +586,30 @@ def test_actionless_write_job_refuses_bad_states(
         payload["version"] = False
     elif situation == "json-nan":
         payload["scanned"] = float("nan")
+    elif situation in {
+        "impossible-calendar", "impossible-clock", "year-zero",
+        "invalid-leap-day", "noncanonical-microseconds",
+        "valid-leap-day", "valid-microseconds",
+    }:
+        payload["scanned"] = {
+            "impossible-calendar": "2026-02-30T12:00:00Z",
+            "impossible-clock": "2026-99-99T99:99:99Z",
+            "year-zero": "0000-01-01T00:00:00Z",
+            "invalid-leap-day": "2025-02-29T00:00:00Z",
+            "noncanonical-microseconds": "2026-11-01T00:00:00.000000Z",
+            "valid-leap-day": "2024-02-29T12:34:56Z",
+            "valid-microseconds": "2026-11-01T18:40:00.123456Z",
+        }[situation]
     raw_payload = json.dumps(payload).encode()
     if situation == "duplicate-json-key":
         raw_payload = b'{"version": 0,' + raw_payload[1:]
     encoded = base64.b64encode(raw_payload).decode()
+    if situation == "oversized-handoff":
+        # This is valid JSON, and base64 is under its separate 70K limit.
+        raw_payload += b" " * (50000 - len(raw_payload))
+        assert len(raw_payload) == 50000
+        encoded = base64.b64encode(raw_payload).decode()
+        assert len(encoded) < 70000
     if situation == "missing":
         encoded = ""
     elif situation == "bad-json":
@@ -650,14 +676,19 @@ def test_actionless_write_job_refuses_bad_states(
             if situation == "api-nonobject":
                 return Response(201, b'[]')
             if situation == "api-oversized":
-                return Response(201, b' ' * 20001)
+                valid = b'{"result":"SUCCESS"}'
+                return Response(201, valid + b" " * (20001 - len(valid)))
+            if situation == "api-nan-response":
+                return Response(201, b'{"result":"SUCCESS","extension":NaN}')
+            if situation == "api-duplicate-response-key":
+                return Response(201, b'{"result":"SUCCESS","result":"SUCCESS"}')
             response = "ACCEPTED" if situation == "accepted" else "SUCCESS"
             return Response(201, json.dumps({"result": response}).encode())
     monkeypatch.setattr(
         urllib.request, "build_opener", lambda *handlers: Opener(handlers)
     )
 
-    if situation == "success":
+    if situation in ("success", "valid-leap-day", "valid-microseconds"):
         exec(compile(_publisher_code(), "actionless-publisher", "exec"), {})
         output = capsys.readouterr()
         assert "API reported SUCCESS" in output.out
@@ -670,7 +701,8 @@ def test_actionless_write_job_refuses_bad_states(
         assert "mock-token-never-log" not in output.out + output.err
         assert "PASS:" not in output.out
         if situation in ("stale", "accepted", "api-http-202",
-                         "api-bad-json", "api-nonobject", "api-oversized"):
+                         "api-bad-json", "api-nonobject", "api-oversized",
+                         "api-nan-response", "api-duplicate-response-key"):
             assert len(calls) == (1 if situation == "stale" else 2)
         elif situation in ("api-http-error", "api-transport-error", "api-redirect"):
             assert len(calls) == 1
@@ -682,7 +714,11 @@ def test_actionless_publisher_inline_python_compiles():
     compile(_publisher_code(), "actionless-publisher", "exec")
 
 
-@pytest.mark.parametrize("attack", ["duplicate-version-key", "nan-scanned", "bool-version"])
+@pytest.mark.parametrize("attack", [
+    "duplicate-version-key", "nan-scanned", "bool-version",
+    "impossible-calendar", "impossible-clock", "year-zero",
+    "invalid-leap-day", "noncanonical-microseconds",
+])
 def test_preflight_refuses_noncanonical_source_artifact(tmp_path, attack):
     """The read-only preflight must not collapse forged artifact JSON fields."""
     import json
@@ -698,6 +734,118 @@ def test_preflight_refuses_noncanonical_source_artifact(tmp_path, attack):
         if target == TARGETS[0] and attack == "nan-scanned":
             snapshot["scanned"] = float("nan")
             raw = json.dumps(snapshot)
+        if target == TARGETS[0] and attack in {
+            "impossible-calendar", "impossible-clock", "year-zero",
+            "invalid-leap-day", "noncanonical-microseconds",
+        }:
+            snapshot["scanned"] = {
+                "impossible-calendar": "2026-02-30T12:00:00Z",
+                "impossible-clock": "2026-99-99T99:99:99Z",
+                "year-zero": "0000-01-01T00:00:00Z",
+                "invalid-leap-day": "2025-02-29T00:00:00Z",
+                "noncanonical-microseconds": "2026-11-01T00:00:00.000000Z",
+            }[attack]
+            raw = json.dumps(snapshot)
         (directory / f"dependency-graph-preview-{target}.json").write_text(raw)
     with pytest.raises(GraphRefused):
         read_snapshots(ROOT, directory, SHA)
+
+
+@pytest.mark.parametrize("timestamp", [
+    "2024-02-29T12:34:56Z",
+    "2026-11-01T18:40:00.123456Z",
+    "2026-11-01T18:40:00Z",
+])
+def test_canonical_actual_calendar_timestamps_are_accepted(timestamp):
+    """Both source profiles accept valid ISO timestamps from the producer."""
+    for target in TARGETS:
+        snap = _graph(target)
+        snap["scanned"] = timestamp
+        assert validate_snapshot(snap, ROOT, target, SHA)["scanned"] == timestamp
+
+
+def test_inline_http_and_handoff_negative_fixtures_are_mutation_sensitive(
+    monkeypatch, capsys,
+):
+    """Remove one protection at a time in an isolated mock-only publisher.
+
+    The valid-JSON adversarial fixture would falsely publish on that mutation.
+    This test never uses a real API token or outbound GitHub API call.
+    """
+    import base64
+    import json
+    import urllib.request
+
+    payload = combine_snapshots([_graph(target) for target in TARGETS])
+    raw = json.dumps(payload, separators=(",", ":")).encode()
+    code = _publisher_code()
+    success_json = b'{"result":"SUCCESS"}'
+    mutations = (
+        (
+            "api-response-size",
+            raw,
+            success_json + b" " * (20001 - len(success_json)),
+            'require(len(body) <= 20000, "Oversized API response")',
+        ),
+        (
+            "raw-handoff-size",
+            raw + b" " * (50000 - len(raw)),
+            success_json,
+            'require(0 < len(raw) < 50000, "Invalid snapshot handoff length")',
+        ),
+        (
+            "api-json-constant",
+            raw,
+            b'{"result":"SUCCESS","extension":NaN}',
+            "parse_constant=reject_json_constant",
+        ),
+    )
+    for name, handoff, answer, removed in mutations:
+        assert len(handoff) <= 50000
+        if name == "raw-handoff-size":
+            assert len(handoff) == 50000
+            assert len(base64.b64encode(handoff)) < 70000
+        assert code.count(removed) == (2 if name == "api-json-constant" else 1)
+        # First occurrence of parse_constant is the API response parser.
+        weakened = code.replace(removed, "", 1)
+        monkeypatch.setenv("SNAPSHOT_B64", base64.b64encode(handoff).decode())
+        monkeypatch.setenv("GITHUB_TOKEN", "synthetic-token-never-log")
+        monkeypatch.setenv("GITHUB_EVENT_NAME", "push")
+        monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
+        monkeypatch.setenv("GITHUB_REPOSITORY", "teixemf/repocache")
+        monkeypatch.setenv("GITHUB_SHA", SHA)
+        calls = []
+
+        class Response:
+            def __init__(self, status, body):
+                self.status = status
+                self.body = body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def read(self, limit):
+                return self.body[:limit]
+
+        class Opener:
+            def open(self, request, timeout):
+                calls.append(request.get_method())
+                if request.data is None:
+                    return Response(200, json.dumps({"commit": {"sha": SHA}}).encode())
+                return Response(201, answer)
+
+        monkeypatch.setattr(urllib.request, "build_opener", lambda *args: Opener())
+        with pytest.raises(SystemExit, match="FAIL: dependency graph submission boundary"):
+            exec(compile(code, f"protected-{name}", "exec"), {})
+        assert "PASS:" not in capsys.readouterr().out
+        if name == "api-json-constant":
+            assert weakened.count("parse_constant=reject_json_constant") == 1
+        # The otherwise valid inputs pass with the one safeguard removed.
+        exec(compile(weakened, f"mutant-{name}", "exec"), {})
+        observed = capsys.readouterr()
+        assert "API reported SUCCESS" in observed.out
+        assert "synthetic-token-never-log" not in observed.out + observed.err
+        assert calls[-2:] == ["GET", "POST"]
