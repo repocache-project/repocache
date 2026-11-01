@@ -1,0 +1,100 @@
+# Issue #81: an unprivileged producer runs on PRs and main.
+# ONLY a trusted main push can authorize the separate write-scoped submit job.
+name: Verified v0.5.0 Python dependency graph
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/dependency-graph-submit-v05.yml'
+      - 'scripts/ci_dependency_graph_*.py'
+      - 'deps/**'
+      - 'pyproject.toml'
+      - 'tests/test_dependency_graph_resolution_v05.py'
+      - 'tests/test_dependency_graph_submission_v05.py'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/dependency-graph-submit-v05.yml'
+      - 'scripts/ci_dependency_graph_*.py'
+      - 'deps/**'
+      - 'pyproject.toml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verified-python-graph-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: Read-only reviewed wheel graph (${{ matrix.target }})
+    if: github.repository == 'teixemf/repocache'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: debian13-py313
+            python: '3.13'
+          - target: almalinux10-py312
+            python: '3.12'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Resolve exact upstream wheels without package execution or API write
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python -I scripts/ci_dependency_graph_collect_v05.py \
+            --source . \
+            --target '${{ matrix.target }}' \
+            --sha "$GITHUB_SHA" \
+            --output "$RUNNER_TEMP/dependency-graph-preview-${{ matrix.target }}.json"
+      - name: Store only the reviewed-profile JSON for the same workflow run
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: verified-graph-${{ matrix.target }}
+          path: ${{ runner.temp }}/dependency-graph-preview-${{ matrix.target }}.json
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Submit exact verified snapshots (protected main only)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'teixemf/repocache'
+    needs: [resolve]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The ONLY write-capable job. Never triggered by a PR, fork or workflow_run.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern: verified-graph-*
+          path: ${{ runner.temp }}/graphs
+          merge-multiple: true
+      - name: Validate both untrusted-as-data artifacts before privileged access
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 -I scripts/ci_dependency_graph_submit_v05.py \
+            --source . --directory "$RUNNER_TEMP/graphs" --sha "$GITHUB_SHA"
+      - name: Submit one atomic snapshot for both runtime and build profiles
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          python3 -I scripts/ci_dependency_graph_submit_v05.py \
+            --source . --directory "$RUNNER_TEMP/graphs" --sha "$GITHUB_SHA" --publish
