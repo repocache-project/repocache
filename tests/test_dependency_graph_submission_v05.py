@@ -241,3 +241,64 @@ def test_reviewed_edge_contract_rejects_fictional_in_lock_relationship():
     assert sum(len(data["dependencies"]) for data in resolved.values()) == 14
     with pytest.raises(GraphRefused, match="Unreviewed exact wheel METADATA edge"):
         validate_snapshot(forged, ROOT, target, SHA)
+
+
+@pytest.mark.parametrize("api_result,expected_success", [
+    ("SUCCESS", True),
+    ("ACCEPTED", False),  # e.g. older, superseded submission
+    ("INVALID", False),
+    ("", False),
+    (None, False),
+])
+def test_publisher_requires_explicit_success_not_accepted(
+    monkeypatch, capsys, api_result, expected_success
+):
+    """HTTP 201 alone is insufficient to claim actual graph replacement."""
+    graphs = [_graph(t) for t in TARGETS]
+    for key, value in {
+        "GITHUB_EVENT_NAME": "push", "GITHUB_REF": "refs/heads/main",
+        "GITHUB_REPOSITORY": "teixemf/repocache", "GITHUB_SHA": SHA,
+        "GITHUB_TOKEN": "test-token-never-log",
+    }.items():
+        monkeypatch.setenv(key, value)
+    import scripts.ci_dependency_graph_submit_v05 as module
+    actual_calls = []
+
+    def mock_api(token, path, payload=None):
+        assert token == "test-token-never-log"
+        actual_calls.append((path, payload))
+        if payload is None:
+            return {"commit": {"sha": SHA}}
+        return {"result": api_result}
+
+    monkeypatch.setattr(module, "github_api", mock_api)
+    if expected_success:
+        submit(graphs, SHA)
+        output = capsys.readouterr()
+        assert "API reported SUCCESS" in output.out
+        assert "graph readback NOT VERIFIED" in output.out
+        assert not output.err
+    else:
+        with pytest.raises(GraphRefused, match="did not report SUCCESS"):
+            submit(graphs, SHA)
+        output = capsys.readouterr()
+        assert "PASS:" not in output.out
+        assert "test-token-never-log" not in (output.out + output.err)
+    assert len(actual_calls) == 2
+    assert actual_calls[0][1] is None
+    assert actual_calls[1][0].endswith("/dependency-graph/snapshots")
+    assert len(actual_calls[1][1]["manifests"]) == 3
+
+
+def test_native_verification_is_triggered_by_every_graph_contract_change():
+    """Both trigger families must cover the collector and publisher paths."""
+    workflow = (
+        ROOT / ".github/workflows/native-upstream-wheels.yml"
+    ).read_text(encoding="utf-8")
+    for path in (
+        "scripts/ci_dependency_graph_v05.py",
+        "scripts/ci_dependency_graph_collect_v05.py",
+        "scripts/ci_dependency_graph_submit_v05.py",
+        "tests/test_dependency_graph_submission_v05.py",
+    ):
+        assert workflow.count(f"      - '{path}'") == 2
