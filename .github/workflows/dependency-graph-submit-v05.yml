@@ -171,6 +171,24 @@ jobs:
               "deps/requirements-almalinux10-py312.txt",
               "deps/requirements-build-v05.txt",
           }
+          REVIEWED_RUNTIME_EDGES = {
+              "annotated-doc": (),
+              "linkify-it-py": (),
+              "markdown-it-py": ("linkify-it-py", "mdurl"),
+              "mdit-py-plugins": ("markdown-it-py",),
+              "mdurl": (),
+              "platformdirs": (),
+              "pygments": (),
+              "rich": ("markdown-it-py", "pygments"),
+              "shellingham": (),
+              "textual": (
+                  "markdown-it-py", "mdit-py-plugins", "platformdirs",
+                  "pygments", "rich", "typing-extensions",
+              ),
+              "typer": ("annotated-doc", "rich", "shellingham"),
+              "typing-extensions": (),
+          }
+          REVIEWED_BUILD_EDGES = {"setuptools": (), "wheel": ()}
           
           
           class Refused(ValueError):
@@ -282,17 +300,35 @@ jobs:
                   resolved = manifest["resolved"]
                   require(len(resolved) == (2 if build else 12),
                           "Incomplete handoff package inventory")
-                  edge_count = 0
-                  for purl, node in resolved.items():
-                      require(isinstance(node, dict) and
-                              node.get("package_url") == purl and
-                              node.get("scope") == ("development" if build else "runtime")
-                              and node.get("relationship") in ("direct", "indirect")
-                              and isinstance(node.get("dependencies"), list),
+                  # Independently enforce exact package adjacency with no
+                  # source checkout or third-party Action in the write job.
+                  expected = REVIEWED_BUILD_EDGES if build else REVIEWED_RUNTIME_EDGES
+                  purls = {}
+                  for purl in resolved:
+                      match = re.fullmatch(
+                          r"pkg:pypi/([a-z0-9-]+)@([0-9]+(?:[.][0-9]+){2})", purl
+                      )
+                      require(match is not None and match.group(1) not in purls,
+                              "Malformed or duplicated handoff PURL")
+                      purls[match.group(1)] = purl
+                  require(set(purls) == set(expected),
+                          "Source-lock package identity mismatch in handoff")
+                  for name, children in expected.items():
+                      purl = purls[name]
+                      node = resolved[purl]
+                      require(isinstance(node, dict) and set(node) == {
+                          "package_url", "relationship", "scope", "dependencies"
+                      } and node["package_url"] == purl
+                              and node["scope"] == (
+                                  "development" if build else "runtime")
+                              and node["relationship"] == (
+                                  "direct" if build or name in {
+                                      "rich", "textual", "typer"
+                                  } else "indirect"),
                               "Unsafe handoff package classification")
-                      edge_count += len(node["dependencies"])
-                  require(edge_count == (0 if build else 14),
-                          "Incomplete handoff dependency relationships")
+                      require(node["dependencies"] == sorted(
+                          purls[child] for child in children
+                      ), "Forged or missing reviewed handoff adjacency")
               # No checkout, artifact downloader, package install, or third-party Action
               # executes in this write-token job. Validation ran in read-only preflight.
               branch = api(token, "/branches/main")

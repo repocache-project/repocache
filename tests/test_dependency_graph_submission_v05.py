@@ -520,7 +520,8 @@ def test_unprivileged_preflight_exports_complete_atomic_payload(monkeypatch, tmp
 @pytest.mark.parametrize("situation", [
     "success", "accepted", "stale", "missing", "wrong-sha",
     "wrong-ref", "wrong-repo", "pr", "bad-json", "bad-base64",
-    "bad-manifest", "bad-scope", "bad-edge", "missing-token",
+    "bad-manifest", "bad-scope", "bad-edge", "forged-in-lock-edge",
+    "missing-token",
 ])
 def test_actionless_write_job_refuses_bad_states(
     monkeypatch, situation, capsys
@@ -534,16 +535,21 @@ def test_actionless_write_job_refuses_bad_states(
         payload["sha"] = "0" * 40
     if situation == "bad-manifest":
         del payload["manifests"]["deps/requirements-build-v05.txt"]
-    if situation in ("bad-scope", "bad-edge"):
+    if situation in ("bad-scope", "bad-edge", "forged-in-lock-edge"):
         name = "deps/requirements-debian13-py313.txt"
-        node = next(iter(payload["manifests"][name]["resolved"].values()))
+        resolved = payload["manifests"][name]["resolved"]
+        node = next(iter(resolved.values()))
         if situation == "bad-scope":
             node["scope"] = "development"
-        else:
-            node["dependencies"] = []
-            # The original fixture has nonzero edges, adjust a linked parent:
-            for item in payload["manifests"][name]["resolved"].values():
+        elif situation == "bad-edge":
+            for item in resolved.values():
                 item["dependencies"] = []
+        else:
+            children = resolved["pkg:pypi/textual@8.2.8"]["dependencies"]
+            children.remove("pkg:pypi/rich@15.0.0")
+            children.append("pkg:pypi/shellingham@1.5.4")
+            children.sort()
+            assert sum(len(item["dependencies"]) for item in resolved.values()) == 14
     encoded = base64.b64encode(json.dumps(payload).encode()).decode()
     if situation == "missing":
         encoded = ""
