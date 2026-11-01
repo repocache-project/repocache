@@ -11,6 +11,7 @@ from repocache.server_install_v1 import InstallInputError
 from repocache.server_repository_plan_v1 import (
     RepositoryPlanError,
     plan_repository_change,
+    propose_automatic_repository_id,
 )
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "docs/examples/server-install-v1.json"
@@ -172,3 +173,90 @@ def test_writes_and_network_calls_are_never_required(monkeypatch):
     monkeypatch.setattr(socket, "create_connection", forbidden)
     assert plan(before, "disable", repository_id="debian-trixie-main")["changed"] is False
     assert plan(before, "add", proposed_repository=new_apt(before))["changed"] is True
+
+
+def test_auto_id_is_stable_for_same_validated_identity():
+    source = document()
+    candidate = new_apt(source)
+    del candidate["id"]
+    original = copy.deepcopy(candidate)
+    reserved = {repo["id"] for repo in source["repositories"]}
+    first = propose_automatic_repository_id(
+        source, candidate, current_generation=0, reserved_ids=reserved)
+    second = propose_automatic_repository_id(
+        source, candidate, current_generation=0, reserved_ids=frozenset(reserved))
+    assert first == second
+    assert first["status"] == "PLAN_ONLY" and first["existing"] is False
+    assert first["repository_id"].startswith("repo-")
+    assert len(first["repository_id"]) <= 48
+    assert first["repository_id"] not in reserved
+    assert candidate == original
+
+
+def test_auto_id_matches_existing_canonical_repository():
+    source = document()
+    candidate = copy.deepcopy(source["repositories"][0])
+    del candidate["id"]
+    result = propose_automatic_repository_id(
+        source, candidate, current_generation=0,
+        reserved_ids={repo["id"] for repo in source["repositories"]})
+    assert result["repository_id"] == "debian-trixie-main"
+    assert result["existing"] is True
+
+
+def test_auto_id_tombstone_prevents_reusing_removed_identity():
+    source = document()
+    candidate = new_apt(source)
+    del candidate["id"]
+    reservations = {repo["id"] for repo in source["repositories"]}
+    first = propose_automatic_repository_id(
+        source, candidate, current_generation=0, reserved_ids=reservations)
+    reservations.add(first["repository_id"])  # reserved even after deletion
+    later = propose_automatic_repository_id(
+        source, candidate, current_generation=0, reserved_ids=reservations)
+    assert later["repository_id"] not in reservations
+    assert later["repository_id"] != first["repository_id"]
+
+
+def test_auto_id_requires_all_existing_repositories_reserved():
+    source = document()
+    candidate = new_apt(source)
+    del candidate["id"]
+    with pytest.raises(RepositoryPlanError, match="live repository not reserved"):
+        propose_automatic_repository_id(
+            source, candidate, current_generation=0, reserved_ids=set())
+
+
+@pytest.mark.parametrize("reservations", [None, [], {}, {"../bad"}, {"a" * 49}, {"ok", 2}])
+def test_auto_id_refuses_ambiguous_reservation_input(reservations):
+    source = document()
+    candidate = new_apt(source)
+    del candidate["id"]
+    with pytest.raises(RepositoryPlanError):
+        propose_automatic_repository_id(
+            source, candidate, current_generation=0,
+            reserved_ids=reservations)
+
+
+def test_auto_id_rejects_unvalidated_and_stale_candidates():
+    source = document()
+    candidate = new_apt(source)
+    del candidate["id"]
+    reservations = {repo["id"] for repo in source["repositories"]}
+    candidate["upstream"]["base_url"] = "http://127.0.0.1/"
+    with pytest.raises(InstallInputError):
+        propose_automatic_repository_id(
+            source, candidate, current_generation=0, reserved_ids=reservations)
+    del candidate["upstream"]["base_url"]
+    with pytest.raises(RepositoryPlanError, match="stale"):
+        propose_automatic_repository_id(
+            source, candidate, current_generation=1, reserved_ids=reservations)
+
+
+def test_auto_id_does_not_accept_explicit_identifier():
+    source = document()
+    candidate = new_apt(source)
+    with pytest.raises(RepositoryPlanError, match="must be omitted"):
+        propose_automatic_repository_id(
+            source, candidate, current_generation=0,
+            reserved_ids={repo["id"] for repo in source["repositories"]})
