@@ -1,10 +1,20 @@
 name: Native upstream dependency compatibility
 
 on:
+  workflow_call:
   pull_request:
     paths:
       - '.github/workflows/native-upstream-wheels.yml'
+      - '.github/workflows/dependency-graph-submit-v05.yml'
       - 'scripts/ci_native_upstream_wheels.py'
+      - 'scripts/ci_dependency_graph_v05.py'
+      - 'scripts/ci_dependency_graph_collect_v05.py'
+      - 'scripts/ci_dependency_graph_submit_v05.py'
+      - 'tests/test_dependency_graph_submission_v05.py'
+      - 'tests/test_dependency_graph_resolution_v05.py'
+      - 'deps/requirements-*.txt'
+      - 'deps/build-wheels.lock'
+      - 'pyproject.toml'
       - 'deps/runtime-wheels.lock'
       - 'src/repocache/**'
       - 'scripts/smoke_tui.py'
@@ -13,7 +23,16 @@ on:
     branches: [main, integration/v0.5.0, integration/v0.6.0]
     paths:
       - '.github/workflows/native-upstream-wheels.yml'
+      - '.github/workflows/dependency-graph-submit-v05.yml'
       - 'scripts/ci_native_upstream_wheels.py'
+      - 'scripts/ci_dependency_graph_v05.py'
+      - 'scripts/ci_dependency_graph_collect_v05.py'
+      - 'scripts/ci_dependency_graph_submit_v05.py'
+      - 'tests/test_dependency_graph_submission_v05.py'
+      - 'tests/test_dependency_graph_resolution_v05.py'
+      - 'deps/requirements-*.txt'
+      - 'deps/build-wheels.lock'
+      - 'pyproject.toml'
       - 'deps/runtime-wheels.lock'
       - 'src/repocache/**'
       - 'scripts/smoke_tui.py'
@@ -49,6 +68,7 @@ jobs:
           # Source read-only; no Actions secrets, privileged container,
           # host network, global pip install or managed activation.
           docker run --rm --pull=always \
+            --env "REPO_GRAPH_SHA=$GITHUB_SHA" \
             --mount "type=bind,source=$PWD,target=/source,readonly" \
             "$image" /bin/sh -eu -c '
           export PATH=/usr/sbin:/usr/bin:/sbin:/bin
@@ -71,6 +91,7 @@ jobs:
           chown repocacheci:repocacheci /work
           exec runuser -u repocacheci -- env -i \
             HOME=/work LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+            REPO_GRAPH_SHA="$REPO_GRAPH_SHA" \
             PATH=/usr/sbin:/usr/bin:/sbin:/bin \
             /usr/bin/python3 /source/scripts/ci_native_upstream_wheels.py
           '
