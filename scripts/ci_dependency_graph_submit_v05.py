@@ -8,6 +8,7 @@ No downloaded wheel or third-party package is executed by this module.
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 from pathlib import Path
@@ -348,12 +349,24 @@ def main() -> None:
     parser.add_argument("--directory", type=Path, required=True)
     parser.add_argument("--sha", required=True)
     parser.add_argument("--publish", action="store_true")
+    parser.add_argument("--github-output", type=Path)
     args = parser.parse_args()
     require(bool(GIT_SHA.fullmatch(args.sha)), "Invalid source SHA")
     snapshots = read_snapshots(args.source, args.directory, args.sha)
     combined = combine_snapshots(snapshots)
     require(len(combined["manifests"]) == 3,
             "Preflight could not form a complete three-manifest snapshot")
+    require(not (args.publish and args.github_output is not None),
+            "Cannot generate an unprivileged handoff while publishing")
+    if args.github_output is not None:
+        # A GitHub Actions job output carries DATA, never executable Python or
+        # a credential. The downstream write-scoped job has no 'uses:' steps.
+        raw = json.dumps(combined, sort_keys=True, separators=(",", ":")).encode()
+        require(len(raw) < 50000, "Combined handoff exceeds size bound")
+        value = base64.b64encode(raw).decode("ascii")
+        require(len(value) < 70000, "Oversized GitHub Actions handoff")
+        with args.github_output.open("a", encoding="utf-8") as out:
+            out.write(f"snapshot_b64={value}\\n".replace("\\n", "\n"))
     if args.publish:
         submit(snapshots, args.sha)
     else:

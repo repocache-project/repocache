@@ -76,6 +76,8 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+    outputs:
+      snapshot_b64: ${{ steps.validate.outputs.snapshot_b64 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -85,12 +87,14 @@ jobs:
           pattern: verified-graph-*
           path: ${{ runner.temp }}/graphs
           merge-multiple: true
-      - name: Validate actual source-locked profiles and combined API payload
+      - name: Validate both profiles and encode the complete source-locked payload
+        id: validate
         shell: bash
         run: |
           set -Eeuo pipefail
           python3 scripts/ci_dependency_graph_submit_v05.py \
-            --source . --directory "$RUNNER_TEMP/graphs" --sha "$GITHUB_SHA"
+            --source . --directory "$RUNNER_TEMP/graphs" --sha "$GITHUB_SHA" \
+            --github-output "$GITHUB_OUTPUT"
 
   publish:
     name: Submit exact verified snapshots (protected main only)
@@ -98,29 +102,170 @@ jobs:
     needs: [preflight]
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # The ONLY write-capable job. Never triggered by a PR, fork or workflow_run.
+    # The ONLY write-capable job. No checkout, artifact Actions or repository code.
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          pattern: verified-graph-*
-          path: ${{ runner.temp }}/graphs
-          merge-multiple: true
-      - name: Validate both untrusted-as-data artifacts before privileged access
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          python3 scripts/ci_dependency_graph_submit_v05.py \
-            --source . --directory "$RUNNER_TEMP/graphs" --sha "$GITHUB_SHA"
-      - name: Submit one atomic snapshot for both runtime and build profiles
+      - name: Submit prevalidated snapshot with no third-party Actions
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          SNAPSHOT_B64: ${{ needs.preflight.outputs.snapshot_b64 }}
         run: |
           set -Eeuo pipefail
-          python3 scripts/ci_dependency_graph_submit_v05.py \
-            --source . --directory "$RUNNER_TEMP/graphs" --sha "$GITHUB_SHA" --publish
+          python3 - <<'PY'
+          import base64
+          import binascii
+          import json
+          import os
+          import re
+          import ssl
+          import urllib.error
+          import urllib.request
+          
+          REPO = "teixemf/repocache"
+          NAMES = {
+              "deps/requirements-debian13-py313.txt",
+              "deps/requirements-almalinux10-py312.txt",
+              "deps/requirements-build-v05.txt",
+          }
+          
+          
+          class Refused(ValueError):
+              pass
+          
+          
+          def require(ok, message):
+              if not ok:
+                  raise Refused(message)
+          
+          
+          def unique_pairs(pairs):
+              result = {}
+              for key, value in pairs:
+                  require(key not in result, "Duplicate JSON key")
+                  result[key] = value
+              return result
+          
+          
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  raise Refused("Refused GitHub API redirect")
+          
+          
+          def api(token, path, payload=None):
+              headers = {
+                  "Accept": "application/vnd.github+json",
+                  "Authorization": "Bearer " + token,
+                  "X-GitHub-Api-Version": "2022-11-28",
+                  "User-Agent": "repocache-issue81-dependency-graph",
+              }
+              raw = None
+              if payload is not None:
+                  raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+                  require(len(raw) < 50000, "Oversized snapshot")
+                  headers["Content-Type"] = "application/json"
+              req = urllib.request.Request(
+                  "https://api.github.com/repos/" + REPO + path,
+                  data=raw, headers=headers,
+                  method="POST" if raw is not None else "GET",
+              )
+              opener = urllib.request.build_opener(
+                  urllib.request.ProxyHandler({}), NoRedirect(),
+                  urllib.request.HTTPSHandler(context=ssl.create_default_context()),
+              )
+              try:
+                  with opener.open(req, timeout=30) as resp:
+                      status, body = resp.status, resp.read(20001)
+              except urllib.error.HTTPError as exc:
+                  raise Refused("GitHub API refused HTTP " + str(exc.code)) from None
+              except (OSError, urllib.error.URLError):
+                  raise Refused("GitHub API transport failure") from None
+              require(len(body) <= 20000, "Oversized API response")
+              require(status == (201 if payload is not None else 200),
+                      "Unexpected GitHub API response status")
+              try:
+                  result = json.loads(body, object_pairs_hook=unique_pairs)
+              except (ValueError, UnicodeError):
+                  raise Refused("Malformed API response") from None
+              require(isinstance(result, dict), "API response is not an object")
+              return result
+          
+          
+          def main():
+              sha = os.environ.get("GITHUB_SHA", "")
+              require(
+                  re.fullmatch(r"[a-f0-9]{40}", sha) is not None
+                  and os.environ.get("GITHUB_EVENT_NAME") == "push"
+                  and os.environ.get("GITHUB_REF") == "refs/heads/main"
+                  and os.environ.get("GITHUB_REPOSITORY") == REPO,
+                  "Publication requires an exact protected-main push",
+              )
+              token = os.environ.get("GITHUB_TOKEN", "")
+              require(0 < len(token) <= 4096, "Missing job-scoped write token")
+              encoded = os.environ.get("SNAPSHOT_B64", "")
+              require(0 < len(encoded) < 70000, "Missing/oversized validated handoff")
+              try:
+                  raw = base64.b64decode(encoded, validate=True)
+              except (ValueError, binascii.Error):
+                  raise Refused("Invalid snapshot handoff encoding") from None
+              require(0 < len(raw) < 50000, "Invalid snapshot handoff length")
+              try:
+                  payload = json.loads(raw, object_pairs_hook=unique_pairs)
+              except (ValueError, UnicodeError):
+                  raise Refused("Invalid snapshot handoff JSON") from None
+              require(isinstance(payload, dict) and set(payload) == {
+                  "version", "sha", "ref", "job", "detector", "scanned", "manifests",
+              }, "Unexpected snapshot handoff schema")
+              require(payload["version"] == 0 and payload["sha"] == sha
+                      and payload["ref"] == "refs/heads/main",
+                      "Snapshot handoff commit or branch mismatch")
+              require(payload["job"] == {
+                  "id": sha, "correlator": "repocache-v05-wheelmeta-two-target",
+              }, "Unexpected snapshot job identity")
+              require(payload["detector"] == {
+                  "name": "repocache-verified-wheel-metadata",
+                  "version": "0.1.0", "url": "https://github.com/teixemf/repocache",
+              }, "Unexpected snapshot detector identity")
+              manifests = payload["manifests"]
+              require(isinstance(manifests, dict) and set(manifests) == NAMES,
+                      "Incomplete snapshot handoff")
+              for path, manifest in manifests.items():
+                  require(isinstance(manifest, dict) and
+                          manifest.get("name") == path and
+                          manifest.get("file") == {"source_location": path} and
+                          isinstance(manifest.get("resolved"), dict),
+                          "Unsafe snapshot handoff manifest")
+                  build = path == "deps/requirements-build-v05.txt"
+                  resolved = manifest["resolved"]
+                  require(len(resolved) == (2 if build else 12),
+                          "Incomplete handoff package inventory")
+                  edge_count = 0
+                  for purl, node in resolved.items():
+                      require(isinstance(node, dict) and
+                              node.get("package_url") == purl and
+                              node.get("scope") == ("development" if build else "runtime")
+                              and node.get("relationship") in ("direct", "indirect")
+                              and isinstance(node.get("dependencies"), list),
+                              "Unsafe handoff package classification")
+                      edge_count += len(node["dependencies"])
+                  require(edge_count == (0 if build else 14),
+                          "Incomplete handoff dependency relationships")
+              # No checkout, artifact downloader, package install, or third-party Action
+              # executes in this write-token job. Validation ran in read-only preflight.
+              branch = api(token, "/branches/main")
+              require(isinstance(branch.get("commit"), dict)
+                      and branch["commit"].get("sha") == sha,
+                      "Protected main advanced before submission")
+              response = api(token, "/dependency-graph/snapshots", payload)
+              require(response.get("result") == "SUCCESS",
+                      "GitHub dependency submission did not report SUCCESS")
+              print("PASS: GitHub API reported SUCCESS for the exact three-manifest "
+                    "snapshot; graph readback NOT VERIFIED", flush=True)
+          
+          
+          try:
+              main()
+          except Refused as exc:
+              raise SystemExit("FAIL: dependency graph submission boundary: " + str(exc)) from None
+          PY

@@ -225,7 +225,18 @@ def test_workflow_uses_strict_job_scoped_write_boundary():
     assert "merge-multiple: true" in active
     assert "Preflight both real snapshot artifacts (read only)" in active
     assert "needs: [preflight]" in active
-    assert active.count("python3 scripts/ci_dependency_graph_submit_v05.py") == 3
+    assert active.count("python3 scripts/ci_dependency_graph_submit_v05.py") == 1
+    preflight = active.split("  preflight:\n", 1)[1].split("  publish:\n", 1)[0]
+    publish = active.split("  publish:\n", 1)[1]
+    assert "snapshot_b64: ${{ steps.validate.outputs.snapshot_b64 }}" in preflight
+    assert '--github-output "$GITHUB_OUTPUT"' in preflight
+    assert "actions/checkout@" in preflight and "actions/download-artifact@" in preflight
+    assert "uses:" not in publish
+    assert "actions/checkout@" not in publish and "actions/download-artifact@" not in publish
+    assert "SNAPSHOT_B64: ${{ needs.preflight.outputs.snapshot_b64 }}" in publish
+    assert "python3 - <<'PY'" in publish
+    assert 'response.get("result") == "SUCCESS"' in publish
+    assert 'branch["commit"].get("sha") == sha' in publish
 
 
 def test_reviewed_edge_contract_rejects_fictional_in_lock_relationship():
@@ -463,3 +474,130 @@ def test_native_validation_is_reusable_without_write_tokens():
     assert "contents: write" not in native
     assert "distro: [debian13, almalinux10]" in native
     assert "persist-credentials: false" in native
+
+
+def _publisher_code() -> str:
+    """Extract the exact privileged step's static Python without executing Actions."""
+    import textwrap
+    workflow = (ROOT / ".github/workflows/dependency-graph-submit-v05.yml").read_text()
+    publisher = workflow.split("\n  publish:\n", 1)[1]
+    text = publisher.split("          python3 - <<'PY'\n", 1)[1]
+    text = text.split("\n          PY", 1)[0]
+    return textwrap.dedent(text) + "\n"
+
+
+def test_unprivileged_preflight_exports_complete_atomic_payload(monkeypatch, tmp_path, capsys):
+    import base64
+    import json
+    import sys
+    from scripts import ci_dependency_graph_submit_v05 as module
+
+    for target in TARGETS:
+        (tmp_path / f"dependency-graph-preview-{target}.json").write_text(
+            json.dumps(_graph(target))
+        )
+    output = tmp_path / "workflow-output"
+    output.touch()
+    monkeypatch.setattr(sys, "argv", ["preflight", "--source", str(ROOT),
+                        "--directory", str(tmp_path), "--sha", SHA,
+                        "--github-output", str(output)])
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    module.main()
+    key, value = output.read_text().strip().split("=", 1)
+    assert key == "snapshot_b64"
+    data = json.loads(base64.b64decode(value, validate=True))
+    assert len(data["manifests"]) == 3
+    assert data["sha"] == SHA
+    assert data["job"]["correlator"] == "repocache-v05-wheelmeta-two-target"
+    assert "NO API call" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("situation", [
+    "success", "accepted", "stale", "missing", "wrong-sha",
+    "wrong-ref", "wrong-repo", "pr", "bad-json", "bad-base64",
+    "bad-manifest", "bad-scope", "bad-edge", "missing-token",
+])
+def test_actionless_write_job_refuses_bad_states(
+    monkeypatch, situation, capsys
+):
+    import base64
+    import json
+    import urllib.request
+
+    payload = combine_snapshots([_graph(t) for t in TARGETS])
+    if situation == "wrong-sha":
+        payload["sha"] = "0" * 40
+    if situation == "bad-manifest":
+        del payload["manifests"]["deps/requirements-build-v05.txt"]
+    if situation in ("bad-scope", "bad-edge"):
+        name = "deps/requirements-debian13-py313.txt"
+        node = next(iter(payload["manifests"][name]["resolved"].values()))
+        if situation == "bad-scope":
+            node["scope"] = "development"
+        else:
+            node["dependencies"] = []
+            # The original fixture has nonzero edges, adjust a linked parent:
+            for item in payload["manifests"][name]["resolved"].values():
+                item["dependencies"] = []
+    encoded = base64.b64encode(json.dumps(payload).encode()).decode()
+    if situation == "missing":
+        encoded = ""
+    elif situation == "bad-json":
+        encoded = base64.b64encode(b"{").decode()
+    elif situation == "bad-base64":
+        encoded = "!not-valid!"
+    monkeypatch.setenv("SNAPSHOT_B64", encoded)
+    monkeypatch.setenv("GITHUB_SHA", SHA)
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request" if situation == "pr" else "push")
+    monkeypatch.setenv("GITHUB_REF", "refs/pull/206/merge" if situation == "wrong-ref"
+                      else "refs/heads/main")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "another/repo" if situation == "wrong-repo"
+                      else "teixemf/repocache")
+    if situation == "missing-token":
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    else:
+        monkeypatch.setenv("GITHUB_TOKEN", "mock-token-never-log")
+
+    calls = []
+    class Response:
+        def __init__(self, status, body):
+            self.status = status
+            self.body = body
+        def __enter__(self):
+            return self
+        def __exit__(self, *_):
+            return False
+        def read(self, n):
+            assert n == 20001
+            return self.body
+    class Opener:
+        def open(self, request, timeout):
+            calls.append((request.full_url, request.get_method(), request.data))
+            assert timeout == 30
+            if request.data is None:
+                branch_sha = "0" * 40 if situation == "stale" else SHA
+                return Response(200, json.dumps({"commit": {"sha": branch_sha}}).encode())
+            response = "ACCEPTED" if situation == "accepted" else "SUCCESS"
+            return Response(201, json.dumps({"result": response}).encode())
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *args: Opener())
+
+    if situation == "success":
+        exec(compile(_publisher_code(), "actionless-publisher", "exec"), {})
+        output = capsys.readouterr()
+        assert "API reported SUCCESS" in output.out
+        assert len(calls) == 2
+        assert len(json.loads(calls[1][2])["manifests"]) == 3
+    else:
+        with pytest.raises(SystemExit, match="FAIL: dependency graph submission boundary"):
+            exec(compile(_publisher_code(), "actionless-publisher", "exec"), {})
+        output = capsys.readouterr()
+        assert "mock-token-never-log" not in output.out + output.err
+        assert "PASS:" not in output.out
+        if situation in ("stale", "accepted"):
+            assert len(calls) == (1 if situation == "stale" else 2)
+        else:
+            assert not calls
+
+
+def test_actionless_publisher_inline_python_compiles():
+    compile(_publisher_code(), "actionless-publisher", "exec")

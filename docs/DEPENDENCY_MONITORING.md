@@ -176,16 +176,23 @@ In the proposed `.github/workflows/dependency-graph-submit-v05.yml`:
   against source-controlled, independently reviewed v0.5.0 wheel metadata,
   not merely a total of 14 edges. Native Debian and AlmaLinux validation
   and hosted producers must match this exact same adjacency contract.
-- The publisher independently validates the source locks, monitor hashes,
-  build/runtime scopes, manifest identities, and current main SHA before
-  one complete snapshot POST. Unknown relationships or moved SHA fail closed.
-- Although the token is explicitly passed only to the final script step,
-  GitHub Actions exposes the `github.token` context to earlier Actions
-  **within the privileged job**. The full-SHA-pinned checkout/download
-  Actions and the GitHub-hosted publisher runner are trusted components;
-  a compromised publisher runner may access the write-scoped token.
-  Token exposure is a residual Medium risk, not eliminated by the YAML.
-  The API client forbids proxies and HTTP redirects.
+- The **read-only preflight** independently validates source locks, monitor
+  hashes, build/runtime scopes and exact manifest/edge identities. It emits a
+  size-bounded, base64-encoded complete three-manifest payload via a GitHub
+  Actions job output; the value contains data only, never code or credentials.
+- The separate **write-scoped publisher executes no third-party Actions**
+  (`uses:`), no checkout, no artifact downloads, no package installation and
+  no source-controlled Python. Its one inline, standard-library-only Python
+  step validates the output's SHA, source branch, detector, manifest inventory
+  and scopes; checks live protected `main`; then submits one atomic snapshot.
+  It requires HTTP 201 plus an explicit `result: SUCCESS`, forbids proxies
+  and redirects and never logs its token.
+- GitHub-hosted runner and reviewed inline workflow source remain part of the
+  privileged trusted computing base. This removes the former F-03 exposure
+  **to checkout/download Actions in the write job**, but does not imply an
+  invulnerable runner, immutable workflow code or zero token risk. The
+  preflight-to-publisher job output is a trusted same-run data boundary; its
+  non-production PR evaluation and post-merge API submission require evidence.
 - The three reviewed source manifests remain separate GitHub graph entries:
   `deps/requirements-debian13-py313.txt`,
   `deps/requirements-almalinux10-py312.txt` and
