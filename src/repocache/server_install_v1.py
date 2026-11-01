@@ -265,6 +265,8 @@ def _predecoded_size(document: Any) -> None:
             size += len(piece.encode("utf-8"))
             if size > MAX_DOCUMENT_BYTES:
                 _reject("install document: decoded object exceeds 1 MiB")
+    except InstallInputError:
+        raise
     except (TypeError, ValueError, UnicodeError, OverflowError, RecursionError):
         _reject("install document: invalid JSON-compatible object")
 
