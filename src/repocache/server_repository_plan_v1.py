@@ -11,11 +11,15 @@ on the real host before any commit.
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 from typing import Any
 
 from repocache.server_install_v1 import (
     ID,
     MAX_INT,
+    _layout_identity,
+    _upstream,
     validate_install_document,
 )
 
@@ -110,3 +114,69 @@ def plan_repository_change(
         "status": "PLAN_ONLY",
         "candidate_document": validated,
     }
+
+
+def _canonical_identity(repo: dict[str, Any]) -> str:
+    """Match the strict v1 validator's identity, ignoring administrative state."""
+    host, port, path = _upstream(repo["upstream"]["base_url"])
+    return json.dumps(
+        [repo["kind"], host, port, path,
+         _layout_identity(repo["kind"], repo["layout"])],
+        sort_keys=True, separators=(",", ":"),
+    )
+
+
+def propose_automatic_repository_id(
+    current_document: dict[str, Any],
+    proposed_repository: dict[str, Any],
+    *,
+    current_generation: int,
+    reserved_ids: set[str] | frozenset[str],
+) -> dict[str, Any]:
+    """Suggest an ID, never reserve it or promise persistent uniqueness.
+
+    A trusted future state engine MUST supply its durable, atomically locked
+    *all-time* reservation/tombstone set, then recheck it at commit. This
+    routine only computes a reproducible, collision-resistant candidate.
+    Callers cannot safely commit its result without that separate engine.
+    """
+    if type(current_generation) is not int or not 0 <= current_generation <= MAX_INT:
+        raise RepositoryPlanError("current_generation: invalid")
+    if type(reserved_ids) not in (set, frozenset) or len(reserved_ids) > 10000:
+        raise RepositoryPlanError("reserved_ids: trusted bounded set required")
+    if any(type(item) is not str or ID.fullmatch(item) is None
+           for item in reserved_ids):
+        raise RepositoryPlanError("reserved_ids: invalid ID")
+    if type(proposed_repository) is not dict or "id" in proposed_repository:
+        raise RepositoryPlanError("automatic ID: ID must be omitted")
+    existing = validate_install_document(current_document, for_apply=True)
+    if existing["expected_state_generation"] != current_generation:
+        raise RepositoryPlanError("expected_state_generation: stale candidate")
+    if any("id" not in item for item in existing["repositories"]):
+        raise RepositoryPlanError("repositories: durable identifiers required")
+    if not {item["id"] for item in existing["repositories"]} <= reserved_ids:
+        raise RepositoryPlanError("reserved_ids: live repository not reserved")
+
+    # Reuse the *same strict input validator* for future candidate identity;
+    # never generate IDs based on unvalidated, ambiguous attacker input.
+    isolated = copy.deepcopy(existing)
+    isolated["repositories"] = [copy.deepcopy(proposed_repository)]
+    validated = validate_install_document(isolated, for_apply=True)
+    candidate = validated["repositories"][0]
+    canonical = _canonical_identity(candidate)
+    for present in existing["repositories"]:
+        if _canonical_identity(present) == canonical:
+            return {"schema_version": 1, "status": "PLAN_ONLY",
+                    "repository_id": present["id"], "existing": True}
+
+    # Hash the canonical identity rather than an input-supplied display name.
+    # Tombstones prevent reuse, even when the same upstream is added later.
+    for nonce in range(256):
+        digest = hashlib.sha256(
+            (canonical + "#" + str(nonce)).encode("utf-8")
+        ).hexdigest()
+        identifier = "repo-" + digest[:32]
+        if identifier not in reserved_ids:
+            return {"schema_version": 1, "status": "PLAN_ONLY",
+                    "repository_id": identifier, "existing": False}
+    raise RepositoryPlanError("automatic ID: reservation conflict")
