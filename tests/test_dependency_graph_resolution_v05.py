@@ -122,3 +122,14 @@ def test_bad_wheel_metadata_refused(tmp_path):
                                      b"Requires-Dist: invalid >>> 3\n\n")
     with pytest.raises(GraphRefused, match="Requires-Dist"):
         metadata_from_wheel(wheel, "pkg", "1.0.0", digest)
+
+
+def test_nested_vendored_metadata_cannot_supplant_top_level_identity(tmp_path):
+    wheel = tmp_path / "pkg-1.0.0-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as z:
+        z.writestr("pkg-1.0.0.dist-info/METADATA",
+                   b"Name: pkg\nVersion: 1.0.0\n\n")
+        z.writestr("pkg/_vendor/unrelated-9.0.0.dist-info/METADATA",
+                   b"Name: unrelated\nVersion: 9.0.0\n\n")
+    digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+    assert metadata_from_wheel(wheel, "pkg", "1.0.0", digest) == []
