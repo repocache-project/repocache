@@ -536,3 +536,27 @@ def test_cache_maximum_size_is_a_material_configuration_difference():
         propose_automatic_repository_id(
             before, candidate, current_generation=0,
             reserved_ids={repo["id"] for repo in before["repositories"]})
+
+
+def test_reservation_cardinality_rechecked_after_copy_interleaving(monkeypatch):
+    """Model caller-set growth strictly between the first length check and copy.
+
+    The injectable frozenset constructor is a deterministic interleaving hook;
+    this is not a production-thread or trusted-ledger integration test.
+    """
+    import repocache.server_repository_plan_v1 as planner
+
+    before = document()
+    reservations = {repo["id"] for repo in before["repositories"]}
+    original_count = len(reservations)
+
+    class GrowingFrozenSet(frozenset):
+        def __new__(cls, iterable):
+            iterable.update(f"historical-{i}" for i in range(10000))
+            return super().__new__(cls, iterable)
+
+    monkeypatch.setattr(planner, "frozenset", GrowingFrozenSet, raising=False)
+    with pytest.raises(RepositoryPlanError, match="bounded snapshot"):
+        planner._reserved_snapshot(before, reservations)
+    assert original_count == len(before["repositories"])
+    assert len(reservations) > 10000
