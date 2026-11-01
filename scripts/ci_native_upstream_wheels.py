@@ -19,6 +19,7 @@ from email.parser import BytesParser
 from pathlib import Path
 
 from ci_dependency_graph_v05 import graph_snapshot, parse_lock, write_preview
+from ci_dependency_graph_submit_v05 import validate_snapshot
 
 SOURCE = Path("/source")
 WORK = Path("/work")
@@ -178,6 +179,9 @@ def main() -> None:
     require(set(snapshot["manifests"]) == {
         f"deps/requirements-{target}.txt", "deps/requirements-build-v05.txt"},
         "Missing runtime or build snapshot")
+    # Independently enforce the source-controlled exact adjacency contract
+    # against native distro wheel metadata, not only the number of edges.
+    validate_snapshot(snapshot, SOURCE, target, os.environ["REPO_GRAPH_SHA"])
     write_preview(snapshot, WORK / f"dependency-graph-preview-{target}.json")
     runtime_resolved = snapshot["manifests"][
         f"deps/requirements-{target}.txt"]["resolved"]
