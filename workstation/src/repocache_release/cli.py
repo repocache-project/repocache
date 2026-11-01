@@ -1109,7 +1109,14 @@ def main(argv: list[str] | None = None) -> int:
         # argparse --help is side-effect-free and exits 0.
         return int(exc.code or 0)
     except SyntaxErrorFromParser as exc:
-        err = OperatorError("INVALID_ARGUMENT", "Invalid command arguments: " + str(exc))
+        # An option supplied to the wrong action must not echo a private
+        # filesystem pathname in a JSON or human diagnostic.
+        has_signer_path = any(arg == "--signer-key-file"
+                              or arg.startswith("--signer-key-file=")
+                              for arg in args)
+        message = ("Invalid command arguments" if has_signer_path
+                   else "Invalid command arguments: " + str(exc))
+        err = OperatorError("INVALID_ARGUMENT", message)
         rc = 2
     except OperatorError as exc:
         err = exc

@@ -990,3 +990,16 @@ def test_explicit_signer_metadata_access_failure_is_closed(monkeypatch, tmp_path
         release.environment(str(parent / "owner.pem"))
     assert caught.value.code == "UNSAFE_SIGNER"
     assert str(parent) not in str(caught.value)
+
+def test_unrecognized_signer_path_option_never_echoes_path(monkeypatch, tmp_path, capsys):
+    marker = str(tmp_path / "private-operator-location.pem")
+    rc = release.main(["candidate", "prepare", "v0.5.0",
+                       "--signer-key-file", marker, "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 2 and payload["error"]["code"] == "INVALID_ARGUMENT"
+    assert marker not in json.dumps(payload)
+    rc = release.main(["candidate", "prepare", "v0.5.0",
+                       "--signer-key-file=" + marker, "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 2 and payload["error"]["code"] == "INVALID_ARGUMENT"
+    assert marker not in json.dumps(payload)
