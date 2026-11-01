@@ -46,7 +46,7 @@ if (origin.scheme != "https" or not origin.hostname
         or origin.path not in ("", "/") or origin.query or origin.fragment
         or port == 0 or origin.netloc.endswith(":")
         or any(ord(ch) < 33 or ord(ch) > 126 for ch in value)
-        or "\\\\" in value or "%" in value):
+        or "\\" in value or "%" in value):
     raise SystemExit("Invalid server: use a canonical HTTPS origin")
 
 hostname = origin.hostname
@@ -55,8 +55,8 @@ try:
 except ValueError:
     # Reject ambiguous numeric/hex IPv4 abbreviations and DNS label tricks.
     labels = hostname.split(".")
-    numeric = re.compile(r"(?:[0-9]+|0[xX][0-9A-Fa-f]+)\\Z", re.ASCII)
-    dns_label = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\Z", re.ASCII)
+    numeric = re.compile(r"(?:[0-9]+|0[xX][0-9A-Fa-f]+)\Z", re.ASCII)
+    dns_label = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z", re.ASCII)
     if (len(hostname) > 253 or len(labels) < 2
             or all(numeric.fullmatch(label) for label in labels)
             or any(not dns_label.fullmatch(label) for label in labels)):
