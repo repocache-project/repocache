@@ -1,6 +1,7 @@
 name: Native upstream dependency compatibility
 
 on:
+  workflow_call:
   pull_request:
     paths:
       - '.github/workflows/native-upstream-wheels.yml'

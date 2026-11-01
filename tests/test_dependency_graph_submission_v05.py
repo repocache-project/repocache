@@ -410,3 +410,55 @@ def test_mocked_branch_response_must_be_object_with_commit(monkeypatch, invalid)
                         lambda token, path, payload=None: invalid)
     with pytest.raises(GraphRefused, match="advanced"):
         submit(graphs, SHA)
+
+def test_unfiltered_protected_main_dependency_gates_are_fail_closed():
+    """Branch-required candidates are stable jobs in the unfiltered Tests run."""
+    workflow = (ROOT / ".github/workflows/tests.yml").read_text(encoding="utf-8")
+    header, jobs = workflow.split("\njobs:\n", 1)
+    assert "  pull_request:" in header
+    assert "    branches: [main, release/v0.4.0" in header
+    assert "    paths:" not in header
+    assert "contents: write" not in workflow
+    assert "--publish" not in workflow
+    assert jobs.count("    if: ${{ always() }}") == 2
+
+    def job(name):
+        marker = f"  {name}:\n"
+        assert jobs.count(marker) == 1
+        return jobs.split(marker, 1)[1].split("\n  ", 1)[0]
+
+    native = job("dependency-native-validation")
+    assert "uses: ./.github/workflows/native-upstream-wheels.yml" in native
+    assert "contents: read" in native
+    graph_source = job("dependency-graph-collect")
+    assert "target: debian13-py313" in graph_source
+    assert "target: almalinux10-py312" in graph_source
+    assert "ci_dependency_graph_collect_v05.py" in graph_source
+    assert "if-no-files-found: error" in graph_source
+
+    for gate_name, prerequisite in (
+        ("dependency-native-gate", "dependency-native-validation"),
+        ("dependency-graph-gate", "dependency-graph-collect"),
+    ):
+        gate = job(gate_name)
+        assert "if: ${{ always() }}" in gate
+        assert f"needs: [{prerequisite}]" in gate
+        assert "UPSTREAM_STATUS" in gate
+        assert 'if [ "$UPSTREAM_STATUS" != \'success\' ]; then' in gate
+        assert "exit 1" in gate
+        assert "MAIN_TARGET" in gate
+    preflight = job("dependency-graph-gate")
+    assert "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333" in preflight
+    assert "ci_dependency_graph_submit_v05.py" in preflight
+    assert "--publish" not in preflight
+
+
+def test_native_validation_is_reusable_without_write_tokens():
+    native = (ROOT / ".github/workflows/native-upstream-wheels.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "\non:\n  workflow_call:\n" in native
+    assert "contents: read" in native
+    assert "contents: write" not in native
+    assert "distro: [debian13, almalinux10]" in native
+    assert "persist-credentials: false" in native

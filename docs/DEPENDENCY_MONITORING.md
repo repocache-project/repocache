@@ -253,3 +253,37 @@ The resolver currently imports `pip._vendor.packaging`, a private pip API.
 The tested Python 3.12/3.13 implementations work, but a future pip change
 must fail closed, be independently assessed and never silently change
 source-controlled adjacency relationships.
+
+### Always-present native and graph security check candidates (Draft PR #206)
+
+The unfiltered `.github/workflows/tests.yml` proposes two stable checks:
+`Native Dependency Security Gate` and `Dependency Graph Security Gate`.
+They run for every PR targeting protected `main` and each `main` push,
+regardless of changed-file paths. On other ref families (including immutable
+legacy release branches) the check jobs still exist and explicitly report
+not applicable; no old-release dependency lock/profile is silently asserted
+compatible.
+
+The native gate invokes the existing **read-only reusable** native workflow
+and fails if either Debian13/Python3.13 or AlmaLinux10/Python3.12 matrix job
+is failed, cancelled or skipped. The graph gate separately collects the two
+source-hash-matched PyPI wheel metadata artifacts without import/installation,
+requires success for the complete producer matrix, downloads only same-run
+artifacts and executes the existing independent stdlib preflight. Its result
+is FAIL for absent, failed, skipped, malformed or incomplete evidence.
+
+Both final gate jobs use `if: always()` and explicitly reject anything
+other than upstream `success`, preventing a failed prerequisite from causing
+a misleading skipped gate. All jobs use `contents: read`, full-SHA-pinned
+official Actions and `persist-credentials: false`. Neither gate can invoke
+the write-scoped graph publisher, which remains solely in the separate
+protected-main-only workflow and **is NOT run by these tests**.
+
+**Governance limit:** merely introducing these two CI checks does not alter
+the effective protected-main ruleset. Before they become mandatory merging
+checks, separately authorize a ruleset update referencing the exact stable
+check names and GitHub Actions integration ID, after independent review and
+actual CI demonstration that both checks always appear and fail closed.
+Do not add the old path-filtered workflow jobs as required contexts. Never
+treat current successful read-only gates as proof of a real dependency API
+publication, GitHub graph readback, owner notification or signed release.
