@@ -123,3 +123,41 @@ credential or security token. If GitHub cannot recognize the complete
 per-platform locks, explicitly retain NOT VERIFIED and design a separately
 reviewed trusted-commit dependency-submission workflow rather than granting
 write rights to untrusted PR code.
+
+## v0.5.0 read-only resolved dependency graph preview (#81)
+
+The GitHub Dependency Graph recognized all 26 monitoring-only pinned package rows
+(12 runtime rows for each target and 2 shared build rows), but the owner-
+exported SPDX for merged PR #200 reported **zero Python package-to-package
+edges**: every pinned package appeared as directly required by REPOCACHE.
+Static exact-hash pins do **not** prove transitive relationships or correct
+build-vs-runtime scopes. This remains a **blocking #81 acceptance gap**.
+
+The proposed CI-only `scripts/ci_dependency_graph_v05.py` reads the **actual
+SHA-256-verified upstream wheel METADATA** in the two existing native
+Debian 13/Python 3.13 and AlmaLinux 10/Python 3.12 container environments.
+It compares each distribution's name, version and bytes against the reviewed
+legacy locks, applies target Python environment markers and requested extras,
+and constructs only the edges declared by the verified wheel metadata. Every
+active unpinned, out-of-lock or incompatible dependency is a hard failure;
+unreachable locked packages are also refused. The separately approved
+`setuptools` and `wheel` build tools appear in the proposed snapshot with
+`development` scope, never as application runtime dependencies.
+
+**Safety boundary:** this is a **read-only graph preview** written into a
+throwaway container's private workspace. It never sends a dependency snapshot
+to GitHub, never uses the API token, never modifies the signed legacy wheel
+locks or installer, and never activates online installation. PR CI has
+`contents: read` only. The native-image CI validates user-space metadata,
+not booted target kernels, systemd, SELinux or release publication.
+
+GitHub prioritizes user-submitted dependency snapshots above its own Python
+Dependabot graph jobs and static parsing. Publishing these previews therefore
+requires a **separately reviewed, strictly main-only and least-permissioned**
+submission implementation (the official API currently requires the job's
+`contents: write` privilege). Its isolation, correct profile-specific
+correlators, anti-PR-token boundary and observed GitHub post-integration
+rendering must pass review **before any merge that grants write permission**.
+This preview PR alone **does not** satisfy #81's production graph acceptance.
+Do not infer that successful native wheel metadata validation is evidence of
+real alert notification delivery or the owner-signed release candidate.
