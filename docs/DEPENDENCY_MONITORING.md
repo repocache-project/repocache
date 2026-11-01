@@ -206,3 +206,50 @@ installer, production service or publication permission changes are implied.
 The isolated private lab separately demonstrated 11 real alerts and a
 security-update PR; it does not prove production graph completeness or
 personal notification receipt.
+
+### Incorrect accepted graph: containment, recovery and evidence
+
+A successful HTTP 201 and `result: SUCCESS` do not prove that GitHub displayed
+the correct graph. Manual submissions can take precedence over GitHub's
+automatically discovered dependencies. An inaccurate graph blocks #81.
+
+1. **Contain:** Stop further graph publication by a separately authorized,
+   reviewed protected-main workflow change. Keep #81 open and do not approve
+   automated dependency PRs on the basis of the disputed graph. Disabling
+   the workflow does **not** remove an already accepted snapshot.
+2. **Preserve:** Record the offending snapshot JSON, exact source SHA, source
+   locks, CI/workflow run, API result, GitHub Dependency Graph and SPDX
+   screenshots. The stable detector is `repocache-verified-wheel-metadata`
+   and the combined correlator is `repocache-v05-wheelmeta-two-target`.
+   Never disclose or archive an API token.
+3. **Correct:** Regenerate all three manifests from exact source-locked
+   SHA-256-verified wheels; independently validate every parent-to-child
+   relationship, all marker conditions, runtime/build scopes and both
+   native Debian13/Python3.13 and AlmaLinux10/Python3.12 environments.
+   Run the adversarial in-lock edge-substitution regression and the actual
+   two-artifact unprivileged preflight before any renewed submission.
+4. **Review and authorize:** Obtain a new independent exact-HEAD review,
+   explicit maintainer acceptance of any residual risk and a separate
+   merge authorization. Only an authorized protected-main push may submit
+   a corrected, complete three-manifest snapshot using the same stable
+   detector/correlator. Require HTTP 201 and `result: SUCCESS`.
+5. **Read back:** Confirm the submitted SHA, both sets of 12 runtime
+   entries, all 14 **actual** edges per runtime profile, both build helpers
+   in `development` scope, direct/indirect labels, fresh SPDX output and
+   corresponding alert behavior. The HTTP result alone is insufficient.
+6. **Escalate on failure:** Leave #81 blocked and the publisher stopped;
+   contact GitHub Support with sanitized exact SHA, detector/correlator,
+   response, expected inventory and incorrect graph readback. A workflow
+   revert cannot be assumed to delete or restore a graph snapshot.
+
+The pre-POST check of current main and the POST are separate HTTP requests:
+main can advance between them (TOCTOU). After any authorized submission,
+compare the returned snapshot SHA and current protected-main revision;
+an obsolete snapshot requires a fresh reviewed main submission.
+Neither the combined API POST nor its expected status proves atomic
+GitHub UI rendering or automatic recovery.
+
+The resolver currently imports `pip._vendor.packaging`, a private pip API.
+The tested Python 3.12/3.13 implementations work, but a future pip change
+must fail closed, be independently assessed and never silently change
+source-controlled adjacency relationships.
