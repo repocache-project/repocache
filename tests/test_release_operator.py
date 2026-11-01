@@ -860,7 +860,7 @@ def test_signer_key_file_cli_option_is_action_scoped():
 
 
 @pytest.mark.parametrize("bad", ["relative.pem", "~/key.pem", "", "/tmp/../key.pem",
-                                 "/tmp//key.pem", "/tmp/key.pem/", "/tmp/key\\n.pem", "/"])
+                                 "/tmp//key.pem", "/tmp/key.pem/", "/tmp/key\n.pem", "/"])
 def test_explicit_signer_path_refuses_ambiguous_or_relative_paths(bad):
     with pytest.raises(release.OperatorError) as caught:
         release.private_signer_path(bad)
@@ -898,6 +898,7 @@ def test_explicit_signer_refuses_unsafe_ancestor(monkeypatch, tmp_path, kind):
         key = actual / "owner.pem"
     else:
         parent.mkdir(mode=0o770)
+        parent.chmod(0o770)  # Do not depend on the CI runner umask.
         key = parent / "owner.pem"
     key.write_bytes(b"synthetic fixture")
     key.chmod(0o600)
@@ -974,3 +975,18 @@ def test_sign_explicit_signer_missing_refuses_before_secret_fd(monkeypatch, tmp_
     with pytest.raises(release.OperatorError) as caught:
         release.sign("v0.5.0", 3, str(tmp_path / "absent.pem"))
     assert caught.value.code == "UNSAFE_SIGNER"
+
+def test_explicit_signer_metadata_access_failure_is_closed(monkeypatch, tmp_path):
+    _mock_environment_readonly(monkeypatch, tmp_path)
+    parent = tmp_path / "unreadable"
+    parent.mkdir(mode=0o700)
+    original = release.Path.lstat
+    def inaccessible(path, *args, **kwargs):
+        if path == parent:
+            raise PermissionError("simulated metadata denial")
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(release.Path, "lstat", inaccessible)
+    with pytest.raises(release.OperatorError) as caught:
+        release.environment(str(parent / "owner.pem"))
+    assert caught.value.code == "UNSAFE_SIGNER"
+    assert str(parent) not in str(caught.value)
