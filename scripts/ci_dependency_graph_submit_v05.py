@@ -296,15 +296,22 @@ def github_api(token: str, path: str, payload: dict | None = None) -> dict:
     try:
         with opener.open(req, timeout=30) as response:
             status = response.status
-            body = response.read(20000)
+            # Read one byte beyond the policy limit to reject truncation.
+            body = response.read(20001)
     except urllib.error.HTTPError as exc:
-        raise GraphRefused(f"GitHub dependency API refused with HTTP {exc.code}") from exc
+        raise GraphRefused(f"GitHub dependency API refused with HTTP {exc.code}") from None
+    except (urllib.error.URLError, OSError):
+        # Never expose transport exception details to a token-bearing job log.
+        raise GraphRefused("GitHub dependency API transport failed") from None
+    require(len(body) <= 20000, "Oversized GitHub API response")
     require(status == (201 if payload is not None else 200),
             "Unexpected GitHub API response code")
     try:
-        return json.loads(body)
-    except (UnicodeError, ValueError) as exc:
-        raise GraphRefused("Invalid GitHub API response") from exc
+        result = json.loads(body)
+    except (UnicodeError, ValueError):
+        raise GraphRefused("Invalid GitHub API response") from None
+    require(isinstance(result, dict), "GitHub API response must be a JSON object")
+    return result
 
 
 def submit(snapshots: list[dict], sha: str) -> None:
@@ -319,14 +326,16 @@ def submit(snapshots: list[dict], sha: str) -> None:
     # manifest. One atomic POST avoids partially publishing one target.
     combined = combine_snapshots(snapshots)
     branch = github_api(token, f"/repos/{REPOSITORY}/branches/main")
-    require(branch.get("commit", {}).get("sha") == sha,
+    require(isinstance(branch, dict) and
+            isinstance(branch.get("commit"), dict) and
+            branch["commit"].get("sha") == sha,
             "Protected main advanced since graph collection; refuse stale submission")
     result = github_api(token, f"/repos/{REPOSITORY}/dependency-graph/snapshots",
                         combined)
     # HTTP 201 can acknowledge a stale/superseded submission. Only a
     # documented SUCCESS result permits this job to report publication PASS.
     # Live Dependency Graph/SPDX readback is a separate #81 acceptance gate.
-    require(result.get("result") == "SUCCESS",
+    require(isinstance(result, dict) and result.get("result") == "SUCCESS",
             "GitHub dependency submission did not report SUCCESS")
     print("PASS: GitHub API reported SUCCESS for both locked profiles "
           "and scoped build inventory; graph readback NOT VERIFIED",

@@ -18,6 +18,8 @@ on:
       - 'scripts/ci_dependency_graph_*.py'
       - 'deps/**'
       - 'pyproject.toml'
+      - 'tests/test_dependency_graph_resolution_v05.py'
+      - 'tests/test_dependency_graph_submission_v05.py'
 
 permissions:
   contents: read

@@ -249,6 +249,8 @@ def test_reviewed_edge_contract_rejects_fictional_in_lock_relationship():
     ("INVALID", False),
     ("", False),
     (None, False),
+    ([], False),
+    ({}, False),
 ])
 def test_publisher_requires_explicit_success_not_accepted(
     monkeypatch, capsys, api_result, expected_success
@@ -296,9 +298,115 @@ def test_native_verification_is_triggered_by_every_graph_contract_change():
         ROOT / ".github/workflows/native-upstream-wheels.yml"
     ).read_text(encoding="utf-8")
     for path in (
+        ".github/workflows/native-upstream-wheels.yml",
+        ".github/workflows/dependency-graph-submit-v05.yml",
+        "scripts/ci_native_upstream_wheels.py",
         "scripts/ci_dependency_graph_v05.py",
         "scripts/ci_dependency_graph_collect_v05.py",
         "scripts/ci_dependency_graph_submit_v05.py",
+        "tests/test_dependency_graph_resolution_v05.py",
         "tests/test_dependency_graph_submission_v05.py",
+        "pyproject.toml",
+        "deps/build-wheels.lock",
+        "deps/runtime-wheels.lock",
     ):
         assert workflow.count(f"      - '{path}'") == 2
+    assert workflow.count("      - 'deps/requirements-*.txt'") == 2
+
+
+def test_graph_pr_and_main_push_cover_graph_contract_tests():
+    workflow = (
+        ROOT / ".github/workflows/dependency-graph-submit-v05.yml"
+    ).read_text(encoding="utf-8")
+    events = workflow.split("\npermissions:", 1)[0]
+    pr, push = events.split("  push:\n", 1)
+    for path in (
+        "tests/test_dependency_graph_resolution_v05.py",
+        "tests/test_dependency_graph_submission_v05.py",
+    ):
+        assert f"      - '{path}'" in pr
+        assert f"      - '{path}'" in push
+
+@pytest.mark.parametrize("body,status,accepted", [
+    (b'{"result":"SUCCESS"}', 201, True),
+    (b'[]', 201, False),
+    (b'null', 201, False),
+    (b'"not-an-object"', 201, False),
+    (b'123', 201, False),
+    (b'{"result":', 201, False),
+    (b'{"result":"SUCCESS"}', 202, False),
+    (b'{"result":"SUCCESS"}' + b' ' * 20001, 201, False),
+])
+def test_github_api_transport_requires_correct_status_and_object(
+    monkeypatch, body, status, accepted
+):
+    """Exercise the real HTTP wrapper without sending any network request."""
+    import scripts.ci_dependency_graph_submit_v05 as module
+
+    class Response:
+        def __enter__(self):
+            self.status = status
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, size):
+            assert size == 20001
+            return body[:size]
+
+    class Opener:
+        def open(self, request, timeout):
+            assert request.full_url == (
+                "https://api.github.com/repos/teixemf/repocache/dependency-graph/snapshots"
+            )
+            assert request.get_method() == "POST"
+            assert timeout == 30
+            return Response()
+
+    monkeypatch.setattr(module.urllib.request, "build_opener",
+                        lambda *args: Opener())
+    path = "/repos/teixemf/repocache/dependency-graph/snapshots"
+    if accepted:
+        assert module.github_api("dummy", path, {"version": 0}) == {
+            "result": "SUCCESS"
+        }
+    else:
+        with pytest.raises(GraphRefused):
+            module.github_api("dummy", path, {"version": 0})
+
+
+@pytest.mark.parametrize("error_kind", ["http", "transport"])
+def test_github_api_transport_errors_never_echo_token(monkeypatch, error_kind):
+    import scripts.ci_dependency_graph_submit_v05 as module
+
+    class Opener:
+        def open(self, request, timeout):
+            if error_kind == "http":
+                raise module.urllib.error.HTTPError(
+                    request.full_url, 403, "test-token-never-log", {}, None
+                )
+            raise module.urllib.error.URLError("test-token-never-log")
+
+    monkeypatch.setattr(module.urllib.request, "build_opener",
+                        lambda *args: Opener())
+    path = "/repos/teixemf/repocache/dependency-graph/snapshots"
+    with pytest.raises(GraphRefused) as error:
+        module.github_api("test-token-never-log", path, {"version": 0})
+    assert "test-token-never-log" not in str(error.value)
+
+
+@pytest.mark.parametrize("invalid", [[], None, "malformed", {"commit": []}])
+def test_mocked_branch_response_must_be_object_with_commit(monkeypatch, invalid):
+    graphs = [_graph(t) for t in TARGETS]
+    for key, value in {
+        "GITHUB_EVENT_NAME": "push", "GITHUB_REF": "refs/heads/main",
+        "GITHUB_REPOSITORY": "teixemf/repocache", "GITHUB_SHA": SHA,
+        "GITHUB_TOKEN": "dummy",
+    }.items():
+        monkeypatch.setenv(key, value)
+    import scripts.ci_dependency_graph_submit_v05 as module
+    monkeypatch.setattr(module, "github_api",
+                        lambda token, path, payload=None: invalid)
+    with pytest.raises(GraphRefused, match="advanced"):
+        submit(graphs, SHA)

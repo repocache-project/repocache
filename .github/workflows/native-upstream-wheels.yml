@@ -4,11 +4,13 @@ on:
   pull_request:
     paths:
       - '.github/workflows/native-upstream-wheels.yml'
+      - '.github/workflows/dependency-graph-submit-v05.yml'
       - 'scripts/ci_native_upstream_wheels.py'
       - 'scripts/ci_dependency_graph_v05.py'
       - 'scripts/ci_dependency_graph_collect_v05.py'
       - 'scripts/ci_dependency_graph_submit_v05.py'
       - 'tests/test_dependency_graph_submission_v05.py'
+      - 'tests/test_dependency_graph_resolution_v05.py'
       - 'deps/requirements-*.txt'
       - 'deps/build-wheels.lock'
       - 'pyproject.toml'
@@ -20,11 +22,13 @@ on:
     branches: [main, integration/v0.5.0, integration/v0.6.0]
     paths:
       - '.github/workflows/native-upstream-wheels.yml'
+      - '.github/workflows/dependency-graph-submit-v05.yml'
       - 'scripts/ci_native_upstream_wheels.py'
       - 'scripts/ci_dependency_graph_v05.py'
       - 'scripts/ci_dependency_graph_collect_v05.py'
       - 'scripts/ci_dependency_graph_submit_v05.py'
       - 'tests/test_dependency_graph_submission_v05.py'
+      - 'tests/test_dependency_graph_resolution_v05.py'
       - 'deps/requirements-*.txt'
       - 'deps/build-wheels.lock'
       - 'pyproject.toml'
