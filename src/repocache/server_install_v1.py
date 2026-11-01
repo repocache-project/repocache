@@ -59,10 +59,18 @@ def _depth(value: Any, level: int = 1,
         if len(value) > budget[0]:
             _reject("install document: decoded object exceeds 1 MiB")
         for key, nested in value.items():
-            _string(key, "JSON field name", allow_empty=False)
-            budget[0] -= len(key)
-            if budget[0] < 0:
+            # Check character count before _string() allocates UTF-8 bytes.
+            # A Python dict supplied directly may contain an enormous key,
+            # even when the wire parser's input-size limit is respected.
+            if type(key) is not str:
+                _reject("JSON field name: expected string")
+            key_length = len(key)
+            if key_length > budget[0]:
                 _reject("install document: decoded object exceeds 1 MiB")
+            if key_length > 2048:
+                _reject("JSON field name: invalid length or whitespace")
+            _string(key, "JSON field name", allow_empty=False)
+            budget[0] -= key_length
             _depth(nested, level + 1, budget)
     elif isinstance(value, list):
         if len(value) > budget[0]:
