@@ -161,3 +161,40 @@ rendering must pass review **before any merge that grants write permission**.
 This preview PR alone **does not** satisfy #81's production graph acceptance.
 Do not infer that successful native wheel metadata validation is evidence of
 real alert notification delivery or the owner-signed release candidate.
+
+### Proposed restricted submission stage (Draft PR #206; not active until reviewed merge)
+
+In the proposed `.github/workflows/dependency-graph-submit-v05.yml`:
+
+- A **read-only** matrix resolves reviewed SHA-256 wheel identities for Python
+  3.13 and 3.12 on disposable GitHub-hosted Linux runners. Wheel package
+  code is not installed or executed; output is a same-run ephemeral artifact.
+- Only a separate job triggered by `push` on protected `main` receives
+  `contents: write`. PR compute jobs retain `contents: read` and
+  `persist-credentials: false`; no `pull_request_target` or `workflow_run`.
+- The publisher validates both artifact inventories, source-lock/manifest
+  hashes, direct and transitively related PURLs, scopes, exact source SHA
+  and current main branch head before ONE atomic snapshot POST. A moved
+  branch, changed graph edge count, mismatched build scopes, API errors
+  or missing artifacts fail closed. Token is provided to its last step only;
+  the API client refuses proxies and HTTP redirects.
+- The three reviewed source manifests remain separate GitHub graph entries:
+  `deps/requirements-debian13-py313.txt`,
+  `deps/requirements-almalinux10-py312.txt` and
+  `deps/requirements-build-v05.txt`, with build helpers in `development`
+  scope. GitHub prioritizes user submissions over Dependabot graph jobs,
+  so independently verifying its rendered results is mandatory.
+- Snapshot collection uses hosted Linux Python 3.12/3.13, not native distro
+  userspace. The separate exact-SHA Debian 13 and AlmaLinux 10 native
+  jobs still validate the same SHA-256-verified wheel bytes and metadata.
+  None of these CI jobs proves booted SELinux/systemd or release signing.
+
+**Status: proposed, unmerged.** Draft PR #206 has not been independently
+security-reviewed or accepted for merge. The protected-main post-merge
+submission, real Dependency Graph labels, SBOM relationships, security
+notifications and owner acceptance remain NOT VERIFIED. No signed wheelhouse,
+installer, production service or publication permission changes are implied.
+
+The isolated private lab separately demonstrated 11 real alerts and a
+security-update PR; it does not prove production graph completeness or
+personal notification receipt.
