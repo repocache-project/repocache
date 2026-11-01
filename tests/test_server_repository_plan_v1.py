@@ -423,3 +423,116 @@ def test_reservations_for_non_add_are_rejected_not_treated_as_authority():
     with pytest.raises(RepositoryPlanError, match="accepted only for add"):
         plan(before, "remove", repository_id="debian-trixie-main",
              reserved_ids={repo["id"] for repo in before["repositories"]})
+
+
+@pytest.mark.parametrize("kind,field", [
+    ("apt", "release_key_refs"), ("dnf", "gpg_key_refs"),
+])
+def test_trust_reference_rotation_is_an_update_not_new_identity(kind, field):
+    before = document()
+    current = next(repo for repo in before["repositories"] if repo["kind"] == kind)
+    rotated = copy.deepcopy(current)
+    rotated["layout"][field] = [
+        "file:/etc/repocache/keys/rotated-public.gpg"
+    ]
+    old_id = current["id"]
+    proposal = copy.deepcopy(rotated)
+    del proposal["id"]
+    reserved = {repo["id"] for repo in before["repositories"]}
+
+    # Changing trust policy must NOT mint an unrelated source identity.
+    with pytest.raises(RepositoryPlanError, match="matching identity has different configuration"):
+        propose_automatic_repository_id(
+            before, proposal, current_generation=0, reserved_ids=reserved)
+    with pytest.raises(RepositoryPlanError, match="already in use"):
+        plan(before, "add", proposed_repository=rotated)
+
+    updated = plan(before, "update", repository_id=old_id,
+                   proposed_repository=rotated)
+    assert updated["changed"] is True
+    assert updated["repository_id"] == old_id
+    effective = next(repo for repo in updated["candidate_document"]["repositories"]
+                     if repo["id"] == old_id)
+    assert effective["layout"][field] == rotated["layout"][field]
+    assert current["layout"][field] != effective["layout"][field]
+
+
+@pytest.mark.parametrize("kind,field", [
+    ("apt", "release_key_refs"), ("dnf", "gpg_key_refs"),
+])
+def test_reordering_public_signing_key_set_is_idempotent(kind, field):
+    before = document()
+    current = next(repo for repo in before["repositories"] if repo["kind"] == kind)
+    current["layout"][field].append("file:/etc/repocache/keys/second-public.gpg")
+    proposed = copy.deepcopy(current)
+    proposed["layout"][field].reverse()
+    assert plan(before, "add", proposed_repository=proposed)["changed"] is False
+    assert plan(before, "update", repository_id=current["id"],
+                proposed_repository=proposed)["changed"] is False
+    del proposed["id"]
+    result = propose_automatic_repository_id(
+        before, proposed, current_generation=0,
+        reserved_ids={repo["id"] for repo in before["repositories"]})
+    assert result["existing"] is True
+    assert result["repository_id"] == current["id"]
+
+
+@pytest.mark.parametrize("field,second", [
+    ("suites", "bookworm"), ("components", "contrib"),
+    ("architectures", "arm64"),
+])
+def test_reordering_apt_routing_sets_is_idempotent(field, second):
+    before = document()
+    current = before["repositories"][0]
+    current["layout"][field].append(second)
+    proposed = copy.deepcopy(current)
+    proposed["layout"][field].reverse()
+    assert plan(before, "add", proposed_repository=proposed)["changed"] is False
+    assert plan(before, "update", repository_id=current["id"],
+                proposed_repository=proposed)["changed"] is False
+
+
+@pytest.mark.parametrize("kind,field", [
+    ("apt", "release_key_refs"), ("dnf", "gpg_key_refs"),
+])
+def test_auto_generated_identity_does_not_change_on_trust_rotation(kind, field):
+    before = document()
+    proposal = copy.deepcopy(
+        next(repo for repo in before["repositories"] if repo["kind"] == kind))
+    proposal.pop("id")
+    proposal["upstream"]["base_url"] = "https://fresh.example.invalid/new-source/"
+    proposal["upstream"]["allowed_hosts"] = ["fresh.example.invalid"]
+    reserved = {repo["id"] for repo in before["repositories"]}
+    first = propose_automatic_repository_id(
+        before, proposal, current_generation=0, reserved_ids=reserved)
+    proposal["layout"][field] = ["file:/etc/repocache/keys/rotated-public.gpg"]
+    second = propose_automatic_repository_id(
+        before, proposal, current_generation=0, reserved_ids=reserved)
+    assert first["repository_id"] == second["repository_id"]
+    assert first["existing"] is second["existing"] is False
+
+
+def test_mutable_reservation_input_is_snapshotted():
+    from repocache.server_repository_plan_v1 import _reserved_snapshot
+
+    before = document()
+    original = {repo["id"] for repo in before["repositories"]}
+    snapshot = _reserved_snapshot(before, original)
+    assert type(snapshot) is frozenset
+    original.add("new-id")
+    assert "new-id" not in snapshot
+    original.clear()
+    assert snapshot == {repo["id"] for repo in before["repositories"]}
+
+
+def test_cache_maximum_size_is_a_material_configuration_difference():
+    before = document()
+    candidate = copy.deepcopy(before["repositories"][0])
+    candidate["cache_overrides"]["max_size_bytes"] = 4096
+    with pytest.raises(RepositoryPlanError, match="already in use"):
+        plan(before, "add", proposed_repository=candidate)
+    del candidate["id"]
+    with pytest.raises(RepositoryPlanError, match="use update"):
+        propose_automatic_repository_id(
+            before, candidate, current_generation=0,
+            reserved_ids={repo["id"] for repo in before["repositories"]})
