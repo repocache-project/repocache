@@ -185,7 +185,8 @@ In the proposed `.github/workflows/dependency-graph-submit-v05.yml`:
   no source-controlled Python. Its one inline, standard-library-only Python
   step independently checks **all source-approved exact package names and
   versions** for the 12 runtime and two build dependencies, every reviewed
-  adjacency, canonical JSON schema, bounded UTC timestamp, SHA, source branch,
+  adjacency, canonical JSON schema, **real calendar-validated UTC**
+  timestamp (including leap-year and time bounds), SHA, source branch,
   detector, inventory and scopes; checks live protected `main`; then
   submits one atomic snapshot. Changes to reviewed source locks require the
   matching inline immutable version contract to be explicitly re-reviewed.

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from datetime import datetime
 import json
 import os
 from pathlib import Path
@@ -71,7 +72,7 @@ DETECTOR = "repocache-verified-wheel-metadata"
 DETECTOR_VERSION = "0.1.0"
 DETECTOR_URL = "https://github.com/teixemf/repocache"
 PURL_RE = re.compile(r"pkg:pypi/([a-z0-9-]+)@([0-9]+(?:\.[0-9]+){2})\Z")
-SCANNED_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\Z")
+SCANNED_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{6})?Z\Z")
 
 
 # Independently reviewed exact adjacency from SHA-256-verified v0.5.0
@@ -173,8 +174,7 @@ def validate_snapshot(snapshot: object, source: Path, target: str, sha: str) -> 
     require(detector == {
         "name": DETECTOR, "version": DETECTOR_VERSION, "url": DETECTOR_URL,
     }, "Unexpected dependency detector")
-    require(isinstance(snapshot["scanned"], str) and
-            SCANNED_RE.fullmatch(snapshot["scanned"]) is not None,
+    require(canonical_utc_scanned(snapshot["scanned"]),
             "Noncanonical UTC scan timestamp")
     runtime = parse_lock((source / "deps/runtime-wheels.lock").read_text("utf-8"))
     build = parse_lock((source / "deps/build-wheels.lock").read_text("utf-8"))
@@ -202,6 +202,18 @@ def validate_snapshot(snapshot: object, source: Path, target: str, sha: str) -> 
         f"deps/requirements-{target}.txt"]["resolved"].values()) == 14,
         "Unexpected native metadata edge count; requires renewed review")
     return snapshot
+
+
+def canonical_utc_scanned(value: object) -> bool:
+    """Require a real UTC calendar instant in the producer's ISO format."""
+    if not isinstance(value, str) or SCANNED_RE.fullmatch(value) is None:
+        return False
+    try:
+        stamp = datetime.fromisoformat(value[:-1])
+    except ValueError:
+        return False
+    # Producer uses datetime.now(timezone.utc).isoformat().replace(...).
+    return stamp.isoformat() + "Z" == value
 
 
 def strict_json_pairs(pairs: list[tuple[str, object]]) -> dict:
@@ -326,7 +338,11 @@ def github_api(token: str, path: str, payload: dict | None = None) -> dict:
     require(status == (201 if payload is not None else 200),
             "Unexpected GitHub API response code")
     try:
-        result = json.loads(body)
+        result = json.loads(
+            body,
+            object_pairs_hook=strict_json_pairs,
+            parse_constant=reject_json_constant,
+        )
     except (UnicodeError, ValueError):
         raise GraphRefused("Invalid GitHub API response") from None
     require(isinstance(result, dict), "GitHub API response must be a JSON object")
