@@ -5,6 +5,10 @@ on:
     paths:
       - '.github/workflows/native-upstream-wheels.yml'
       - 'scripts/ci_native_upstream_wheels.py'
+      - 'scripts/ci_dependency_graph_v05.py'
+      - 'deps/requirements-*.txt'
+      - 'deps/build-wheels.lock'
+      - 'pyproject.toml'
       - 'deps/runtime-wheels.lock'
       - 'src/repocache/**'
       - 'scripts/smoke_tui.py'
@@ -14,6 +18,10 @@ on:
     paths:
       - '.github/workflows/native-upstream-wheels.yml'
       - 'scripts/ci_native_upstream_wheels.py'
+      - 'scripts/ci_dependency_graph_v05.py'
+      - 'deps/requirements-*.txt'
+      - 'deps/build-wheels.lock'
+      - 'pyproject.toml'
       - 'deps/runtime-wheels.lock'
       - 'src/repocache/**'
       - 'scripts/smoke_tui.py'
@@ -49,6 +57,7 @@ jobs:
           # Source read-only; no Actions secrets, privileged container,
           # host network, global pip install or managed activation.
           docker run --rm --pull=always \
+            --env "REPO_GRAPH_SHA=$GITHUB_SHA" \
             --mount "type=bind,source=$PWD,target=/source,readonly" \
             "$image" /bin/sh -eu -c '
           export PATH=/usr/sbin:/usr/bin:/sbin:/bin
