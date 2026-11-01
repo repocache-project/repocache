@@ -62,8 +62,12 @@ def _reserved_snapshot(
     # atomic ledger snapshot; the real writer must hold its own state lock.
     try:
         snapshot = frozenset(reserved_ids)
-    except RuntimeError as exc:
+    except RuntimeError:
         raise RepositoryPlanError("reserved_ids: concurrent input mutation") from None
+    # The caller may modify a mutable set after the first len() check.
+    # Validate the *copied* cardinality; this is still not a trusted ledger.
+    if len(snapshot) > 10000:
+        raise RepositoryPlanError("reserved_ids: bounded snapshot required")
     if any(type(item) is not str or ID.fullmatch(item) is None
            for item in snapshot):
         raise RepositoryPlanError("reserved_ids: invalid ID")
