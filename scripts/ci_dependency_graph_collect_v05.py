@@ -19,6 +19,7 @@ from ci_dependency_graph_v05 import (
     GIT_SHA, TARGETS, GraphRefused, graph_snapshot, parse_lock, require,
     write_preview,
 )
+from ci_dependency_graph_submit_v05 import validate_snapshot
 
 PROJECT = "teixemf/repocache"
 
@@ -77,6 +78,7 @@ def collect(source: Path, target: str, sha: str, output: Path) -> dict:
         result = graph_snapshot(
             source, wheels["runtime"], wheels["build"], target, sha,
         )
+        validate_snapshot(result, source, target, sha)
         write_preview(result, output)
         return result
 
