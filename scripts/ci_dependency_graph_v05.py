@@ -223,7 +223,8 @@ def graph_snapshot(
             "job": {"correlator": f"repocache-v05-wheelmeta-{target}",
                     "id": sha},
             "detector": {"name": "repocache-verified-wheel-metadata",
-                         "version": "0.1.0"},
+                         "version": "0.1.0",
+                         "url": "https://github.com/teixemf/repocache"},
             "scanned": timestamp, "manifests": manifests}
 
 
