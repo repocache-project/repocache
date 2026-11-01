@@ -29,6 +29,8 @@ done
   exit 2
 }
 /usr/bin/python3 - "$SERVER" <<'PY'
+import ipaddress
+import re
 import sys
 from urllib.parse import urlsplit
 
@@ -39,12 +41,26 @@ try:
 except ValueError:
     raise SystemExit("Invalid server: malformed HTTPS origin")
 
-if (value != value.strip() or origin.scheme != "https"
-        or not origin.hostname or origin.username is not None
-        or origin.password is not None or origin.path not in ("", "/")
-        or origin.query or origin.fragment or port == 0
-        or any(ch.isspace() for ch in origin.netloc)):
-    raise SystemExit("Invalid server: use a HTTPS origin without credentials, path or query")
+if (origin.scheme != "https" or not origin.hostname
+        or origin.username is not None or origin.password is not None
+        or origin.path not in ("", "/") or origin.query or origin.fragment
+        or port == 0 or origin.netloc.endswith(":")
+        or any(ord(ch) < 33 or ord(ch) > 126 for ch in value)
+        or "\\\\" in value or "%" in value):
+    raise SystemExit("Invalid server: use a canonical HTTPS origin")
+
+hostname = origin.hostname
+try:
+    ipaddress.ip_address(hostname)
+except ValueError:
+    # Reject ambiguous numeric/hex IPv4 abbreviations and DNS label tricks.
+    labels = hostname.split(".")
+    numeric = re.compile(r"(?:[0-9]+|0[xX][0-9A-Fa-f]+)\\Z", re.ASCII)
+    dns_label = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\Z", re.ASCII)
+    if (len(hostname) > 253 or len(labels) < 2
+            or all(numeric.fullmatch(label) for label in labels)
+            or any(not dns_label.fullmatch(label) for label in labels)):
+        raise SystemExit("Invalid server: use a canonical HTTPS origin")
 PY
 # END SERVER_ARGUMENT_PREFLIGHT
 
