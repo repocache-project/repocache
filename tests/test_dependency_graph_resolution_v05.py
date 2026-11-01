@@ -133,3 +133,29 @@ def test_nested_vendored_metadata_cannot_supplant_top_level_identity(tmp_path):
                    b"Name: unrelated\nVersion: 9.0.0\n\n")
     digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
     assert metadata_from_wheel(wheel, "pkg", "1.0.0", digest) == []
+
+
+def test_multiple_target_environment_markers_change_exact_adjacency():
+    """Same pins/count/closure can conceal different target-specific edges."""
+    rows = {
+        "root": ("1.0.0", SHA),
+        "bridge": ("1.0.0", SHA),
+        "leaf": ("1.0.0", SHA),
+    }
+    metadata = requirements(
+        root=["bridge>=1", "leaf>=1; platform_system == 'Linux'"],
+        bridge=["leaf>=1; os_name == 'nt'"],
+        leaf=[],
+    )
+    linux = resolve(rows, metadata, {"root"}, {
+        "python_version": "3.13", "platform_system": "Linux",
+        "os_name": "posix",
+    })
+    windows = resolve(rows, metadata, {"root"}, {
+        "python_version": "3.13", "platform_system": "Windows",
+        "os_name": "nt",
+    })
+    assert linux["root"]["dependencies"] != windows["root"]["dependencies"]
+    assert linux["bridge"]["dependencies"] != windows["bridge"]["dependencies"]
+    assert sum(map(lambda r: len(r["dependencies"]), linux.values())) == 2
+    assert sum(map(lambda r: len(r["dependencies"]), windows.values())) == 2
