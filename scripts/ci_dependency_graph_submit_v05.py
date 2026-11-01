@@ -323,9 +323,13 @@ def submit(snapshots: list[dict], sha: str) -> None:
             "Protected main advanced since graph collection; refuse stale submission")
     result = github_api(token, f"/repos/{REPOSITORY}/dependency-graph/snapshots",
                         combined)
-    require(result.get("result") in {"SUCCESS", "ACCEPTED"},
-            "GitHub did not accept submitted dependency graph")
-    print("PASS: accepted both locked profiles and scoped build inventory",
+    # HTTP 201 can acknowledge a stale/superseded submission. Only a
+    # documented SUCCESS result permits this job to report publication PASS.
+    # Live Dependency Graph/SPDX readback is a separate #81 acceptance gate.
+    require(result.get("result") == "SUCCESS",
+            "GitHub dependency submission did not report SUCCESS")
+    print("PASS: GitHub API reported SUCCESS for both locked profiles "
+          "and scoped build inventory; graph readback NOT VERIFIED",
           flush=True)
 
 
