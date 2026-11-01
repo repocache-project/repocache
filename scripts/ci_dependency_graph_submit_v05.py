@@ -294,11 +294,14 @@ def main() -> None:
     args = parser.parse_args()
     require(bool(GIT_SHA.fullmatch(args.sha)), "Invalid source SHA")
     snapshots = read_snapshots(args.source, args.directory, args.sha)
+    combined = combine_snapshots(snapshots)
+    require(len(combined["manifests"]) == 3,
+            "Preflight could not form a complete three-manifest snapshot")
     if args.publish:
         submit(snapshots, args.sha)
     else:
-        print("PASS: validated both exact-main snapshot artifacts; NO submission",
-              flush=True)
+        print("PASS: validated real two-profile artifacts and the atomic "
+              "three-manifest submission payload; NO API call", flush=True)
 
 
 if __name__ == "__main__":
