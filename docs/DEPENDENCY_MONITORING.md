@@ -123,3 +123,179 @@ credential or security token. If GitHub cannot recognize the complete
 per-platform locks, explicitly retain NOT VERIFIED and design a separately
 reviewed trusted-commit dependency-submission workflow rather than granting
 write rights to untrusted PR code.
+
+## v0.5.0 read-only resolved dependency graph preview (#81)
+
+The GitHub Dependency Graph recognized all 26 monitoring-only pinned package rows
+(12 runtime rows for each target and 2 shared build rows), but the owner-
+exported SPDX for merged PR #200 reported **zero Python package-to-package
+edges**: every pinned package appeared as directly required by REPOCACHE.
+Static exact-hash pins do **not** prove transitive relationships or correct
+build-vs-runtime scopes. This remains a **blocking #81 acceptance gap**.
+
+The proposed CI-only `scripts/ci_dependency_graph_v05.py` reads the **actual
+SHA-256-verified upstream wheel METADATA** in the two existing native
+Debian 13/Python 3.13 and AlmaLinux 10/Python 3.12 container environments.
+It compares each distribution's name, version and bytes against the reviewed
+legacy locks, applies target Python environment markers and requested extras,
+and constructs only the edges declared by the verified wheel metadata. Every
+active unpinned, out-of-lock or incompatible dependency is a hard failure;
+unreachable locked packages are also refused. The separately approved
+`setuptools` and `wheel` build tools appear in the proposed snapshot with
+`development` scope, never as application runtime dependencies.
+
+**Safety boundary:** this is a **read-only graph preview** written into a
+throwaway container's private workspace. It never sends a dependency snapshot
+to GitHub, never uses the API token, never modifies the signed legacy wheel
+locks or installer, and never activates online installation. PR CI has
+`contents: read` only. The native-image CI validates user-space metadata,
+not booted target kernels, systemd, SELinux or release publication.
+
+GitHub prioritizes user-submitted dependency snapshots above its own Python
+Dependabot graph jobs and static parsing. Publishing these previews therefore
+requires a **separately reviewed, strictly main-only and least-permissioned**
+submission implementation (the official API currently requires the job's
+`contents: write` privilege). Its isolation, correct profile-specific
+correlators, anti-PR-token boundary and observed GitHub post-integration
+rendering must pass review **before any merge that grants write permission**.
+This preview PR alone **does not** satisfy #81's production graph acceptance.
+Do not infer that successful native wheel metadata validation is evidence of
+real alert notification delivery or the owner-signed release candidate.
+
+### Proposed restricted submission stage (Draft PR #206; not active until reviewed merge)
+
+In the proposed `.github/workflows/dependency-graph-submit-v05.yml`:
+
+- A **read-only** matrix resolves reviewed SHA-256 wheel identities for Python
+  3.13 and 3.12 on disposable GitHub-hosted Linux runners. Wheel package
+  code is not installed or executed; output is a same-run ephemeral artifact.
+- Only a separate job triggered by `push` on protected `main` receives
+  `contents: write`. PR compute jobs retain `contents: read` and
+  `persist-credentials: false`; no `pull_request_target` or `workflow_run`.
+- The publisher compares the complete **canonical per-parent adjacency**
+  against source-controlled, independently reviewed v0.5.0 wheel metadata,
+  not merely a total of 14 edges. Native Debian and AlmaLinux validation
+  and hosted producers must match this exact same adjacency contract.
+- The **read-only preflight** independently validates source locks, monitor
+  hashes, build/runtime scopes and exact manifest/edge identities. It emits a
+  size-bounded, base64-encoded complete three-manifest payload via a GitHub
+  Actions job output; the value contains data only, never code or credentials.
+- The separate **write-scoped publisher executes no third-party Actions**
+  (`uses:`), no checkout, no artifact downloads, no package installation and
+  no source-controlled Python. Its one inline, standard-library-only Python
+  step independently checks **all source-approved exact package names and
+  versions** for the 12 runtime and two build dependencies, every reviewed
+  adjacency, canonical JSON schema, **real calendar-validated UTC**
+  timestamp (including leap-year and time bounds), SHA, source branch,
+  detector, inventory and scopes; checks live protected `main`; then
+  submits one atomic snapshot. Changes to reviewed source locks require the
+  matching inline immutable version contract to be explicitly re-reviewed.
+  It requires HTTP 201 plus an explicit `result: SUCCESS`, forbids proxies
+  and redirects and never logs its token.
+- GitHub-hosted runner and reviewed inline workflow source remain part of the
+  privileged trusted computing base. This removes the former F-03 exposure
+  **to checkout/download Actions in the write job**, but does not imply an
+  invulnerable runner, immutable workflow code or zero token risk. The
+  preflight-to-publisher job output is a trusted same-run data boundary; its
+  non-production PR evaluation and post-merge API submission require evidence.
+- The three reviewed source manifests remain separate GitHub graph entries:
+  `deps/requirements-debian13-py313.txt`,
+  `deps/requirements-almalinux10-py312.txt` and
+  `deps/requirements-build-v05.txt`, with build helpers in `development`
+  scope. GitHub prioritizes user submissions over Dependabot graph jobs,
+  so independently verifying its rendered results is mandatory.
+- Snapshot collection uses hosted Linux Python 3.12/3.13, not native distro
+  userspace. The separate exact-SHA Debian 13 and AlmaLinux 10 native
+  jobs still validate the same SHA-256-verified wheel bytes and metadata.
+  None of these CI jobs proves booted SELinux/systemd or release signing.
+
+**Status: proposed, unmerged.** Draft PR #206 has not been independently
+security-reviewed or accepted for merge. The protected-main post-merge
+submission, real Dependency Graph labels, SBOM relationships, security
+notifications and owner acceptance remain NOT VERIFIED. No signed wheelhouse,
+installer, production service or publication permission changes are implied.
+
+The isolated private lab separately demonstrated 11 real alerts and a
+security-update PR; it does not prove production graph completeness or
+personal notification receipt.
+
+### Incorrect accepted graph: containment, recovery and evidence
+
+A successful HTTP 201 and `result: SUCCESS` do not prove that GitHub displayed
+the correct graph. Manual submissions can take precedence over GitHub's
+automatically discovered dependencies. An inaccurate graph blocks #81.
+
+1. **Contain:** Stop further graph publication by a separately authorized,
+   reviewed protected-main workflow change. Keep #81 open and do not approve
+   automated dependency PRs on the basis of the disputed graph. Disabling
+   the workflow does **not** remove an already accepted snapshot.
+2. **Preserve:** Record the offending snapshot JSON, exact source SHA, source
+   locks, CI/workflow run, API result, GitHub Dependency Graph and SPDX
+   screenshots. The stable detector is `repocache-verified-wheel-metadata`
+   and the combined correlator is `repocache-v05-wheelmeta-two-target`.
+   Never disclose or archive an API token.
+3. **Correct:** Regenerate all three manifests from exact source-locked
+   SHA-256-verified wheels; independently validate every parent-to-child
+   relationship, all marker conditions, runtime/build scopes and both
+   native Debian13/Python3.13 and AlmaLinux10/Python3.12 environments.
+   Run the adversarial in-lock edge-substitution regression and the actual
+   two-artifact unprivileged preflight before any renewed submission.
+4. **Review and authorize:** Obtain a new independent exact-HEAD review,
+   explicit maintainer acceptance of any residual risk and a separate
+   merge authorization. Only an authorized protected-main push may submit
+   a corrected, complete three-manifest snapshot using the same stable
+   detector/correlator. Require HTTP 201 and `result: SUCCESS`.
+5. **Read back:** Confirm the submitted SHA, both sets of 12 runtime
+   entries, all 14 **actual** edges per runtime profile, both build helpers
+   in `development` scope, direct/indirect labels, fresh SPDX output and
+   corresponding alert behavior. The HTTP result alone is insufficient.
+6. **Escalate on failure:** Leave #81 blocked and the publisher stopped;
+   contact GitHub Support with sanitized exact SHA, detector/correlator,
+   response, expected inventory and incorrect graph readback. A workflow
+   revert cannot be assumed to delete or restore a graph snapshot.
+
+The pre-POST check of current main and the POST are separate HTTP requests:
+main can advance between them (TOCTOU). After any authorized submission,
+compare the returned snapshot SHA and current protected-main revision;
+an obsolete snapshot requires a fresh reviewed main submission.
+Neither the combined API POST nor its expected status proves atomic
+GitHub UI rendering or automatic recovery.
+
+The resolver currently imports `pip._vendor.packaging`, a private pip API.
+The tested Python 3.12/3.13 implementations work, but a future pip change
+must fail closed, be independently assessed and never silently change
+source-controlled adjacency relationships.
+
+### Always-present native and graph security check candidates (Draft PR #206)
+
+The unfiltered `.github/workflows/tests.yml` proposes two stable checks:
+`Native Dependency Security Gate` and `Dependency Graph Security Gate`.
+They run for every PR targeting protected `main` and each `main` push,
+regardless of changed-file paths. On other ref families (including immutable
+legacy release branches) the check jobs still exist and explicitly report
+not applicable; no old-release dependency lock/profile is silently asserted
+compatible.
+
+The native gate invokes the existing **read-only reusable** native workflow
+and fails if either Debian13/Python3.13 or AlmaLinux10/Python3.12 matrix job
+is failed, cancelled or skipped. The graph gate separately collects the two
+source-hash-matched PyPI wheel metadata artifacts without import/installation,
+requires success for the complete producer matrix, downloads only same-run
+artifacts and executes the existing independent stdlib preflight. Its result
+is FAIL for absent, failed, skipped, malformed or incomplete evidence.
+
+Both final gate jobs use `if: always()` and explicitly reject anything
+other than upstream `success`, preventing a failed prerequisite from causing
+a misleading skipped gate. All jobs use `contents: read`, full-SHA-pinned
+official Actions and `persist-credentials: false`. Neither gate can invoke
+the write-scoped graph publisher, which remains solely in the separate
+protected-main-only workflow and **is NOT run by these tests**.
+
+**Governance limit:** merely introducing these two CI checks does not alter
+the effective protected-main ruleset. Before they become mandatory merging
+checks, separately authorize a ruleset update referencing the exact stable
+check names and GitHub Actions integration ID, after independent review and
+actual CI demonstration that both checks always appear and fail closed.
+Do not add the old path-filtered workflow jobs as required contexts. Never
+treat current successful read-only gates as proof of a real dependency API
+publication, GitHub graph readback, owner notification or signed release.
