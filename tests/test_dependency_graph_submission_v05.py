@@ -48,15 +48,21 @@ def _graph(target):
                 "dependencies": [],
             }
         if scope == "runtime":
-            indirect = sorted(set(pins) - roots)
-            # A deliberately synthetic connected fixture: nine necessary edges
-            # + five extra edges; no claim these are actual upstream relations.
-            purls = [f"pkg:pypi/{name}@{pins[name]}" for name in indirect]
-            root_purl = f"pkg:pypi/rich@{pins['rich']}"
-            data[root_purl]["dependencies"] = sorted([purls[0], *purls[1:6]])
-            for previous, child in zip(purls, purls[1:]):
-                data[previous]["dependencies"].append(child)
-            # 6 roots-to-indirect + 8 in-chain edges = 14 total.
+            # Explicit independent regression fixture from the actual
+            # v0.5.0 verified wheel METADATA, not a synthetic 14-edge count.
+            parents = {
+                "typer": ("annotated-doc", "rich", "shellingham"),
+                "rich": ("markdown-it-py", "pygments"),
+                "textual": ("markdown-it-py", "mdit-py-plugins",
+                            "platformdirs", "pygments", "rich",
+                            "typing-extensions"),
+                "markdown-it-py": ("linkify-it-py", "mdurl"),
+                "mdit-py-plugins": ("markdown-it-py",),
+            }
+            for parent, children in parents.items():
+                data[f"pkg:pypi/{parent}@{pins[parent]}"]["dependencies"] = sorted(
+                    f"pkg:pypi/{child}@{pins[child]}" for child in children
+                )
         manifests[manifest] = {
             "name": manifest, "file": {"source_location": manifest},
             "resolved": data,
@@ -89,6 +95,7 @@ def test_exact_source_manifest_and_scoped_profiles_validate():
     "wrong-sha", "wrong-ref", "wrong-detector", "wrong-url", "wrong-manifest",
     "missing-package", "unknown-package", "bad-scope", "bad-relation",
     "out-of-lock-edge", "bad-edge-count", "bad-correlator",
+    "substituted-in-lock-edge",
 ])
 def test_tampered_snapshots_fail_closed(mutation):
     target = TARGETS[0]
@@ -122,6 +129,15 @@ def test_tampered_snapshots_fail_closed(mutation):
             record["dependencies"] = []
     elif mutation == "bad-correlator":
         snap["job"]["correlator"] = "foreign-job"
+    elif mutation == "substituted-in-lock-edge":
+        # Demonstrated independent reviewer F-01: same 14 edges, PURLs,
+        # reachability and package classification, but an invented edge.
+        textual = man["resolved"]["pkg:pypi/textual@8.2.8"]["dependencies"]
+        assert "pkg:pypi/rich@15.0.0" in textual
+        textual.remove("pkg:pypi/rich@15.0.0")
+        textual.append("pkg:pypi/shellingham@1.5.4")
+        textual.sort()
+        assert sum(len(d["dependencies"]) for d in man["resolved"].values()) == 14
     with pytest.raises(GraphRefused):
         validate_snapshot(snap, ROOT, target, SHA)
 
@@ -210,3 +226,18 @@ def test_workflow_uses_strict_job_scoped_write_boundary():
     assert "Preflight both real snapshot artifacts (read only)" in active
     assert "needs: [preflight]" in active
     assert active.count("python3 scripts/ci_dependency_graph_submit_v05.py") == 3
+
+
+def test_reviewed_edge_contract_rejects_fictional_in_lock_relationship():
+    target = TARGETS[1]
+    genuine = _graph(target)
+    validate_snapshot(genuine, ROOT, target, SHA)
+    forged = deepcopy(genuine)
+    resolved = forged["manifests"][f"deps/requirements-{target}.txt"]["resolved"]
+    children = resolved["pkg:pypi/textual@8.2.8"]["dependencies"]
+    children.remove("pkg:pypi/rich@15.0.0")
+    children.append("pkg:pypi/shellingham@1.5.4")
+    children.sort()
+    assert sum(len(data["dependencies"]) for data in resolved.values()) == 14
+    with pytest.raises(GraphRefused, match="Unreviewed exact wheel METADATA edge"):
+        validate_snapshot(forged, ROOT, target, SHA)
