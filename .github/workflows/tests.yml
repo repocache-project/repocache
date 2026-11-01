@@ -182,9 +182,9 @@ jobs:
             echo 'NOT APPLICABLE: graph gates cover protected main, not legacy release refs'
           fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: env.MAIN_TARGET == 'true'
         with:
           persist-credentials: false
+        if: env.MAIN_TARGET == 'true'
       - name: Fetch both snapshots from this workflow run only
         if: env.MAIN_TARGET == 'true'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
