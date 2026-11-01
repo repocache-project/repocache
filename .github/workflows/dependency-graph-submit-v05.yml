@@ -66,10 +66,34 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  preflight:
+    name: Preflight both real snapshot artifacts (read only)
+    needs: [resolve]
+    if: github.repository == 'teixemf/repocache'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: verified-graph-*
+          path: ${{ runner.temp }}/graphs
+          merge-multiple: true
+      - name: Validate actual source-locked profiles and combined API payload
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/ci_dependency_graph_submit_v05.py \
+            --source . --directory "$RUNNER_TEMP/graphs" --sha "$GITHUB_SHA"
+
   publish:
     name: Submit exact verified snapshots (protected main only)
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'teixemf/repocache'
-    needs: [resolve]
+    needs: [preflight]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # The ONLY write-capable job. Never triggered by a PR, fork or workflow_run.
