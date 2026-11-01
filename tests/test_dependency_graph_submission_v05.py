@@ -198,7 +198,7 @@ def test_workflow_uses_strict_job_scoped_write_boundary():
     assert re.findall(r"^\s+contents: write$", active, flags=re.MULTILINE) == [
         "      contents: write"
     ]
-    assert active.count("contents: read") == 2
+    assert active.count("contents: read") == 3
     assert "pull_request_target:" not in active
     assert "workflow_run:" not in active
     assert "github.event_name == 'push'" in active
@@ -207,3 +207,6 @@ def test_workflow_uses_strict_job_scoped_write_boundary():
     assert "github.token" in active
     assert "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333" in active
     assert "merge-multiple: true" in active
+    assert "Preflight both real snapshot artifacts (read only)" in active
+    assert "needs: [preflight]" in active
+    assert active.count("python3 scripts/ci_dependency_graph_submit_v05.py") == 3
