@@ -80,6 +80,7 @@ jobs:
           chown repocacheci:repocacheci /work
           exec runuser -u repocacheci -- env -i \
             HOME=/work LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+            REPO_GRAPH_SHA="$REPO_GRAPH_SHA" \
             PATH=/usr/sbin:/usr/bin:/sbin:/bin \
             /usr/bin/python3 /source/scripts/ci_native_upstream_wheels.py
           '
