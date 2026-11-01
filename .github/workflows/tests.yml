@@ -201,130 +201,104 @@ jobs:
             --source . --directory "$RUNNER_TEMP/gate-graphs" \
             --sha "$GITHUB_SHA"
 
-  # BEGIN TEMPORARY GATE FAILURE PROBE — deliberately red; not for merge
-  native-matrix-partial-failure:
-    name: Probe native matrix (${{ matrix.target }})
+  # TEMPORARY read-only Docker test; remove after collecting exact-run evidence.
+  dependency-gate-docker-negative-lab:
+    name: TEMP Docker gate negative-path contract
     runs-on: ubuntu-latest
-    timeout-minutes: 5
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: debian13
-            image: debian:13-slim
-          - target: almalinux10
-            image: almalinux:10
-    container:
-      image: ${{ matrix.image }}
-    steps:
-      - name: Simulate one failed and one successful native profile
-        shell: sh
-        run: |
-          set -eu
-          case '${{ matrix.target }}' in
-            debian13) echo 'PROBE: deliberate native matrix failure (expected)'; exit 23 ;;
-            almalinux10) echo 'PROBE: native matrix success'; exit 0 ;;
-            *) exit 1 ;;
-          esac
-
-  native-failure-gate:
-    name: Probe final gate after native matrix failure
-    if: ${{ always() }}
-    needs: [native-matrix-partial-failure]
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    container:
-      image: debian:13-slim
-    env:
-      UPSTREAM_STATUS: ${{ needs.native-matrix-partial-failure.result }}
-    steps:
-      - name: Intentionally fail closed on non-success upstream
-        shell: sh
-        run: |
-          set -eu
-          echo "PROBE: native matrix status=$UPSTREAM_STATUS"
-          test "$UPSTREAM_STATUS" = failure
-          if [ "$UPSTREAM_STATUS" != success ]; then
-            echo 'PROBE PASS: native final gate refuses failed prerequisite'
-            exit 21
-          fi
-          echo 'PROBE FAIL: native final gate bypass'
-          exit 0
-
-  skipped-prerequisite:
-    name: Probe intentionally skipped prerequisite
-    if: ${{ false }}
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo 'UNEXPECTED: this must not run'
-
-  skipped-prerequisite-gate:
-    name: Probe final gate after skipped prerequisite
-    if: ${{ always() }}
-    needs: [skipped-prerequisite]
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    container:
-      image: almalinux:10
-    env:
-      UPSTREAM_STATUS: ${{ needs.skipped-prerequisite.result }}
-    steps:
-      - name: Intentionally fail closed on skipped upstream
-        shell: sh
-        run: |
-          set -eu
-          echo "PROBE: skipped dependency status=$UPSTREAM_STATUS"
-          test "$UPSTREAM_STATUS" = skipped
-          if [ "$UPSTREAM_STATUS" != success ]; then
-            echo 'PROBE PASS: final gate refuses skipped prerequisite'
-            exit 22
-          fi
-          echo 'PROBE FAIL: skipped prerequisite bypass'
-          exit 0
-
-  graph-missing-artifacts:
-    name: Probe real graph preflight missing artifacts
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    container:
-      image: python:3.13-slim
+    if: ${{ github.event_name == 'pull_request' && github.base_ref == 'main' }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Actual production preflight must fail on empty same-run artifact directory
-        shell: sh
+      - name: Check actual gate shell commands and real preflight refusal in isolated containers
+        shell: bash
         run: |
-          set -eu
-          mkdir -p /tmp/repocache-gate-probe-empty
-          echo 'PROBE: deliberately invoking read-only preflight with missing artifacts'
-          python scripts/ci_dependency_graph_submit_v05.py \
-            --source . --directory /tmp/repocache-gate-probe-empty \
-            --sha "$GITHUB_SHA"
-          echo 'PROBE FAIL: preflight unexpectedly accepted missing artifacts'
-          exit 0
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+          import tempfile
+          import textwrap
 
-  graph-preflight-failure-gate:
-    name: Probe final graph gate after real preflight failure
-    if: ${{ always() }}
-    needs: [graph-missing-artifacts]
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    container:
-      image: python:3.13-slim
-    env:
-      UPSTREAM_STATUS: ${{ needs.graph-missing-artifacts.result }}
-    steps:
-      - name: Intentionally fail closed on rejected graph preflight
-        shell: sh
-        run: |
-          set -eu
-          echo "PROBE: actual preflight result=$UPSTREAM_STATUS"
-          test "$UPSTREAM_STATUS" = failure
-          if [ "$UPSTREAM_STATUS" != success ]; then
-            echo 'PROBE PASS: graph gate refuses failed real preflight'
-            exit 24
-          fi
-          echo 'PROBE FAIL: graph preflight failure bypass'
-          exit 0
-  # END TEMPORARY GATE FAILURE PROBE
+          source = Path('.github/workflows/tests.yml').read_text('utf-8')
+          def command(job):
+              marker = '  ' + job + ':\n'
+              assert source.count(marker) == 1, job
+              body = source.split(marker, 1)[1].split('\n  ', 1)[0]
+              chunks = re.findall(r'(?m)^        run: \|\n((?:^          .*\n)+)', body)
+              assert chunks, job
+              return textwrap.dedent(chunks[0])
+
+          with tempfile.TemporaryDirectory(prefix='repocache-gate-probe-') as root:
+              base = Path(root)
+              for job in ('dependency-native-gate', 'dependency-graph-gate'):
+                  path = base / (job + '.sh')
+                  path.write_text(command(job), 'utf-8')
+                  path.chmod(0o644)
+                  for image in ('debian:13-slim', 'almalinux:10'):
+                      for status in ('success', 'failure', 'skipped', 'cancelled', ''):
+                          args = [
+                              'docker', 'run', '--rm', '--network', 'none',
+                              '--read-only',
+                              '--mount', f'type=bind,source={base},target=/probe,readonly',
+                              '-e', 'MAIN_TARGET=true',
+                              '-e', f'UPSTREAM_STATUS={status}',
+                              image, '/bin/bash', '/probe/' + path.name,
+                          ]
+                          result = subprocess.run(
+                              args, capture_output=True, text=True, timeout=100,
+                              check=False,
+                          )
+                          expected = (status == 'success')
+                          actual = (result.returncode == 0)
+                          print('Docker gate:', job, image,
+                                'status=' + repr(status),
+                                'exit=' + str(result.returncode), flush=True)
+                          if actual != expected:
+                              raise SystemExit('FAIL: incorrect fail-closed gate result: '
+                                               + result.stdout + result.stderr)
+              # Execute the production, read-only validator itself, not a model.
+              empty = base / 'empty'
+              invalid = base / 'malformed'
+              empty.mkdir()
+              invalid.mkdir()
+              for profile in ('debian13-py313', 'almalinux10-py312'):
+                  (invalid / ('dependency-graph-preview-' + profile + '.json')).write_text('{}', 'utf-8')
+              for label, directory, expected in (
+                  ('missing', 'empty', 'Missing or unexpected snapshot files'),
+                  ('malformed', 'malformed', 'snapshot'),
+              ):
+                  args = [
+                      'docker', 'run', '--rm', '--network', 'none',
+                      '--read-only', '--tmpfs', '/tmp',
+                      '--mount', 'type=bind,source=' + os.getcwd()
+                      + ',target=/source,readonly',
+                      '--mount', 'type=bind,source=' + str(base)
+                      + ',target=/probe,readonly',
+                      '-e', 'REPO_PROBE_SHA=' + os.environ['GITHUB_SHA'],
+                      'python:3.13-slim', '/bin/sh', '-ec',
+                      'python /source/scripts/ci_dependency_graph_submit_v05.py '
+                      '--source /source --directory /probe/' + directory
+                      + ' --sha "$REPO_PROBE_SHA"',
+                  ]
+                  result = subprocess.run(
+                      args, capture_output=True, text=True, timeout=120,
+                      check=False,
+                  )
+                  combined = result.stdout + result.stderr
+                  print('Actual read-only preflight:', label,
+                        'exit=' + str(result.returncode), flush=True)
+                  if result.returncode == 0 or 'FAIL:' not in combined:
+                      raise SystemExit('FAIL: graph validator did not refuse '
+                                       + label + ': ' + combined)
+                  if label == 'missing' and expected not in combined:
+                      raise SystemExit('FAIL: missing artifact rejection not observed: '
+                                       + combined)
+                  print('PASS: production preflight refused ' + label, flush=True)
+          print('PASS: 20 real Docker gate refusals/successes and two graph preflight negatives; no API call', flush=True)
+          PY
