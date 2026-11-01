@@ -425,7 +425,8 @@ def test_unfiltered_protected_main_dependency_gates_are_fail_closed():
     def job(name):
         marker = f"  {name}:\n"
         assert jobs.count(marker) == 1
-        return jobs.split(marker, 1)[1].split("\n  ", 1)[0]
+        tail = jobs.split(marker, 1)[1]
+        return re.split(r"\n  (?=[a-z][a-z0-9-]+:\n)", tail, maxsplit=1)[0]
 
     native = job("dependency-native-validation")
     assert "uses: ./.github/workflows/native-upstream-wheels.yml" in native
