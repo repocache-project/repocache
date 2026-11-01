@@ -52,6 +52,8 @@ def test_installer_shell_syntax():
     "https://cache.example.org/",
     "https://cache.example.org:8443",
     "https://[2001:db8::1]:8443",
+    "https://127.0.0.1:8443",
+    "https://xn--bcher-kva.example.org",
 ))
 def test_explicit_https_origin_is_accepted(origin, tmp_path):
     result = _preflight("--server", origin, cwd=tmp_path)
@@ -72,6 +74,16 @@ def test_explicit_https_origin_is_accepted(origin, tmp_path):
     ("--server", "https://cache.example.org#fragment"),
     ("--server", "https://cache.example.org:0"),
     ("--server", "https://cache.example.org:65536"),
+    ("--server", "https://cache.example.org:"),
+    ("--server", "https://cache.example.org."),
+    ("--server", "https://bad_host.example.org"),
+    ("--server", "https://cache..example.org"),
+    ("--server", "https://-bad.example.org"),
+    ("--server", "https://cache.example.org%0a.evil.org"),
+    ("--server", "https://0x7f000001"),
+    ("--server", "https://127.1"),
+    ("--server", "https://ca\\\\che.example.org"),
+    ("--server", "https://☃.example.org"),
     ("--server", " https://cache.example.org"),
     ("--server", "https://cache.example.org", "--server", "https://other.example.org"),
 ))
