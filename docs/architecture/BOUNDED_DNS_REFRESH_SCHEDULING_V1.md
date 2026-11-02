@@ -9,7 +9,7 @@ The approved Option A requires normal upstream DNS/IP rotations without manual I
 - **server_bounded_dns_v1.bounded_getaddrinfo**: libc A/AAAA resolution in a short-lived isolated Python subprocess; eight-second default and fifteen-second maximum hard deadline, no shell, no inherited file descriptors, constrained child environment, bounded JSON response and redacted failures. A blocked lookup cannot permanently stall a polling loop. It performs DNS only, never HTTP.
 - **server_dns_refresh_schedule_v1.refresh_due**: monotonic per-repository scheduling hints, at least five minutes between successful refreshes, stable per-repository 0–60-second jitter, exponential bounded failure retries of 60–3600 seconds, changed/no-op candidate recognition and immediate reconsideration on trusted generation change. Unsafe, partial or failed DNS yields a retry hint, not any new pin authorization.
 
-The scheduler does not sleep, install a timer, write persistent state, mutate NGINX or invoke a service. Its slots are untrusted ephemeral scheduling metadata. The returned candidate is not evidence of administrator approval.
+The scheduler does not sleep, install a timer, write persistent state, mutate NGINX or invoke a service. Its slots are untrusted ephemeral scheduling metadata. The returned candidate is not evidence of administrator approval. A slot whose next due time is farther into the future than its policy-allowed horizon is discarded and refreshed immediately; an untrusted or wrong-epoch scheduling hint must never suppress DNS rotation indefinitely. This is not clock authentication or process-resume recovery.
 
 ## Mandatory operational integration
 
