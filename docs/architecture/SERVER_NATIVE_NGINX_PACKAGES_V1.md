@@ -1,8 +1,12 @@
-# Inert native NGINX package preview v1 (#27)
+# Native NGINX package preview and signed-metadata probe v1 (#27)
 
-**Status:** initial source-only, non-authorizing implementation. This document and
-server_native_package_plan_v1.py do **not** deliver native package verification,
-NGINX installation or server provisioning.
+**Status:** unmerged, non-installing #27 development implementation.
+The `server_native_package_plan_v1.py` preview is intentionally inert.
+The separate `server_native_package_trust_v1.py` can explicitly query actual
+native APT/DNF signed repository metadata and NGINX candidates but **cannot
+authorize** an install or claim package payload authenticity. Neither module
+delivers operational NGINX installation, service activation or server
+provisioning.
 
 ## Fixed package intent
 
@@ -97,6 +101,21 @@ all of the following, failing closed with redacted actionable errors:
 5. Only after existing-NGINX ownership, staged complete-context nginx -t,
    rollback and controlled reload gates have been proved, perform separately
    approved service activation. Preserve the previous configuration on failure.
+
+## Disposable distro metadata validation
+
+The PR adds `scripts/smoke_server_native_package_metadata.py` and the focused
+`.github/workflows/server-native-nginx-metadata.yml` matrix. The workflow
+runs the **actual native** APT/DNF metadata verification in short-lived
+Debian 13 and AlmaLinux 10 Docker images and requires both to observe a trusted
+NGINX candidate. When missing, the smoke step exits nonzero with a bounded,
+redacted failure classification; it never prints manager stdout/stderr. The
+CI-only bootstrap may install OS Python and root CA certificates **inside the
+disposable container**, not on the GitHub runner or any production host.
+A green result proves only tested distribution userspace/network trust at that
+CI revision; a red result is not waived by earlier mocked pytest success.
+Actual booted host systemd/SELinux and transaction-stage package signatures
+remain untested and mandatory.
 
 The original #27 criteria remain NOT VERIFIED: booted Debian 13 and AlmaLinux
 10 installed NGINX service acceptance, re-run idempotence, no third-party
