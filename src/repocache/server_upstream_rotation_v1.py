@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ipaddress
 import socket
+from urllib.parse import urlsplit
 from typing import Any, Callable
 
 from repocache.server_install_v1 import ID, MAX_INT, validate_install_document
@@ -90,7 +91,10 @@ def propose_automatic_upstream_refresh(
     if repo["desired_state"] != "active":
         raise UpstreamRotationError("repository: not enabled for refresh")
 
-    allowed_hosts = sorted(set(repo["upstream"]["allowed_hosts"]))
+    allowed_hosts = sorted({host.lower() for host in repo["upstream"]["allowed_hosts"]})
+    # Keep the destination port bound to the approved URL; never silently
+    # pin port 443 when an explicit non-default HTTPS port was approved.
+    port = urlsplit(repo["upstream"]["base_url"]).port or 443
     if previous_pins_by_host is not None:
         previous = _checked_pins(validated, repository_id, previous_pins_by_host)
     else:
@@ -105,7 +109,7 @@ def propose_automatic_upstream_refresh(
             # Use the approved hostname exclusively. Never fetch HTTP or
             # follow a redirect while discovering candidate destinations.
             records = lookup(
-                host, 443, family=socket.AF_UNSPEC,
+                host, port, family=socket.AF_UNSPEC,
                 type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP,
             )
         except OSError:
