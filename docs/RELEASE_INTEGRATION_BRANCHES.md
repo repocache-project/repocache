@@ -1,4 +1,4 @@
-# Release integration lanes — v0.5.0 and v0.6.0
+# Release integration lanes — historical v0.5.0 and next-public v0.6.0
 
 **Status (2026-10-26):** PR #158 is merged into protected `main`
 (`9e213d7beb6534181e3ff418a890c5fdf2db2017`), and the reviewed
@@ -10,13 +10,40 @@ with all nine required checks successful (11/11 total checks on each).
 Infrastructure issue #157 is closed after that verification. No integration
 branch is a signed or production-ready release.
 
+## Approved current public-release direction (2026-11-02)
+
+The maintainer has **cancelled the intermediate public v0.5.0 release target**.
+**v0.6.0 is the next public release target** and must install and operate a
+complete NGINX-backed Debian 13 / AlmaLinux 10 REPOCACHE server. Existing
+v0.5.0 protected integration-branch pushes remain valid **historical CI
+evidence**, not acceptance of any public v0.5.0 release. Preserve their exact
+commits, workflow runs, ruleset history and test outcomes; do not delete,
+rename, force-push or repurpose the protected historical branch.
+
+Original [#76](https://github.com/teixemf/repocache/issues/76) and
+[#88](https://github.com/teixemf/repocache/issues/88) release gates are now
+tracked in the v0.6.0 milestone with **no criteria waived**. Require a real,
+independently owner-signed **public v0.4.0 -> v0.6.0** upgrade, both supported
+native OS acceptance, rollback/security checks and authorized publication.
+The approved legacy schema-1/offline-wheelhouse release profile remains the
+default until an independently reviewed explicit policy/format decision;
+the proposed online/source-only v0.7.0 stack is not a dependency assumed
+by this CI-lane document. See [next public release plan](RELEASE_TARGET_V0.6.0.md)
+(proposed in draft PR #226; not adopted on protected `main` until merged).
+
+The already completed #157 live-push checks below remain historical PASS.
+Future generic integration-branch workflow changes stay with [#175](https://github.com/teixemf/repocache/issues/175)
+/ draft PR #183 and are **not adopted here**. Do not infer release readiness,
+a working server installer, active network services, or signing authority
+from CI runs on integration branches.
+
 ## Canonical branches and provenance
 
 | Branch | Initial base / purpose |
 | --- | --- |
 | `main` | Reviewed primary history; original v0.4.0 release remains immutable |
-| `integration/v0.5.0` | Created 2026-10-24 from `main` SHA `bba3286be209eee85e3b7d8702edaa10af1bfe57`; v0.5.x consolidation |
-| `integration/v0.6.0` | Created from `integration/v0.5.0` at the SAME baseline SHA; future online profile |
+| `integration/v0.5.0` | Historical protected v0.5.x integration lane, created 2026-10-24 from `main` SHA `bba3286be209eee85e3b7d8702edaa10af1bfe57`; retain for audit, not for a public v0.5.0 release |
+| `integration/v0.6.0` | Created from `integration/v0.5.0` at the SAME baseline SHA; now the next-public complete-server target. The future online/source-only dependency profile is v0.7.0 work, not a default property of this lane |
 | `release/v0.4.0` | Historical protected release reference; do not rewrite |
 | `integration/v0.5.0-governed-submissions-gate-a`, `integration/v0.5.0-metrics-submissions-tui` | Existing **feature-specific** experimental branches. Not release integration; do not bulk merge or delete |
 
@@ -30,16 +57,17 @@ version assertions.
 1. Changes originate in focused `feat/`, `fix/`, `test/`, `ci/` or
    `docs/` branches, with an issue reference, a draft/reviewable PR and
    measurable acceptance criteria.
-2. Route only v0.5-target changes to `integration/v0.5.0` after reviewing
-   issue milestone, stack ancestry and overlap with work already merged into
-   `main`. **A green CI run alone does not authorize integration.** Each
-   acceptance criterion must be PASS, with executed evidence; any FAIL or NOT
-   VERIFIED blocks merge. Explicit maintainer approval is mandatory.
-3. v0.6 may incorporate **approved, stable** v0.5 integration state through a
-   dedicated reviewed synchronization PR
-   `integration/v0.5.0` → `integration/v0.6.0`. Do not automatically
-   propagate unaccepted v0.5 work, and do not directly merge feature-level
-   0.5 integration branches into 0.6.
+2. **No new public-v0.5 release-target work:** retain `integration/v0.5.0`
+   as a protected historical CI/provenance lane. Route any still-applicable
+   functionality or release gate to the approved v0.6.0 workstream under its
+   actual issues/milestones. **A green CI run alone does not authorize
+   integration.** Every applicable acceptance criterion must be PASS; a FAIL
+   or NOT VERIFIED blocks merge. Explicit maintainer approval is mandatory.
+3. Do **not** automatically propagate the old v0.5 integration state into
+   v0.6.0 merely to advance the release. Compare its actual content against
+   protected `main` and the current v0.6 lane; reconcile only uniquely needed,
+   accepted changes through a narrow reviewed PR. Do not bulk merge the
+   historical lane or old feature-level integration branches into v0.6.0.
 4. Route v0.6-target PRs to `integration/v0.6.0` only after reconciling their
    parent PRs, signature/lock contracts and the main-vs-integration diff.
    Avoid mass PR base retargeting: the current #99 → #151 chain is stacked,
@@ -51,7 +79,7 @@ version assertions.
    authorization. Signing, tagging and publication are **separately
    authorized** operations.
 
-## Initial PR and issue routing snapshot (2026-10-24)
+## Historical PR and issue routing snapshot (2026-10-24)
 
 | Work / issue | Release lane | Status / next action |
 | --- | --- | --- |
