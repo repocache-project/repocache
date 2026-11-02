@@ -96,7 +96,8 @@ def test_mixed_public_and_non_global_dns_aborts_whole_rotation(unsafe):
         return [
             (socket.AF_INET, 1, 6, "", ("8.8.8.8", 443)),
             (socket.AF_INET6 if ":" in unsafe else socket.AF_INET,
-             1, 6, "", (unsafe, 443)),
+             1, 6, "", (unsafe, 443, 0, 0) if ":" in unsafe
+             else (unsafe, 443)),
         ]
     with pytest.raises(UpstreamRotationError, match="unsafe"):
         refresh(pins={HOST: ["1.1.1.1"]}, resolver=malicious)
@@ -212,3 +213,24 @@ def test_explicit_https_port_is_resolved_without_silent_443_fallback():
                  "", ("8.8.8.8", 8443))]
     result = refresh(doc=doc, resolver=port_checked)
     assert result["candidate_pins_by_host"] == {HOST: ["8.8.8.8"]}
+
+
+@pytest.mark.parametrize("sockaddr_record", [
+    (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP,
+     "", ("8.8.8.8", 8443)),
+    (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP,
+     "", ("2001:4860:4860::8888", 443)),
+    (socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP,
+     "", ("8.8.8.8", 443, 0, 0)),
+    (socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP,
+     "", ("2001:4860:4860::8888", 443, 0, 5)),
+    (socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP,
+     "", ("2001:4860:4860::8888", 443, 1, 0)),
+    (socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP,
+     "", ("8.8.8.8", 443)),
+    (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP,
+     "", ("8.8.8.8", False)),
+])
+def test_dns_sockaddr_must_match_approved_tcp_family_port_and_scope(sockaddr_record):
+    with pytest.raises(UpstreamRotationError, match="mismatch"):
+        refresh(resolver=lambda *_args, **_kwargs: [sockaddr_record])
