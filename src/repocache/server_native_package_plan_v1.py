@@ -7,6 +7,7 @@ a package name in this plan is *not* package availability or provenance proof.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any
 
 from repocache.server_install_v1 import (
@@ -16,10 +17,10 @@ from repocache.server_install_v1 import (
 
 # The allowlist is implementation-owned, never read from an operator document.
 # Native distro packages only; do not use upstream NGINX repositories or PyPI.
-_NATIVE_NGINX = {
+_NATIVE_NGINX = MappingProxyType({
     "debian": ("apt", ("nginx",)),
     "almalinux": ("dnf", ("nginx",)),
-}
+})
 
 # Each unresolved gate is a mandatory fail-closed prerequisite for *future*
 # authorized package installation. Do not reinterpret this static inventory
