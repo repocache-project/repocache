@@ -1,0 +1,48 @@
+name: Server Native NGINX Metadata Probe
+
+on:
+  pull_request:
+    paths:
+      - 'src/repocache/server_native_package_*.py'
+      - 'tests/test_server_native_package_*.py'
+      - 'scripts/smoke_server_native_package_metadata.py'
+      - 'docs/architecture/SERVER_NATIVE_NGINX_PACKAGES_V1.md'
+      - '.github/workflows/server-native-nginx-metadata.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-metadata:
+    name: Native signed NGINX metadata (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ['debian:trixie-slim', 'almalinux:10']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Query real APT/DNF distro metadata without installing NGINX
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker run --rm --network bridge \
+            --mount "type=bind,source=$PWD,target=/workspace,readonly" \
+            --workdir /workspace '${{ matrix.image }}' \
+            sh -ec '
+              # Python is a prerequisite for this test only. If absent it is
+              # bootstrapped inside the disposable image, never on the runner.
+              if ! command -v python3 >/dev/null 2>&1; then
+                if command -v apt-get >/dev/null 2>&1; then
+                  apt-get update -qq
+                  apt-get install -y --no-install-recommends python3 >/dev/null
+                else
+                  dnf install -y python3 >/dev/null
+                fi
+              fi
+              PYTHONPATH=src python3 scripts/smoke_server_native_package_metadata.py
+            '
