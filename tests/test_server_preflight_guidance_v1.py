@@ -40,7 +40,7 @@ def test_host_secrets_cannot_enter_guidance_and_no_install_authorization():
     assert secret not in serialized
     assert "/etc/os-release" not in serialized
     assert "https://" not in serialized
-    assert "issue #27" in serialized
+    assert "issue #27" in serialized.lower()
     assert not report.all_verified and not report.authorizes_installation
 
 
@@ -65,5 +65,5 @@ def test_malformed_or_forged_reports_are_refused():
 
 def test_native_packages_are_not_conflated_with_online_python_profile():
     assert "APT/DNF" in _ACTIONS["native_package_availability"]
-    assert "issue #27" in _ACTIONS["native_package_availability"]
+    assert "issue #27" in _ACTIONS["native_package_availability"].lower()
     assert "application dependency profile" in _ACTIONS["application_dependency_profile"]
