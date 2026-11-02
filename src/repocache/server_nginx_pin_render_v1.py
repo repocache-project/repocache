@@ -65,11 +65,12 @@ def render_pinned_upstream_fragments(
         # The closed input validator rejects URL userinfo, non-HTTPS,
         # encoded syntax, omitted canonical slash, and unauthorized hosts.
         if (not hostname or upstream_url.scheme != "https"
-                or hostname not in repo["upstream"]["allowed_hosts"]):
+                or hostname not in {h.lower() for h in repo["upstream"]["allowed_hosts"]}):
             raise ValueError("invalid origin")
-        if re.fullmatch(r"/[A-Za-z0-9_./+-]*", upstream_url.path, re.ASCII) is None:
+        if re.fullmatch(r"/[A-Za-z0-9_./+~-]*", upstream_url.path, re.ASCII) is None:
             raise ValueError("NGINX-unsafe origin path")
-        ip_set = candidate_pins_by_host[hostname]
+        port = upstream_url.port or 443
+        ip_set = {k.lower(): v for k, v in candidate_pins_by_host.items()}[hostname]
         addresses = sorted(
             {ipaddress.ip_address(raw) for raw in ip_set},
             key=lambda ip: (ip.version, int(ip)),
@@ -79,19 +80,20 @@ def render_pinned_upstream_fragments(
 
     group = f"repocache_pin_{repository_id.replace('-', '_')}"
     route = f"/__repocache/repos/{repository_id}/"
+    host_header = hostname if port == 443 else f"{hostname}:{port}"
     reject_name = f"@repocache_redirect_denied_{repository_id.replace('-', '_')}"
     # No variables, interpolation or URL-supplied NGINX syntax are accepted.
     upstream = [f"upstream {group} {{"]
     for ip in addresses:
         numeric = f"[{ip}]" if ip.version == 6 else str(ip)
-        upstream.append(f"    server {numeric}:443;")
+        upstream.append(f"    server {numeric}:{port};")
     upstream.append("}")
 
     location = [
         f"location ^~ {route} {{",
         "    limit_except GET HEAD { deny all; }",
         f"    proxy_pass https://{group}{upstream_url.path};",
-        f"    proxy_set_header Host {hostname};",
+        f"    proxy_set_header Host {host_header};",
         f"    proxy_ssl_name {hostname};",
         "    proxy_ssl_server_name on;",
         "    proxy_ssl_verify on;",
