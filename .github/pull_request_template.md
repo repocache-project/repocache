@@ -35,32 +35,29 @@ Describe design choices, API/CLI compatibility, and any changes to NGINX, reposi
 
 **Rollback plan:**
 
-## Independent review and acceptance (required)
+## Acceptance and protected merge (required)
 
-Follow [PR review and acceptance policy](https://github.com/teixemf/repocache/blob/main/docs/PR_REVIEW_GOVERNANCE.md) (effective only after separately authorized merge into protected `main`). Do not call an AI-assisted report a human GitHub approval.
+Follow the [PR acceptance and review policy](https://github.com/teixemf/repocache/blob/main/docs/PR_REVIEW_GOVERNANCE.md) from the **currently protected default branch**. The optional-review change is effective only when its policy amendment is merged.
 
-- [ ] Every applicable primary-issue/PR acceptance criterion is PASS with a reproducible executed test or verified review/manual procedure.
-- [ ] Exact PR HEAD, protected target SHA, ancestry, merge method, milestone, and all nine required GitHub Actions contexts checked.
-- [ ] Security/compatibility/install/upgrade/rollback/documentation impacts reviewed and outstanding FAIL/NOT VERIFIED gates classified.
-- [ ] Independent review evidence recorded with the actual reviewer type, scope and exact SHA.
-- [ ] If an AI-assisted technical second opinion is accepted as an allowed alternative to the **project-level review evidence criterion**, authenticated **PR-/exact-HEAD-specific maintainer approval** of that amendment is linked (or NOT VERIFIED); separately required human reviews are not waived.
-- [ ] GitHub human review count, blocking discussions, and current protection/mergeability checked without bypass.
-- [ ] **Separate explicit maintainer authorization for this merge** recorded after all applicable gates PASS.
+- [ ] Every applicable primary-issue/PR acceptance criterion is PASS with reproducible executed or reviewed evidence.
+- [ ] Exact PR HEAD, target SHA, ancestry, allowed merge method, issue/milestone routing and all currently required GitHub Actions contexts verified.
+- [ ] Security, compatibility, install, upgrade, rollback and documentation impacts evaluated; mandatory FAIL/NOT VERIFIED gates resolved.
+- [ ] Independently required issue-specific human/security reviews completed, if any; an optional AI assessment is not a human GitHub approval.
+- [ ] Actual submitted human GitHub reviews, unresolved threads, active protection rules and mergeability independently checked.
+- [ ] Separate explicit maintainer authorization for **this PR and evaluated HEAD** recorded before merge.
 
-**Review source and exact SHA:**
+**Applicable acceptance criterion | PASS / FAIL / NOT VERIFIED | evidence:**
+
+**Optional external technical review (if obtained; reviewer type and scope):**
 
 **Actual submitted human GitHub approvals:**
 
-**PR-specific review criterion amendment (owner link, or NONE):**
-
-**Acceptance criterion | PASS / FAIL / NOT VERIFIED | evidence:**
-
 **Tests executed (run IDs/logs); tests not executed:**
 
-**Blocking findings and remaining native/release/production gates:**
+**Security findings and remaining native/release/production gates:**
 
-**Explicit merge permission (owner link, or NOT VERIFIED):**
+**Explicit merge permission (trusted owner decision, or NOT GRANTED):**
 
 ## Reviewer notes
 
-List known limitations, follow-up issues, and maintainer decisions. No merge is authorized by a clean CI status or completion of this template alone.
+List limitations, follow-up issues and maintainer decisions. A clean CI status or completed template does not authorize merge. Standing conditional authorization is not active; obtain explicit PR-specific maintainer merge permission.
