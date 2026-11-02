@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ipaddress
 import socket
+import ipaddress
 from urllib.parse import urlsplit
 from typing import Any, Callable
 
@@ -125,9 +126,25 @@ def propose_automatic_upstream_refresh(
                     or type(item[4]) is not tuple or not item[4]
                     or type(item[4][0]) is not str):
                 raise UpstreamRotationError("DNS lookup: unsupported answer")
-            address = item[4][0]
+            sockaddr = item[4]
+            family = item[0]
+            if (item[1] != socket.SOCK_STREAM
+                    or item[2] != socket.IPPROTO_TCP
+                    or len(sockaddr) != (2 if family == socket.AF_INET else 4)
+                    or type(sockaddr[1]) is not int or sockaddr[1] != port
+                    or (family == socket.AF_INET6
+                        and (type(sockaddr[2]) is not int or sockaddr[2] != 0
+                             or type(sockaddr[3]) is not int or sockaddr[3] != 0))):
+                raise UpstreamRotationError("DNS lookup: mismatched socket answer")
+            address = sockaddr[0]
             if len(address) > 45:
                 raise UpstreamRotationError("DNS lookup: invalid address")
+            try:
+                parsed_address = ipaddress.ip_address(address)
+            except ValueError:
+                raise UpstreamRotationError("DNS lookup: invalid IP address") from None
+            if parsed_address.version != (4 if family == socket.AF_INET else 6):
+                raise UpstreamRotationError("DNS lookup: address-family mismatch")
             addresses.add(address)
         # Deduplicate getaddrinfo alias/address repetitions before applying
         # the existing strict public-address and full-allowlist checks.
