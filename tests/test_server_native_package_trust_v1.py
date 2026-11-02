@@ -95,6 +95,14 @@ def test_fixed_native_sandbox_and_successfully_queried_candidate(
         assert "--setopt=rc-appstream.repo_gpgcheck=1" in update
         assert "--setopt=skip_if_unavailable=0" in update
         assert "--assumeyes" in update
+        assert "--noplugins" in update
+        assert "--no-plugins" not in update
+        assert "--disablerepo=*" in update
+        assert "--enablerepo=rc-baseos,rc-appstream" in update
+        assert "--setopt=rc-baseos.gpgcheck=1" in update
+        assert "--setopt=rc-appstream.gpgcheck=1" in update
+        assert not any(".pkg_gpgcheck=" in arg for arg in update)
+        assert not any(arg.startswith("--repo=") for arg in update)
 
 
 @pytest.mark.parametrize("distro,release,python,output", [
@@ -207,8 +215,10 @@ def test_distro_sources_are_fixed_and_signature_checks_not_optional(tmp_path):
     conf = (alma / "dnf.conf").read_text(encoding="ascii")
     repos = (alma / "repos" / "repocache.repo").read_text(encoding="ascii")
     assert "repo_gpgcheck=1" in conf
+    assert "pkg_gpgcheck" not in conf
     assert repos.count("repo_gpgcheck=1") == 2
-    assert repos.count("pkg_gpgcheck=1") == 2
+    assert "pkg_gpgcheck" not in repos
+    assert repos.count("gpgcheck=1") == 4  # RPM and metadata GPG checks in both repos
     assert "skip_if_unavailable=0" in conf
     assert "https://repo.almalinux.org/almalinux/10/" in repos
     assert "repoquery" in repoquery
