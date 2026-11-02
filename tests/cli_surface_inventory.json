@@ -11,6 +11,7 @@
     "config",
     "config check",
     "config show",
+    "config validate",
     "dashboard",
     "health",
     "log",
