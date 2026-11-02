@@ -56,7 +56,7 @@ def test_example_enforces_inert_endpoints_and_reference_only_tls_material():
     assert tls["mode"] == "operator-provided"
     for field in ("certificate_file", "private_key_file"):
         assert tls[field].startswith("/etc/repocache/tls/")
-        assert "\\n" not in tls[field] and "-----" not in tls[field]
+        assert "\n" not in tls[field] and "-----" not in tls[field]
     for repo in document["repositories"]:
         assert repo["desired_state"] == "disabled"
         assert repo["upstream"]["base_url"].startswith("https://")
@@ -66,7 +66,7 @@ def test_example_enforces_inert_endpoints_and_reference_only_tls_material():
             "release_key_refs" if repo["kind"] == "apt" else "gpg_key_refs"
         ]:
             assert ref.startswith("file:/etc/repocache/keys/")
-            assert "\\n" not in ref and "-----" not in ref
+            assert "\n" not in ref and "-----" not in ref
 
     source = EXAMPLE.read_text(encoding="utf-8")
     assert "-----BEGIN " not in source
