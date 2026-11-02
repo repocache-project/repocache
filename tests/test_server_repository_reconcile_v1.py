@@ -147,3 +147,44 @@ def test_no_network_process_or_host_writes(monkeypatch):
     proposed["repositories"] = []
     result = preview(current, proposed)
     assert result["status"] == "PLAN_ONLY"
+
+
+def test_semantically_equivalent_list_order_is_a_true_noop():
+    """Unordered lists cannot trigger generation churn or policy changes."""
+    current = document()
+    repo = current["repositories"][0]
+    repo["layout"]["suites"] = ["trixie", "bookworm"]
+    repo["layout"]["components"] = ["main", "contrib"]
+    repo["upstream"]["allowed_hosts"] = [
+        "mirror.example.invalid", "backup.example.invalid"
+    ]
+    repo["layout"]["release_key_refs"] = [
+        "file:/etc/repocache/keys/a.gpg",
+        "file:/etc/repocache/keys/b.gpg",
+    ]
+    proposed = copy.deepcopy(current)
+    proposed["repositories"] = [copy.deepcopy(repo)]
+    for key in ("suites", "components", "release_key_refs"):
+        proposed["repositories"][0]["layout"][key].reverse()
+    proposed["repositories"][0]["upstream"]["allowed_hosts"].reverse()
+    del proposed["repositories"][0]["cache_overrides"]
+    result = preview(current, proposed)
+    assert result["changed"] is False
+    assert result["explicit_changed_ids"] == []
+    assert result["implicit_policy_ids"] == []
+    assert result["candidate_document"] == current
+
+
+def test_explicit_change_of_trust_policy_is_not_silenced_by_identity():
+    current = document()
+    proposed = copy.deepcopy(current)
+    proposed["repositories"] = [copy.deepcopy(current["repositories"][0])]
+    proposed["repositories"][0]["layout"]["release_key_refs"] = [
+        "file:/etc/repocache/keys/other.gpg"
+    ]
+    result = preview(current, proposed)
+    assert result["changed"] is True
+    assert result["explicit_changed_ids"] == ["debian-trixie-main"]
+    assert result["candidate_document"]["repositories"][0]["layout"]["release_key_refs"] == [
+        "file:/etc/repocache/keys/other.gpg"
+    ]
