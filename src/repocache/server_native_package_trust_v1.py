@@ -21,7 +21,7 @@ from repocache.server_native_package_plan_v1 import preview_nginx_packages
 # operator repository files, custom GPG keys and untrusted mirrors are unused.
 _NATIVE = {
     "debian": ("/usr/bin/apt-get", "/usr/bin/apt-cache",
-               "/usr/share/keyrings/debian-archive-keyring.gpg"),
+               "/usr/share/keyrings/debian-archive-keyring.pgp"),
     "almalinux": ("/usr/bin/dnf", "/usr/bin/dnf",
                   "/etc/pki/rpm-gpg/RPM-GPG-KEY-AlmaLinux-10"),
 }
@@ -111,11 +111,11 @@ def _apt_commands(work: Path) -> tuple[list[str], list[str]]:
     """Isolated apt-secure signed metadata for Debian 13 official sources."""
     source = work / "sources.list"
     source.write_text(
-        "deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] "
+        "deb [signed-by=/usr/share/keyrings/debian-archive-keyring.pgp] "
         "https://deb.debian.org/debian trixie main\n"
-        "deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] "
+        "deb [signed-by=/usr/share/keyrings/debian-archive-keyring.pgp] "
         "https://deb.debian.org/debian trixie-updates main\n"
-        "deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] "
+        "deb [signed-by=/usr/share/keyrings/debian-archive-keyring.pgp] "
         "https://security.debian.org/debian-security trixie-security main\n",
         encoding="ascii",
     )
