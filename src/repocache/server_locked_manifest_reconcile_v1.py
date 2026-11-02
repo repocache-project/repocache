@@ -13,7 +13,8 @@ from typing import Any
 from repocache.server_install_v1 import MAX_INT
 from repocache.server_managed_include_fd_v1 import observe_managed_include_at
 from repocache.server_protected_state_inspect_v1 import (
-    _INCLUDE_SEGMENTS, _recheck, _safe_directory, _walk,
+    _DIRECTORY_FLAGS, _INCLUDE_SEGMENTS, _identity,
+    _recheck, _safe_directory, _walk,
 )
 from repocache.server_protected_state_store_v1 import (
     JOURNAL_NAME, JOURNAL_TMP_NAME, MAX_JOURNAL_BYTES,
@@ -126,3 +127,51 @@ def _inspect_locked_under_root(
             "authorizes_nginx_reload": False,
             "authorizes_catalog_publication": False,
         }
+
+
+
+def _verify_current_root_fd(root_fd: int) -> None:
+    """Require identity with '/' in the *current mount namespace*.
+
+    This is not a host namespace attestation or an operator authorization.
+    """
+    try:
+        opened = _safe_directory(root_fd, 0)
+        named = os.stat("/", follow_symlinks=False)
+        if _identity(opened) != _identity(named):
+            _deny("CURRENT_NAMESPACE_ROOT_CHANGED")
+    except LockedManifestInspectionError:
+        raise
+    except (OSError, ValueError):
+        _deny("CURRENT_NAMESPACE_ROOT_UNVERIFIED")
+
+
+def inspect_current_namespace_locked_manifest(
+    *, expected_generation: int
+) -> dict[str, Any]:
+    """Read only the current namespace's fixed root-owned NGINX/state paths.
+
+    Unlike _inspect_locked_under_root, no caller supplies an arbitrary root
+    FD or UID. Even a successful read never authenticates an administrator,
+    proves host mount namespace isolation, or authorizes root writes/reloads.
+    """
+    if type(expected_generation) is not int or not 0 <= expected_generation <= MAX_INT:
+        _deny("MANIFEST_INSPECTION_ARGUMENT_INVALID")
+    if os.geteuid() != 0:
+        _deny("CURRENT_NAMESPACE_ROOT_PRIVILEGE_REQUIRED")
+    try:
+        root_fd = os.open("/", _DIRECTORY_FLAGS)
+    except OSError:
+        _deny("CURRENT_NAMESPACE_ROOT_OPEN_REFUSED")
+    try:
+        _verify_current_root_fd(root_fd)
+        result = _inspect_locked_under_root(
+            root_fd, owner_uid=0, expected_generation=expected_generation
+        )
+        _verify_current_root_fd(root_fd)
+        # Only describes the root path opened in this process's namespace.
+        # It does not prove trusted host ancestry, privilege delegation,
+        # SELinux/ACL correctness or operator provenance.
+        return {**result, "current_namespace_root_path_verified": True}
+    finally:
+        os.close(root_fd)
