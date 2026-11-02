@@ -1,0 +1,128 @@
+"""Locked, non-authorizing live managed-include drift inspection (#31).
+
+This module intentionally has NO public privileged or mutating entry point.
+An untrusted directory FD, stored approval hash or matching inode never grants
+administrator permission. The private entry is for isolated Linux fixtures.
+"""
+from __future__ import annotations
+
+from contextlib import ExitStack
+import os
+from typing import Any
+
+from repocache.server_install_v1 import MAX_INT
+from repocache.server_managed_include_fd_v1 import observe_managed_include_at
+from repocache.server_protected_state_inspect_v1 import (
+    _INCLUDE_SEGMENTS, _recheck, _safe_directory, _walk,
+)
+from repocache.server_protected_state_store_v1 import (
+    JOURNAL_NAME, JOURNAL_TMP_NAME, MAX_JOURNAL_BYTES,
+    MAX_STATE_BYTES, ROLLBACK_NAME, STAGE_NAME,
+    _locked, _read_file, _read_journal, _read_state,
+)
+
+_COMPARE_FIELDS = ("sha256", "uid", "gid", "mode", "dev", "ino")
+
+
+class LockedManifestInspectionError(ValueError):
+    """Fixed symbolic refusal; no host paths, metadata, or file bytes."""
+
+
+def _deny(code: str) -> None:
+    raise LockedManifestInspectionError(code)
+
+
+def _match_manifest(
+    manifest: list[dict[str, Any]],
+    observation: dict[str, Any] | None,
+    *,
+    expected_owner_uid: int,
+) -> str:
+    """Compare only the already validated fixed-path manifest and live inode.
+
+    This pure inner step does not establish the caller's filesystem ancestry,
+    root privilege, ACL or operator approval. It never returns content/hashes.
+    """
+    if not manifest:
+        if observation is not None:
+            _deny("FOREIGN_MANAGED_INCLUDE_REFUSED")
+        return "NO_MANAGED_INCLUDE"
+    if observation is None:
+        _deny("RECORDED_MANAGED_INCLUDE_MISSING")
+    if observation["uid"] != expected_owner_uid:
+        _deny("MANAGED_INCLUDE_OWNER_MISMATCH")
+    recorded = manifest[0]
+    if any(recorded[k] != observation[k] for k in _COMPARE_FIELDS):
+        _deny("MANAGED_INCLUDE_DRIFT")
+    if observation["kind"] != "regular" or observation["nlink"] != 1:
+        _deny("MANAGED_INCLUDE_UNSAFE")
+    return "MANIFEST_MATCHES_OBSERVED_INCLUDE"
+
+
+def _inspect_locked_under_root(
+    root_fd: int, *, owner_uid: int, expected_generation: int
+) -> dict[str, Any]:
+    """Private fixture-only entry, never a privileged authorization oracle.
+
+    A caller-provided FD is NOT evidence of the OS root. The caller must not
+    use the result as authority for mutation or NGINX/certificate operations.
+    """
+    if (type(root_fd) is not int or root_fd < 0 or type(owner_uid) is not int
+            or owner_uid < 0 or type(expected_generation) is not int
+            or not 0 <= expected_generation <= MAX_INT):
+        _deny("MANIFEST_INSPECTION_ARGUMENT_INVALID")
+    with _locked(root_fd, owner_uid) as state_dir:
+        # Never silently recover on a read-only check. If an interrupted
+        # transaction exists, the designated recovery operation must run first.
+        if _read_journal(state_dir, owner_uid) is not None:
+            _deny("PROTECTED_STATE_RECOVERY_REQUIRED")
+        for name, limit in (
+            (JOURNAL_TMP_NAME, MAX_JOURNAL_BYTES),
+            (STAGE_NAME, MAX_STATE_BYTES),
+            (ROLLBACK_NAME, MAX_STATE_BYTES),
+        ):
+            if _read_file(state_dir, name, owner_uid, limit) is not None:
+                _deny("PROTECTED_STATE_RECOVERY_REQUIRED")
+        state, raw = _read_state(state_dir, owner_uid)
+        generation = 0 if state is None else state["state_generation"]
+        if generation != expected_generation:
+            _deny("PROTECTED_STATE_GENERATION_STALE")
+
+        with ExitStack() as stack:
+            include_dir, chain = _walk(
+                root_fd, _INCLUDE_SEGMENTS, stack, owner_uid
+            )
+            include = observe_managed_include_at(include_dir)
+            observation = include["observation"]
+            if observation is not None and observation["uid"] != owner_uid:
+                _deny("MANAGED_INCLUDE_OWNER_MISMATCH")
+            manifest = [] if state is None else state["ownership_manifest"]
+            status = _match_manifest(
+                manifest, observation, expected_owner_uid=owner_uid
+            )
+            # Re-read the exact same protected content under the held lock,
+            # even if another root-capable actor modified it without flock.
+            _, after = _read_state(state_dir, owner_uid)
+            if raw != after:
+                _deny("PROTECTED_STATE_CHANGED_DURING_INSPECTION")
+            _recheck(chain, owner_uid)
+            _safe_directory(root_fd, owner_uid)
+        return {
+            "schema_version": 1,
+            "status": "LOCKED_READ_ONLY_RECONCILIATION",
+            "include_status": status,
+            "state_generation": generation,
+            "manifest_entry_present": bool(manifest),
+            "include_file_present": observation is not None,
+            "exclusive_state_lock_held_during_inspection": True,
+            # The presence of a stored record or its SHA-256 is NOT trusted
+            # administrator provenance, user consent, or NGINX live exposure.
+            "operator_authorization_verified": False,
+            "protected_manifest_provenance_verified": False,
+            "mount_namespace_acl_selinux_verified": False,
+            "nginx_syntax_verified": False,
+            "nginx_live_exposure_verified": False,
+            "authorizes_write": False,
+            "authorizes_nginx_reload": False,
+            "authorizes_catalog_publication": False,
+        }
