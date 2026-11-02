@@ -26,7 +26,8 @@ jobs:
       - name: Install test requirements
         run: python -m pip install -e . pytest
       - name: Run unit and Textual integration tests
-        run: python -m pytest -q
+        # Show the exact skip reason in required Python 3.12/3.13 job logs.
+        run: python -m pytest -q -rs
       # Required contract gate: any unreviewed public command/alias addition
       # fails the protected Python 3.12/3.13 CI matrix. Future grammar changes
       # require updating the reviewed inventory and the behavioral tests.
@@ -81,3 +82,122 @@ jobs:
           path: dist/
           if-no-files-found: error
           retention-days: 1
+
+  # Stable, unfiltered checks live in the already-required Tests workflow.
+  # The native reusable workflow is read-only and covers BOTH target distros.
+  dependency-native-validation:
+    name: Unprivileged native dependency evidence
+    if: ${{ (github.event_name == 'pull_request' && github.base_ref == 'main') || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    uses: ./.github/workflows/native-upstream-wheels.yml
+    permissions:
+      contents: read
+
+  dependency-native-gate:
+    name: Native Dependency Security Gate
+    if: ${{ always() }}
+    needs: [dependency-native-validation]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    env:
+      MAIN_TARGET: ${{ (github.event_name == 'pull_request' && github.base_ref == 'main') || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+      UPSTREAM_STATUS: ${{ needs.dependency-native-validation.result }}
+    steps:
+      - name: Require both native operating-system checks to succeed
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [ "$MAIN_TARGET" = 'true' ]; then
+            if [ "$UPSTREAM_STATUS" != 'success' ]; then
+              echo 'FAIL: native dependency evidence missing, skipped or failed' >&2
+              exit 1
+            fi
+            echo 'PASS: both native dependency profiles completed successfully'
+          else
+            echo 'NOT APPLICABLE: graph gates cover protected main, not legacy release refs'
+          fi
+
+  # Read-only producer matrix; never call the write-capable publisher workflow.
+  # Always runs on PRs against main, even for docs-only changes.
+  dependency-graph-collect:
+    name: Gate read-only graph source (${{ matrix.target }})
+    if: ${{ (github.event_name == 'pull_request' && github.base_ref == 'main') || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: debian13-py313
+            python: '3.13'
+          - target: almalinux10-py312
+            python: '3.12'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Produce exact pinned wheel metadata without executing packages
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python scripts/ci_dependency_graph_collect_v05.py \
+            --source . --target '${{ matrix.target }}' \
+            --sha "$GITHUB_SHA" \
+            --output "$RUNNER_TEMP/dependency-graph-preview-${{ matrix.target }}.json"
+      - name: Preserve same-run source-verified snapshot
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: gate-graph-${{ matrix.target }}
+          path: ${{ runner.temp }}/dependency-graph-preview-${{ matrix.target }}.json
+          if-no-files-found: error
+          retention-days: 1
+
+  dependency-graph-gate:
+    name: Dependency Graph Security Gate
+    if: ${{ always() }}
+    needs: [dependency-graph-collect]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      MAIN_TARGET: ${{ (github.event_name == 'pull_request' && github.base_ref == 'main') || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+      UPSTREAM_STATUS: ${{ needs.dependency-graph-collect.result }}
+    steps:
+      - name: Refuse missing, skipped or failed profile collection
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [ "$MAIN_TARGET" = 'true' ]; then
+            if [ "$UPSTREAM_STATUS" != 'success' ]; then
+              echo 'FAIL: one or both graph profiles missing, skipped or failed' >&2
+              exit 1
+            fi
+          else
+            echo 'NOT APPLICABLE: graph gates cover protected main, not legacy release refs'
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+        if: env.MAIN_TARGET == 'true'
+      - name: Fetch both snapshots from this workflow run only
+        if: env.MAIN_TARGET == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: gate-graph-*
+          path: ${{ runner.temp }}/gate-graphs
+          merge-multiple: true
+      - name: Verify exact source locks, edges and combined manifest
+        if: env.MAIN_TARGET == 'true'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/ci_dependency_graph_submit_v05.py \
+            --source . --directory "$RUNNER_TEMP/gate-graphs" \
+            --sha "$GITHUB_SHA"

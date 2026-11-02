@@ -1,5 +1,8 @@
 # Release acceptance: candidate gates and published smoke
 
+> **Current target alignment (2026-11-02):** The maintainer approved skipping public v0.5.0 and making **v0.6.0 the next public release**, delivering a complete server. All original Stage A/Stage B obligations below, including [#76](https://github.com/teixemf/repocache/issues/76), [#88](https://github.com/teixemf/repocache/issues/88), the genuine official Node24 `release.yml` upload/readback gate transferred from #74, and owner-only signing and publication, remain mandatory without waiver. Test an actual *public v0.4.0 -> final signed v0.6.0* path; any v0.5.0-specific candidate wording below is historical. The currently approved legacy schema-1/offline-wheelhouse eight-asset profile remains the baseline unless separately changed by reviewed maintainer decision. See [v0.6.0 release target](RELEASE_TARGET_V0.6.0.md). This clarification does not authorize a tag, release dispatch, signing, staging, publication or production activation.
+
+
 This policy applies to subsequent releases. First-public v0.4.0 is special:
 there was no earlier public REPOCACHE distribution against which the public
 update and installation pipeline could be tested. This is not permission to

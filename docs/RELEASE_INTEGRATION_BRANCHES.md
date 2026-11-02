@@ -28,8 +28,8 @@ native OS acceptance, rollback/security checks and authorized publication.
 The approved legacy schema-1/offline-wheelhouse release profile remains the
 default until an independently reviewed explicit policy/format decision;
 the proposed online/source-only v0.7.0 stack is not a dependency assumed
-by this CI-lane document. See [next public release plan](RELEASE_TARGET_V0.6.0.md)
-(proposed in draft PR #226; not adopted on protected `main` until merged).
+by this CI-lane document. See the [adopted next public release plan](RELEASE_TARGET_V0.6.0.md)
+(merged in PR #226 on 2026-11-02; documentation approval is not operational acceptance).
 
 The already completed #157 live-push checks below remain historical PASS.
 Future generic integration-branch workflow changes stay with [#175](https://github.com/teixemf/repocache/issues/175)
