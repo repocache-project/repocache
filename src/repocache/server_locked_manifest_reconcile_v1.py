@@ -1,8 +1,9 @@
 """Locked, non-authorizing live managed-include drift inspection (#31).
 
-This module intentionally has NO public privileged or mutating entry point.
-An untrusted directory FD, stored approval hash or matching inode never grants
-administrator permission. The private entry is for isolated Linux fixtures.
+The public root-UID entry is READ-ONLY and anchors '/' only in the current
+mount namespace. It cannot authenticate host-root context or an operator.
+No function in this module grants authority to write, reload or publish.
+The caller-FD entry remains private and intended only for Linux fixtures.
 """
 from __future__ import annotations
 
