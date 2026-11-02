@@ -153,6 +153,8 @@ def _dnf_commands(work: Path) -> tuple[list[str], list[str]]:
     (work / "root").mkdir(mode=0o700)
     (work / "cache").mkdir(mode=0o700)
     (work / "log").mkdir(mode=0o700)
+    (work / "persist").mkdir(mode=0o700)
+    (work / "vars").mkdir(mode=0o700)
     # Only distribution-selected HTTPS endpoints and root-owned OS signing
     # key; never reuse third-party enabled host repositories or host DNF cache.
     (repodir / "repocache.repo").write_text(
@@ -175,6 +177,8 @@ def _dnf_commands(work: Path) -> tuple[list[str], list[str]]:
         f"cachedir={work / 'cache'}\n"
         f"system_cachedir={work / 'cache'}\n"
         f"logdir={work / 'log'}\n"
+        f"persistdir={work / 'persist'}\n"
+        f"varsdir={work / 'vars'}\n"
         "gpgcheck=1\npkg_gpgcheck=1\nrepo_gpgcheck=1\n"
         "sslverify=1\nskip_if_unavailable=0\nbest=1\nplugins=0\n",
         encoding="ascii",
@@ -186,6 +190,10 @@ def _dnf_commands(work: Path) -> tuple[list[str], list[str]]:
         f"--setopt=cachedir={work / 'cache'}",
         f"--setopt=system_cachedir={work / 'cache'}",
         f"--setopt=logdir={work / 'log'}",
+        f"--setopt=persistdir={work / 'persist'}",
+        f"--setopt=varsdir={work / 'vars'}",
+        "--repo=rc-baseos,rc-appstream",
+        "--no-plugins",
         "--setopt=skip_if_unavailable=0",
         "--setopt=sslverify=1",
         "--setopt=plugins=0",
@@ -229,7 +237,8 @@ def _run(command: list[str], *, work: Path,
     if any(token in lowered for token in (
         "skipping repository", "ignoring repository", "failed to download",
         "gpg check failed", "signature verification failed", "not signed",
-        "signature error", "no matching packages",
+        "signature error", "gpg error", "cannot be authenticated",
+        "repository unavailable", "no matching packages",
     )):
         return "", "NATIVE_MANAGER_FAILED"
     return proc.stdout, ""
