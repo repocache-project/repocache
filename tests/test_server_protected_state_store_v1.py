@@ -144,6 +144,89 @@ def test_failed_first_install_recovers_to_no_state(protected_root, point):
     assert recover(protected_root)["status"] == "CLEAN"
 
 
+def test_recovery_os_rename_failure_keeps_journal_and_can_retry(
+        protected_root, monkeypatch):
+    save(protected_root, candidate(), 0)
+    _, folder, uid = protected_root
+    previous = (folder / STATE_NAME).read_bytes()
+    next_state = candidate(2)
+    next_state["configuration_sha256"] = "d" * 64
+
+    def power_loss(phase):
+        if phase == "replace_durable":
+            raise RuntimeError("synthetic interruption")
+
+    with pytest.raises(RuntimeError, match="synthetic"):
+        _commit_under_root(
+            protected_root[0], next_state, expected_generation=1,
+            owner_uid=uid, inject_fault=power_loss,
+        )
+    updated = (folder / STATE_NAME).read_bytes()
+    pending = (folder / JOURNAL_NAME).read_bytes()
+    real_replace = os.replace
+
+    def injected_replace(source, dest, *args, **kwargs):
+        if source == ROLLBACK_NAME and dest == STATE_NAME:
+            raise OSError(5, "synthetic rollback EIO")
+        return real_replace(source, dest, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "replace", injected_replace)
+        with pytest.raises(
+            ProtectedStateStoreError, match="PROTECTED_RECOVERY_IO_REFUSED"
+        ):
+            recover(protected_root)
+    assert (folder / STATE_NAME).read_bytes() == updated
+    assert (folder / JOURNAL_NAME).read_bytes() == pending
+    assert (folder / ROLLBACK_NAME).read_bytes() == previous
+    assert recover(protected_root)["status"] == "ROLLED_BACK"
+    assert (folder / STATE_NAME).read_bytes() == previous
+    assert not (folder / JOURNAL_NAME).exists()
+    assert recover(protected_root)["status"] == "CLEAN"
+
+
+def test_recovery_fsync_failure_preserves_journal_for_retry(
+        protected_root, monkeypatch):
+    save(protected_root, candidate(), 0)
+    _, folder, uid = protected_root
+    previous = (folder / STATE_NAME).read_bytes()
+    next_state = candidate(2)
+    next_state["configuration_sha256"] = "d" * 64
+
+    def power_loss(phase):
+        if phase == "replace_durable":
+            raise RuntimeError("synthetic interruption")
+
+    with pytest.raises(RuntimeError, match="synthetic"):
+        _commit_under_root(
+            protected_root[0], next_state, expected_generation=1,
+            owner_uid=uid, inject_fault=power_loss,
+        )
+    pending = (folder / JOURNAL_NAME).read_bytes()
+    real_fsync = os.fsync
+
+    # File durability for the rollback temp succeeds; the first fd sync
+    # after the rename must be the intentionally failed directory fsync.
+    # _write_exclusive calls fsync(file) and fsync(directory) before replace,
+    # so fail only when the rollback name has been consumed by the rename.
+    def fail_renamed_directory_sync(fd):
+        if (not (folder / ROLLBACK_NAME).exists()
+                and (folder / STATE_NAME).read_bytes() == previous):
+            raise OSError(5, "synthetic directory fsync EIO")
+        return real_fsync(fd)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "fsync", fail_renamed_directory_sync)
+        with pytest.raises(
+            ProtectedStateStoreError, match="PROTECTED_RECOVERY_IO_REFUSED"
+        ):
+            recover(protected_root)
+    assert (folder / STATE_NAME).read_bytes() == previous
+    assert (folder / JOURNAL_NAME).read_bytes() == pending
+    assert recover(protected_root)["status"] == "ROLLED_BACK"
+    assert not (folder / JOURNAL_NAME).exists()
+
+
 def test_recovery_refuses_external_state_drift(protected_root):
     save(protected_root, candidate(), 0)
     _, folder, uid = protected_root
@@ -359,7 +442,9 @@ def test_partially_written_rollback_can_be_retried(protected_root):
     assert recover(protected_root)["status"] == "CLEAN"
 
 
-def test_unexpected_stage_after_replacement_is_refused(protected_root):
+@pytest.mark.parametrize("identical_candidate", [False, True])
+def test_unexpected_stage_after_replacement_is_refused(
+        protected_root, identical_candidate):
     save(protected_root, candidate(), 0)
     _, folder, uid = protected_root
     next_state = candidate(2)
@@ -373,8 +458,16 @@ def test_unexpected_stage_after_replacement_is_refused(protected_root):
         _commit_under_root(protected_root[0], next_state, expected_generation=1,
                            owner_uid=uid, inject_fault=fault)
     unexpected = folder / STAGE_NAME
-    unexpected.write_bytes(b"unexpected")
+    # A forged duplicate stage with the *same* digest must also fail closed.
+    # Renaming a durable stage into the new state consumes its inode, so a
+    # remaining stage after replacement cannot be a legitimate crash state.
+    expected_state_bytes = (folder / STATE_NAME).read_bytes()
+    unexpected.write_bytes(
+        expected_state_bytes if identical_candidate else b"unexpected")
     unexpected.chmod(0o600)
     with pytest.raises(ProtectedStateStoreError, match="RECOVERY_DRIFT"):
         recover(protected_root)
     assert (folder / JOURNAL_NAME).exists()
+    assert (folder / STAGE_NAME).read_bytes() == (
+        expected_state_bytes if identical_candidate else b"unexpected")
+    assert (folder / STATE_NAME).read_bytes() == expected_state_bytes
