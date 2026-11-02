@@ -18,6 +18,13 @@ The result is a redacted diagnostic with generation and fixed flags. ALL write/r
 - Complete native packaged NGINX syntax, controlled reload/rollback, TLS, signed APT/DNF metadata and derived catalog exposure remain separately gated. Do not activate unverified configurations, claim successful full host provisioning, or mutate client sources.
 - This PR does not touch #214 repository reconciliation, existing source/CLI files or any running service. Original issues #31 and #18 remain OPEN.
 
+
+## Current mount namespace root-anchored read entry
+
+The same module now offers inspect_current_namespace_locked_manifest(expected_generation=...). It is strictly read-only and requires an effective UID of 0; it opens '/' itself with O_DIRECTORY | O_NOFOLLOW and descriptor closing semantics rather than accepting a caller-supplied root FD or owner UID. It compares the opened directory identity and owner to the literal '/' in the current process mount namespace **before and after** the locked manifest observation, rejecting substitutions and detectable root changes. The output's current_namespace_root_path_verified=true describes only this narrow property. The private _inspect_locked_under_root entry remains isolated-fixture-only.
+
+UID 0 in a user namespace, chroot or container and '/' in a non-host mount namespace do not prove the *host* root or authenticate an administrator; ACLs, xattrs, mount topology, SELinux enforcing mode and independently trusted approval are still NOT VERIFIED. Neither a successful read nor this new boolean permits any persistent write, service reload or catalog exposure. There is no CLI registration, root install helper or invocation during application startup. Real root-owned preprovisioned paths remain required before the entry can return positively on an actual host; unit tests mock the internal observer and do not claim native host validation.
+
 ## Test and acceptance stage
 
 Focused: python -m pytest -q tests/test_server_locked_manifest_reconcile_v1.py
