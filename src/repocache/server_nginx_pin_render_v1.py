@@ -100,6 +100,11 @@ def render_pinned_upstream_fragments(
         "    proxy_ssl_verify_depth 3;",
         f"    proxy_ssl_trusted_certificate {ca_bundle_path};",
         "    proxy_redirect off;",
+        # A malicious upstream can request an *internal* NGINX redirect
+        # independently of HTTP 3xx via X-Accel-Redirect. Never let a
+        # remote repository select another location in the server block.
+        "    proxy_ignore_headers X-Accel-Redirect;",
+        "    proxy_hide_header X-Accel-Redirect;",
         # Do not forward a redirect response to a package manager which
         # could follow it to an unapproved host, bypassing this proxy.
         "    proxy_intercept_errors on;",
