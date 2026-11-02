@@ -27,6 +27,52 @@ checks package trust, claims NGINX ownership or asks for privilege. It is not
 yet wired into the public deployment preflight command, which remains a
 separate partial, permanently non-authorizing observation.
 
+## Native signed-metadata probe (development-only; not an install gate)
+
+`server_native_package_trust_v1.inspect_native_nginx_metadata()` is a
+separately invoked, non-installing **native package-manager probe**. It is not
+wired into #26's strictly no-network preflight or any privileged provisioning
+entrypoint. It rejects unsupported OS/Python or unreviewed v1 policy before
+external execution. It uses a newly created temporary directory per run and
+the fixed distro package-manager binaries, a stripped environment, bounded
+timeouts and static redacted diagnostics. Scratch contents are removed after
+the attempt; external network access and temporary files **do occur**.
+
+For Debian 13 the probe uses fixed official Debian trixie/trixie-updates and
+trixie-security source endpoints, the OS-owned Debian archive keyring and
+apt-secure signature validation through a fresh isolated `apt-get update`.
+Insecure/unauthenticated/downgrade-to-insecure metadata and partial-update
+success are explicitly refused. It then checks `apt-cache policy nginx`
+against those same fresh lists, requiring an actual candidate.
+
+For AlmaLinux 10 it selects the fixed official BaseOS/AppStream HTTPS
+repositories, a preflight-checked root-owned AlmaLinux 10 key and **requires
+both RPM package GPG checks and GPG-signed repository metadata**. The DNF
+refresh occurs with a private installroot, repository configuration, cache
+and log directory. The subsequent `repoquery --available` must find the
+literal `nginx` package. Hosts whose official repository/mirror fails the
+required metadata signature gate are **NOT VERIFIED**, even if DNF normally
+accepts that repository with `repo_gpgcheck=0`; we do not silently lower the
+requirement. GitHub-hosted synthetic fixtures cannot establish whether the
+actual supported distribution repositories meet this policy.
+
+The probe's PASS means only that **at the time of the read-only probe**
+native authenticated metadata was refreshed and an NGINX candidate was
+observed from its fixed allowed repositories. It is **not** proof of the
+downloaded RPM/DEB payload signature, of package transaction dependencies
+or final host readiness. It always returns `can_install=false`,
+`payload_signature_verified=false` and `authorizes_installation=false`.
+No package is downloaded for installation, installed or staged for activation;
+no persistent host package-manager sources/cache are deliberately modified.
+
+**Caveats:** a privileged execution helper must independently re-check
+signatures, origins and actual package payloads immediately before the native
+transaction. Distro mirror changes may require a reviewed configuration
+update; this prototype intentionally refuses arbitrary operator sources.
+The source scan prevents common unsafe signing-key ownership and symlink
+patterns but does not substitute for complete root/LSM/namespace and
+distribution package-trust acceptance.
+
 ## Mandatory downstream execution boundary (not implemented)
 
 Before a privileged native transaction (#27), implement and separately test
