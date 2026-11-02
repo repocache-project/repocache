@@ -67,7 +67,7 @@ def render_pinned_upstream_fragments(
         if (not hostname or upstream_url.scheme != "https"
                 or hostname not in repo["upstream"]["allowed_hosts"]):
             raise ValueError("invalid origin")
-        if re.fullmatch(r"/[A-Za-z0-9_./+-]*/", upstream_url.path, re.ASCII) is None:
+        if re.fullmatch(r"/[A-Za-z0-9_./+-]*", upstream_url.path, re.ASCII) is None:
             raise ValueError("NGINX-unsafe origin path")
         ip_set = candidate_pins_by_host[hostname]
         addresses = sorted(
