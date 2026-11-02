@@ -43,7 +43,7 @@ Follow [PR review and acceptance policy](https://github.com/teixemf/repocache/bl
 - [ ] Exact PR HEAD, protected target SHA, ancestry, merge method, milestone, and all nine required GitHub Actions contexts checked.
 - [ ] Security/compatibility/install/upgrade/rollback/documentation impacts reviewed and outstanding FAIL/NOT VERIFIED gates classified.
 - [ ] Independent review evidence recorded with the actual reviewer type, scope and exact SHA.
-- [ ] If an AI-assisted technical second opinion is accepted as an allowed alternative to the **project-level review evidence criterion**, authenticated **PR-/exact-HEAD-specific maintainer approval** of that amendment is linked (or NOT VERIFIED); separately required human reviews are not waived.
+- [ ] Independent human review or a separately commissioned technical second opinion covers this exact HEAD, records attributable PASS/FAIL/NOT VERIFIED and links inspectable evidence; any separately mandatory human review remains mandatory. The proposed removal of an extra report sign-off is **not effective before the governance amendment is merged**.
 - [ ] GitHub human review count, blocking discussions, and current protection/mergeability checked without bypass.
 - [ ] **Separate explicit maintainer authorization for this merge** recorded after all applicable gates PASS.
 
@@ -51,7 +51,7 @@ Follow [PR review and acceptance policy](https://github.com/teixemf/repocache/bl
 
 **Actual submitted human GitHub approvals:**
 
-**PR-specific review criterion amendment (owner link, or NONE):**
+**Independent review PASS / FAIL / NOT VERIFIED (report link and exact SHA):**
 
 **Acceptance criterion | PASS / FAIL / NOT VERIFIED | evidence:**
 
@@ -63,4 +63,4 @@ Follow [PR review and acceptance policy](https://github.com/teixemf/repocache/bl
 
 ## Reviewer notes
 
-List known limitations, follow-up issues, and maintainer decisions. No merge is authorized by a clean CI status or completion of this template alone.
+List known limitations, follow-up issues, and maintainer decisions. No merge is authorized by a clean CI status or completion of this template alone. A proposed standing conditional authorization is NOT ACTIVE; continue obtaining explicit PR-specific maintainer merge permission until separately adopted and activated under current governance.
