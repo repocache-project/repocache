@@ -52,6 +52,8 @@ def test_numeric_pins_are_only_nginx_upstream_servers():
     assert "proxy_intercept_errors on;" in loc
     assert "error_page 301 302 303 307 308 =502" in loc
     assert "proxy_redirect off;" in loc
+    assert "proxy_ignore_headers X-Accel-Redirect;" in loc
+    assert "proxy_hide_header X-Accel-Redirect;" in loc
     assert "return 502;" in loc
     assert "limit_except GET HEAD" in loc
     assert result["pin_count"] == 2
