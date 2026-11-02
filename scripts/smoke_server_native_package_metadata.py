@@ -42,10 +42,31 @@ def classified_ci_runner(args, **kwargs):
                 "permission denied", "could not open lock",
             )),
         }
+        # Identify a rejected *static* CLI token without printing an
+        # operator-supplied path, repository response or native diagnostics.
+        tokens = {
+            "no_plugins": "--no-plugins",
+            "plugins_option": "--setopt=plugins=0",
+            "repo_option": "--repo=rc-baseos,rc-appstream",
+            "assumeyes": "--assumeyes",
+            "refresh": "--refresh",
+            "makecache": "makecache",
+            "persistdir": "--setopt=persistdir=",
+            "varsdir": "--setopt=varsdir=",
+            "system_cachedir": "--setopt=system_cachedir=",
+            "repo_gpgcheck": ".repo_gpgcheck=1",
+            "pkg_gpgcheck": ".pkg_gpgcheck=1",
+            "installroot": "--installroot=",
+            "config": "--config=",
+            "releasever": "--releasever=10",
+        }
+        matches = [label for label, value in tokens.items()
+                   if value in combined]
         print(json.dumps({
             "ci_native_manager_stage": args[-1],
             "return_code": process.returncode,
             "signals": signals,
+            "static_dnf_argument_error_labels": matches,
         }, sort_keys=True), flush=True)
     return process
 
