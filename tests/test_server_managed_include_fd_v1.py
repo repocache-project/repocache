@@ -90,8 +90,13 @@ def test_nonallowlisted_file_modes_refused(tmp_path, mode):
     path = tmp_path / observer.MANAGED_INCLUDE_NAME
     path.write_bytes(b"data")
     path.chmod(mode)
-    with pytest.raises(observer.ManagedIncludeObservationError, match="INCLUDE_METADATA_UNSAFE"):
+    with pytest.raises(observer.ManagedIncludeObservationError) as exc:
         observe(tmp_path)
+    # Unprivileged runners cannot open 000-mode files, while root reaches
+    # metadata validation. Both are the intended fail-closed outcomes.
+    allowed = ({"INCLUDE_OPEN_UNSAFE_OR_UNAVAILABLE", "INCLUDE_METADATA_UNSAFE"}
+               if mode == 0 else {"INCLUDE_METADATA_UNSAFE"})
+    assert str(exc.value) in allowed
 
 
 def test_group_writable_parent_refused(tmp_path):
