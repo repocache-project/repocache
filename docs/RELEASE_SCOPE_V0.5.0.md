@@ -1,5 +1,8 @@
 # v0.5.0 release scope and acceptance ledger
 
+> **Historical release ledger — superseded target decision (2026-11-02).** The maintainer approved **skipping public v0.5.0** and targeting the next public release at **v0.6.0, a complete working Debian 13 / AlmaLinux 10 server**. Issues [#76](https://github.com/teixemf/repocache/issues/76) and [#88](https://github.com/teixemf/repocache/issues/88) were transferred intact to the v0.6.0 milestone with NO acceptance/security waivers. Old v0.5-specific timelines, milestone counts, roadmaps and “maintain v0.5” notes below are historical, not current instructions. See the [current target and full carried-forward gates](RELEASE_TARGET_V0.6.0.md). Do not interpret the historical original acceptance ledger as an approved intermediate public release.
+
+
 **Status: proposed governance baseline; NOT a release approval or an approved scope amendment.**
 **Snapshot:** 2026-10-25, before creation of PR #182: GitHub issue milestone `v0.5.0` (#2) had 28 issues (14 open / 14 closed) and **20 open associated PRs, excluding the then-not-yet-created #182**. A subsequent check after #182 opened found **21 open associated PRs**; this is not a release-scope increase in issue count. Reviewed protected `main` reference at initial inventory: `9e213d7beb6534181e3ff418a890c5fdf2db2017`. This historical snapshot becomes stale as GitHub changes: **always re-check issues, PRs, branch heads and current gate evidence before acting**.
 
