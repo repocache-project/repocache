@@ -46,7 +46,7 @@ for root in roots:
     assert policy["compatible_from"] == expected, source_version
     policy["version"] = "0.4.0"
     policy["compatible_from"] = []
-    policy_file.write_text(json.dumps(policy, indent=2) + "\\n")
+    policy_file.write_text(json.dumps(policy, indent=2) + "\n")
 PY
 python3 - "$work/legacy" <<'PY'
 import json
