@@ -199,10 +199,12 @@ def test_v05_schema_one_compatibility_bridge_policy_fixture(system):
     """
     policy_path = Path(__file__).resolve().parents[1] / "release-policy.json"
     baseline = json.loads(policy_path.read_text(encoding="utf-8"))
-    assert baseline["schema"] == 1 and baseline["version"] == "0.4.0"
-    assert baseline["compatible_from"] == []
-    bridge = {**baseline, "version": "0.5.0",
-              "compatible_from": ["0.4.0"]}
+    assert baseline["schema"] == 1 and baseline["version"] == "0.5.0"
+    assert baseline["compatible_from"] == ["0.4.0"]
+    # The current reviewed candidate metadata is already the proposed bridge.
+    # Preserve the *historical* immutable v0.4.0 policy as a separate fixture.
+    bridge = baseline
+    historical = {**baseline, "version": "0.4.0", "compatible_from": []}
     assert upgrade._policy(
         bridge, "0.5.0", {"version": "0.4.0"}, system,
     )["compatible_from"] == ["0.4.0"]
@@ -214,7 +216,7 @@ def test_v05_schema_one_compatibility_bridge_policy_fixture(system):
         upgrade._policy(bridge, "0.5.0", {"version": "0.3.0"}, system)
     # Installing a compatible forward release is not permission to downgrade.
     with pytest.raises(upgrade.UpgradeError, match="Compatibility"):
-        upgrade._policy(baseline, "0.4.0", {"version": "0.5.0"}, system)
+        upgrade._policy(historical, "0.4.0", {"version": "0.5.0"}, system)
 
 def test_schema_two_cannot_use_v05_bootstrap_version():
     document = _manifest(b"synthetic", "0.5.0")
