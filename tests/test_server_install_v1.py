@@ -43,6 +43,37 @@ def test_real_inert_example_parses_as_validate_and_apply_intent():
     assert all(r["desired_state"] == "disabled" for r in doc["repositories"])
 
 
+def test_example_enforces_inert_endpoints_and_reference_only_tls_material():
+    """#18 sample contract: never ship a live upstream, key bytes or activation."""
+    document = parse_install_bytes(EXAMPLE.read_bytes(), for_apply=False)
+    listen = document["deployment"]["listen"]
+    tls = document["deployment"]["tls"]
+
+    assert listen["bind_address"] == "127.0.0.1"
+    assert listen["hostname"].endswith(".invalid")
+    assert document["deployment"]["firewall"]["modify"] is False
+    assert document["deployment"]["nginx"]["ownership"] == "new-managed-only"
+    assert tls["mode"] == "operator-provided"
+    for field in ("certificate_file", "private_key_file"):
+        assert tls[field].startswith("/etc/repocache/tls/")
+        assert "\\n" not in tls[field] and "-----" not in tls[field]
+    for repo in document["repositories"]:
+        assert repo["desired_state"] == "disabled"
+        assert repo["upstream"]["base_url"].startswith("https://")
+        assert repo["upstream"]["base_url"].split("/")[2].endswith(".invalid")
+        assert all(host.endswith(".invalid") for host in repo["upstream"]["allowed_hosts"])
+        for ref in repo["layout"][
+            "release_key_refs" if repo["kind"] == "apt" else "gpg_key_refs"
+        ]:
+            assert ref.startswith("file:/etc/repocache/keys/")
+            assert "\\n" not in ref and "-----" not in ref
+
+    source = EXAMPLE.read_text(encoding="utf-8")
+    assert "-----BEGIN " not in source
+    assert "Authorization:" not in source
+    assert "Bearer " not in source
+
+
 def test_missing_generation_only_allowed_for_read_only_validation():
     doc = fixture()
     del doc["expected_state_generation"]
