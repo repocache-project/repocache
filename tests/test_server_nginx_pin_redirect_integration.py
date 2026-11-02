@@ -93,13 +93,17 @@ def _status_body_headers(opener, url):
                     reason="real stock nginx and openssl required")
 @pytest.mark.parametrize("origin_address", ["127.0.0.1", "::1"], ids=["ipv4", "ipv6"])
 @pytest.mark.parametrize(
-    "cert_hostname", [APPROVED_HOST, "wrong.example.invalid"],
-    ids=["valid-cert", "wrong-cert"],
+    "certificate_case", ["valid", "wrong-host", "untrusted-ca"],
+    ids=["valid-cert", "wrong-hostname", "untrusted-ca"],
 )
 def test_real_nginx_pinned_tls_sni_and_redirects(
-    tmp_path, origin_address, cert_hostname,
+    tmp_path, origin_address, certificate_case,
 ):
     """Real proxy data-plane test; a public-IP policy bypass is never exposed."""
+    cert_hostname = (
+        "wrong.example.invalid" if certificate_case == "wrong-host"
+        else APPROVED_HOST
+    )
     key = tmp_path / "key.pem"
     cert = tmp_path / "cert.pem"
     subprocess.run([
@@ -135,7 +139,18 @@ def test_real_nginx_pinned_tls_sni_and_redirects(
     origin_thread.start()
 
     listener_port = _ephemeral_port()
-    candidate = render(ca=str(cert))
+    trusted_bundle = cert
+    if certificate_case == "untrusted-ca":
+        trusted_bundle = tmp_path / "unrelated-ca.pem"
+        subprocess.run([
+            OPENSSL, "req", "-x509", "-newkey", "rsa:2048",
+            "-nodes", "-days", "1",
+            "-keyout", str(tmp_path / "unrelated-ca-key.pem"),
+            "-out", str(trusted_bundle),
+            "-subj", "/CN=unrelated-ca.example.invalid",
+            "-addext", "subjectAltName=DNS:unrelated-ca.example.invalid",
+        ], check=True, capture_output=True, timeout=15)
+    candidate = render(ca=str(trusted_bundle))
     upstream = candidate["http_upstream_fragment"]
     assert "server 8.8.8.8:443;" in upstream
     assert "server [2001:4860:4860::8888]:443;" in upstream
@@ -192,8 +207,8 @@ def test_real_nginx_pinned_tls_sni_and_redirects(
                 time.sleep(0.1)
         assert observed is not None, "isolated NGINX proxy never became ready"
 
-        if cert_hostname != APPROVED_HOST:
-            assert observed[0] == 502, "wrong-name TLS cert was accepted"
+        if certificate_case != "valid":
+            assert observed[0] == 502, "invalid TLS trust/hostname was accepted"
             assert b"REPOCACHE-PINNED-TLS-OK" not in observed[1]
         else:
             assert observed[0] == 200
