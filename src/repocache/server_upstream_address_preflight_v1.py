@@ -33,7 +33,7 @@ def inspect_upstream_address_snapshot(
     filesystem or process side effect happens here.
     """
     validated = validate_install_document(document, for_apply=True)
-    if type(repository_id) is not str or ID.fullmatch(repository_id) is None:
+    if (type(repository_id) is not str or len(repository_id) > 48\n            or ID.fullmatch(repository_id) is None):
         raise UpstreamAddressError("repository_id: invalid")
     matching = [item for item in validated["repositories"]
                 if item.get("id") == repository_id]
@@ -50,7 +50,7 @@ def inspect_upstream_address_snapshot(
         raise UpstreamAddressError("DNS snapshot: missing or additional host")
     normalized: dict[str, tuple[str, ...]] = {}
     for name, addresses in answers_by_host.items():
-        if type(name) is not str:
+        if type(name) is not str or len(name) > 253:
             raise UpstreamAddressError("DNS snapshot: invalid host")
         try:
             canonical = _host(name, "DNS host")
