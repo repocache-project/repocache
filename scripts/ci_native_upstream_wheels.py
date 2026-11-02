@@ -18,6 +18,9 @@ import zipfile
 from email.parser import BytesParser
 from pathlib import Path
 
+from ci_dependency_graph_v05 import graph_snapshot, parse_lock, write_preview
+from ci_dependency_graph_submit_v05 import validate_snapshot
+
 SOURCE = Path("/source")
 WORK = Path("/work")
 LOCK = SOURCE / "deps/runtime-wheels.lock"
@@ -103,6 +106,7 @@ def main() -> None:
     wheels = WORK / "wheels"
     wheels.mkdir(mode=0o700)
     offline = []
+    verified_runtime = {}
     for name, version, digest in rows:
         before = set(wheels.iterdir())
         # pip selects ABI-compatible binaries from the *real* public PyPI.
@@ -119,6 +123,7 @@ def main() -> None:
         actual = hashlib.sha256(wheel.read_bytes()).hexdigest()
         require(actual == digest, f"Pinned upstream SHA-256 mismatch for {name}")
         identity(wheel, name, version)
+        verified_runtime[name.replace("_", "-")] = wheel
         offline.append(f"./wheels/{wheel.name} --hash=sha256:{digest}")
         print(f"PASS: {target}: upstream wheel {name}=={version} SHA-256", flush=True)
 
@@ -146,6 +151,46 @@ def main() -> None:
             "Unexpected package installed in isolated venv")
     print(f"PASS: {target}: rootless native offline hash-only installation, pip check",
           flush=True)
+
+    # Issue #81: generate a preview from the same hash-verified upstream bytes.
+    # Separate build-only helpers are inspected, never installed or executed.
+    build_rows = parse_lock(
+        (SOURCE / "deps/build-wheels.lock").read_text(encoding="utf-8"))
+    build_dir = WORK / "build-wheels"
+    build_dir.mkdir(mode=0o700)
+    verified_build = {}
+    for name, (version, digest) in sorted(build_rows.items()):
+        before = set(build_dir.iterdir())
+        run([sys.executable, "-I", "-m", "pip", "--isolated", "download",
+             "--no-deps", "--only-binary=:all:", "--no-cache-dir",
+             "--disable-pip-version-check", "--index-url",
+             "https://pypi.org/simple", "--dest", str(build_dir),
+             f"{name}=={version}"], env=env, timeout=180)
+        added = set(build_dir.iterdir()) - before
+        require(len(added) == 1, f"Expected one reviewed build wheel for {name}")
+        wheel = added.pop()
+        require(wheel.is_file() and not wheel.is_symlink(), "Unsafe build wheel")
+        require(hashlib.sha256(wheel.read_bytes()).hexdigest() == digest,
+                f"Review hash differs for build wheel {name}")
+        verified_build[name] = wheel
+    snapshot = graph_snapshot(
+        SOURCE, verified_runtime, verified_build, target,
+        os.environ.get("REPO_GRAPH_SHA", ""))
+    require(set(snapshot["manifests"]) == {
+        f"deps/requirements-{target}.txt", "deps/requirements-build-v05.txt"},
+        "Missing runtime or build snapshot")
+    # Independently enforce the source-controlled exact adjacency contract
+    # against native distro wheel metadata, not only the number of edges.
+    validate_snapshot(snapshot, SOURCE, target, os.environ["REPO_GRAPH_SHA"])
+    write_preview(snapshot, WORK / f"dependency-graph-preview-{target}.json")
+    runtime_resolved = snapshot["manifests"][
+        f"deps/requirements-{target}.txt"]["resolved"]
+    require(sum(v["relationship"] == "indirect" for v in runtime_resolved.values()) >= 1,
+            "Native wheel metadata did not expose transitives")
+    print(f"PASS: {target}: verified wheel METADATA -> "
+          f"{len(runtime_resolved)} package nodes, "
+          f"{sum(len(v['dependencies']) for v in runtime_resolved.values())} "
+          "real package edges; offline graph preview only", flush=True)
 
     # Negative hash test: corrupt a separate copy, never the verified wheel.
     tamper = WORK / "tamper"

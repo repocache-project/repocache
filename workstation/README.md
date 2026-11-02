@@ -41,6 +41,32 @@ default encrypted PEM path remains
 `~/repocache-signing/repocache-release-private.pem` (owner-only 0600).
 The key is not copied or backed up by the program.
 
+For an owner-held PEM stored elsewhere, explicitly select its **absolute**
+path without moving, copying, symlinking or changing `HOME`:
+
+```console
+repocache-release environment check --signer-key-file "$HOME/signing/owner.pem" --json
+```
+
+The same optional `--signer-key-file ABSOLUTE_PATH` must be supplied to
+`candidate sign VERSION --passphrase-fd FD` to select that file for
+an explicitly approved future signing operation. When omitted, both commands
+retain the existing default path. This option is invocation-local: no key
+path or passphrase is saved, and the path is not printed in JSON errors.
+The path must be absolute and normalized, with trusted non-symlink ancestors;
+the regular, singly linked owner file must be exactly mode `0600`.
+The signing command remains separately authorized and must **not** be invoked
+as part of a read-only preflight.
+
+The `status: ready` output means only that the read-only prerequisite
+and signer-path metadata checks passed at that instant. It does **not**
+validate the encrypted private PEM bytes, unlock the key, establish a
+public/private key match, or authorize signing or publication. Missing
+signer files report `signer_missing`; unsafe objects, including dangling
+symlinks, must fail closed as `UNSAFE_SIGNER`. Cryptographic identity and
+actual release acceptance require separately authorized operations and
+owner-workstation evidence.
+
 `candidate prepare` requires exactly one finished, successful and
 owner-triggered release-workflow run for an existing version tag reachable
 from reviewed `main`. It obtains the unsigned GitHub Actions artifact

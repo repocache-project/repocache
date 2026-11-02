@@ -1,4 +1,4 @@
-# Stock NGINX eviction feasibility — issue #94 (v0.6.0)
+# Stock NGINX eviction feasibility — issue #94 (v0.7.0 research milestone)
 
 **Scope:** disposable research only; no REPOCACHE installation, CLI, service, existing NGINX configuration, package-manager source, or production cache changes. Not approval to implement priority-aware eviction.
 
@@ -10,7 +10,7 @@
 
 **Baseline remains mandatory and separately accepted:** #29 owns secure cache storage, isolation and persistence. #95 owns normal removal (withdraw route/catalog and retain eligible cached data without a removal-specific expiry, subject to native policy/pressure) plus fail-closed, ownership-verified force-cleanup. #97 owns native capacity/retention inheritance, limits, alerting, low-space recovery and safety. No unmanaged deletion of live NGINX cache objects is authorized. Supported Debian 13 / AlmaLinux 10 testing, SELinux, signed APT/DNF integrity and real fallback obligations remain mandatory **where applicable in these baseline issues**.
 
-**Current artifact status:** The research-only PR #188 remains Draft, not merged. A separate independent technical assessment found former HEAD `8e17f1031ac97f04b3c3a85f29c78f6c0da4b7ed` technically adequate for the bounded deliverable (32/32 checks SUCCESS, Debian 13 18/18 lab unit tests); this documentation decision update changes the PR HEAD, so prior HEAD-specific review evidence requires an applicability check and any formal Option B acceptance must target the final exact HEAD. NO-GO and research scope decisions **do not** authorize Ready-for-review, merging, closing #94, release/signing, production activation or destructive operations.
+**Artifact status (2026-11-02):** PR #188 is OPEN / Ready for review, assigned with issue #94 to milestone **v0.7.0**, and remains unmerged. The eight research-only files retain historical `v06` filename suffixes to avoid unrelated changes to test and CI wiring; these names do not determine release scope. Earlier independent technical assessments, project-level acceptance decisions and CI results were revision-specific, not evidence for a newly synchronized HEAD. Recheck the final PR SHA, exact-head CI, review applicability, branch ancestry and separate maintainer merge authorization. The accepted NO-GO does not authorize closing #94, signing, publishing, production activation or destructive operations.
 
 The historical experimental sections below preserve what was originally measured and recommended before maintainer adoption.
 
@@ -164,7 +164,7 @@ The memo does **not** endorse a particular lifecycle representation (parked NGIN
 | Cost/performance/operational burden | **NOT VERIFIED (qualitative cost assessed)** | Nominal zone sizes/config complexity explained; measured CPU/RAM/I/O and native scale not executed |
 | Written GO / LIMITED GO / NO-GO outcome | **PASS as documented recommendation** | Engineering NO-GO was subsequently adopted on 2026-10-27; this does not close issue #94 or imply full acceptance |
 
-**Current disposition:** NO-GO and end of optional research approved on 2026-10-27, with original incomplete acceptance statuses preserved. #94 remains OPEN and PR #188 DRAFT; PR-specific independent-review acceptance, current-HEAD CI, branch freshness, merge and issue closure are separate gates. No v0.5.0 impact.
+**Research disposition:** NO-GO and end of optional research approved on 2026-10-27, with the original incomplete acceptance statuses preserved. #94 remains OPEN and PR #188 is Ready for review but unmerged; current-HEAD CI, review applicability, branch freshness, merge authorization and issue closure are separate gates. The research branch does not alter v0.6.0 operational code or release acceptance. Its future integration is a distinct, explicitly authorized v0.7.0 decision.
 
 ## Review-response addendum — 2026-10-27
 
