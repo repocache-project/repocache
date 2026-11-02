@@ -17,6 +17,37 @@ for target in "$work/legacy" "$work/next"; do
     "$repo/install.sh" "$repo/platform_check.py" "$repo/release-policy.json" \
     "$repo/src" "$repo/client" "$repo/scripts" "$repo/deps" "$repo/docs" "$target/"
 done
+# The historical synthetic 0.3 -> 0.4 test deliberately uses two fabricated
+# version identities. Once the reviewed application source is bumped to 0.5.0,
+# normalize COPIES only, never the real checkout or published v0.4.0 bytes.
+# This remains a synthetic rollback test, not real #76 signed acceptance.
+python3 - "$work/legacy" "$work/next" <<'PY'
+import json
+import sys
+import tomllib
+from pathlib import Path
+
+roots = [Path(item) for item in sys.argv[1:]]
+source_version = tomllib.loads(
+    (roots[0] / "pyproject.toml").read_text())["project"]["version"]
+assert source_version in ("0.4.0", "0.5.0"), source_version
+for root in roots:
+    project = root / "pyproject.toml"
+    init = root / "src/repocache/__init__.py"
+    for file in (project, init):
+        content = file.read_text()
+        assert content.count(source_version) == 1, (file.name, source_version)
+        file.write_text(content.replace(source_version, "0.4.0"))
+    policy_file = root / "release-policy.json"
+    policy = json.loads(policy_file.read_text())
+    assert policy["schema"] == 1 and policy["version"] == source_version
+    assert policy["downgrade_from"] == []
+    expected = [] if source_version == "0.4.0" else ["0.4.0"]
+    assert policy["compatible_from"] == expected, source_version
+    policy["version"] = "0.4.0"
+    policy["compatible_from"] = []
+    policy_file.write_text(json.dumps(policy, indent=2) + "\\n")
+PY
 python3 - "$work/legacy" <<'PY'
 import json
 import sys
