@@ -1,6 +1,6 @@
 # Security Policy
 
-REPOCACHE is under active development. **There is no approved public v0.4.0 release yet.** Debian 13 and AlmaLinux 10 are the targeted supported platforms. Do not assume a draft branch passed independent security auditing or live-system validation.
+REPOCACHE is under active development. **The immutable public v0.4.0 release is available. v0.5.0 remains an unpublished candidate until the authentic owner-signed release acceptance gates pass.** Debian 13 and AlmaLinux 10 are the targeted supported platforms. Do not assume a draft branch passed independent security auditing or live-system validation.
 
 ## Reporting vulnerabilities
 
