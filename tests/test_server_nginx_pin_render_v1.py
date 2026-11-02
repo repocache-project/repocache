@@ -134,7 +134,12 @@ def test_no_nginx_service_or_filesystem_side_effect(monkeypatch):
 @pytest.mark.skipif(shutil.which("nginx") is None, reason="packaged nginx unavailable")
 def test_packaged_nginx_accepts_fragments_without_activation(tmp_path):
     """Real nginx -t on an isolated disposable config; never reload/service."""
-    candidate = render()
+    native_ca = next((p for p in (
+        CA, "/etc/pki/tls/certs/ca-bundle.crt",
+    ) if Path(p).is_file()), None)
+    if native_ca is None:
+        pytest.skip("packaged CA bundle unavailable")
+    candidate = render(ca=native_ca)
     conf = tmp_path / "nginx.conf"
     conf.write_text(
         f"pid {tmp_path / 'nginx.pid'};\n"
