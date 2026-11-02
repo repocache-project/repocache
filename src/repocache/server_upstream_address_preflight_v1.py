@@ -71,7 +71,7 @@ def inspect_upstream_address_snapshot(
                 raise UpstreamAddressError("DNS snapshot: invalid IP address") from None
             # Deny all special-purpose destinations; also deny IPv4-mapped
             # IPv6 regardless of the mapped IPv4's apparent global status.
-            if (not address.is_global
+            if (not address.is_global or address.is_multicast or address.is_reserved
                     or (isinstance(address, ipaddress.IPv6Address)
                         and (address.ipv4_mapped is not None
                              or address.scope_id is not None))):
