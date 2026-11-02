@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from repocache import releases, updater, upgrade, signatures, wheelhouse
+from repocache import __version__, releases, updater, upgrade, signatures, wheelhouse
 
 
 @pytest.fixture(autouse=True)
@@ -24,7 +24,7 @@ def fixture_wheels_only(monkeypatch):
     monkeypatch.setattr(updater, "recover_transaction", lambda: None)
 
 
-VERSION = "0.4.0"
+VERSION = __version__
 PREVIOUS = {"version": VERSION}
 DEBIAN13 = {"ID": "debian", "VERSION_ID": "13"}
 ALMA10 = {"ID": "almalinux", "VERSION_ID": "10.0"}
@@ -36,7 +36,8 @@ def policy():
         "python_max_exclusive": "3.14",
         "targets": [{"id": "debian", "major": "13"},
                     {"id": "almalinux", "major": "10"}],
-        "compatible_from": [], "downgrade_from": [],
+        "compatible_from": (["0.4.0"] if VERSION == "0.5.0" else []),
+        "downgrade_from": [],
         "config_schema": 1, "api_schema": 1
     }
 
@@ -91,16 +92,18 @@ def test_selected_version_never_bypasses_integrity(tmp_path):
 
 
 def test_first_public_release_refuses_historical_upgrade():
-    standalone = policy()
+    # Keep the immutable first-public v0.4.0 policy as a separate historical
+    # fixture. A current v0.5.0 upgrade allowlist must not rewrite that rule.
+    standalone = {**policy(), "version": "0.4.0", "compatible_from": []}
     signed_release_policy = json.loads((Path(__file__).resolve().parents[1] /
                                         "release-policy.json").read_text())
     assert standalone["compatible_from"] == []
-    assert signed_release_policy == standalone
+    assert signed_release_policy == policy()
     for system in (DEBIAN13, ALMA10):
-        assert upgrade._policy(standalone, VERSION, {"version": "0.0.0"}, system) == standalone
-        assert upgrade._policy(standalone, VERSION, {"version": VERSION}, system) == standalone
+        assert upgrade._policy(standalone, "0.4.0", {"version": "0.0.0"}, system) == standalone
+        assert upgrade._policy(standalone, "0.4.0", {"version": "0.4.0"}, system) == standalone
         with pytest.raises(upgrade.UpgradeError, match="Compatibility"):
-            upgrade._policy(standalone, VERSION, {"version": "0.3.0"}, system)
+            upgrade._policy(standalone, "0.4.0", {"version": "0.3.0"}, system)
 
 
 def test_explicit_os_support_and_unknown_downgrades():
@@ -112,16 +115,17 @@ def test_explicit_os_support_and_unknown_downgrades():
         with pytest.raises(upgrade.UpgradeError, match="OS"):
             upgrade._policy(policy(), VERSION, PREVIOUS, system)
     target = policy()
-    target["compatible_from"].append("0.5.0")
+    newer = "0.6.0" if VERSION == "0.5.0" else "0.5.0"
+    target["compatible_from"].append(newer)
     with pytest.raises(upgrade.UpgradeError, match="Downgrade"):
-        upgrade._policy(target, VERSION, {"version": "0.5.0"}, DEBIAN13)
-    older = {"version": "0.5.0", "release_policy": {
+        upgrade._policy(target, VERSION, {"version": newer}, DEBIAN13)
+    older = {"version": newer, "release_policy": {
         "downgrade_from": [VERSION], "config_schema": 1, "api_schema": 1}}
     assert upgrade._policy(target, VERSION, older, DEBIAN13)["version"] == VERSION
 
 
 @pytest.mark.parametrize("bad", [
-    {"version": "0.5.0"}, {"schema": 2}, {"compatible_from": "0.3.0"},
+    {"version": "9.9.9"}, {"schema": 2}, {"compatible_from": "0.3.0"},
     {"targets": [{"id": "debian", "major": "12"}]}, {"config_schema": 999}
 ])
 def test_invalid_policy_fails_closed(bad):
@@ -132,7 +136,7 @@ def test_invalid_policy_fails_closed(bad):
 
 
 def test_reject_symlink_and_path_traversal_archives(tmp_path):
-    for member in ("repocache-v0.4.0/../../../escape", "repocache-v0.4.0/release-policy.json"):
+    for member in (f"repocache-v{VERSION}/../../../escape", f"repocache-v{VERSION}/release-policy.json"):
         fileobj = io.BytesIO()
         with tarfile.open(fileobj=fileobj, mode="w:gz") as tar:
             entry = tarfile.TarInfo(member)
@@ -147,7 +151,7 @@ def test_reject_symlink_and_path_traversal_archives(tmp_path):
 def test_tampered_or_truncated_source_fails_before_install(tmp_path):
     fileobj = io.BytesIO()
     with tarfile.open(fileobj=fileobj, mode="w:gz") as tar:
-        info = tarfile.TarInfo("repocache-v0.4.0/release-policy.json")
+        info = tarfile.TarInfo(f"repocache-v{VERSION}/release-policy.json")
         data = json.dumps(policy()).encode()
         info.size = len(data)
         tar.addfile(info, io.BytesIO(data))
