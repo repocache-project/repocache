@@ -108,6 +108,14 @@ def test_manually_constructed_plan_is_never_privileged_authority():
         plan.distribution = "debian"
 
 
+def test_in_process_package_allowlist_reassignment_is_blocked():
+    from repocache import server_native_package_plan_v1 as native
+
+    with pytest.raises(TypeError):
+        native._NATIVE_NGINX["debian"] = ("dnf", ("untrusted-nginx",))
+    assert NativePackagePlanV1("debian").packages == ("nginx",)
+
+
 def test_no_host_probes_or_package_commands_are_invoked(monkeypatch):
     import os
     import socket
