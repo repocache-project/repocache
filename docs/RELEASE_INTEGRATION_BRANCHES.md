@@ -163,8 +163,10 @@ strictly up-to-date nine GitHub Actions check contexts, resolved review
 threads, and rejects force pushes/deletion with **no bypass actors**.
 The exact required contexts match protected-main ruleset `#25436501`
 (GitHub Actions app `15368`). Its `required_approving_review_count: 0`
-does **not** prove an independent security review or waive the project's
-documented reviewer gate. Ruleset presence is **PASS (API inspection)**;
+does **not** prove an independent security review or waive any
+issue-specific mandatory security-review criteria. The adopted project-wide
+policy does not require a global independent review for ordinary PRs.
+Ruleset presence is **PASS (API inspection)**;
 real protected-branch `push` CI on **both** v0.5.0 and v0.6.0 is **PASS**.
 Future-lane policy #175, new feature-PR reviews, and the actual owner-signed
 release/security acceptance gates remain **NOT VERIFIED**.
