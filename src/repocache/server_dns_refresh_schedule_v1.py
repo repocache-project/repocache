@@ -98,6 +98,16 @@ def refresh_due(
                 or builtins_type(prior_slot.failures) is not int
                 or not 0 <= prior_slot.failures <= 12):
             raise UpstreamScheduleError("SCHEDULE_SLOT_INVALID")
+    # A slot is an untrusted hint, not a durable clock lease. A forged or
+    # wrong-epoch future deadline must not suspend DNS refresh indefinitely.
+    # Reset only the hint; repository approval/generation checks above remain
+    # mandatory and any result is still a non-authorizing candidate.
+    if prior_slot is not None and prior_slot.generation == current_generation:
+        max_delay = (MAX_FAILURE_BACKOFF_SECONDS if prior_slot.failures
+                     else MIN_REFRESH_INTERVAL_SECONDS + MAX_JITTER_SECONDS)
+        if prior_slot.next_due - now_monotonic > max_delay:
+            prior_slot = None
+
     if (prior_slot is not None
             and prior_slot.generation == current_generation
             and now_monotonic < prior_slot.next_due):
