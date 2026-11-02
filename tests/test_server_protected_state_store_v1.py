@@ -312,3 +312,69 @@ def test_interrupted_journal_creation_never_changes_state(protected_root, alread
     assert recover(protected_root)["status"] == "CLEAN"
     assert save(protected_root, proposal, 1 if already_initialized else 0)[
         "status"] == "COMMITTED_INERT_STATE"
+
+
+def test_partially_written_stage_is_recovered_without_losing_old_state(protected_root):
+    save(protected_root, candidate(), 0)
+    _, folder, uid = protected_root
+    original = (folder / STATE_NAME).read_bytes()
+    next_state = candidate(2)
+    next_state["configuration_sha256"] = "c" * 64
+
+    def fault(phase):
+        if phase == "journal_durable":
+            raise RuntimeError("crash while starting stage")
+
+    with pytest.raises(RuntimeError):
+        _commit_under_root(protected_root[0], next_state, expected_generation=1,
+                           owner_uid=uid, inject_fault=fault)
+    partial = folder / STAGE_NAME
+    partial.write_bytes(b"incomplete")
+    partial.chmod(0o600)
+    assert recover(protected_root)["status"] == "ROLLED_BACK"
+    assert (folder / STATE_NAME).read_bytes() == original
+    assert not partial.exists()
+    assert recover(protected_root)["status"] == "CLEAN"
+
+
+def test_partially_written_rollback_can_be_retried(protected_root):
+    save(protected_root, candidate(), 0)
+    _, folder, uid = protected_root
+    original = (folder / STATE_NAME).read_bytes()
+    next_state = candidate(2)
+    next_state["configuration_sha256"] = "d" * 64
+
+    def fault(phase):
+        if phase == "replace_durable":
+            raise RuntimeError("crash before recovery")
+
+    with pytest.raises(RuntimeError):
+        _commit_under_root(protected_root[0], next_state, expected_generation=1,
+                           owner_uid=uid, inject_fault=fault)
+    partial = folder / ROLLBACK_NAME
+    partial.write_bytes(b"partial rollback write")
+    partial.chmod(0o600)
+    assert recover(protected_root)["status"] == "ROLLED_BACK"
+    assert (folder / STATE_NAME).read_bytes() == original
+    assert recover(protected_root)["status"] == "CLEAN"
+
+
+def test_unexpected_stage_after_replacement_is_refused(protected_root):
+    save(protected_root, candidate(), 0)
+    _, folder, uid = protected_root
+    next_state = candidate(2)
+    next_state["configuration_sha256"] = "d" * 64
+
+    def fault(phase):
+        if phase == "replace_durable":
+            raise RuntimeError("crash")
+
+    with pytest.raises(RuntimeError):
+        _commit_under_root(protected_root[0], next_state, expected_generation=1,
+                           owner_uid=uid, inject_fault=fault)
+    unexpected = folder / STAGE_NAME
+    unexpected.write_bytes(b"unexpected")
+    unexpected.chmod(0o600)
+    with pytest.raises(ProtectedStateStoreError, match="RECOVERY_DRIFT"):
+        recover(protected_root)
+    assert (folder / JOURNAL_NAME).exists()
