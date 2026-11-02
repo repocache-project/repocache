@@ -100,3 +100,11 @@ def test_does_not_write_produce_network_traffic_or_call_nginx(monkeypatch):
     monkeypatch.setattr(subprocess, "run", forbidden)
     result = inspect({"mirror.example.invalid": ["8.8.8.8"]})
     assert result["runtime_dns_binding_verified"] is False
+
+def test_oversized_snapshot_strings_rejected_before_ip_parsing():
+    with pytest.raises(UpstreamAddressError):
+        inspect({"mirror.example.invalid": ["8" * 100000]})
+    with pytest.raises(UpstreamAddressError):
+        inspect({"h" * 100000: ["8.8.8.8"]})
+    with pytest.raises(UpstreamAddressError):
+        inspect({"mirror.example.invalid": ["8.8.8.8"]}, repo_id="r" * 100000)
