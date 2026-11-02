@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from repocache.server_protected_state_store_v1 import (
-    JOURNAL_NAME, LOCK_NAME, ROLLBACK_NAME, STAGE_NAME, STATE_NAME,
+    JOURNAL_NAME, JOURNAL_TMP_NAME, LOCK_NAME, ROLLBACK_NAME, STAGE_NAME, STATE_NAME,
     ProtectedStateStoreError, _commit_under_root, _locked,
     _recover_under_root, validate_protected_state,
 )
@@ -284,3 +284,31 @@ def test_unsafe_directory_refused_without_mutation(protected_root):
     with pytest.raises(ValueError):
         _commit_under_root(fd, candidate(), expected_generation=0, owner_uid=uid)
     assert not (folder / STATE_NAME).exists()
+
+
+@pytest.mark.parametrize("already_initialized", [False, True])
+def test_interrupted_journal_creation_never_changes_state(protected_root, already_initialized):
+    if already_initialized:
+        save(protected_root, candidate(), 0)
+    _, folder, uid = protected_root
+    previous = (folder / STATE_NAME).read_bytes() if already_initialized else None
+    proposal = candidate(2 if already_initialized else 1)
+    proposal["configuration_sha256"] = "e" * 64
+
+    def fault(phase):
+        if phase == "journal_tmp_durable":
+            raise RuntimeError("injected before journal publish")
+
+    with pytest.raises(RuntimeError, match="injected"):
+        _commit_under_root(protected_root[0], proposal, owner_uid=uid,
+                           expected_generation=1 if already_initialized else 0,
+                           inject_fault=fault)
+    assert (folder / JOURNAL_TMP_NAME).exists()
+    assert not (folder / JOURNAL_NAME).exists()
+    assert ((folder / STATE_NAME).read_bytes()
+            if already_initialized else None) == previous
+    assert recover(protected_root)["status"] == "DISCARDED_UNPUBLISHED_JOURNAL"
+    assert not (folder / JOURNAL_TMP_NAME).exists()
+    assert recover(protected_root)["status"] == "CLEAN"
+    assert save(protected_root, proposal, 1 if already_initialized else 0)[
+        "status"] == "COMMITTED_INERT_STATE"
