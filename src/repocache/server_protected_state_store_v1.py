@@ -242,6 +242,31 @@ def _unlink_known(directory: int, name: str, raw: bytes | None,
         _fail("PROTECTED_RECOVERY_IO_REFUSED")
 
 
+def _recheck_after_mutation(
+    chain: list[tuple[int, str, int, tuple[int, ...]]],
+    owner_uid: int,
+) -> None:
+    # The state directory's own mtime/ctime/size change after legitimate
+    # create/rename/unlink. Its ancestors must remain byte-for-byte identical,
+    # while the leaf directory must preserve pinned structural identity.
+    _recheck(chain[:-1], owner_uid)
+    parent, name, child, original = chain[-1]
+    try:
+        named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        opened = _safe_directory(child, owner_uid)
+        structural = lambda st: (
+            st.st_dev, st.st_ino, st.st_mode,
+            st.st_uid, st.st_gid, st.st_nlink,
+        )
+        expected = original[:6]
+        if structural(named) != expected or structural(opened) != expected:
+            _fail("PROTECTED_DIRECTORY_CHANGED")
+    except ProtectedStateStoreError:
+        raise
+    except OSError:
+        _fail("PROTECTED_DIRECTORY_CHANGED")
+
+
 @contextmanager
 def _locked(root_fd: int, owner_uid: int) -> Iterator[int]:
     """Fixture-only pinned path. Lock inode must be preprovisioned, never created here."""
@@ -269,7 +294,7 @@ def _locked(root_fd: int, owner_uid: int) -> Iterator[int]:
             _fail("PROTECTED_LOCK_UNAVAILABLE")
         try:
             yield state_fd
-            _recheck(chain, owner_uid)
+            _recheck_after_mutation(chain, owner_uid)
             if _identity(named) != _identity(os.stat(LOCK_NAME, dir_fd=state_fd,
                                                       follow_symlinks=False)):
                 _fail("PROTECTED_LOCK_CHANGED")
