@@ -14,6 +14,7 @@ from typing import Any
 from repocache.server_install_v1 import (
     MAX_INT, validate_install_document,
 )
+from repocache.server_repository_plan_v1 import _effective_configuration
 
 
 class ReconciliationPlanError(ValueError):
@@ -73,7 +74,12 @@ def plan_declarative_reconciliation(
     candidate = copy.deepcopy(current)
     candidate["deployment"] = copy.deepcopy(proposed["deployment"])
     candidate["repositories"] = [
-        copy.deepcopy(updates.get(repo["id"], repo)) for repo in existing
+        (copy.deepcopy(repo)
+         if repo["id"] not in updates
+         or _effective_configuration(updates[repo["id"]])
+            == _effective_configuration(repo)
+         else copy.deepcopy(updates[repo["id"]]))
+        for repo in existing
     ]
     # Validate the combined result: an individually valid partial document
     # may collide with a preserved repository's canonical upstream identity.
