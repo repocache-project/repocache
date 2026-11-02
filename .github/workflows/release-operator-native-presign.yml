@@ -1,0 +1,107 @@
+# Issue #88: reuse existing owner-release-operator security and contract
+# regression tests in the real target Linux userspaces. This is NOT signed
+# candidate acceptance (#76): no owner PEM, tokens, tag or release is used.
+name: Release Operator native pre-signing checks
+
+on:
+  pull_request:
+  push:
+    branches: [main, integration/v0.5.0]
+
+permissions:
+  contents: read
+
+jobs:
+  native-pre-signing:
+    name: Release Operator presigning (${{ matrix.platform }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: debian13-py313
+            image: debian:13-slim
+            python: '3.13'
+          - platform: almalinux10-py312
+            image: almalinux:10
+            python: '3.12'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run existing operator and draft-gate refusal tests without secrets
+        shell: bash
+        env:
+          BASE_IMAGE: ${{ matrix.image }}
+          PLATFORM: ${{ matrix.platform }}
+          PYTHON_VERSION: ${{ matrix.python }}
+        run: |
+          set -Eeuo pipefail
+          # Dependencies are installed ONLY in a disposable container image
+          # on the ephemeral Actions runner, never on the maintainer host.
+          # Use distribution-provided pytest (AlmaLinux 10 CRB) rather
+          # than installing unrestricted wheels or executing release code.
+          cat > "$RUNNER_TEMP/Dockerfile.release-operator-presign" <<'DOCKERFILE'
+          ARG BASE_IMAGE
+          FROM ${BASE_IMAGE}
+          RUN if command -v apt-get >/dev/null 2>&1; then \
+                apt-get update -qq && \
+                DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+                  python3 python3-pytest git openssl util-linux passwd; \
+              else \
+                dnf -y -q --enablerepo=crb install \
+                  python3 python3-pytest git openssl util-linux shadow-utils; \
+              fi
+          DOCKERFILE
+          image="repocache-operator-presign:${PLATFORM}"
+          docker build --pull \
+            --build-arg "BASE_IMAGE=${BASE_IMAGE}" \
+            -t "$image" \
+            -f "$RUNNER_TEMP/Dockerfile.release-operator-presign" "$RUNNER_TEMP"
+
+          # No network, source writes, elevated capabilities or host secrets
+          # during the actual tests. Private tmpfs disappears with --rm.
+          docker run --rm --network none --read-only \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --pids-limit 512 \
+            --tmpfs /tmp:rw,nosuid,nodev,mode=1777 \
+            --tmpfs /work:rw,nosuid,nodev,uid=10001,gid=10001,mode=0700 \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/source,readonly" \
+            --user 10001:10001 --workdir /source \
+            --env HOME=/work \
+            --env TMPDIR=/work \
+            --env XDG_STATE_HOME=/work/state \
+            --env XDG_CACHE_HOME=/work/cache \
+            --env PYTHONDONTWRITEBYTECODE=1 \
+            --env PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+            --env "EXPECTED_PYTHON=$PYTHON_VERSION" \
+            "$image" /bin/sh -eu -c '
+              observed="$(/usr/bin/python3 -c "import sys; print(f\"{sys.version_info.major}.{sys.version_info.minor}\")")"
+              test "$observed" = "$EXPECTED_PYTHON" || {
+                echo "Wrong native Python version: $observed" >&2
+                exit 1
+              }
+              /usr/bin/python3 -B -m pytest -q -rs -p no:cacheprovider \
+                tests/test_release_operator.py \
+                tests/test_release_operator_state_fd.py \
+                tests/test_draft_release_gate.py
+              # Actual read-only executable invocation, not just in-process mocks.
+              # Missing candidate state MUST not count as accepted or published.
+              status_json="$(PYTHONPATH=/source/workstation/src /usr/bin/python3 -B \
+                -m repocache_release.cli candidate status v0.5.0 --json)"
+              printf "%s\n" "$status_json"
+              # Reject false PASS even if the CLI exits with code zero.
+              printf "%s\n" "$status_json" | /usr/bin/python3 -c \
+                "import json,sys; actual=json.load(sys.stdin); expected=dict(ok=True, result=dict(acceptance=\"NOT VERIFIED\", phase=\"absent\", ready_to_publish=False, version=\"v0.5.0\"), schema_version=1); sys.exit(0 if actual == expected else 1)" || {
+                echo "FAIL: absent candidate was not reported as NOT VERIFIED" >&2
+                exit 1
+              }
+            '
+      - name: Report acceptance boundary
+        if: always()
+        run: |
+          echo 'Native distro userspace (container) + existing synthetic tests only.'
+          echo 'No owner PEM, signing, release workflow, Draft or publication used.'
+          echo 'No booted systemd/SELinux, host rollback or physical crash claim.'
+          echo 'Genuine final owner-signed candidate acceptance remains #76.'
