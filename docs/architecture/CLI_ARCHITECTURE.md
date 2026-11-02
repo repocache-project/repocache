@@ -166,7 +166,7 @@ repocache
 │   ├── enable
 │   └── disable
 ├── deployment                   [planned provisioning]
-│   ├── preflight
+│   ├── preflight --file FILE
 │   ├── install --file FILE
 │   ├── status
 │   ├── verify
@@ -300,6 +300,25 @@ operations with their own security and acceptance gates under #18/#28/#95;
 their planned syntax below is **not** a claim of implementation. Real
 Debian 13 and AlmaLinux 10 operational provisioning is not validated by this
 read-only CLI increment.
+
+**Read-only native deployment preflight (#26, incremental CLI):**
+
+```console
+repocache deployment preflight --file server-install-v1.json --json
+repocache --json deployment preflight --file server-install-v1.json
+```
+
+The command validates the same strict, bounded JSON input as `config validate`
+before any local host observation, then reports existing native OS/UID/ports,
+storage/NGINX/TLS/systemd/SELinux diagnostics with static, redacted English
+guidance. It does not execute package managers, probe upstream networks,
+perform package metadata refresh, change files/services or authorize
+deployment. Because this userspace check remains partial, its finite
+version-1 JSON response always has `ok=false`, an explicit
+`PREFLIGHT_NOT_READY` error, `can_install=false` and exit status **1**.
+Unreadable/invalid JSON fails before host probing with exit status **2**.
+The original #26 missing-native-package outcome remains dependent on #27;
+the library and CLI are not a complete installer readiness certificate.
 
 ### 4.5 Configuration, provisioning, application updates
 
