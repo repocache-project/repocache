@@ -204,14 +204,6 @@ def test_recovery_fsync_failure_preserves_journal_for_retry(
         )
     pending = (folder / JOURNAL_NAME).read_bytes()
     real_fsync = os.fsync
-    failed = False
-
-    def injected_fsync(fd):
-        nonlocal failed
-        if not failed:
-            failed = True
-            raise OSError(5, "synthetic rollback fsync EIO")
-        return real_fsync(fd)
 
     # File durability for the rollback temp succeeds; the first fd sync
     # after the rename must be the intentionally failed directory fsync.
