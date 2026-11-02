@@ -414,9 +414,14 @@ def _recover_locked(directory: int, uid: int) -> str:
         else:
             if rollback is None:
                 _write_exclusive(directory, ROLLBACK_NAME, previous, uid, MAX_STATE_BYTES)
-            os.replace(ROLLBACK_NAME, STATE_NAME, src_dir_fd=directory,
-                       dst_dir_fd=directory)
-            os.fsync(directory)
+            try:
+                os.replace(ROLLBACK_NAME, STATE_NAME, src_dir_fd=directory,
+                           dst_dir_fd=directory)
+                os.fsync(directory)
+            except OSError:
+                # The durable journal remains the recovery authority. Never
+                # surface raw OS paths/errors or silently mark recovery clean.
+                _fail("PROTECTED_RECOVERY_IO_REFUSED")
     if stage is not None:
         _unlink_known(directory, STAGE_NAME, stage, uid, MAX_STATE_BYTES)
     if rollback is not None and current == previous:
