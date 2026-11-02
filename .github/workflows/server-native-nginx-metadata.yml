@@ -36,11 +36,13 @@ jobs:
             sh -ec '
               # Python is a prerequisite for this test only. If absent it is
               # bootstrapped inside the disposable image, never on the runner.
-              if ! command -v python3 >/dev/null 2>&1 || ! test -s /etc/ssl/certs/ca-certificates.crt; then
-                if command -v apt-get >/dev/null 2>&1; then
+              if command -v apt-get >/dev/null 2>&1; then
+                if ! command -v python3 >/dev/null 2>&1 || ! test -s /etc/ssl/certs/ca-certificates.crt; then
                   apt-get update -qq
                   DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 ca-certificates >/dev/null
-                else
+                fi
+              else
+                if ! command -v python3 >/dev/null 2>&1 || ! test -s /etc/pki/tls/certs/ca-bundle.crt; then
                   dnf install -y python3 ca-certificates >/dev/null
                 fi
               fi
