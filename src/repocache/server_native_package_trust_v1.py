@@ -44,12 +44,17 @@ class NativeMetadataEvidenceV1:
     candidate_available: bool
 
     def __post_init__(self) -> None:
-        if (self.distribution not in _NATIVE or
-            self.code not in {"NATIVE_CANDIDATE_OBSERVED", *_FAILURE_HINTS} or
+        permitted = {
+            "NATIVE_CANDIDATE_OBSERVED": (True, True),
+            "NATIVE_PACKAGE_NOT_AVAILABLE": (True, False),
+            **{code: (False, False) for code in _FAILURE_HINTS
+               if code != "NATIVE_PACKAGE_NOT_AVAILABLE"},
+        }
+        if (type(self.distribution) is not str or self.distribution not in _NATIVE or
+            type(self.code) is not str or self.code not in permitted or
             type(self.metadata_signed) is not bool or
             type(self.candidate_available) is not bool or
-            ((self.metadata_signed and self.candidate_available)
-             != (self.code == "NATIVE_CANDIDATE_OBSERVED"))):
+            (self.metadata_signed, self.candidate_available) != permitted[self.code]):
             raise ValueError("invalid native metadata evidence")
 
     @property
@@ -79,6 +84,13 @@ def _trusted_key(path: str) -> bool:
     if type(path) is not str or not path.startswith("/"):
         return False
     current = Path("/")
+    try:
+        root = os.lstat(current)
+    except OSError:
+        return False
+    if (root.st_uid != 0 or root.st_mode & 0o022 or
+        not stat.S_ISDIR(root.st_mode)):
+        return False
     for segment in Path(path).parts[1:]:
         current = current / segment
         try:
@@ -164,7 +176,7 @@ def _dnf_commands(work: Path) -> tuple[list[str], list[str]]:
         f"system_cachedir={work / 'cache'}\n"
         f"logdir={work / 'log'}\n"
         "gpgcheck=1\npkg_gpgcheck=1\nrepo_gpgcheck=1\n"
-        "sslverify=1\nskip_if_unavailable=0\nbest=1\n",
+        "sslverify=1\nskip_if_unavailable=0\nbest=1\nplugins=0\n",
         encoding="ascii",
     )
     args = [
@@ -176,6 +188,7 @@ def _dnf_commands(work: Path) -> tuple[list[str], list[str]]:
         f"--setopt=logdir={work / 'log'}",
         "--setopt=skip_if_unavailable=0",
         "--setopt=sslverify=1",
+        "--setopt=plugins=0",
         "--setopt=rc-baseos.repo_gpgcheck=1",
         "--setopt=rc-appstream.repo_gpgcheck=1",
         "--setopt=rc-baseos.pkg_gpgcheck=1",
@@ -267,7 +280,7 @@ def inspect_native_nginx_metadata(
             )
         if not available:
             return NativeMetadataEvidenceV1(
-                distro, "NATIVE_PACKAGE_NOT_AVAILABLE", False, False
+                distro, "NATIVE_PACKAGE_NOT_AVAILABLE", True, False
             )
         return NativeMetadataEvidenceV1(
             distro, "NATIVE_CANDIDATE_OBSERVED", True, True
