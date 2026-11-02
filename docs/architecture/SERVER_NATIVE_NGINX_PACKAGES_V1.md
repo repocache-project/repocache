@@ -51,9 +51,12 @@ against those same fresh lists, requiring an actual candidate.
 
 For AlmaLinux 10 it selects the fixed official BaseOS/AppStream HTTPS
 repositories, a preflight-checked root-owned AlmaLinux 10 key and **requires
-both RPM package GPG checks and GPG-signed repository metadata**. The DNF
-refresh occurs with a private installroot, repository configuration, cache
-and log directory. The subsequent `repoquery --available` must find the
+both RPM package GPG checks and GPG-signed repository metadata**. The AlmaLinux 10 native manager is **DNF4** (not DNF5): the probe uses
+`--noplugins`, `--disablerepo=*` with explicit fixed-repository re-enabling,
+`gpgcheck=1` for RPM packages and `repo_gpgcheck=1` for metadata. DNF5-only
+`--no-plugins` and `pkg_gpgcheck` are not accepted by the distribution's
+DNF4. The DNF refresh occurs with a private installroot, repository
+configuration, cache and log directory. The subsequent `repoquery --available` must find the
 literal `nginx` package. Hosts whose official repository/mirror fails the
 required metadata signature gate are **NOT VERIFIED**, even if DNF normally
 accepts that repository with `repo_gpgcheck=0`; we do not silently lower the
