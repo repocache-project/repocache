@@ -51,8 +51,11 @@ class _Origin(http.server.BaseHTTPRequestHandler):
         if not self.path.startswith("/debian/"):
             self.send_error(404)
             return
-        if self.path.endswith("/redirect"):
-            self.send_response(302)
+        if self.path.rsplit("/", 1)[-1].startswith("redirect-"):
+            redirect_code = int(self.path.rsplit("-", 1)[-1])
+            if redirect_code not in (301, 302, 303, 307, 308):
+                raise AssertionError("unknown test-only redirect")
+            self.send_response(redirect_code)
             self.send_header("Location", "http://127.0.0.1/internal-metadata")
             self.end_headers()
         elif self.path.endswith("/accel"):
@@ -196,11 +199,12 @@ def test_real_nginx_pinned_tls_sni_and_redirects(
             assert observed[0] == 200
             assert observed[1] == b"REPOCACHE-PINNED-TLS-OK"
 
-            status, body, headers = _status_body_headers(
-                opener, base + "redirect",
-            )
-            assert status == 502, "unapproved HTTP redirect escaped proxy"
-            assert headers.get("Location") is None
+            for code in (301, 302, 303, 307, 308):
+                status, body, headers = _status_body_headers(
+                    opener, base + f"redirect-{code}",
+                )
+                assert status == 502, f"upstream HTTP {code} escaped proxy"
+                assert headers.get("Location") is None
 
             status, body, headers = _status_body_headers(
                 opener, base + "accel",
