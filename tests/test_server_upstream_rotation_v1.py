@@ -199,3 +199,16 @@ def test_invalid_oversized_prior_snapshot_refused_without_mutation():
     with pytest.raises(UpstreamRotationError):
         refresh(doc=original, pins={HOST: ["8" * 200000]})
     assert original == before
+
+
+def test_explicit_https_port_is_resolved_without_silent_443_fallback():
+    doc = document()
+    doc["repositories"][0]["upstream"]["base_url"] = (
+        "https://mirror.example.invalid:8443/debian/"
+    )
+    def port_checked(host, port, *, family, type, proto):
+        assert host == HOST and port == 8443
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP,
+                 "", ("8.8.8.8", 8443))]
+    result = refresh(doc=doc, resolver=port_checked)
+    assert result["candidate_pins_by_host"] == {HOST: ["8.8.8.8"]}
