@@ -36,12 +36,12 @@ jobs:
             sh -ec '
               # Python is a prerequisite for this test only. If absent it is
               # bootstrapped inside the disposable image, never on the runner.
-              if ! command -v python3 >/dev/null 2>&1; then
+              if ! command -v python3 >/dev/null 2>&1 || ! test -s /etc/ssl/certs/ca-certificates.crt; then
                 if command -v apt-get >/dev/null 2>&1; then
                   apt-get update -qq
-                  apt-get install -y --no-install-recommends python3 >/dev/null
+                  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 ca-certificates >/dev/null
                 else
-                  dnf install -y python3 >/dev/null
+                  dnf install -y python3 ca-certificates >/dev/null
                 fi
               fi
               PYTHONPATH=src python3 scripts/smoke_server_native_package_metadata.py
