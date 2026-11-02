@@ -563,7 +563,57 @@ def approved_build(version: str) -> tuple[str, int, int]:
     return commit, rid, attempt
 
 
-def environment() -> dict[str, Any]:
+
+def private_signer_path(override: str | None = None) -> Path:
+    """Select an explicit absolute path or the unchanged legacy default.
+
+    The path is not a secret and is never persisted by this option. Refuse
+    normalization ambiguities instead of silently traversing to another file.
+    """
+    if override is None:
+        return Path.home() / "repocache-signing/repocache-release-private.pem"
+    if (not override or override.startswith("//")
+            or any(ord(ch) < 32 or ord(ch) == 127
+                   or 0xD800 <= ord(ch) <= 0xDFFF for ch in override)
+            or not Path(override).is_absolute()
+            or os.path.normpath(override) != override
+            or ".." in Path(override).parts
+            or Path(override).name in ("", ".", "..")):
+        raise OperatorError("UNSAFE_SIGNER", "Signer path must be an absolute normalized file path")
+    return Path(override)
+
+
+def signer_metadata_present(path: Path) -> bool:
+    """Read-only owner-held signer metadata; do not read or unlock PEM bytes.
+
+    Reject symlink or untrusted writable ancestors even if the final file
+    currently appears safe. Root-owned sticky /tmp is allowed for fixtures.
+    """
+    for parent in path.parents:
+        try:
+            info = parent.lstat()
+        except FileNotFoundError:
+            continue  # Preserve signer_missing for an absent default directory.
+        except OSError as exc:
+            raise OperatorError("UNSAFE_SIGNER", "Signer directory cannot be inspected") from exc
+        if (not stat.S_ISDIR(info.st_mode)
+                or info.st_uid not in (0, os.getuid())
+                or (info.st_mode & 0o022
+                    and not (info.st_uid == 0 and info.st_mode & stat.S_ISVTX))):
+            raise OperatorError("UNSAFE_SIGNER", "Signer path has an unsafe ancestor")
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise OperatorError("UNSAFE_SIGNER", "Signing key path cannot be inspected") from exc
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+        raise OperatorError("UNSAFE_SIGNER", "Signer must be a unique owner-only regular file with mode 0600")
+    return True
+
+
+def environment(private_key_file: str | None = None) -> dict[str, Any]:
     if os.geteuid() == 0:
         raise OperatorError("UNSAFE_PRIVILEGE", "Release operator must run as a normal user")
     repo = root_path()
@@ -585,21 +635,7 @@ def environment() -> dict[str, Any]:
     if hashlib.sha256(trusted).hexdigest() != EXPECTED_FINGERPRINT:
         raise OperatorError("UNTRUSTED_SIGNER", "Publisher public key fingerprint mismatch")
     guard_state_dir(state_root())
-    private = Path.home() / "repocache-signing/repocache-release-private.pem"
-    # lstat, unlike exists(), detects dangling symlinks. This is only a
-    # read-only metadata snapshot: do not read or unlock the owner key here.
-    try:
-        signer_info = private.lstat()
-    except FileNotFoundError:
-        signer_present = False
-    except OSError as exc:
-        raise OperatorError("UNSAFE_SIGNER", "Signing key path cannot be inspected") from exc
-    else:
-        if (not stat.S_ISREG(signer_info.st_mode)
-                or signer_info.st_uid != os.getuid()
-                or stat.S_IMODE(signer_info.st_mode) != 0o600):
-            raise OperatorError("UNSAFE_SIGNER", "Signing key must be owner-only mode 0600")
-        signer_present = True
+    signer_present = signer_metadata_present(private_signer_path(private_key_file))
     return {"repository": REPO, "public_fingerprint": EXPECTED_FINGERPRINT,
             "private_key_present": signer_present,
             "status": "ready" if signer_present else "signer_missing"}
@@ -935,7 +971,7 @@ def read_passphrase(fd: int, *, timeout: float = 15.0) -> bytes:
                 pass
 
 
-def sign(version: str, fd: int) -> dict[str, Any]:
+def sign(version: str, fd: int, private_key_file: str | None = None) -> dict[str, Any]:
     if os.geteuid() == 0:
         raise OperatorError("UNSAFE_PRIVILEGE", "Release signer cannot run as root")
     record = read_state(version)
@@ -944,11 +980,9 @@ def sign(version: str, fd: int) -> dict[str, Any]:
     if record["phase"] != "prepared":
         raise OperatorError("ALREADY_SIGNED", "Signing requires a fresh explicit prepared candidate")
     verify_state(version, record)
-    private = Path.home() / "repocache-signing/repocache-release-private.pem"
-    if (private.is_symlink() or not private.is_file()
-            or private.stat().st_uid != os.getuid()
-            or private.stat().st_mode & 0o077):
-        raise OperatorError("UNSAFE_SIGNER", "Owner Ed25519 key must be private and mode 0600")
+    private = private_signer_path(private_key_file)
+    if not signer_metadata_present(private):
+        raise OperatorError("UNSAFE_SIGNER", "Owner signing key is missing")
     checkout = verify_checkout(version, record)
     password = read_passphrase(fd)
     scripts = checkout / "scripts"
@@ -1008,6 +1042,8 @@ def build_parser() -> SafeParser:
     env.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     ea = env.add_subparsers(dest="action", parser_class=SafeParser)
     ec = ea.add_parser("check", help="Check tools, trust anchor and signer path")
+    ec.add_argument("--signer-key-file", metavar="ABSOLUTE_PATH",
+                    help="Owner PEM file path (defaults to the legacy HOME path)")
     ec.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     candidate = objects.add_parser("candidate", help="Prepare and sign a reviewed candidate")
     candidate.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
@@ -1023,6 +1059,8 @@ def build_parser() -> SafeParser:
         p.add_argument("version")
         if action == "sign":
             p.add_argument("--passphrase-fd", required=True, type=int)
+            p.add_argument("--signer-key-file", metavar="ABSOLUTE_PATH",
+                           help="Owner PEM file path (defaults to the legacy HOME path)")
         if action == "status":
             p.add_argument("--acceptance-run-id", type=int)
         if action == "publish":
@@ -1048,13 +1086,14 @@ def main(argv: list[str] | None = None) -> int:
                     break
             return 0
         if values.object == "environment":
-            data = environment()
+            data = environment(values.signer_key_file)
         elif values.action in ("prepare", "sign", "stage", "publish"):
             with candidate_lock(values.version):
                 if values.action == "prepare":
                     data = prepare(values.version)
                 elif values.action == "sign":
-                    data = sign(values.version, values.passphrase_fd)
+                    data = sign(values.version, values.passphrase_fd,
+                                values.signer_key_file)
                 elif values.action == "stage":
                     data = stage(values.version)
                 else:
@@ -1072,7 +1111,14 @@ def main(argv: list[str] | None = None) -> int:
         # argparse --help is side-effect-free and exits 0.
         return int(exc.code or 0)
     except SyntaxErrorFromParser as exc:
-        err = OperatorError("INVALID_ARGUMENT", "Invalid command arguments: " + str(exc))
+        # An option supplied to the wrong action must not echo a private
+        # filesystem pathname in a JSON or human diagnostic.
+        has_signer_path = any(arg == "--signer-key-file"
+                              or arg.startswith("--signer-key-file=")
+                              for arg in args)
+        message = ("Invalid command arguments" if has_signer_path
+                   else "Invalid command arguments: " + str(exc))
+        err = OperatorError("INVALID_ARGUMENT", message)
         rc = 2
     except OperatorError as exc:
         err = exc

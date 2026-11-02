@@ -94,6 +94,32 @@ def test_missing_file_refused_without_printing_file_name(tmp_path):
     assert unavailable.name not in result.output
 
 
+def test_unreadable_file_is_refused_without_exposing_path_or_os_error(tmp_path, monkeypatch):
+    """Simulate EACCES regardless of runner UID (including root)."""
+    unreadable = tmp_path / "private-credential-file.json"
+    original = EXAMPLE.read_bytes()
+    unreadable.write_bytes(original)
+    actual_os_open = cli.os.open
+
+    def denied_open(path, flags, *args, **kwargs):
+        if Path(path) == unreadable:
+            raise PermissionError(13, "synthetic-access-denied", str(unreadable))
+        return actual_os_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(cli.os, "open", denied_open)
+    for json_mode in (True, False):
+        args = ["config", "validate", "--file", str(unreadable)]
+        if json_mode:
+            args.append("--json")
+        result = RUNNER.invoke(cli.app, args)
+        assert result.exit_code == 2, result.output
+        if json_mode:
+            assert json.loads(result.stdout)["error"]["code"] == "CONFIG_UNAVAILABLE"
+        assert unreadable.name not in result.output
+        assert "synthetic-access-denied" not in result.output
+    assert unreadable.read_bytes() == original
+
+
 def test_oversized_input_refused_without_exposing_its_data(tmp_path):
     huge = tmp_path / "huge.json"
     huge.write_bytes(b'{"data":"' + b"x" * (1024 * 1024 + 5) + b'"}')
