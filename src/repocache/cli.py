@@ -72,6 +72,7 @@ logs_app = typer.Typer(help="Read and follow logs", no_args_is_help=True)
 service_app = typer.Typer(help="NGINX status and safe operations", no_args_is_help=True)
 update_app = typer.Typer(help="Discover trusted GitHub Releases and manage server upgrades", no_args_is_help=False)
 config_app = typer.Typer(help="Configuration checks and discovery", no_args_is_help=True)
+deployment_app = typer.Typer(help="Read-only native deployment diagnostics", no_args_is_help=True)
 catalog_app = typer.Typer(help="Explicitly approved read-only repository catalog", no_args_is_help=True)
 app.add_typer(repos_app, name="repos")
 app.add_typer(repos_app, name="repo", hidden=True)
@@ -82,6 +83,7 @@ app.add_typer(logs_app, name="logs")
 app.add_typer(logs_app, name="log", hidden=True)
 app.add_typer(service_app, name="service")
 app.add_typer(config_app, name="config")
+app.add_typer(deployment_app, name="deployment")
 app.add_typer(catalog_app, name="catalog")
 app.add_typer(update_app, name="update")
 console = Console()
@@ -495,20 +497,18 @@ def config_check(ctx: typer.Context) -> None:
 
 
 
-@config_app.command("validate")
-def config_validate(
-    ctx: typer.Context,
-    file: Path = typer.Option(..., "--file", help="Read-only server-install v1 JSON input"),
-    json_output: bool = typer.Option(False, "--json", help="One bounded v1 JSON result"),
-) -> None:
-    """Validate a complete proposed server configuration without applying it."""
+def _read_server_install_request(
+    ctx: typer.Context, file: Path, json_output: bool,
+) -> dict:
+    """Bounded read-only v1 JSON parser shared by validate and preflight.
+
+    File failures are redacted before any host observation. A final symlink,
+    directory or blocking special file is never accepted as configuration.
+    """
     from repocache.server_install_v1 import (
         MAX_DOCUMENT_BYTES, InstallInputError, parse_install_bytes,
     )
 
-    # Open a bounded regular file without following a final symlink; never
-    # invoke install, NGINX, systemctl, network code or any privileged helper.
-    # Nonblocking open avoids hanging on untrusted FIFO/special paths.
     flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -521,10 +521,20 @@ def config_validate(
         _cli_error(ctx, "CONFIG_UNAVAILABLE", "Cannot read a regular configuration file.",
                    status=2, local_json=json_output)
     try:
-        candidate = parse_install_bytes(payload, for_apply=False)
+        return parse_install_bytes(payload, for_apply=False)
     except (InstallInputError, ValueError):
         _cli_error(ctx, "CONFIG_INVALID", "Configuration failed strict v1 validation.",
                    status=2, local_json=json_output)
+
+
+@config_app.command("validate")
+def config_validate(
+    ctx: typer.Context,
+    file: Path = typer.Option(..., "--file", help="Read-only server-install v1 JSON input"),
+    json_output: bool = typer.Option(False, "--json", help="One bounded v1 JSON result"),
+) -> None:
+    """Validate a complete proposed server configuration without applying it."""
+    candidate = _read_server_install_request(ctx, file, json_output)
     summary = {
         "ok": True, "status": "VALIDATION_ONLY",
         "kind": "repocache.server.install",
@@ -540,6 +550,53 @@ def config_validate(
         console.print("Validated server-install v1 input (read-only; no activation).")
         console.print(f"Repositories: {summary['repository_count']}")
         console.print("No NGINX configuration, service or catalog has been changed.")
+
+
+@deployment_app.command("preflight")
+def deployment_preflight(
+    ctx: typer.Context,
+    file: Path = typer.Option(..., "--file", help="Strict server-install v1 JSON input"),
+    json_output: bool = typer.Option(False, "--json", help="One redacted v1 JSON result"),
+) -> None:
+    """Report local host observations; never authorize or perform installation."""
+    # The configuration parser must succeed before *any* local host probing.
+    candidate = _read_server_install_request(ctx, file, json_output)
+    from repocache.server_host_checks_v1 import inspect_deployment_host
+    from repocache.server_preflight_guidance_v1 import explain_native_preflight
+    from repocache.server_install_v1 import InstallInputError
+
+    try:
+        report = inspect_deployment_host(candidate, intent="inspect")
+        guidance = explain_native_preflight(report)
+    except (InstallInputError, OSError, UnicodeError, TypeError, ValueError):
+        _cli_error(ctx, "PREFLIGHT_UNAVAILABLE",
+                   "Read-only native host observations could not be verified.",
+                   status=1, local_json=json_output)
+
+    # This stage deliberately cannot give a GO, even if every local probe PASSes:
+    # native package trust (#27), rollout/state ownership and execution gates
+    # are separate. A partial report must not be mistaken for a readiness token.
+    status = "FAIL" if report.has_failures else "NOT_VERIFIED"
+    message = ("Native preflight found a failed local check."
+               if report.has_failures else
+               "Native preflight is partial; installation is not authorized.")
+    result = {
+        "ok": False, "status": status,
+        "kind": "repocache.server.native-preflight.partial",
+        "can_install": False, "authorizes_installation": False,
+        "checks": list(guidance),
+        "error": {"code": "PREFLIGHT_NOT_READY", "message": message},
+    }
+    if _json_enabled(ctx, json_output):
+        emit_json(result)
+    else:
+        console.print("Read-only deployment preflight (no installation or activation).")
+        for item in guidance:
+            console.print(
+                f"{item['status']} [{item['code']}]: {item['guidance']}"
+            )
+        typer.echo(f"ERROR [PREFLIGHT_NOT_READY]: {message}", err=True)
+    raise typer.Exit(1)
 
 
 @config_app.command("show")

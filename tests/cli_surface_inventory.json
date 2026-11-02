@@ -13,6 +13,8 @@
     "config show",
     "config validate",
     "dashboard",
+    "deployment",
+    "deployment preflight",
     "health",
     "log",
     "log follow",
