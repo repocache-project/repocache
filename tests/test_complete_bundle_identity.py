@@ -1,4 +1,4 @@
-"""Exhaustive distributed-member identity regression for first-public v0.4.0.
+"""Exhaustive distributed-member identity regression for schema-1 release bundles.
 
 A source_digest based on selected installed files must never substitute for the
 SHA-256 of the complete signed archive. All approved distribution members are
@@ -15,7 +15,7 @@ import tarfile
 
 import pytest
 
-from repocache import upgrade
+from repocache import __version__, upgrade
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location(
@@ -24,7 +24,7 @@ builder = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 spec.loader.exec_module(builder)
 
-VERSION = "0.4.0"
+VERSION = __version__
 TAG = "v" + VERSION
 MEMBERS = tuple(builder.FILES)
 
