@@ -53,7 +53,8 @@ maintain upstream IP addresses manually when approved mirrors change DNS.
 | Semantic no-op detection and changed pin candidate | Draft PR #215; CI/independent review required |
 | Periodic daemon/timer with jitter, backoff and safe recovery | NOT IMPLEMENTED |
 | Protected state/ID authorization, locking, journalling and generation | NOT IMPLEMENTED |
-| Pinned NGINX rendering, TLS/SNI and SSRF enforcement, staging/reload | NOT IMPLEMENTED |
+| Deterministic candidate NGINX upstream/location fragments (literal IP, hostname TLS, redirect denial) | Draft pure renderer in PR #215; `nginx -t` check is conditional on a packaged NGINX installation; not production SSRF proof |
+| Actual pinned NGINX runtime enforcement, staging/reload/rollback | NOT IMPLEMENTED |
 | Atomic verified exposure and derived catalog, native cache HIT/integrity | NOT IMPLEMENTED |
 | Native Debian 13 + AlmaLinux 10 systemd/SELinux/NGINX evidence | NOT VERIFIED |
 
@@ -67,3 +68,9 @@ enable an operational command based only on this module.
 last-known-good configuration rather than authorizing new destinations.
 Availability is not guaranteed: old pins may stop working, and APT/DNF
 upstream fallback must be verified separately on actual clients.
+
+## Candidate fragment notes
+
+The bounded, purely functional `server_nginx_pin_render_v1.render_pinned_upstream_fragments` returns a proposed `http{}` upstream block and separate `server{}` route and redirect-denial locations. Both are **inactive strings**, not a trusted install document or deployed include. The input CA file reference and upstream URL path must be NGINX-directive-safe (no semicolons, whitespace, percent escaping, variables or shell syntax), in addition to the strict installation schema. Redirect responses (301/302/303/307/308) are intercepted and mapped to 502; `proxy_redirect off` alone would not have prevented a client from following an unapproved redirect. Only GET and HEAD are forwarded. TLS hostname/SNI comes from the approved upstream hostname, while the NGINX server group contains only numeric pinned IPs. No generic HTTP proxy is exposed.
+
+Integration must validate that the final managed NGINX configuration uses **only** these destinations; must not combine the fragments with dynamic host-based fallback. The CA bundle must be an existing, correctly owned, verified operating-system trust store; the path string alone is not evidence. Separately configure robust metadata/artifact freshness, APT/DNF signed metadata and cache correctness through the full #28/#95 engine. Do not install this fragment in a production listener until full native TLS tests, ownership, transaction rollback and catalog consistency are demonstrated.
