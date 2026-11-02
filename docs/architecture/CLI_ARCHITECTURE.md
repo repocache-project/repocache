@@ -274,6 +274,33 @@ repocache service reload --yes
 - `service reload --yes` retains acknowledgement from the existing command contract. `--yes` is not OS authorization. NGINX config validation precedes delegated reload; refuse unmanaged instances and unsafe paths. No global `sudo` privileges or generic privileged subprocess runner.
 - `config apply` owns only explicitly declared, validated managed files. It does not overwrite arbitrary operator NGINX configuration, trust stores, certificates, package-manager sources or unrelated service state.
 
+**Read-only server configuration validation (PR #209, #107, v0.6.0 increment):**
+
+```console
+repocache config validate --file server-install-v1.json
+repocache --json config validate --file server-install-v1.json
+repocache config validate --file server-install-v1.json --json
+```
+
+This noninteractive preflight accepts the strict **server-install v1 JSON** input
+contract (not YAML), uses the canonical parser with `for_apply=False`, and
+reads at most 1 MiB plus one byte from a regular file. Final symlinks, special
+files, unavailable/unreadable input and malformed or oversized documents fail
+closed with bounded, redacted errors (exit status 2). Finite JSON responses use
+the shared version-1 envelope; successful output contains only
+`VALIDATION_ONLY`, repository and active-intent counts, and
+`authorizes_installation=false`. No input configuration, secret, filename or
+upstream information is echoed.
+
+Validation never authorizes an active repository, checks the actual host,
+modifies managed files or state, generates catalog data, invokes `nginx -t`,
+reloads services, downloads packages, or provisions the server. The later
+`config apply` and `deployment install` commands remain distinct, dependent
+operations with their own security and acceptance gates under #18/#28/#95;
+their planned syntax below is **not** a claim of implementation. Real
+Debian 13 and AlmaLinux 10 operational provisioning is not validated by this
+read-only CLI increment.
+
 ### 4.5 Configuration, provisioning, application updates
 
 Three different change scopes:
