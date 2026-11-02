@@ -90,25 +90,13 @@ jobs:
               # Missing candidate state MUST not count as accepted or published.
               status_json="$(PYTHONPATH=/source/workstation/src /usr/bin/python3 -B \
                 -m repocache_release.cli candidate status v0.5.0 --json)"
-              printf '%s\n' "$status_json"
+              printf "%s\n" "$status_json"
               # Reject false PASS even if the CLI exits with code zero.
-              printf '%s\n' "$status_json" | /usr/bin/python3 -c '
-import json
-import sys
-actual = json.load(sys.stdin)
-expected = {
-    "ok": True,
-    "result": {
-        "acceptance": "NOT VERIFIED",
-        "phase": "absent",
-        "ready_to_publish": False,
-        "version": "v0.5.0",
-    },
-    "schema_version": 1,
-}
-if actual != expected:
-    raise SystemExit("FAIL: absent candidate was not reported as NOT VERIFIED")
-'
+              printf "%s\n" "$status_json" | /usr/bin/python3 -c \
+                "import json,sys; actual=json.load(sys.stdin); expected=dict(ok=True, result=dict(acceptance=\"NOT VERIFIED\", phase=\"absent\", ready_to_publish=False, version=\"v0.5.0\"), schema_version=1); sys.exit(0 if actual == expected else 1)" || {
+                echo "FAIL: absent candidate was not reported as NOT VERIFIED" >&2
+                exit 1
+              }
             '
       - name: Report acceptance boundary
         if: always()
