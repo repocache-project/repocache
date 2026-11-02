@@ -26,7 +26,8 @@ jobs:
       - name: Install test requirements
         run: python -m pip install -e . pytest
       - name: Run unit and Textual integration tests
-        run: python -m pytest -q
+        # Show the exact skip reason in required Python 3.12/3.13 job logs.
+        run: python -m pytest -q -rs
       # Required contract gate: any unreviewed public command/alias addition
       # fails the protected Python 3.12/3.13 CI matrix. Future grammar changes
       # require updating the reviewed inventory and the behavioral tests.
