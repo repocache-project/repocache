@@ -8,6 +8,7 @@ system nginx includes, firewall, systemd services or packages are altered.
 from __future__ import annotations
 
 import http.server
+import json
 import shutil
 import socket
 import ssl
@@ -20,7 +21,22 @@ from pathlib import Path
 
 import pytest
 
-from test_server_nginx_pin_render_v1 import render
+from repocache.server_nginx_pin_render_v1 import render_pinned_upstream_fragments
+
+EXAMPLE = Path(__file__).resolve().parents[1] / "docs/examples/server-install-v1.json"
+
+
+def render(*, ca):
+    document = json.loads(EXAMPLE.read_text(encoding="utf-8"))
+    document["repositories"][0]["desired_state"] = "active"
+    return render_pinned_upstream_fragments(
+        document,
+        repository_id="debian-trixie-main",
+        candidate_pins_by_host={
+            "mirror.example.invalid": ["8.8.8.8", "2001:4860:4860::8888"],
+        },
+        ca_bundle_path=ca,
+    )
 
 NGINX = shutil.which("nginx")
 OPENSSL = shutil.which("openssl")
