@@ -277,7 +277,8 @@ def test_cli_routes_ephemerally_signed_candidate_through_real_verifier(
     import subprocess
     import time
 
-    from repocache import signatures, upgrade, wheelhouse
+    from repocache import __version__, signatures, upgrade, wheelhouse
+    version = __version__
 
     root = Path(__file__).resolve().parents[1]
 
@@ -302,7 +303,7 @@ def test_cli_routes_ephemerally_signed_candidate_through_real_verifier(
 
     builder = load_module("cli_v1_signed_builder", root / "scripts/build_release.py")
     signer = load_module("cli_v1_signed_signer", root / "scripts/sign_release.py")
-    archive, checksum = builder.build_release(tmp_path / "output", "v0.4.0")
+    archive, checksum = builder.build_release(tmp_path / "output", "v" + version)
     wheel_file = archive.with_name(archive.name + ".wheelhouse.tar.gz")
     wheel_file.write_bytes(b"ephemeral wheelhouse placeholder, not executable")
     now = int(time.time())
@@ -343,23 +344,23 @@ def test_cli_routes_ephemerally_signed_candidate_through_real_verifier(
     def record_installer(source, **kwargs):
         installed.append(kwargs)
         assert (source / "pyproject.toml").is_file()
-        return {"ok": True, "status": "installed", "version": "0.4.0",
+        return {"ok": True, "status": "installed", "version": version,
                 "previous_version": "0.0.0"}
 
     monkeypatch.setattr(updater, "install_source", record_installer)
     result = CliRunner().invoke(cli.app, [
-        "update", "install", "0.4.0", "--json",
+        "update", "install", version, "--json",
         "--bundle", str(archive), "--checksum", str(checksum),
         "--manifest", str(manifest), "--signature", str(signature),
         "--wheelhouse", str(wheel_file),
     ])
     assert result.exit_code == 0, result.output
-    assert json.loads(result.stdout)["version"] == "0.4.0"
+    assert json.loads(result.stdout)["version"] == version
     assert len(installed) == 1
     identity = installed[0]["release_identity"]
     assert identity["archive_sha256"] == hashlib.sha256(archive.read_bytes()).hexdigest()
     assert identity["publisher_key_id"] == "ci-ephemeral"
-    assert installed[0]["release_policy"]["version"] == "0.4.0"
+    assert installed[0]["release_policy"]["version"] == version
 
 
 
