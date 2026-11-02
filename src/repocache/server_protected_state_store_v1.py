@@ -393,11 +393,17 @@ def _recover_locked(directory: int, uid: int) -> str:
     if _hash(current) not in (next_digest, _hash(previous)):
         _fail("PROTECTED_RECOVERY_DRIFT")
     stage = _read_file(directory, STAGE_NAME, uid, MAX_STATE_BYTES)
-    if stage is not None and _hash(stage) != next_digest:
+    if stage is not None and _hash(stage) != next_digest and current != previous:
+        # A partial stage is normal only BEFORE the state replacement. Once
+        # the new state is present the stage should already have been renamed.
         _fail("PROTECTED_RECOVERY_DRIFT")
     rollback = _read_file(directory, ROLLBACK_NAME, uid, MAX_STATE_BYTES)
     if rollback is not None and rollback != previous:
-        _fail("PROTECTED_RECOVERY_DRIFT")
+        # A prior recovery can crash while writing its replacement backup.
+        # The fixed root-owned temp can be discarded and rebuilt; NEVER
+        # discard drift in the authoritative state file itself.
+        _unlink_known(directory, ROLLBACK_NAME, rollback, uid, MAX_STATE_BYTES)
+        rollback = None
     if current != previous:
         if previous is None:
             if current is None:
