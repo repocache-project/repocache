@@ -7,9 +7,47 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
 import sys
 
 from repocache.server_native_package_trust_v1 import inspect_native_nginx_metadata
+
+
+def classified_ci_runner(args, **kwargs):
+    """Print bounded *boolean* CI diagnostics; never log native output."""
+    process = subprocess.run(args, **kwargs)
+    if process.returncode:
+        combined = (process.stdout + process.stderr).casefold()
+        signals = {
+            "apt_config_error": any(word in combined for word in (
+                "conflicting values", "invalid option", "configuration error",
+                "unsupported filetype", "ignoring keyring",
+            )),
+            "signature_failure": any(word in combined for word in (
+                "not signed", "no_pubkey", "signature", "gpg error",
+                "public key is not available",
+            )),
+            "network_or_tls_failure": any(word in combined for word in (
+                "could not resolve", "certificate", "tls", "failed to fetch",
+                "temporary failure", "could not connect",
+            )),
+            "repository_metadata_parse_failure": any(word in combined for word in (
+                "repomd", "parse error", "failed to download metadata",
+            )),
+            "option_unrecognized": any(word in combined for word in (
+                "unknown argument", "unknown option", "unrecognized",
+                "invalid option",
+            )),
+            "permission_failure": any(word in combined for word in (
+                "permission denied", "could not open lock",
+            )),
+        }
+        print(json.dumps({
+            "ci_native_manager_stage": args[-1],
+            "return_code": process.returncode,
+            "signals": signals,
+        }, sort_keys=True), flush=True)
+    return process
 
 
 def main() -> int:
@@ -22,6 +60,7 @@ def main() -> int:
         os_release=release,
         python_version=(sys.version_info.major, sys.version_info.minor),
         document=document,
+        runner=classified_ci_runner,
     ).to_dict()
     # The report is static/redacted; do not print native stdout/stderr, URL,
     # package key material, host source definitions, or files from the cache.
