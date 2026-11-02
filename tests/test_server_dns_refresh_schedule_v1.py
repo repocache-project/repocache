@@ -68,6 +68,42 @@ def test_not_due_does_not_query_dns_or_stage_changes():
     assert next_tick["slot"] == first["slot"]
 
 
+def test_untrusted_future_slot_cannot_suspend_periodic_dns_indefinitely():
+    """A forged hint is never a durable lease or a source of authorization."""
+    future = RefreshSlot("debian-trixie-main", 0, 1e14, 0)
+    observed = []
+
+    def counted(*args, **kwargs):
+        observed.append(True)
+        return answer(*args, **kwargs)
+
+    refresh = tick(now=1000.0, slot=future, resolver=counted)
+    assert refresh["status"] == "PIN_CHANGE_CANDIDATE"
+    assert observed == [True]
+    assert refresh["slot"].next_due <= 1360
+    assert refresh["authorizes_nginx_activation"] is False
+
+    # A forged retry with the maximum valid failure count cannot lock out
+    # periodic refresh either. It is abandoned rather than trusting a date.
+    retry = RefreshSlot("debian-trixie-main", 0, 1e14, 12)
+    observed.clear()
+    attempted = tick(now=1000.0, slot=retry, resolver=counted)
+    assert attempted["status"] == "PIN_CHANGE_CANDIDATE"
+    assert attempted["slot"].failures == 0
+    assert observed == [True]
+
+
+def test_valid_future_retry_slot_still_defers_work():
+    slot = RefreshSlot("debian-trixie-main", 0, 4600.0, 12)
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("bounded retry deadline must be respected")
+
+    result = tick(now=1000.0, slot=slot, resolver=forbidden)
+    assert result["status"] == "NOT_DUE"
+    assert result["slot"] == slot
+
+
 def test_identical_pins_reset_backoff_and_skip_reactivation():
     first = tick()
     second = tick(
