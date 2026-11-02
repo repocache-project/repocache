@@ -195,7 +195,7 @@ def test_distro_sources_are_fixed_and_signature_checks_not_optional(tmp_path):
     root.mkdir()
     update, query = native._apt_commands(root)
     source = (root / "sources.list").read_text(encoding="ascii")
-    assert "signed-by=/usr/share/keyrings/debian-archive-keyring.gpg" in source
+    assert "signed-by=/usr/share/keyrings/debian-archive-keyring.pgp" in source
     assert source.count("deb [signed-by=") == 3
     assert "example.invalid" not in source
     assert "trusted=yes" not in source
@@ -238,3 +238,20 @@ def test_trust_anchor_rejects_symlink_and_unprivileged_ancestors(
         SimpleNamespace(st_uid=0, st_mode=stat.S_IFLNK | 0o777, st_size=42)
         if str(path) == "/etc/pki/rpm-gpg/KEY" else good)
     assert not native._trusted_key("/etc/pki/rpm-gpg/KEY")
+
+
+def test_debian_key_path_must_be_real_root_owned_regular_file(monkeypatch):
+    """A distro-supplied symlink is not an acceptable verified key path."""
+    assert native._NATIVE["debian"][2] == (
+        "/usr/share/keyrings/debian-archive-keyring.pgp"
+    )
+    key = native._NATIVE["debian"][2]
+    root = SimpleNamespace(st_uid=0, st_mode=stat.S_IFDIR | 0o755, st_size=4096)
+    proper = SimpleNamespace(st_uid=0, st_mode=stat.S_IFREG | 0o644, st_size=128)
+    link = SimpleNamespace(st_uid=0, st_mode=stat.S_IFLNK | 0o777, st_size=128)
+    monkeypatch.setattr(native.os, "lstat",
+                        lambda name: proper if str(name) == key else root)
+    assert native._trusted_key(key) is True
+    monkeypatch.setattr(native.os, "lstat",
+                        lambda name: link if str(name) == key else root)
+    assert native._trusted_key(key) is False
