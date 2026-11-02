@@ -178,3 +178,24 @@ def test_safe_root_https_path_and_uppercase_hostname():
     result = render(doc=doc)
     assert "proxy_pass https://repocache_pin_debian_trixie_main/;" in result["server_location_fragment"]
     assert "proxy_ssl_name mirror.example.invalid;" in result["server_location_fragment"]
+
+
+def test_dnf_baseos_candidate_renders_from_metadata_without_source_changes():
+    doc = document()
+    doc["repositories"][1]["id"] = "almalinux-baseos"
+    doc["repositories"][1]["desired_state"] = "active"
+    before = copy.deepcopy(doc)
+    output = render_pinned_upstream_fragments(
+        doc,
+        repository_id="almalinux-baseos",
+        candidate_pins_by_host={HOST: ["8.8.8.8"]},
+        ca_bundle_path=CA,
+    )
+    assert "server 8.8.8.8:443;" in output["http_upstream_fragment"]
+    assert (
+        "proxy_pass https://repocache_pin_almalinux_baseos/"
+        "almalinux/10/BaseOS/x86_64/os/;"
+    ) in output["server_location_fragment"]
+    assert "proxy_ssl_verify on;" in output["server_location_fragment"]
+    assert output["authorizes_nginx_activation"] is False
+    assert doc == before
