@@ -9,6 +9,7 @@ ownership gates have passed. No hostname-based runtime resolution.
 from __future__ import annotations
 
 import ipaddress
+import re
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -42,6 +43,10 @@ def render_pinned_upstream_fragments(
         if type(ca_bundle_path) is not str or len(ca_bundle_path) > 2048:
             raise PinnedNginxError("CA reference: invalid")
         _path(ca_bundle_path, "CA reference")
+        # NGINX directives are not shell commands: semicolons, quotes and
+        # whitespace still permit configuration injection if not rejected.
+        if re.fullmatch(r"/[A-Za-z0-9_./+-]+", ca_bundle_path, re.ASCII) is None:
+            raise PinnedNginxError("CA reference: unsafe syntax")
         inspect_upstream_address_snapshot(
             doc, repository_id=repository_id,
             answers_by_host=candidate_pins_by_host,
@@ -62,6 +67,8 @@ def render_pinned_upstream_fragments(
         if (not hostname or upstream_url.scheme != "https"
                 or hostname not in repo["upstream"]["allowed_hosts"]):
             raise ValueError("invalid origin")
+        if re.fullmatch(r"/[A-Za-z0-9_./+-]*/", upstream_url.path, re.ASCII) is None:
+            raise ValueError("NGINX-unsafe origin path")
         ip_set = candidate_pins_by_host[hostname]
         addresses = sorted(
             {ipaddress.ip_address(raw) for raw in ip_set},
