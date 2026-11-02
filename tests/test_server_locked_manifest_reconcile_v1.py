@@ -279,3 +279,88 @@ def test_errors_never_echo_sensitive_bytes(layout):
         inspect(layout)
     assert payload.decode() not in str(err.value)
     assert str(layout[2]) not in str(err.value)
+
+
+def test_current_namespace_root_entry_rejects_unprivileged_without_open(
+    monkeypatch,
+):
+    import repocache.server_locked_manifest_reconcile_v1 as module
+    monkeypatch.setattr(module.os, "geteuid", lambda: 1001)
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("must not open any host path")
+    monkeypatch.setattr(module.os, "open", unexpected)
+    with pytest.raises(
+        LockedManifestInspectionError, match="ROOT_PRIVILEGE_REQUIRED"
+    ):
+        module.inspect_current_namespace_locked_manifest(expected_generation=0)
+
+
+@pytest.mark.parametrize("bad", [True, -1, None, "1", 2**63])
+def test_current_namespace_root_entry_validates_generation_before_open(
+    monkeypatch, bad,
+):
+    import repocache.server_locked_manifest_reconcile_v1 as module
+    monkeypatch.setattr(module.os, "geteuid", lambda: 0)
+    with pytest.raises(
+        LockedManifestInspectionError, match="ARGUMENT_INVALID"
+    ):
+        module.inspect_current_namespace_locked_manifest(expected_generation=bad)
+
+
+def test_current_namespace_root_entry_pins_real_root_before_and_after(
+    monkeypatch,
+):
+    import repocache.server_locked_manifest_reconcile_v1 as module
+    monkeypatch.setattr(module.os, "geteuid", lambda: 0)
+    visited = []
+
+    def observe(fd, *, owner_uid, expected_generation):
+        assert owner_uid == 0
+        assert expected_generation == 6
+        assert os.fstat(fd).st_ino == os.stat("/").st_ino
+        visited.append(os.fstat(fd).st_ino)
+        return {
+            "authorizes_write": False,
+            "authorizes_nginx_reload": False,
+            "authorizes_catalog_publication": False,
+        }
+    monkeypatch.setattr(module, "_inspect_locked_under_root", observe)
+    report = module.inspect_current_namespace_locked_manifest(
+        expected_generation=6
+    )
+    assert report["current_namespace_root_path_verified"] is True
+    assert report["authorizes_write"] is False
+    assert report["authorizes_nginx_reload"] is False
+    assert report["authorizes_catalog_publication"] is False
+    assert len(visited) == 1
+
+
+def test_current_namespace_root_entry_rejects_caller_root_substitution(
+    layout, monkeypatch,
+):
+    import repocache.server_locked_manifest_reconcile_v1 as module
+    fd, _, _, _ = layout
+    real_open = os.open
+    monkeypatch.setattr(module.os, "geteuid", lambda: 0)
+
+    def substitute(path, flags, *args, **kwargs):
+        if path == "/":
+            return os.dup(fd)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, "open", substitute)
+    with pytest.raises(
+        LockedManifestInspectionError,
+        match="ROOT_(CHANGED|UNVERIFIED)",
+    ):
+        module.inspect_current_namespace_locked_manifest(
+            expected_generation=0
+        )
+
+
+def test_current_namespace_root_fd_is_not_a_fixture_authorization(layout):
+    import repocache.server_locked_manifest_reconcile_v1 as module
+    fd, _, _, _ = layout
+    with pytest.raises(LockedManifestInspectionError):
+        module._verify_current_root_fd(fd)
