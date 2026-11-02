@@ -26,6 +26,7 @@ from repocache.server_protected_state_inspect_v1 import (
 STATE_NAME = "state-v1.json"
 LOCK_NAME = ".state-v1.lock"
 JOURNAL_NAME = ".state-v1.pending"
+JOURNAL_TMP_NAME = ".state-v1.pending-tmp"
 STAGE_NAME = ".state-v1.stage"
 ROLLBACK_NAME = ".state-v1.rollback"
 MAX_STATE_BYTES = 1024 * 1024
@@ -296,6 +297,27 @@ def _journal(previous: bytes | None, proposed: bytes) -> bytes:
     return _canonical(value, limit=MAX_JOURNAL_BYTES)
 
 
+def _install_journal(directory: int, uid: int, previous: bytes | None,
+                     proposed: bytes,
+                     inject_fault: Callable[[str], None] | None) -> None:
+    # The journal file is published ONLY after a complete fsynced temporary
+    # inode exists. A crash during temporary creation leaves state unchanged.
+    raw = _journal(previous, proposed)
+    _write_exclusive(directory, JOURNAL_TMP_NAME, raw, uid, MAX_JOURNAL_BYTES)
+    if inject_fault is not None:
+        inject_fault("journal_tmp_durable")
+    try:
+        if _read_file(directory, JOURNAL_NAME, uid, MAX_JOURNAL_BYTES) is not None:
+            _fail("PROTECTED_JOURNAL_CONFLICT")
+        os.replace(JOURNAL_TMP_NAME, JOURNAL_NAME,
+                   src_dir_fd=directory, dst_dir_fd=directory)
+        os.fsync(directory)
+    except ProtectedStateStoreError:
+        raise
+    except OSError:
+        _fail("PROTECTED_JOURNAL_IO_REFUSED")
+
+
 def _read_journal(directory: int, uid: int) -> tuple[bytes | None, str, bytes] | None:
     raw = _read_file(directory, JOURNAL_NAME, uid, MAX_JOURNAL_BYTES)
     if raw is None:
@@ -326,12 +348,21 @@ def _read_journal(directory: int, uid: int) -> tuple[bytes | None, str, bytes] |
 
 def _recover_locked(directory: int, uid: int) -> str:
     journal = _read_journal(directory, uid)
+    temp = _read_file(directory, JOURNAL_TMP_NAME, uid, MAX_JOURNAL_BYTES)
     if journal is None:
         if _read_file(directory, STAGE_NAME, uid, MAX_STATE_BYTES) is not None:
             _fail("PROTECTED_ORPHAN_STAGE_REQUIRES_REVIEW")
         if _read_file(directory, ROLLBACK_NAME, uid, MAX_STATE_BYTES) is not None:
             _fail("PROTECTED_ORPHAN_ROLLBACK_REQUIRES_REVIEW")
+        if temp is not None:
+            # No published journal means the state rename cannot have started.
+            # Verify the current state and discard ONLY the owned fixed temp.
+            _read_state(directory, uid)
+            _unlink_known(directory, JOURNAL_TMP_NAME, temp, uid, MAX_JOURNAL_BYTES)
+            return "DISCARDED_UNPUBLISHED_JOURNAL"
         return "CLEAN"
+    if temp is not None:
+        _fail("PROTECTED_ORPHAN_JOURNAL_TEMP_REQUIRES_REVIEW")
     previous, next_digest, journal_bytes = journal
     current = _read_file(directory, STATE_NAME, uid, MAX_STATE_BYTES)
     if _hash(current) not in (next_digest, _hash(previous)):
@@ -387,7 +418,9 @@ def _commit_under_root(root_fd: int, candidate: dict[str, Any], *,
         if _read_journal(directory, owner_uid) is not None:
             _fail("PROTECTED_RECOVERY_REQUIRED")
         if (_read_file(directory, STAGE_NAME, owner_uid, MAX_STATE_BYTES) is not None
-                or _read_file(directory, ROLLBACK_NAME, owner_uid, MAX_STATE_BYTES) is not None):
+                or _read_file(directory, ROLLBACK_NAME, owner_uid, MAX_STATE_BYTES) is not None
+                or _read_file(directory, JOURNAL_TMP_NAME, owner_uid,
+                              MAX_JOURNAL_BYTES) is not None):
             _fail("PROTECTED_ORPHAN_STAGE_REQUIRES_REVIEW")
         existing, previous = _read_state(directory, owner_uid)
         generation = 0 if existing is None else existing["state_generation"]
@@ -412,8 +445,7 @@ def _commit_under_root(root_fd: int, candidate: dict[str, Any], *,
                 _fail("PROTECTED_REPOSITORY_ID_REASSIGNMENT_OR_REMOVAL")
         # Journalling BEFORE replacing the protected state makes an uncommitted
         # state always recoverable to its exact prior canonical bytes.
-        _write_exclusive(directory, JOURNAL_NAME,
-                         _journal(previous, raw), owner_uid, MAX_JOURNAL_BYTES)
+        _install_journal(directory, owner_uid, previous, raw, inject_fault)
         if inject_fault is not None:
             inject_fault("journal_durable")
         _write_exclusive(directory, STAGE_NAME, raw, owner_uid, MAX_STATE_BYTES)
