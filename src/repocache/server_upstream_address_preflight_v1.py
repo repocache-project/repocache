@@ -33,7 +33,8 @@ def inspect_upstream_address_snapshot(
     filesystem or process side effect happens here.
     """
     validated = validate_install_document(document, for_apply=True)
-    if (type(repository_id) is not str or len(repository_id) > 48\n            or ID.fullmatch(repository_id) is None):
+    if (type(repository_id) is not str or len(repository_id) > 48
+            or ID.fullmatch(repository_id) is None):
         raise UpstreamAddressError("repository_id: invalid")
     matching = [item for item in validated["repositories"]
                 if item.get("id") == repository_id]
@@ -62,8 +63,8 @@ def inspect_upstream_address_snapshot(
             raise UpstreamAddressError("DNS snapshot: missing or unbounded addresses")
         checked: set[str] = set()
         for value in addresses:
-            if (type(value) is not str or not value.isascii()
-                    or not 1 <= len(value) <= 45 or "%" in value):
+            if (type(value) is not str or not 1 <= len(value) <= 45
+                    or not value.isascii() or "%" in value):
                 raise UpstreamAddressError("DNS snapshot: invalid IP address")
             try:
                 address = ipaddress.ip_address(value)
