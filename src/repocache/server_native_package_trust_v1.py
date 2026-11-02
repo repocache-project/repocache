@@ -147,7 +147,7 @@ def _apt_commands(work: Path) -> tuple[list[str], list[str]]:
 
 
 def _dnf_commands(work: Path) -> tuple[list[str], list[str]]:
-    """Isolated DNF repository metadata with mandatory OpenPGP verification."""
+    """Isolated AlmaLinux 10 DNF4 metadata with mandatory OpenPGP checks."""
     repodir = work / "repos"
     repodir.mkdir(mode=0o700)
     (work / "root").mkdir(mode=0o700)
@@ -155,17 +155,20 @@ def _dnf_commands(work: Path) -> tuple[list[str], list[str]]:
     (work / "log").mkdir(mode=0o700)
     (work / "persist").mkdir(mode=0o700)
     (work / "vars").mkdir(mode=0o700)
+    # AlmaLinux 10 ships DNF4: its '--noplugins', '--disablerepo' and
+    # 'gpgcheck' syntax differs from DNF5. DNF4 does not support the DNF5
+    # pkg_gpgcheck option, so require native DNF4 gpgcheck=1 instead.
     # Only distribution-selected HTTPS endpoints and root-owned OS signing
     # key; never reuse third-party enabled host repositories or host DNF cache.
     (repodir / "repocache.repo").write_text(
         "[rc-baseos]\nname=AlmaLinux 10 BaseOS\n"
         "baseurl=https://repo.almalinux.org/almalinux/10/BaseOS/$basearch/os/\n"
-        "enabled=1\ngpgcheck=1\npkg_gpgcheck=1\nrepo_gpgcheck=1\n"
+        "enabled=1\ngpgcheck=1\nrepo_gpgcheck=1\n"
         "sslverify=1\nskip_if_unavailable=0\n"
         "gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-AlmaLinux-10\n"
         "[rc-appstream]\nname=AlmaLinux 10 AppStream\n"
         "baseurl=https://repo.almalinux.org/almalinux/10/AppStream/$basearch/os/\n"
-        "enabled=1\ngpgcheck=1\npkg_gpgcheck=1\nrepo_gpgcheck=1\n"
+        "enabled=1\ngpgcheck=1\nrepo_gpgcheck=1\n"
         "sslverify=1\nskip_if_unavailable=0\n"
         "gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-AlmaLinux-10\n",
         encoding="ascii",
@@ -179,7 +182,7 @@ def _dnf_commands(work: Path) -> tuple[list[str], list[str]]:
         f"logdir={work / 'log'}\n"
         f"persistdir={work / 'persist'}\n"
         f"varsdir={work / 'vars'}\n"
-        "gpgcheck=1\npkg_gpgcheck=1\nrepo_gpgcheck=1\n"
+        "gpgcheck=1\nrepo_gpgcheck=1\n"
         "sslverify=1\nskip_if_unavailable=0\nbest=1\nplugins=0\n",
         encoding="ascii",
     )
@@ -192,15 +195,16 @@ def _dnf_commands(work: Path) -> tuple[list[str], list[str]]:
         f"--setopt=logdir={work / 'log'}",
         f"--setopt=persistdir={work / 'persist'}",
         f"--setopt=varsdir={work / 'vars'}",
-        "--repo=rc-baseos,rc-appstream",
-        "--no-plugins",
+        "--disablerepo=*",
+        "--enablerepo=rc-baseos,rc-appstream",
+        "--noplugins",
         "--setopt=skip_if_unavailable=0",
         "--setopt=sslverify=1",
         "--setopt=plugins=0",
         "--setopt=rc-baseos.repo_gpgcheck=1",
         "--setopt=rc-appstream.repo_gpgcheck=1",
-        "--setopt=rc-baseos.pkg_gpgcheck=1",
-        "--setopt=rc-appstream.pkg_gpgcheck=1",
+        "--setopt=rc-baseos.gpgcheck=1",
+        "--setopt=rc-appstream.gpgcheck=1",
         "--assumeyes",
     ]
     return ([*args, "makecache", "--refresh"],
