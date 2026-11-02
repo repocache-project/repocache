@@ -149,3 +149,25 @@ def test_packaged_nginx_accepts_fragments_without_activation(tmp_path):
         capture_output=True, text=True, timeout=10, check=False,
     )
     assert observed.returncode == 0, observed.stderr
+
+
+def test_non_default_https_port_and_url_path_are_preserved():
+    doc = document()
+    doc["repositories"][0]["upstream"]["base_url"] = (
+        "https://mirror.example.invalid:8443/repo~stable/"
+    )
+    result = render(doc=doc)
+    assert "server 8.8.8.8:8443;" in result["http_upstream_fragment"]
+    assert "server [2001:4860:4860::8888]:8443;" in result["http_upstream_fragment"]
+    assert "proxy_pass https://repocache_pin_debian_trixie_main/repo~stable;" not in result["server_location_fragment"]
+    assert "proxy_pass https://repocache_pin_debian_trixie_main/repo~stable/;" in result["server_location_fragment"]
+    assert "proxy_set_header Host mirror.example.invalid:8443;" in result["server_location_fragment"]
+    assert "proxy_ssl_name mirror.example.invalid;" in result["server_location_fragment"]
+
+
+def test_safe_root_https_path_and_uppercase_hostname():
+    doc = document()
+    doc["repositories"][0]["upstream"]["base_url"] = "https://MIRROR.EXAMPLE.INVALID/"
+    result = render(doc=doc)
+    assert "proxy_pass https://repocache_pin_debian_trixie_main/;" in result["server_location_fragment"]
+    assert "proxy_ssl_name mirror.example.invalid;" in result["server_location_fragment"]
