@@ -445,6 +445,10 @@ def _commit_under_root(root_fd: int, candidate: dict[str, Any], *,
     if not _number(expected_generation):
         _fail("PROTECTED_EXPECTED_GENERATION_INVALID")
     raw = _canonical(candidate, limit=MAX_STATE_BYTES)
+    # Do not consult mutable caller-owned objects after serializing: a separate
+    # thread must not change generation/identity checks for the bytes committed.
+    candidate = _json(raw, limit=MAX_STATE_BYTES)
+    validate_protected_state(candidate)
     with _locked(root_fd, owner_uid) as directory:
         if _read_journal(directory, owner_uid) is not None:
             _fail("PROTECTED_RECOVERY_REQUIRED")
