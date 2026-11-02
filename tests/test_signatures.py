@@ -181,12 +181,14 @@ def test_unsigned_offline_bundle_cannot_execute_install_hook(tmp_path, monkeypat
 
 def test_valid_signed_offline_bundle_verifies_before_source_install(tmp_path, keys, monkeypatch):
     private, _ = keys
+    from repocache import __version__
+    version = __version__
     root = Path(__file__).resolve().parents[1]
     module = root / "scripts" / "build_release.py"
     spec = importlib.util.spec_from_file_location("build_signed_test", module)
     builder = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(builder)
-    archive, checksum = builder.build_release(tmp_path / "out", "v0.4.0")
+    archive, checksum = builder.build_release(tmp_path / "out", "v" + version)
     signer_module = root / "scripts" / "sign_release.py"
     spec2 = importlib.util.spec_from_file_location("offline_signer", signer_module)
     signer = importlib.util.module_from_spec(spec2)
@@ -206,9 +208,9 @@ def test_valid_signed_offline_bundle_verifies_before_source_install(tmp_path, ke
     called = []
     def install(source, **kw):
         called.append((source, kw))
-        return {"version": "0.4.0", "status": "installed"}
+        return {"version": version, "status": "installed"}
     monkeypatch.setattr(updater, "install_source", install)
-    result = upgrade.upgrade("0.4.0", archive, checksum,
+    result = upgrade.upgrade(version, archive, checksum,
                             system={"ID": "debian", "VERSION_ID": "13"})
     assert result["status"] == "installed"
     assert len(called) == 1
@@ -220,6 +222,6 @@ def test_valid_signed_offline_bundle_verifies_before_source_install(tmp_path, ke
     manifest.write_bytes(wrong_policy)
     detached.write_bytes(_sign(wrong_policy, private, tmp_path))
     with pytest.raises(upgrade.UpgradeError, match="policy digest mismatch"):
-        upgrade.upgrade("0.4.0", archive, checksum,
+        upgrade.upgrade(version, archive, checksum,
                         system={"ID": "debian", "VERSION_ID": "13"})
     assert len(called) == 1
