@@ -139,7 +139,7 @@ def test_packaged_nginx_accepts_fragments_without_activation(tmp_path):
     conf.write_text(
         f"pid {tmp_path / 'nginx.pid'};\n"
         f"error_log {tmp_path / 'error.log'} notice;\n"
-        "events {}\nhttp {\n"
+        "events {}\nhttp { access_log off;\n"
         + candidate["http_upstream_fragment"]
         + "server { listen 127.0.0.1:19991;\n"
         + candidate["server_location_fragment"]
