@@ -108,8 +108,10 @@ def _safe_existing_ancestor(path: str) -> tuple[str | None, str]:
     Returns the closest existing directory and a static classification.
     Ownership cannot be inferred even for an otherwise safe path.
     """
-    parts = path.split("/")[1:]
-    if not parts or any(not part or part in (".", "..") for part in parts):
+    # A TLS file directly below / has / as its legitimate parent. Inspect
+    # root metadata below instead of treating this canonical path as unsafe.
+    parts = [] if path == "/" else path.split("/")[1:]
+    if path != "/" and (not parts or any(not part or part in (".", "..") for part in parts)):
         return None, "UNSAFE_STORAGE_PATH"
     current = "/"
     last_directory = "/"

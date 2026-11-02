@@ -621,3 +621,77 @@ def test_root_directory_metadata_is_checked_and_fail_closed(monkeypatch):
     assert directory is None and code == "STORAGE_PATH_ACCESS_UNVERIFIED"
 
 
+def test_root_only_tls_parent_is_observed_without_false_unsafe_failure(monkeypatch):
+    """RC-196-05: / is a canonical parent, not an unsafe path by itself."""
+    import stat
+
+    seen = []
+
+    def virtual_lstat(path):
+        seen.append(path)
+        if path == "/":
+            return SimpleNamespace(st_mode=stat.S_IFDIR | 0o755)
+        if path == "/chain.pem":
+            return SimpleNamespace(st_mode=stat.S_IFREG | 0o644)
+        if path == "/private.key":
+            return SimpleNamespace(st_mode=stat.S_IFREG | 0o600)
+        raise AssertionError("Unexpected path inspection")
+
+    monkeypatch.setattr(
+        host, "os", SimpleNamespace(path=os.path, lstat=virtual_lstat)
+    )
+    assert host._safe_existing_ancestor("/") == (
+        "/", "EXISTING_PATH_OWNERSHIP_UNVERIFIED"
+    )
+    result = host._tls_reference_check(
+        spec(tls_certificate_file="/chain.pem", tls_private_key_file="/private.key")
+    )
+    assert (result.status, result.code) == (
+        PreflightStatus.NOT_VERIFIED, "TLS_REFERENCE_MODES_OBSERVED_ONLY"
+    )
+    assert seen == ["/", "/", "/chain.pem", "/", "/private.key"]
+
+
+@pytest.mark.parametrize(
+    ("root_mode", "expected"),
+    [
+        (0o775, (PreflightStatus.FAIL, "TLS_REFERENCE_PARENT_UNSAFE")),
+        (0o777, (PreflightStatus.FAIL, "TLS_REFERENCE_PARENT_UNSAFE")),
+    ],
+)
+def test_root_only_tls_parent_rejects_unsafe_root(monkeypatch, root_mode, expected):
+    """A safe path syntax must not bypass root-directory mode checks."""
+    import stat
+
+    inspected = []
+
+    def virtual_lstat(path):
+        inspected.append(path)
+        assert path == "/"
+        return SimpleNamespace(st_mode=stat.S_IFDIR | root_mode)
+
+    monkeypatch.setattr(
+        host, "os", SimpleNamespace(path=os.path, lstat=virtual_lstat)
+    )
+    result = host._tls_reference_check(
+        spec(tls_certificate_file="/chain.pem", tls_private_key_file="/private.key")
+    )
+    assert (result.status, result.code) == expected
+    assert inspected == ["/", "/"]
+
+
+def test_root_only_tls_parent_denied_stays_unverified(monkeypatch):
+    """Inaccessible root metadata is not silently upgraded to a PASS."""
+    def virtual_lstat(path):
+        assert path == "/"
+        raise PermissionError("root metadata unavailable")
+
+    monkeypatch.setattr(
+        host, "os", SimpleNamespace(path=os.path, lstat=virtual_lstat)
+    )
+    result = host._tls_reference_check(
+        spec(tls_certificate_file="/chain.pem", tls_private_key_file="/private.key")
+    )
+    assert (result.status, result.code) == (
+        PreflightStatus.NOT_VERIFIED, "TLS_REFERENCE_ACCESS_UNVERIFIED"
+    )
