@@ -2,8 +2,24 @@ name: Server NGINX Pins Native
 
 on:
   pull_request:
+    paths:
+      - '.github/workflows/server-nginx-pins-native.yml'
+      - 'src/repocache/server_install_v1.py'
+      - 'src/repocache/server_upstream_address_preflight_v1.py'
+      - 'src/repocache/server_upstream_rotation_v1.py'
+      - 'src/repocache/server_nginx_pin_render_v1.py'
+      - 'tests/test_server_nginx_pin_*'
+      - 'tests/test_server_upstream_*'
   push:
     branches: [main]
+    paths:
+      - '.github/workflows/server-nginx-pins-native.yml'
+      - 'src/repocache/server_install_v1.py'
+      - 'src/repocache/server_upstream_address_preflight_v1.py'
+      - 'src/repocache/server_upstream_rotation_v1.py'
+      - 'src/repocache/server_nginx_pin_render_v1.py'
+      - 'tests/test_server_nginx_pin_*'
+      - 'tests/test_server_upstream_*'
 
 permissions:
   contents: read
