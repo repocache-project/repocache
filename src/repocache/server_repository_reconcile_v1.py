@@ -9,12 +9,18 @@ transaction lock, verify provenance/ownership and repeat validation.
 from __future__ import annotations
 
 import copy
+import hashlib
 from typing import Any
 
 from repocache.server_install_v1 import (
     MAX_INT, validate_install_document,
 )
-from repocache.server_repository_plan_v1 import _effective_configuration
+from repocache.server_repository_plan_v1 import (
+    _canonical_identity, _effective_configuration,
+)
+from repocache.server_protected_state_store_v1 import (
+    ProtectedStateStoreError, validate_protected_state,
+)
 
 
 class ReconciliationPlanError(ValueError):
@@ -125,4 +131,66 @@ def plan_declarative_reconciliation(
         "implicit_policy_ids": sorted(implicit_policy_ids),
         "effective_policy_changes": changes,
         "candidate_document": candidate,
+    }
+
+def preview_declarative_state_alignment(
+    current_document: dict[str, Any],
+    protected_snapshot: dict[str, Any],
+    *,
+    current_generation: int,
+) -> dict[str, Any]:
+    """Compare two UNTRUSTED snapshots, never authenticate persistent state.
+
+    This checks only the narrow schema/generation/ID/identity/desired-state
+    intersection between #18 and the inert #31 state v1. It cannot verify
+    the configuration digest, reservation tombstones, approval provenance,
+    actual NGINX exposure, privileged root/lock ownership or cache identity.
+    The future privileged owner MUST independently read and verify state
+    under the exclusive transaction lock and revalidate everything at commit.
+    """
+    if type(current_generation) is not int or not 1 <= current_generation <= MAX_INT:
+        raise ReconciliationPlanError("state alignment: invalid generation")
+    current = validate_install_document(current_document, for_apply=True)
+    if current["expected_state_generation"] != current_generation:
+        raise ReconciliationPlanError("state alignment: stale configuration")
+    try:
+        state = validate_protected_state(protected_snapshot)
+    except ProtectedStateStoreError:
+        raise ReconciliationPlanError("state alignment: invalid state snapshot") from None
+    if state["state_generation"] != current_generation:
+        raise ReconciliationPlanError("state alignment: stale state snapshot")
+
+    installed = state["repositories"]
+    declared = current["repositories"]
+    if any("id" not in repo for repo in declared):
+        raise ReconciliationPlanError("state alignment: durable IDs required")
+    if len(installed) != len(declared):
+        raise ReconciliationPlanError("state alignment: repository set mismatch")
+    by_id = {row["id"]: row for row in installed}
+    if set(by_id) != {repo["id"] for repo in declared}:
+        raise ReconciliationPlanError("state alignment: repository set mismatch")
+
+    for repo in declared:
+        row = by_id[repo["id"]]
+        identity_sha256 = hashlib.sha256(
+            _canonical_identity(repo).encode("utf-8")
+        ).hexdigest()
+        if (row["canonical_identity_sha256"] != identity_sha256
+                or row["desired_state"] != repo["desired_state"]):
+            raise ReconciliationPlanError("state alignment: identity or intent mismatch")
+
+    return {
+        "schema_version": 1,
+        "status": "UNTRUSTED_ALIGNMENT_ONLY",
+        "state_generation": current_generation,
+        "aligned_repository_ids": sorted(by_id),
+        "configuration_digest_verified": False,
+        "approval_provenance_verified": False,
+        "observed_exposure_verified": False,
+        "reservation_history_verified": False,
+        "requires_trusted_locked_recheck": True,
+        "authorizes_installation": False,
+        "authorizes_nginx_reload": False,
+        "authorizes_catalog_publication": False,
+        "authorizes_cache_cleanup": False,
     }

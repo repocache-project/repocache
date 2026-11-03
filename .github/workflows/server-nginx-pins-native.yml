@@ -1,0 +1,74 @@
+name: Server NGINX Pins Native
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/server-nginx-pins-native.yml'
+      - 'src/repocache/server_install_v1.py'
+      - 'src/repocache/server_upstream_address_preflight_v1.py'
+      - 'src/repocache/server_upstream_rotation_v1.py'
+      - 'src/repocache/server_nginx_pin_render_v1.py'
+      - 'tests/test_server_nginx_pin_*'
+      - 'tests/test_server_upstream_*'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/server-nginx-pins-native.yml'
+      - 'src/repocache/server_install_v1.py'
+      - 'src/repocache/server_upstream_address_preflight_v1.py'
+      - 'src/repocache/server_upstream_rotation_v1.py'
+      - 'src/repocache/server_nginx_pin_render_v1.py'
+      - 'tests/test_server_nginx_pin_*'
+      - 'tests/test_server_upstream_*'
+
+permissions:
+  contents: read
+
+jobs:
+  scoped-pin-acceptance:
+    name: Scoped pinned proxy TLS/redirect checks (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: debian13
+            image: debian:trixie-slim
+          - platform: almalinux10
+            image: almalinux:10
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install only distro-packaged NGINX and test prerequisites
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [ '${{ matrix.platform }}' = 'debian13' ]; then
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq
+            apt-get install -y -qq --no-install-recommends \
+              python3 python3-pytest nginx openssl ca-certificates
+          else
+            # pytest and its pluggy/iniconfig deps are in AlmaLinux 10 CRB.
+            # Changes occur only inside the disposable CI container.
+            dnf -y -q --enablerepo=crb install \
+              python3 python3-pytest nginx openssl ca-certificates
+          fi
+          python3 --version
+          nginx -v
+          python3 -m pytest --version
+      - name: Verify syntax, HTTPS SNI/trust, redirect denial and DNS pin policy
+        shell: bash
+        env:
+          PYTHONPATH: src
+        run: |
+          set -Eeuo pipefail
+          python3 -m pytest -q \
+            tests/test_server_nginx_pin_render_v1.py \
+            tests/test_server_nginx_pin_redirect_integration.py \
+            tests/test_server_upstream_rotation_v1.py \
+            tests/test_server_upstream_address_preflight_v1.py

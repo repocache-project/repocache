@@ -2,15 +2,18 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from pathlib import Path
 
 import pytest
 
 from repocache.server_install_v1 import InstallInputError
+from repocache.server_repository_plan_v1 import _canonical_identity
 from repocache.server_repository_reconcile_v1 import (
     ReconciliationPlanError,
     plan_declarative_reconciliation,
+    preview_declarative_state_alignment,
 )
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "docs/examples/server-install-v1.json"
@@ -188,3 +191,138 @@ def test_explicit_change_of_trust_policy_is_not_silenced_by_identity():
     assert result["candidate_document"]["repositories"][0]["layout"]["release_key_refs"] == [
         "file:/etc/repocache/keys/other.gpg"
     ]
+
+
+def _inert_state_snapshot(config: dict, *, generation: int = 1) -> dict:
+    return {
+        "state_schema_version": 1,
+        "state_generation": generation,
+        # The inert state schema only checks the digest's shape. There is NO
+        # accepted config-byte binding or provenance in this pure preview.
+        "configuration_sha256": "a" * 64,
+        "repositories": [
+            {
+                "id": repo["id"],
+                "canonical_identity_sha256": hashlib.sha256(
+                    _canonical_identity(repo).encode("utf-8")
+                ).hexdigest(),
+                "approval": {"source": "operator", "decision_sha256": "b" * 64},
+                "desired_state": repo["desired_state"],
+                "observed_state": "not-activated",
+            }
+            for repo in config["repositories"]
+        ],
+        "ownership_manifest": [],
+    }
+
+
+def test_untrusted_state_alignment_is_never_authorization():
+    config = document()
+    config["expected_state_generation"] = 1
+    config["repositories"][0]["desired_state"] = "active"
+    state = _inert_state_snapshot(config)
+    before = copy.deepcopy(state)
+    result = preview_declarative_state_alignment(
+        config, state, current_generation=1
+    )
+    assert result["status"] == "UNTRUSTED_ALIGNMENT_ONLY"
+    assert result["aligned_repository_ids"] == [
+        "almalinux-baseos", "debian-trixie-main"
+    ]
+    assert result["requires_trusted_locked_recheck"] is True
+    for field in (
+        "configuration_digest_verified", "approval_provenance_verified",
+        "observed_exposure_verified", "reservation_history_verified",
+        "authorizes_installation", "authorizes_nginx_reload",
+        "authorizes_catalog_publication", "authorizes_cache_cleanup",
+    ):
+        assert result[field] is False
+    assert state == before
+
+
+@pytest.mark.parametrize("which", [
+    "missing", "extra", "duplicate", "identity", "intent", "invalid_schema",
+])
+def test_untrusted_state_alignment_refuses_drift(which):
+    config = document()
+    config["expected_state_generation"] = 1
+    state = _inert_state_snapshot(config)
+    if which == "missing":
+        state["repositories"].pop()
+    elif which == "extra":
+        state["repositories"].append({
+            **copy.deepcopy(state["repositories"][0]), "id": "extraneous"
+        })
+    elif which == "duplicate":
+        state["repositories"][1]["id"] = state["repositories"][0]["id"]
+    elif which == "identity":
+        state["repositories"][0]["canonical_identity_sha256"] = "f" * 64
+    elif which == "intent":
+        state["repositories"][0]["desired_state"] = "active"
+    else:
+        state["repositories"][0]["observed_state"] = "active"
+    with pytest.raises(ReconciliationPlanError, match="state alignment"):
+        preview_declarative_state_alignment(
+            config, state, current_generation=1
+        )
+
+
+@pytest.mark.parametrize("generation", [-1, 0, True, "1", 2**63])
+def test_untrusted_state_alignment_refuses_invalid_generation(generation):
+    config = document()
+    config["expected_state_generation"] = 1
+    with pytest.raises(ReconciliationPlanError):
+        preview_declarative_state_alignment(
+            config, _inert_state_snapshot(config), current_generation=generation
+        )
+
+
+def test_untrusted_state_alignment_detects_stale_snapshots_and_missing_ids():
+    config = document()
+    config["expected_state_generation"] = 1
+    state = _inert_state_snapshot(config)
+    state["state_generation"] = 2
+    with pytest.raises(ReconciliationPlanError, match="stale state"):
+        preview_declarative_state_alignment(config, state, current_generation=1)
+    state["state_generation"] = 1
+    config["expected_state_generation"] = 2
+    with pytest.raises(ReconciliationPlanError, match="stale configuration"):
+        preview_declarative_state_alignment(config, state, current_generation=1)
+    config["expected_state_generation"] = 1
+    del config["repositories"][0]["id"]
+    with pytest.raises(ReconciliationPlanError, match="durable IDs"):
+        preview_declarative_state_alignment(config, state, current_generation=1)
+
+
+def test_untrusted_state_alignment_never_promises_a_config_digest():
+    config = document()
+    config["expected_state_generation"] = 1
+    state = _inert_state_snapshot(config)
+    # An untrusted shape-valid digest is not evidence of the actual config.
+    state["configuration_sha256"] = "f" * 64
+    result = preview_declarative_state_alignment(
+        config, state, current_generation=1
+    )
+    assert result["configuration_digest_verified"] is False
+    assert result["authorizes_catalog_publication"] is False
+
+
+def test_untrusted_state_alignment_is_immutable_and_has_no_host_effects(monkeypatch):
+    import os
+    import socket
+    import subprocess
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("host effects are forbidden")
+
+    monkeypatch.setattr(os, "replace", forbidden)
+    monkeypatch.setattr(socket, "create_connection", forbidden)
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    config = document()
+    config["expected_state_generation"] = 1
+    state = _inert_state_snapshot(config)
+    old_config = copy.deepcopy(config)
+    old_state = copy.deepcopy(state)
+    preview_declarative_state_alignment(config, state, current_generation=1)
+    assert config == old_config
+    assert state == old_state

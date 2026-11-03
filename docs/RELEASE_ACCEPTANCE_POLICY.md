@@ -1,9 +1,27 @@
 # Release acceptance: candidate gates and published smoke
 
+> **Current target alignment (2026-11-02):** The maintainer approved skipping public v0.5.0 and making **v0.6.0 the next public release**, delivering a complete server. All original Stage A/Stage B obligations below, including [#76](https://github.com/teixemf/repocache/issues/76), [#88](https://github.com/teixemf/repocache/issues/88), the genuine official Node24 `release.yml` upload/readback gate transferred from #74, and owner-only signing and publication, remain mandatory without waiver. Test an actual *public v0.4.0 -> final signed v0.6.0* path; any v0.5.0-specific candidate wording below is historical. The currently approved legacy schema-1/offline-wheelhouse eight-asset profile remains the baseline unless separately changed by reviewed maintainer decision. See [v0.6.0 release target](RELEASE_TARGET_V0.6.0.md). This clarification does not authorize a tag, release dispatch, signing, staging, publication or production activation.
+
+
 This policy applies to subsequent releases. First-public v0.4.0 is special:
 there was no earlier public REPOCACHE distribution against which the public
 update and installation pipeline could be tested. This is not permission to
 publish future releases before exercising their signed installers.
+
+## Version-independent stabilization and final source identity
+
+For every selected stable `vX.Y.Z`, run feature acceptance on
+`integration/vX.Y.Z` and optionally alpha/beta host trials on the frozen
+`release/vX.Y.Z`, without claiming those preliminary test artifacts are
+the signed final candidate. The protected `main`/release rulesets currently
+require linear history and permit squash/rebase promotion; these methods may
+rewrite the source commit. **Promote first, then verify the resulting protected
+`main` source SHA, authorize the official stable tag and only afterwards
+perform the genuine owner-signed candidate Stage A against that exact SHA.**
+The signed candidate must be accepted before Stage B publication.
+There is no default alpha/beta signing, publication or production activation.
+Follow [the generic lifecycle](RELEASE_LIFECYCLE.md) and preserve the actual
+version-specific signed trust/baseline policy (issue #76).
 
 ## Stage A: release candidate (prepublication, mandatory for v0.5.0 onward)
 
