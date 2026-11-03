@@ -108,3 +108,20 @@ This is a single, reviewable source of functional requirements, not a replacemen
 - **UC-10 in existing runtime:** `client/repocache_client.py` still contains an example default origin when neither `--server` nor installed configuration exists. This phase only fixes the installer. Eliminate this runtime fallback with a reviewed compatibility/test migration in a follow-up. Never use example.org as a production cache.
 - **#24 milestone:** the live GitHub assignment is milestone #4, **v0.6.0** (verified 2026-10-23). The issue body retains an older mismatch note; preserve history but use the current assignment as source of truth. Milestone assignment does not establish readiness.
 - **Overlapping draft PRs:** #46 changes client submit behavior and #107 owns CLI parser convergence; review and reconcile before any client parser/transport integration. Server work #95/#96/#28 must precede claims of an available managed cache catalog.
+
+## Scoped explicit-origin client integration (PR #115)
+
+The proposed client installer requires exactly one explicit `--server HTTPS_ORIGIN`
+before managed filesystem writes. The standalone runtime accepts the explicit
+CLI option or a pre-existing local `/etc/repocache-client/config.json` server
+setting; it has **no implicit example hostname or network discovery fallback**.
+Missing or explicitly empty origins fail before repository discovery and network
+calls, with the existing JSON v1 `OPERATION_FAILED` error and exit status 2.
+Canonical HTTPS origin input refusal is consistent with the installer preflight.
+The four supported client command forms and existing `check` status 1/3
+behavior remain unchanged with a valid configured server.
+
+This incremental origin contract does not enable `repos sync --apply`,
+modify APT/DNF sources, or prove native package manager fallback, ownership,
+SELinux, transaction locking, rollback or installed-host compatibility.
+Exact-HEAD CI and separate review/integration acceptance are required.
