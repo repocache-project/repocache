@@ -89,7 +89,10 @@ def main() -> int:
     assert report["authorizes_package_transaction"] is False
     assert report["can_install"] is False
     assert report["footprint"]["existing_instance_adoption_allowed"] is False
-    if (report["footprint"]["code"] != "FRESH_NGINX_FOOTPRINT_NOT_OBSERVED"\n            or report["metadata"] is None\n            or report["metadata"]["code"] != "NATIVE_CANDIDATE_OBSERVED"\n            or report["metadata"]["payload_signature_verified"] is not False):
+    if (report["footprint"]["code"] != "FRESH_NGINX_FOOTPRINT_NOT_OBSERVED"
+            or report["metadata"] is None
+            or report["metadata"]["code"] != "NATIVE_CANDIDATE_OBSERVED"
+            or report["metadata"]["payload_signature_verified"] is not False):
         return 1
     return 0
 
