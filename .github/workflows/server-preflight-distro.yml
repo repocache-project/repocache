@@ -49,6 +49,45 @@ jobs:
           fi
           python3 --version
           python3 -m pytest --version
+      - name: Observe actual distro OS/Python and native manager (non-authorizing)
+        shell: bash
+        env:
+          PYTHONPATH: src
+          PYTHONDONTWRITEBYTECODE: '1'
+          EXPECTED_PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -Eeuo pipefail
+          python3 -B - <<'PY'
+          import os
+          from repocache.server_install_v1 import validate_os_identity
+          from repocache.server_preflight_v1 import (
+              PreflightStatus, capture_native_host_facts, inspect_native_host,
+          )
+
+          expected = {
+              "debian13": ("debian", (3, 13)),
+              "almalinux10": ("almalinux", (3, 12)),
+          }
+          distribution, python = expected[os.environ["EXPECTED_PLATFORM"]]
+          facts = capture_native_host_facts()  # Genuine container OS identity.
+          assert facts.python_version == python
+          assert validate_os_identity(facts.os_release, facts.python_version) == distribution
+          assert facts.native_manager_visible is True
+
+          report = inspect_native_host()
+          checks = {check.name: check for check in report.checks}
+          assert checks["supported_os_and_python"].status is PreflightStatus.PASS
+          assert checks["architecture_identity"].status is PreflightStatus.PASS
+          assert checks["native_package_manager_binary"].status is PreflightStatus.PASS
+          # A syntactically valid machine is NOT an approved architecture.
+          assert checks["architecture_supported"].status is PreflightStatus.NOT_VERIFIED
+          assert checks["native_package_availability"].status is PreflightStatus.NOT_VERIFIED
+          assert not report.all_verified and not report.authorizes_installation
+          assert report.to_dict()["can_install"] is False
+          # Never print /etc/os-release, host paths, or full diagnostics.
+          print("PASS: supported OS/Python and manager observed; installation not authorized")
+          PY
+          # Docker userspace is NOT booted native systemd or SELinux evidence.
       - name: Execute read-only positive and negative preflight regressions
         shell: bash
         env:
