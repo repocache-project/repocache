@@ -1,6 +1,6 @@
 # Security Policy
 
-REPOCACHE is under active development. **There is no approved public v0.4.0 release yet.** Debian 13 and AlmaLinux 10 are the targeted supported platforms. Do not assume a draft branch passed independent security auditing or live-system validation.
+REPOCACHE is under active development. **The [v0.4.0 release](https://github.com/teixemf/repocache/releases/tag/v0.4.0) was published on 2026-10-21 with GitHub immutable-release protection.** The next public release is targeted at v0.6.0; its complete-server functionality and operational release acceptance are not yet verified. Debian 13 and AlmaLinux 10 are the targeted supported platforms. Publication of v0.4.0 does not imply that draft branches have passed independent security auditing or live-system validation.
 
 ## Reporting vulnerabilities
 
