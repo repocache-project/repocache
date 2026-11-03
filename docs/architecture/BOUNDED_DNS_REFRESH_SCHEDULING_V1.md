@@ -13,7 +13,7 @@ The scheduler does not sleep, install a timer, write persistent state, mutate NG
 
 ## Mandatory operational integration
 
-Activation remains blocked pending concurrent #31 PR #222 protected-state writer/journal and #224 locked manifest-inode reconciliation, and the #95 trusted repository identity/authorization model. Do not duplicate or merge their unfinished work.
+PR #222 (protected inert journal/store) and PR #224 (read-only same-lock manifest/inode comparison) are now merged into the v0.6.0 integration ancestry. They are foundations, not privileged mutation or route-activation authority. Activation remains blocked on a verified privileged #31 transaction and the #95 trusted repository identity/authorization model. Do not duplicate their existing components.
 
 The next integration must use (1) a privilege-separated real systemd timer/service loading only approved enabled hostnames from an authenticated generation; (2) an exclusively locked, root-verified state/manifest and generation CAS; (3) durable staged NGINX configuration with packaged nginx -t, verified reload, rollback after any failure or crash, and foreign ownership refusal; (4) active-only atomically derived catalog and native APT/DNF metadata, cache HIT and fallback verification; (5) booted Debian 13 and AlmaLinux 10 hosts, including enforcing SELinux, ACL/xattr/mount checks and fault injection.
 
