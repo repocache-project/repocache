@@ -83,6 +83,109 @@ def metadata(wheel: pathlib.Path, name: str, version: str) -> None:
               "wheel name/version matches reviewed pin")
 
 
+def hostile_wheel_probe(work: pathlib.Path, download: pathlib.Path,
+                        requirement: pathlib.Path, python: pathlib.Path,
+                        pip_list: list[str], active: pathlib.Path,
+                        active_bytes: bytes) -> None:
+    """CI-only malicious wheel: .pth startup code must stay inside bwrap.
+
+    This generated fixture is never published or installed on the host.
+    The exact production sandbox pip argv is used for wheel installation
+    and its subsequent automatic site-packages startup execution.
+    """
+    import base64
+    import csv
+    import io
+    import socket
+
+    proof = work / "hostile-wheel-execution-proof"
+    fixture = download / "repocache_hostile_probe-0.0.1-py3-none-any.whl"
+    info = "repocache_hostile_probe-0.0.1.dist-info/"
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    try:
+        port = listener.getsockname()[1]
+        payload = (
+            "import pathlib, socket\n"
+            f"_proof = pathlib.Path({str(proof)!r})\n"
+            "_proof.write_text('started')\n"
+            "for _target in ('/opt/repocache-cli/managed/installed.json', "
+            "'/var/lib/repocache/ci-private-secret'):\n"
+            "    try:\n"
+            "        pathlib.Path(_target).read_bytes()\n"
+            "    except OSError:\n"
+            "        pass\n"
+            "    else:\n"
+            "        raise RuntimeError('host secret readable: ' + _target)\n"
+            "for _target in ('/opt/repocache-cli/managed/installed.json', "
+            "'/etc/repocache-hostile-wheel-escape'):\n"
+            "    try:\n"
+            "        pathlib.Path(_target).write_text('escaped')\n"
+            "    except OSError:\n"
+            "        pass\n"
+            "    else:\n"
+            "        raise RuntimeError('host state writable: ' + _target)\n"
+            "_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n"
+            "_sock.settimeout(2)\n"
+            "try:\n"
+            f"    assert _sock.connect_ex(('127.0.0.1', {port})) != 0, "
+            "'outer loopback reachable'\n"
+            "finally:\n"
+            "    _sock.close()\n"
+            "_proof.write_text('denied')\n"
+        )
+        members = {
+            "repocache_hostile_probe.py": payload.encode("utf-8"),
+            "repocache_hostile_probe.pth": b"import repocache_hostile_probe\n",
+            info + "METADATA": (
+                b"Metadata-Version: 2.1\nName: repocache-hostile-probe\n"
+                b"Version: 0.0.1\n"
+            ),
+            info + "WHEEL": (
+                b"Wheel-Version: 1.0\nGenerator: repocache-ci\n"
+                b"Root-Is-Purelib: true\nTag: py3-none-any\n"
+            ),
+        }
+        record = io.StringIO()
+        writer = csv.writer(record, lineterminator="\n")
+        for name, data in members.items():
+            digest = base64.urlsafe_b64encode(
+                hashlib.sha256(data).digest()).rstrip(b"=").decode("ascii")
+            writer.writerow((name, "sha256=" + digest, str(len(data))))
+        writer.writerow((info + "RECORD", "", ""))
+        members[info + "RECORD"] = record.getvalue().encode("utf-8")
+        with zipfile.ZipFile(fixture, "w", zipfile.ZIP_DEFLATED) as archive:
+            for name, data in members.items():
+                archive.writestr(name, data)
+        fixture.chmod(0o600)
+
+        original_lock = requirement.read_bytes()
+        try:
+            requirement.write_text(
+                f"./{fixture.name} --hash=sha256:"
+                f"{hashlib.sha256(fixture.read_bytes()).hexdigest()}\n",
+                encoding="ascii")
+            install, _, _ = online_generation._install_commands(
+                python, requirement)
+            candidate_sandbox.run_isolated(
+                install, workspace=work, cwd=download, timeout=180)
+            proof.unlink(missing_ok=True)  # Require a separate Python startup.
+            inventory = json.loads(candidate_sandbox.run_isolated(
+                pip_list, workspace=work, timeout=90))
+            check(any(row["name"].lower().replace("-", "_")
+                      == "repocache_hostile_probe" for row in inventory),
+                  "CI-only hostile wheel was installed through bwrap")
+            check(proof.is_file() and proof.read_text() == "denied",
+                  "hostile wheel .pth executed but host read/write/net denied")
+            check(active.read_bytes() == active_bytes,
+                  "hostile wheel left active installed manifest unchanged")
+        finally:
+            requirement.write_bytes(original_lock)
+    finally:
+        listener.close()
+
+
 def main() -> None:
     updater._require_service_account()
     candidate_sandbox.require_executor()  # Fail before any PyPI wheel download.
@@ -176,6 +279,8 @@ def main() -> None:
             checks[3], workspace=work, timeout=90)
         check(True, "installed Textual run_test real headless navigation in bwrap")
         check(marker.read_bytes() == old, "installed manifest unchanged")
+        hostile_wheel_probe(work, download, requirement, python, pip_list,
+                            marker, old)
     check(not list(parent.iterdir()), "no candidate generations survived staging")
     check(marker.read_bytes() == old, "last known good remains unchanged")
     print("LIMITATION: legacy-reviewed lock/source, no signed 0.6 online candidate,"
