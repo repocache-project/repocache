@@ -200,35 +200,56 @@ missing-package diagnostic acceptance. Do not close #26, #27, #18 or #25 based
 on this source-only increment.
 
 
-## Locked local pre-transaction snapshot (non-authorizing)
+## Fresh-host pre-package state boundary (non-authorizing)
 
-The internal `server_native_nginx_local_boundary_v1.inspect_native_nginx_local_boundary()`
-is a separate **local-only**, strictly non-mutating and non-installing #27
-check. After the existing schema and known-third-party NGINX footprint refusal,
-it requires an observed effective UID of zero and reuses #31's current-namespace
-root-anchored read-only locked manifest inspection at generation zero. Any
-existing managed include, foreign footprint, pending recovery journal, stale
-generation, inaccessible state, or inconsistent snapshot fails closed with only
-fixed redacted error codes. The #26 preflight is unchanged: this stage performs
-no APT/DNF operation or network access and does not introduce an install
-authority into the local preflight. It does not try to recover an interrupted
-journal, adopt a third-party NGINX, or modify protected state.
+The initial #27 implementation had a **real sequencing conflict**: the
+conservative NGINX footprint scan refused
+`/var/lib/repocache/server`, while the #31 protected state store requires
+that root-owned directory (0700) and its preprovisioned mode-0600 lock before
+reading state. The full locked-manifest reconciler also traverses
+`/etc/nginx/conf.d`, which cannot exist on a genuinely fresh host without
+NGINX provisioning. A synthetic mocked PASS did not prove the proposed
+pre-package positive branch was reachable on a fresh native host.
 
-Even `LOCAL_READ_ONLY_SNAPSHOT_OBSERVED` is **NOT VERIFIED** for installation:
-the #31 lock has been **released** before the result is returned, so the
-snapshot can become stale immediately. UID zero in the current namespace is
-not verified host-root or administrator approval, and the code does not attest
-systemd/process/listener state, mount/ACL/xattr/SELinux policy, package payload
-authentication at mutation time or a non-atomic native transaction journal.
-The report unconditionally refuses package transaction, service activation and
-any install authority. This is preparation for a later privileged, narrowly
-authorized helper that must **hold** the protected lock across fresh state,
-ownership and package checks, journal package-manager side effects and provide
-explicit recovery. It is not that helper and must never be used as an
-authorization token.
+The new internal `server_native_nginx_prepackage_state_v1.py` explicitly
+separates that stage. It opens the current namespace's fixed `/` as root,
+reuses #31's pinned exclusive state lock and validated journal/state readers,
+and demands **no previously committed generation**, **no pending journal**,
+**no orphan stage/rollback** and no observed state creation between two reads.
+It does not access or require `/etc/nginx/conf.d` before NGINX exists. It
+does not create the state directory/lock, write state, run subprocesses, make
+network requests, download/install packages or invoke recovery. A missing
+preprovisioned directory or unsafe lock is a redacted refusal, not permission
+to create or adopt it.
 
-Focused synthetic tests: `python -m pytest -q
-tests/test_server_native_nginx_local_boundary_v1.py`. These tests exercise
-the fixed fail-closed branch ordering, pre-existing NGINX refusal, root identity,
-pending/stale/conflicting manifest refusal, and non-authorizing positive
-snapshot. They do not prove a booted native OS installation.
+`server_native_nginx_local_boundary_v1.inspect_native_nginx_local_boundary()`
+keeps all **NGINX** footprint markers strict, but exempts exactly the code-owned
+protected-state root from the old *NGINX conflict* classification, delegating
+its ownership, ancestry, permissions, symlink/mount checks, lock and journal
+verification to the same #31 storage primitives. An externally modified,
+inaccessible, symlinked, mounted or foreign state is not adopted simply
+because its path is known. The standalone network metadata and download-only
+rehearsals retain their original conservative footprint refusal; this new
+check is **not automatically invoked by #26** and does not change the
+network-free server preflight.
+
+An observed `LOCKED_PREPACKAGE_STATE_ABSENT` snapshot is only a read-only
+result. The exclusive lock is released before returning and the result
+cannot be used as a write token. A real privileged installer must separately
+validate operator consent **and OS authorization**, a native host/root
+namespace, process/listener/systemd/SELinux state, immutable package
+selection, APT/DNF signatures and actual payloads under the held lock.
+It must create a distinct durable non-atomic native package-transaction
+journal before possible package-manager side effects, report/recover
+partial transactions, and only then perform the full #31 live include
+reconciliation, staged complete-context `nginx -t`, controlled reload and
+rollback. UID 0 alone never proves trusted host-root authority. No root
+helper, directory provisioner or native package transaction exists in this
+increment.
+
+Focused synthetic checks:
+`python -m pytest -q tests/test_server_native_nginx_prepackage_state_v1.py tests/test_server_native_nginx_local_boundary_v1.py`.
+The tests cover preprovisioned path acceptance strictly under a mock #31
+reader, journal/recovery refusal, existing state, races, root errors and
+lack of install authority. They are not live native booted-host evidence.
+All five original #27 operational acceptance criteria remain NOT VERIFIED.
