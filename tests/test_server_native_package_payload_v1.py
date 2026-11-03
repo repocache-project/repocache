@@ -210,7 +210,7 @@ def test_download_command_never_permits_native_package_install(tmp_path):
     assert a_refresh[-1] == "update"
     assert "--download-only" in a_command and "install" in a_command
     assert "--assume-yes" in a_command
-    assert all("AllowUnauthenticated=false" not in x for x in [])  # no opt-out
+    assert "APT::Get::AllowUnauthenticated=false" in a_command
     assert d_refresh[-2:] == ["makecache", "--refresh"]
     assert "--downloadonly" in d_command and "install" in d_command
     assert "--noplugins" in d_command

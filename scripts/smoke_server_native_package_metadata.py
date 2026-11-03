@@ -11,6 +11,7 @@ import subprocess
 import sys
 
 from repocache.server_native_nginx_ownership_v1 import prepare_fresh_native_nginx
+from repocache.server_native_package_payload_v1 import rehearse_native_nginx_downloads
 
 
 def classified_ci_runner(args, **kwargs):
@@ -93,6 +94,18 @@ def main() -> int:
             or report["metadata"] is None
             or report["metadata"]["code"] != "NATIVE_CANDIDATE_OBSERVED"
             or report["metadata"]["payload_signature_verified"] is not False):
+        return 1
+    payload = rehearse_native_nginx_downloads(
+        os_release=release,
+        python_version=(sys.version_info.major, sys.version_info.minor),
+        document=document,
+        runner=classified_ci_runner,
+    ).to_dict()
+    print(json.dumps(payload, sort_keys=True))
+    assert payload["host_package_transaction_performed"] is False
+    assert payload["authorizes_package_installation"] is False
+    assert payload["can_install"] is False
+    if payload["code"] != "NATIVE_PAYLOADS_VERIFIED_IN_SCRATCH":
         return 1
     return 0
 

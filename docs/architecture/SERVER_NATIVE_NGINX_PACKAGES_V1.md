@@ -117,6 +117,41 @@ configuration ownership. Before service activation, staged complete-context
 `nginx -t`, atomic managed include changes and tested recovery are mandatory
 under #27/#28/#31. No pre-existing NGINX adoption is supported.
 
+## Disposable native package payload rehearsal (unmerged)
+
+`server_native_package_payload_v1.rehearse_native_nginx_downloads()`
+extends the existing fresh-host refusal and signed metadata observation with
+an **explicit download-only** rehearsal in a second private, disposable
+workspace. It uses the same fixed official distro repositories, key material,
+source isolation, timeouts and sanitized subprocess environment, and refreshes
+signed metadata again immediately before the download-only action.
+Debian 13 uses `apt-get --download-only --no-install-recommends install nginx`
+with isolated APT lists, cache, archives and empty dpkg status; APT binds
+downloaded .deb hashes to its signed Release/Packages index, and `dpkg-deb
+--field` observes the package name without executing maintainer scripts.
+AlmaLinux 10 uses DNF4 `install --downloadonly --downloaddir=...`, a
+private installroot and signed BaseOS/AppStream. Downloaded RPMs undergo an
+additional `rpmkeys --checksig` verification after import of the already
+preflight-validated distro **public** key into a private temporary RPM
+database. Digest-only OK is **not** sufficient. No host rpmdb or package
+cache is intentionally changed.
+
+The stage rejects missing/ambiguous nginx payloads, unexpected or linked
+files, empty/truncated downloads, signature errors, resource limits and
+native command failures. It reports a bounded package count only (not
+repository URLs, payload names, bytes or raw native output), and deletes
+all temporary packages afterward. Even a successful download-only
+rehearsal leaves `can_install=false`,
+`authorizes_package_installation=false`,
+`host_package_transaction_performed=false` and
+`authorizes_nginx_activation=false`. Debian .deb bytes rely on the
+APT signed-index hash chain; they are not claimed to have individual RPM-like
+OpenPGP signatures. These early-download observations **cannot** be reused
+as trust or authorization for a later privileged transaction, which must
+recheck trust, ownership and live state under the actual protected lock,
+repeat/rebind packages, record non-atomic failures and test systemd/SELinux
+and recovery. CI userspace success is not real host operational acceptance.
+
 ## Mandatory downstream execution boundary (not implemented)
 
 Before a privileged native transaction (#27), implement and separately test
@@ -154,8 +189,8 @@ CI-only bootstrap may install OS Python and root CA certificates **inside the
 disposable container**, not on the GitHub runner or any production host.
 A green result proves only tested distribution userspace/network trust at that
 CI revision; a red result is not waived by earlier mocked pytest success.
-Actual booted host systemd/SELinux and transaction-stage package signatures
-remain untested and mandatory.
+Actual booted host systemd/SELinux, privilege-bounded native package transactions,
+transaction-time signature rechecks and failure recovery remain untested and mandatory.
 
 The original #27 criteria remain NOT VERIFIED: booted Debian 13 and AlmaLinux
 10 installed NGINX service acceptance, re-run idempotence, no third-party
