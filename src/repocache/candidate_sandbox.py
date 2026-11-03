@@ -23,6 +23,13 @@ class SandboxError(RuntimeError):
 
 
 BWRAP = Path("/usr/bin/bwrap")
+PRLIMIT = Path("/usr/bin/prlimit")
+# RLIMITs inherited by bwrap children: per-process safeguards, not a cgroup.
+CPU_SECONDS = 60
+ADDRESS_SPACE_BYTES = 2 * 1024 * 1024 * 1024
+FILE_SIZE_BYTES = 512 * 1024 * 1024
+OPEN_FILE_COUNT = 256
+USER_TASK_COUNT = 128
 # A per-invocation private /tmp cap; NOT a quota for the persistent staging bind.
 TMPFS_MAX_BYTES = 64 * 1024 * 1024
 _ALLOWED_OWNED_COMMANDS = {
@@ -90,20 +97,20 @@ def require_executor() -> None:
     an independent OS/package and functional native acceptance gate.
     """
     updater._require_service_account()
-    for path in (Path("/usr"), Path("/usr/bin"), BWRAP):
+    for path in (Path("/usr"), Path("/usr/bin"), BWRAP, PRLIMIT):
         try:
             meta = path.lstat()
         except OSError as exc:
             raise SandboxError("Required OS sandbox executor is unavailable") from exc
-        if path == BWRAP and meta.st_mode & (stat.S_ISUID | stat.S_ISGID):
+        if path in (BWRAP, PRLIMIT) and meta.st_mode & (stat.S_ISUID | stat.S_ISGID):
             raise SandboxError("Setuid/setgid sandbox helpers are forbidden")
         if (meta.st_uid != 0 or meta.st_mode & 0o022
-                or (not stat.S_ISDIR(meta.st_mode) if path != BWRAP
+                or (not stat.S_ISDIR(meta.st_mode) if path not in (BWRAP, PRLIMIT)
                     else not stat.S_ISREG(meta.st_mode))):
             raise SandboxError("Untrusted OS sandbox executor path")
-    meta = BWRAP.lstat()
-    if not meta.st_mode & 0o111:
-        raise SandboxError("Sandbox helper is non-executable")
+    for executable in (BWRAP, PRLIMIT):
+        if not executable.lstat().st_mode & 0o111:
+            raise SandboxError("Sandbox helper is non-executable")
     _verify_patch_level()
 
 
@@ -239,6 +246,22 @@ def command(workspace: Path, argv: list[str], *,
 MAX_CAPTURE_BYTES = 1024 * 1024
 
 
+
+def _limited_command(argv: list[str]) -> list[str]:
+    """Launch the sandbox with inherited Linux resource ceilings.
+
+    These limits prevent individual-process runaway, but do not replace
+    per-candidate cgroup memory/CPU/PIDs or staging filesystem quotas.
+    """
+    limits = (
+        ("cpu", CPU_SECONDS), ("as", ADDRESS_SPACE_BYTES),
+        ("nproc", USER_TASK_COUNT), ("nofile", OPEN_FILE_COUNT),
+        ("fsize", FILE_SIZE_BYTES), ("core", 0),
+    )
+    return [str(PRLIMIT), *(f"--{name}={value}:{value}"
+                            for name, value in limits), "--", *argv]
+
+
 def _run_bounded(argv: list[str], *, cwd: Path, timeout: int) -> str:
     """Drain stdout/stderr incrementally; kill the launcher group on failure.
 
@@ -259,7 +282,8 @@ def _run_bounded(argv: list[str], *, cwd: Path, timeout: int) -> str:
     }
     try:
         process = subprocess.Popen(
-            argv, cwd=cwd, env=environment, stdin=subprocess.DEVNULL,
+            _limited_command(argv), cwd=cwd, env=environment,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             start_new_session=True)
     except OSError as exc:

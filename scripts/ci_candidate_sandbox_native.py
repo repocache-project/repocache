@@ -223,6 +223,30 @@ print('SANDBOX_ESCAPE_PROBES_PASS')
               "private candidate tmpfs actually refuses disk exhaustion")
         check(marker.read_bytes() == original,
               "tmpfs exhaustion never changed active release state")
+
+        # The real untrusted process inherits native per-process RLIMITs,
+        # even though this is NOT an aggregate cgroup resource boundary.
+        console.write_text(
+            "#!/usr/bin/python3\n"
+            "import resource\n"
+            "names=('CPU','AS','NPROC','NOFILE','FSIZE','CORE')\n"
+            "print(','.join(str(resource.getrlimit(getattr(resource,'RLIMIT_'+n))[0]) for n in names))\n",
+            encoding="utf-8")
+        console.chmod(0o700)
+        output = candidate_sandbox.run_isolated(
+            [str(console), "--version"], workspace=work, timeout=30)
+        expected_limits = (
+            candidate_sandbox.CPU_SECONDS,
+            candidate_sandbox.ADDRESS_SPACE_BYTES,
+            candidate_sandbox.USER_TASK_COUNT,
+            candidate_sandbox.OPEN_FILE_COUNT,
+            candidate_sandbox.FILE_SIZE_BYTES,
+            0,
+        )
+        check(output == ",".join(str(value) for value in expected_limits),
+              "sandboxed candidate inherits CPU/AS/task/file/core RLIMITs")
+        check(marker.read_bytes() == original,
+              "resource-limit probe preserved active installation")
     finally:
         shutil.rmtree(work)
     check(marker.read_bytes() == original, "last known good state preserved")

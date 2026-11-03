@@ -290,3 +290,52 @@ def test_candidate_capture_invalid_deadline_does_not_spawn(tmp_path, monkeypatch
         with pytest.raises(updater.UpdateError, match="Invalid"):
             candidate_sandbox._run_bounded(
                 [sys.executable], cwd=tmp_path, timeout=deadline)
+
+
+def test_candidate_prlimit_requires_root_owned_non_setuid_binary(
+        monkeypatch, tmp_path):
+    monkeypatch.setattr(updater, "_require_service_account", lambda: None)
+    # A missing secondary trusted helper must fail before any wheel download.
+    missing = tmp_path / "prlimit-missing"
+    monkeypatch.setattr(candidate_sandbox, "PRLIMIT", missing)
+    with pytest.raises(candidate_sandbox.SandboxError):
+        candidate_sandbox.require_executor()
+
+
+def test_candidate_rlimits_apply_before_bwrap_execution(workspace):
+    _, work = workspace
+    args = candidate_sandbox._limited_command(
+        candidate_sandbox.command(work, _pip(work)))
+    assert args[0] == "/usr/bin/prlimit"
+    expected = {
+        "cpu": candidate_sandbox.CPU_SECONDS,
+        "as": candidate_sandbox.ADDRESS_SPACE_BYTES,
+        "nproc": candidate_sandbox.USER_TASK_COUNT,
+        "nofile": candidate_sandbox.OPEN_FILE_COUNT,
+        "fsize": candidate_sandbox.FILE_SIZE_BYTES,
+        "core": 0,
+    }
+    for name, size in expected.items():
+        assert f"--{name}={size}:{size}" in args
+    assert args[args.index("--") + 1] == "/usr/bin/bwrap"
+    assert args[args.index("--") + 1:].count("--unshare-net") == 1
+
+
+def test_candidate_resource_limits_inherit_in_linux_child(tmp_path):
+    import resource
+    expr = (
+        "import resource;"
+        "names=['CPU','AS','NPROC','NOFILE','FSIZE','CORE'];"
+        "print(','.join(str(resource.getrlimit(getattr(resource,'RLIMIT_'+n))[0])"
+        " for n in names))")
+    observed = candidate_sandbox._run_bounded(
+        [sys.executable, "-I", "-c", expr], cwd=tmp_path, timeout=10)
+    expected = [
+        candidate_sandbox.CPU_SECONDS,
+        candidate_sandbox.ADDRESS_SPACE_BYTES,
+        candidate_sandbox.USER_TASK_COUNT,
+        candidate_sandbox.OPEN_FILE_COUNT,
+        candidate_sandbox.FILE_SIZE_BYTES,
+        0,
+    ]
+    assert observed == ",".join(str(value) for value in expected)

@@ -35,6 +35,13 @@ The production Bubblewrap invocation now uses \`--size 67108864 --tmpfs /tmp\`, 
 
 This is **not** a staging workspace filesystem quota, whole-process-tree memory/CPU/PID cgroup limit, guarantee against all disk-pressure paths, or native Debian/AlmaLinux/SELinux acceptance. Those Gate A/Gate B criteria remain NOT VERIFIED. This change does not enable activation or authorize merge.
 
+
+## 2026-11-03 — Additional per-process Linux resource ceilings
+
+The executor also requires root-owned, non-symlinked, non-setuid **\`/usr/bin/prlimit\`** from the OS util-linux package before any untrusted execution. Its exact argv sets soft **and** hard inherited limits on each launched Bubblewrap child: CPU time 60 seconds/process, virtual address space 2 GiB/process, tasks/processes 128 per real UID, open descriptors 256/process, maximum single-file size 512 MiB, and core dumps disabled. No shell or default policy fallback is allowed. Both target CI userspaces must demonstrate the limits inside a running sandbox rather than merely inspecting the command text.
+
+**Scope caveat:** \`RLIMIT_AS\` and \`RLIMIT_CPU\` apply per process, \`RLIMIT_NPROC\` applies against the real UID across the host, and \`RLIMIT_FSIZE\` applies per individual file. These are **defense in depth**, NOT a per-candidate aggregate cgroup CPU/RAM/PID budget, nor a filesystem quota on the persistent staging bind. They cannot satisfy the full Gate A resource-containment requirement alone. Native provisioning and aggregate exhaustion/rollback remain NOT VERIFIED. Unsupported/missing OS helper refuses early; an independently commissioned security review is still required.
+
 ## Acceptance and limitations
 
 1. **PASS (unit policy only):** missing/symlinked/insecure/setuid helper rejected before network; command-generation tests confirm rootless namespace flags, minimal read-only runtime, one writable workspace, cleared environment and no host network.
