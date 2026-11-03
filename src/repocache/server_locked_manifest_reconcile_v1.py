@@ -129,6 +129,14 @@ def _inspect_locked_under_root(
             )
             action = (_candidate_action(candidate_bytes, observation)
                       if candidate_bytes is not None else None)
+            # A writer that does not honor flock (e.g. another root actor)
+            # may change the include after the first bounded inode read.
+            # Reobserve under the same lock before returning any preview.
+            # This detects covered same-inode, same-size content drift too,
+            # which checking the parent directory alone cannot detect.
+            second = observe_managed_include_at(include_dir)["observation"]
+            if second != observation:
+                _deny("MANAGED_INCLUDE_CHANGED_DURING_INSPECTION")
             # Re-read the exact same protected content under the held lock,
             # even if another root-capable actor modified it without flock.
             _, after = _read_state(state_dir, owner_uid)

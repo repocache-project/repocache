@@ -38,7 +38,11 @@ The new read-only preview_current_namespace_locked_candidate function validates
 bounded (at most 256 KiB), strict UTF-8, NUL-free candidate bytes against the
 actual managed include under the same exclusive protected-state lock. It
 refuses foreign includes, manifest/inode drift, stale generations, symlinks,
-unsafe directories, pending journals and orphan state stages. Its redacted
+unsafe directories, pending journals and orphan state stages. It reobserves
+live include content/inode while still locked, rejecting changes between
+observations, including same-inode content drift that directory metadata
+alone cannot detect. This narrows detectable races, but does not defeat
+hostile root writers or make results valid after the lock is released. Its redacted
 candidate_action is WOULD_CREATE, UNCHANGED or WOULD_REPLACE. No candidate
 bytes, digest, identity lease or operator credentials are returned. Existing
 write, NGINX validation/reload/exposure and catalog authority flags remain

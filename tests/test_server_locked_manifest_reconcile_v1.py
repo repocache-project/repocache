@@ -479,3 +479,54 @@ def test_public_candidate_preflight_rejects_bad_bytes_before_open(monkeypatch):
         preview_current_namespace_locked_candidate(
             expected_generation=0, candidate_bytes=b"\x00",
         )
+
+
+def test_candidate_preview_refuses_include_observation_change_without_mutation(
+    layout, monkeypatch,
+):
+    import repocache.server_locked_manifest_reconcile_v1 as module
+    # Model a hostile writer that does not honor the protected-state flock.
+    # In production, this could be an external root actor racing in-place.
+    actual = module.observe_managed_include_at
+    calls = 0
+
+    def substituted(parent_fd):
+        nonlocal calls
+        calls += 1
+        snapshot = actual(parent_fd)
+        if calls == 2:
+            return {**snapshot, "observation": {
+                "kind": "regular", "sha256": "e" * 64, "uid": 0,
+                "gid": 0, "mode": 0o640, "dev": 1, "ino": 1,
+                "nlink": 1,
+            }}
+        return snapshot
+
+    monkeypatch.setattr(module, "observe_managed_include_at", substituted)
+    with pytest.raises(
+        LockedManifestInspectionError,
+        match="MANAGED_INCLUDE_CHANGED_DURING_INSPECTION",
+    ):
+        preview(layout, b"# candidate\n")
+    assert calls == 2
+    assert not (layout[2] / "repocache-managed.conf").exists()
+
+
+def test_candidate_preview_rechecks_absent_include_without_mutation(
+    layout, monkeypatch,
+):
+    import repocache.server_locked_manifest_reconcile_v1 as module
+    actual = module.observe_managed_include_at
+    observations = []
+
+    def record(parent_fd):
+        observation = actual(parent_fd)
+        observations.append(observation)
+        return observation
+
+    monkeypatch.setattr(module, "observe_managed_include_at", record)
+    result = preview(layout, b"# candidate\n")
+    assert result["candidate_action"] == "WOULD_CREATE"
+    assert len(observations) == 2
+    assert observations[0] == observations[1]
+    assert not (layout[2] / "repocache-managed.conf").exists()
