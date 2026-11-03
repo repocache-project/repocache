@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import hashlib
 import math
 import socket
-import time
+from time import monotonic
 from typing import Any, Callable
 
 from repocache.server_bounded_dns_v1 import (
@@ -68,11 +68,11 @@ def _cycle_bounded_resolver() -> Callable[..., list[tuple[Any, ...]]]:
     Use a real monotonic clock rather than the caller's scheduling hint.
     Test-injected resolvers remain explicit non-production fixtures.
     """
-    deadline = time.monotonic() + MAX_REFRESH_CYCLE_SECONDS
+    deadline = monotonic() + MAX_REFRESH_CYCLE_SECONDS
 
     def resolve(host: str, port: int, *, family: int, type: int,
                 proto: int) -> list[tuple[Any, ...]]:
-        remaining = deadline - time.monotonic()
+        remaining = deadline - monotonic()
         if not math.isfinite(remaining) or remaining <= 0:
             # The upstream planner converts OSError to a fixed, redacted
             # failure and discards the entire candidate pin set.
