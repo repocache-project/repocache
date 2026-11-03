@@ -8,6 +8,21 @@ there was no earlier public REPOCACHE distribution against which the public
 update and installation pipeline could be tested. This is not permission to
 publish future releases before exercising their signed installers.
 
+## Version-independent stabilization and final source identity
+
+For every selected stable `vX.Y.Z`, run feature acceptance on
+`integration/vX.Y.Z` and optionally alpha/beta host trials on the frozen
+`release/vX.Y.Z`, without claiming those preliminary test artifacts are
+the signed final candidate. The protected `main`/release rulesets currently
+require linear history and permit squash/rebase promotion; these methods may
+rewrite the source commit. **Promote first, then verify the resulting protected
+`main` source SHA, authorize the official stable tag and only afterwards
+perform the genuine owner-signed candidate Stage A against that exact SHA.**
+The signed candidate must be accepted before Stage B publication.
+There is no default alpha/beta signing, publication or production activation.
+Follow [the generic lifecycle](RELEASE_LIFECYCLE.md) and preserve the actual
+version-specific signed trust/baseline policy (issue #76).
+
 ## Stage A: release candidate (prepublication, mandatory for v0.5.0 onward)
 
 1. Freeze the reviewed commit, compatibility policy and dependencies. Test

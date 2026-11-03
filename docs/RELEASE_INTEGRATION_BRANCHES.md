@@ -32,8 +32,10 @@ by this CI-lane document. See the [adopted next public release plan](RELEASE_TAR
 (merged in PR #226 on 2026-11-02; documentation approval is not operational acceptance).
 
 The already completed #157 live-push checks below remain historical PASS.
-Future generic integration-branch workflow changes stay with [#175](https://github.com/teixemf/repocache/issues/175)
-/ draft PR #183 and are **not adopted here**. Do not infer release readiness,
+At the historical 2026-11-02 checkpoint, generic branch push coverage
+was still under [#175](https://github.com/teixemf/repocache/issues/175)
+/ draft PR #183. Check current protected-branch code and live Actions before
+claiming adoption. Do not infer release readiness,
 a working server installer, active network services, or signing authority
 from CI runs on integration branches.
 
@@ -194,3 +196,44 @@ impact. Reject promotion if any mandatory criterion, review, branch rule or
 publisher-signature/native acceptance is NOT VERIFIED or FAIL.
 
 Do not merge release integration branches merely to keep GitHub green.
+
+
+## Version-independent lane routing (2026-11-03 maintainer direction)
+
+For every maintainer-selected stable version `vX.Y.Z`, the intended pipeline
+is `feature/*` -> `integration/vX.Y.Z` -> `release/vX.Y.Z` -> `main`.
+`main` accepts only independently authorized hotfixes and final release
+promotions, not regular feature PRs. Backport accepted `main` hotfixes into
+each affected active integration or release lane through reviewed PRs.
+
+A future `integration/vX.Y.Z` starts from a verified accepted baseline
+and receives issue/milestone-aligned feature PRs individually. A new
+`release/vX.Y.Z` is created only at an expressly approved stabilization
+cut from the accepted integration HEAD. It accepts only candidate stabilization
+fixes, with regression validation on the exact resulting HEAD. After all
+stabilization-stage criteria PASS, a separately authorized PR promotes the
+reviewed release source to protected `main` by one of the permitted
+**squash/rebase** methods (the live main ruleset requires linear history).
+That promotion changes the source commit SHA when necessary: repeat all
+mandatory exact-HEAD tests, freeze the **resulting protected-main commit**,
+and **only then** authorize the stable tag and official unsigned build.
+Never sign, publish, or claim exact-SHA parity for an unpromoted release
+branch commit. Private owner signing, tags, Draft staging, publication
+and production activation each need separate explicit approval.
+There is **no** automatic feature merge, branch creation, deployment or signing.
+
+Optional alpha/beta tests can use isolated real Debian 13 and AlmaLinux 10
+hosts. They require explicit test authorization, isolated identities and
+exact candidate hashes; they do not make a release publishable or authorize
+production activation. The existing final signed-candidate gate for #76 is
+**not** replaced by exploratory prereleases; current `release.yml` still
+requires the tag commit to be an ancestor of protected `main`.
+
+The CI pattern proposed in PR #183 uses unfiltered `'integration/**'` and
+`'release/**'` `push` triggers in the three mandatory workflows so every
+future version receives nine required job contexts; the upstream wheel check
+remains supplemental/path-filtered. These patterns intentionally also cover
+legacy/experimental refs under the protected namespaces. Keep lightweight
+experiments in `feat/*`, `test/*` or `ci/*`. The active GitHub rulesets,
+not this documentation, enforce protected-branch changes. **Until #183 is
+merged, exact-version triggers in protected `main` still govern.**
