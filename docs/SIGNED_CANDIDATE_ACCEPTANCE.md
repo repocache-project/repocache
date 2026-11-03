@@ -1,5 +1,17 @@
 # Signed release candidate acceptance (v0.5.0+)
 
+> **2026-11-03 generic release lifecycle clarification:** this document
+> contains the historical initial v0.5.0-only trust gate; public v0.5.0 was
+> canceled. For any maintainer-selected `vX.Y.Z`, stabilize and optionally
+> conduct isolated alpha/beta trials on `release/vX.Y.Z`, but promote through
+> the permitted linear-history method into protected `main` **before**
+> authorizing the final tag and real owner-signed release candidate. The
+> final tag, build, signing and #76 acceptance use the *resulting main SHA*,
+> not the earlier release-branch SHA. Do not broaden the v0.5.0-only verifier
+> for v0.6.0 or future versions without explicit security-reviewed version,
+> public baseline and compatibility evidence. See
+> [generic release lifecycle](RELEASE_LIFECYCLE.md).
+
 This initial implementation is strictly for an **actual v0.5.0 candidate
 upgraded from published v0.4.0**. The workflow framework can be adapted for
 later releases, but the verifier deliberately refuses v0.5.1, v0.6.0 and other
