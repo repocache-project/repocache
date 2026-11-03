@@ -207,7 +207,12 @@ def _trusted_interpreter(path: Path) -> None:
     if (resolved.parent != Path("/usr/bin")
             or not re.fullmatch(r"python3[.][0-9]+", resolved.name)
             or not (stat.S_ISLNK(link.st_mode) or stat.S_ISREG(link.st_mode))
-            or link.st_uid != 0 or link.st_mode & (0o022 | stat.S_ISUID | stat.S_ISGID)
+            # Symlink mode bits are conventionally 0777 on Linux, but have
+            # no permission semantics. Only the root-owned link placement
+            # and its canonical resolved executable are security-relevant.
+            or link.st_uid != 0
+            or (stat.S_ISREG(link.st_mode)
+                and link.st_mode & (0o022 | stat.S_ISUID | stat.S_ISGID))
             or not stat.S_ISREG(binary.st_mode) or binary.st_uid != 0
             or binary.st_mode & (0o022 | stat.S_ISUID | stat.S_ISGID)
             or not binary.st_mode & 0o111

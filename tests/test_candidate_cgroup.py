@@ -243,3 +243,14 @@ def test_entry_requires_pinned_resource_limits(delegated):
     with pytest.raises(candidate_cgroup.CgroupGateError):
         candidate_cgroup.entry_argv(
             _gate(delegated), leaf, ["/usr/bin/prlimit", "--", "/bin/true"])
+
+
+
+def test_system_python_symlink_metadata_is_accepted_but_untrusted_path_denied():
+    # OS Python is commonly /usr/bin/python3 -> python3.13/python3.12:
+    # symlink mode is 0777 even though the resolved binary is root-owned 0755.
+    candidate_cgroup._trusted_interpreter(candidate_cgroup.SYSTEM_PYTHON)
+    with pytest.raises(candidate_cgroup.CgroupGateError,
+                       match="Noncanonical"):
+        candidate_cgroup._trusted_interpreter(
+            __import__("pathlib").Path("/usr/local/bin/python3"))
