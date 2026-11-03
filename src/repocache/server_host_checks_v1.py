@@ -227,7 +227,7 @@ def _parse_tcp_listeners(raw: bytes, *, ipv6: bool = False) -> set[int]:
         if len(columns) < 10 or len(columns[1].split(":")) != 2:
             raise ValueError("invalid proc net row")
         endpoint, port_hex = columns[1].split(":", 1)
-        if (len(endpoint) not in (8, 32) or not port_hex or len(port_hex) != 4
+        if (len(endpoint) != (32 if ipv6 else 8) or not port_hex or len(port_hex) != 4
                 or any(c not in "0123456789abcdefABCDEF" for c in endpoint + port_hex)
                 or len(columns[3]) != 2
                 or any(c not in "0123456789abcdefABCDEF" for c in columns[3])):
