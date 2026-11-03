@@ -237,6 +237,40 @@ def test_capture_skips_host_probes_on_unsupported_os_and_retains_false_auth(monk
     assert not result.authorizes_installation
 
 
+@pytest.mark.parametrize("release,python", [
+    ("ID=debian\nVERSION_ID=13\n", (3, 13)),
+    ("ID=almalinux\\nVERSION_ID=10\\n", (3, 12)),
+])
+def test_invalid_machine_identity_never_reaches_host_probes(
+    monkeypatch, release, python,
+):
+    """Malformed architecture fails before any native host probe on both OSes."""
+    from dataclasses import replace
+
+    doc = json.loads(
+        (Path(__file__).parents[1] / "docs/examples/server-install-v1.json")
+        .read_text(encoding="utf-8")
+    )
+    invalid = replace(fact(release, python), machine="../unsupported")
+    monkeypatch.setattr(host, "capture_native_host_facts", lambda: invalid)
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("Invalid machine identity reached local host probes")
+
+    monkeypatch.setattr(host, "_capture_host_probes", forbidden)
+    report = host.inspect_deployment_host(doc)
+    assert byname(report.checks, "supported_os_and_python").status is PreflightStatus.PASS
+    assert byname(report.checks, "architecture_identity").status is PreflightStatus.FAIL
+    assert not set(host._PROBE_CODES).intersection(c.name for c in report.checks)
+    assert report.has_failures
+    assert not report.all_verified and not report.authorizes_installation
+    assert "../unsupported" not in json.dumps(report.to_dict())
+
+    # A caller cannot inject positive host observations after identity failure.
+    injected = host.assess_deployment_host(invalid, complete_probes())
+    assert injected == report
+
+
 def test_inspect_uses_strict_validated_document_and_report(monkeypatch):
     doc = json.loads((Path(__file__).parents[1]/"docs/examples/server-install-v1.json").read_text())
     monkeypatch.setattr(host,"capture_native_host_facts",lambda:fact())
