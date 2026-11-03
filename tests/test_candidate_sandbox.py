@@ -295,10 +295,18 @@ def test_candidate_capture_invalid_deadline_does_not_spawn(tmp_path, monkeypatch
 def test_candidate_prlimit_requires_root_owned_non_setuid_binary(
         monkeypatch, tmp_path):
     monkeypatch.setattr(updater, "_require_service_account", lambda: None)
-    # A missing secondary trusted helper must fail before any wheel download.
+    # Substitute a known root-owned regular executable for the primary helper
+    # so this test cannot pass merely because bwrap is absent on CI runners.
+    monkeypatch.setattr(candidate_sandbox, "BWRAP", Path("/usr/bin/env"))
+    monkeypatch.setattr(candidate_sandbox, "_verify_patch_level", lambda: None)
     missing = tmp_path / "prlimit-missing"
     monkeypatch.setattr(candidate_sandbox, "PRLIMIT", missing)
-    with pytest.raises(candidate_sandbox.SandboxError):
+    with pytest.raises(candidate_sandbox.SandboxError, match="unavailable"):
+        candidate_sandbox.require_executor()
+    link = tmp_path / "prlimit-linked"
+    link.symlink_to("/usr/bin/env")
+    monkeypatch.setattr(candidate_sandbox, "PRLIMIT", link)
+    with pytest.raises(candidate_sandbox.SandboxError, match="Untrusted"):
         candidate_sandbox.require_executor()
 
 
