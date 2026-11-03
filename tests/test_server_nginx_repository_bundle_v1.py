@@ -38,11 +38,16 @@ def pins(*, apt=True, dnf=True):
     }
 
 
-def render(doc=None, candidates=None, generation=4, ca=CA):
+_DEFAULT_CANDIDATES = object()
+
+
+def render(doc=None, candidates=_DEFAULT_CANDIDATES, generation=4, ca=CA):
     return render_repository_nginx_bundle_candidate(
         document() if doc is None else doc,
         expected_state_generation=generation,
-        candidate_pins_by_repository=(pins() if candidates is None else candidates),
+        candidate_pins_by_repository=(
+            pins() if candidates is _DEFAULT_CANDIDATES else candidates
+        ),
         ca_bundle_path=ca,
     )
 
