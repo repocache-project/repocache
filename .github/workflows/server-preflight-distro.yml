@@ -1,0 +1,64 @@
+name: Server Preflight Distro Containers
+
+on:
+  pull_request:
+    paths:
+      - 'src/repocache/server_install_v1.py'
+      - 'src/repocache/server_preflight_v1.py'
+      - 'src/repocache/server_host_checks_v1.py'
+      - 'tests/test_server_install_v1.py'
+      - 'tests/test_server_preflight_v1.py'
+      - 'tests/test_server_host_checks_v1.py'
+      - '.github/workflows/server-preflight-distro.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  preflight-userspace:
+    name: Read-only local preflight tests (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: debian13
+            image: debian:trixie-slim
+          - platform: almalinux10
+            image: almalinux:10
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install test-only OS Python and pytest inside disposable container
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          # Bootstrap only the disposable CI container, not the host or
+          # preflight implementation. Do not install NGINX or services.
+          if [ '${{ matrix.platform }}' = 'debian13' ]; then
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq
+            apt-get install -y -qq --no-install-recommends python3 python3-pytest
+          else
+            dnf -y -q --enablerepo=crb install python3 python3-pytest
+          fi
+          python3 --version
+          python3 -m pytest --version
+      - name: Execute read-only positive and negative preflight regressions
+        shell: bash
+        env:
+          PYTHONPATH: src
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          set -Eeuo pipefail
+          python3 -B -m pytest -q -rs \
+            tests/test_server_install_v1.py \
+            tests/test_server_preflight_v1.py \
+            tests/test_server_host_checks_v1.py
+          # This is distro userspace/container evidence, NOT a booted
+          # systemd or SELinux enforcing/managed-label acceptance test.
