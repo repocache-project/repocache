@@ -52,3 +52,34 @@ non-authorizing output. Test presence is NOT executed evidence. Full original
 #95 and #31 acceptance, including real native Debian 13/AlmaLinux 10
 NGINX/SELinux/cache/recovery and trusted root authorization, remains
 **NOT VERIFIED**.
+
+
+## Inert persistence transition intent (second increment)
+
+`plan_inert_persistence_transition` requires validated #18 current/proposed
+documents, an aligned but **untrusted** #31 state-v1 snapshot and exact
+generation. It refuses generation exhaustion, new or removed IDs, and changes
+to an existing ID's canonical source/layout identity that #31's current writer
+cannot preserve. The output describes the closed state-v1 repository ID,
+identity and desired-state projection and conservatively identifies IDs whose
+changes would require authenticated administrative review, including global
+policy changes affecting omitted repositories. Existing inputs are not
+mutated. Activation remains separate from intent.
+
+**Crucially, this is not a persisted configuration transaction or a complete
+state-v1 record.** Approval references and the `configuration_sha256` binding
+are deliberately omitted, preventing the plan itself from being accepted by
+`validate_protected_state` as a directly committable state object. It never
+calls `_commit_under_root`; that API remains private to #31 Linux FD fixtures.
+A focused test explicitly constructs a *synthetic, non-authenticated* complete
+state candidate, calls #31's private fixture writer under a disposable root,
+observes durable atomic write, clean recovery and stale-CAS refusal. This
+proves schema interoperability in the fixture **only**. It does not approve
+any existing host write, NGINX activation or real administrative operation.
+
+The next operational development must first agree with the #31 owner on a
+protected, canonical and recoverable configuration payload/digest, durable
+tombstone history, capacity (install v1 <=500 vs state v1 <=32), and an
+authenticated authorizer under the same state lock. An immutable-identity
+migration or force-cleanup is separately blocked pending approved ownership
+and recovery design. No PR is merge-ready merely because this fixture passes.

@@ -194,3 +194,80 @@ def preview_declarative_state_alignment(
         "authorizes_catalog_publication": False,
         "authorizes_cache_cleanup": False,
     }
+
+
+def plan_inert_persistence_transition(
+    current_document: dict[str, Any],
+    proposed_document: dict[str, Any],
+    protected_snapshot: dict[str, Any],
+    *,
+    current_generation: int,
+) -> dict[str, Any]:
+    """Produce a non-committable transition intent for the inert #31 store.
+
+    The #31 v1 protected format has no durable install-document payload,
+    tombstone ledger, activation state or authenticated operator approval.
+    Even a matching caller-supplied snapshot MUST NOT grant permission to
+    invoke its private fixture-only writer. The returned intent intentionally
+    omits the approval and configuration digest fields required by that writer.
+
+    Existing canonical identities must stay stable: #31 forbids identity
+    reassignment and removal. A different upstream/layout identity needs a
+    future authenticated migration/reallocation transaction, not overwrite.
+    """
+    aligned = preview_declarative_state_alignment(
+        current_document, protected_snapshot, current_generation=current_generation
+    )
+    if current_generation == MAX_INT:
+        raise ReconciliationPlanError("persistence: state generation exhausted")
+
+    plan = plan_declarative_reconciliation(
+        current_document, proposed_document, current_generation=current_generation
+    )
+    current = validate_install_document(current_document, for_apply=True)
+    candidate = plan["candidate_document"]
+    before = {repo["id"]: repo for repo in current["repositories"]}
+    after = {repo["id"]: repo for repo in candidate["repositories"]}
+    if set(before) != set(after):
+        raise ReconciliationPlanError("persistence: repository set change unsupported")
+
+    projections = []
+    changed_ids = []
+    for identifier in sorted(after):
+        old, new = before[identifier], after[identifier]
+        digest = hashlib.sha256(_canonical_identity(new).encode("utf-8")).hexdigest()
+        if digest != hashlib.sha256(_canonical_identity(old).encode("utf-8")).hexdigest():
+            raise ReconciliationPlanError("persistence: identity reassignment unsupported")
+        if _effective_configuration(old) != _effective_configuration(new):
+            changed_ids.append(identifier)
+        projections.append({
+            "id": identifier,
+            "canonical_identity_sha256": digest,
+            "desired_state": new["desired_state"],
+            "observed_state": "not-activated",
+        })
+    deployment_changed = current["deployment"] != candidate["deployment"]
+    # Approval records are deliberately absent: only a separately reviewed
+    # privileged owner can authenticate the exact deployment/repo decision.
+    reapproval = sorted(after) if deployment_changed else changed_ids
+    return {
+        "schema_version": 1,
+        "status": "PLAN_ONLY",
+        "state_schema_version": 1,
+        "expected_state_generation": current_generation,
+        "proposed_state_generation": current_generation + int(plan["changed"]),
+        "changed": plan["changed"],
+        "repository_intents": projections,
+        "fresh_approval_required_ids": reapproval,
+        "deployment_approval_required": deployment_changed,
+        "candidate_document": candidate,
+        "state_alignment": aligned["status"],
+        "authorizes_state_commit": False,
+        "authorizes_nginx_reload": False,
+        "authorizes_catalog_publication": False,
+        "authorizes_cache_cleanup": False,
+        "requires_trusted_locked_recheck": True,
+        "configuration_digest_binding_verified": False,
+        "reservation_history_verified": False,
+        "approval_provenance_verified": False,
+    }
