@@ -128,7 +128,7 @@ def run_rehearsal(
         "nginx_syntax_test_passed_in_container": True,
         "native_systemd_tested": False,
         "selinux_enforcing_host_tested": False,
-        "activation_or_reload_performed_by_script": False,
+        "service_start_or_reload_explicitly_requested_by_test_driver": False,
         "host_package_transaction_authorized": False,
         "production_installation_verified": False,
     }
