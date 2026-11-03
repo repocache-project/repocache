@@ -144,4 +144,4 @@ def test_write_only_cgroup_kill_gate_is_not_read(delegated, monkeypatch):
 
     monkeypatch.setattr(candidate_cgroup, "_read", forbid_kill_reads)
     assert _gate(delegated).candidates == candidates
-    assert kill.read_bytes() == b""
+    assert kill.stat().st_size == 0
