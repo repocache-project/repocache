@@ -14,6 +14,29 @@ from repocache.server_native_nginx_ownership_v1 import prepare_fresh_native_ngin
 from repocache.server_native_package_payload_v1 import rehearse_native_nginx_downloads
 
 
+
+def redacted_native_stage(args: list[str]) -> str:
+    """Return only code-owned labels, never command-supplied package paths."""
+    if not args:
+        return "unknown"
+    binary = args[0]
+    if binary == "/usr/bin/apt-get":
+        return "apt_metadata" if args[-1] == "update" else "apt_download"
+    if binary == "/usr/bin/apt-cache":
+        return "apt_candidate"
+    if binary == "/usr/bin/dnf":
+        return ("dnf_metadata" if "makecache" in args else
+                "dnf_candidate" if "repoquery" in args else "dnf_download")
+    if binary == "/usr/bin/dpkg-deb":
+        return "deb_header"
+    if binary == "/usr/bin/rpmkeys":
+        return "rpm_signature"
+    if binary == "/usr/bin/rpm":
+        return ("rpm_private_db_init" if "--initdb" in args else
+                "rpm_pubkey_import" if "--import" in args else "rpm_header")
+    return "unknown"
+
+
 def classified_ci_runner(args, **kwargs):
     """Print bounded *boolean* CI diagnostics; never log native output."""
     process = subprocess.run(args, **kwargs)
@@ -64,7 +87,7 @@ def classified_ci_runner(args, **kwargs):
         matches = [label for label, value in tokens.items()
                    if value in combined]
         print(json.dumps({
-            "ci_native_manager_stage": args[-1],
+            "ci_native_manager_stage": redacted_native_stage(args),
             "return_code": process.returncode,
             "signals": signals,
             "static_dnf_argument_error_labels": matches,

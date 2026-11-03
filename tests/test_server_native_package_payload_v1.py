@@ -230,3 +230,24 @@ def test_download_command_never_permits_native_package_install(tmp_path):
 def test_synthetic_evidence_must_be_closed_and_coherent(code, count):
     with pytest.raises(ValueError):
         stage.NativePayloadRehearsalV1("debian", code, count)
+
+
+def test_ci_diagnostics_never_log_scratch_paths(monkeypatch, capsys):
+    from scripts import smoke_server_native_package_metadata as smoke
+
+    dangerous = "/tmp/operator-secret-location/very-private-nginx.rpm"
+    for path, expected in (
+        (["/usr/bin/rpmkeys", "--checksig", dangerous], "rpm_signature"),
+        (["/usr/bin/rpm", "-qp", dangerous], "rpm_header"),
+        (["/usr/bin/dpkg-deb", "--field", dangerous, "Package"], "deb_header"),
+    ):
+        assert smoke.redacted_native_stage(path) == expected
+        monkeypatch.setattr(smoke.subprocess, "run", lambda *a, **kw:
+                            SimpleNamespace(returncode=1, stdout="",
+                                            stderr="untrusted native output"))
+        smoke.classified_ci_runner(path)
+    diagnostics = capsys.readouterr().out
+    assert dangerous not in diagnostics
+    assert "operator-secret" not in diagnostics
+    assert "untrusted native output" not in diagnostics
+    assert diagnostics.count("ci_native_manager_stage") == 3
