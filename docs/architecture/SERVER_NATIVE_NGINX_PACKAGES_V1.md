@@ -253,3 +253,23 @@ The tests cover preprovisioned path acceptance strictly under a mock #31
 reader, journal/recovery refusal, existing state, races, root errors and
 lack of install authority. They are not live native booted-host evidence.
 All five original #27 operational acceptance criteria remain NOT VERIFIED.
+
+## CI userspace reachability of the pre-package locked snapshot
+
+The existing `server-native-nginx-metadata.yml` matrix now runs a second
+smoke check on **disposable** Debian 13 and AlmaLinux 10 images. Only after
+successful non-installing signed-metadata and download-only rehearsal does
+the test container preprovision the literal #31 state directory with mode
+0700 and a new empty mode-0600 lock. It first confirms neither the managed
+state root nor `/etc/nginx` is already present. The standalone
+`scripts/smoke_server_native_nginx_prepackage_state.py` then performs actual
+read-only state-lock observations with OS distribution Python and confirms
+that a preprovisioned protected root is distinguishable from foreign NGINX,
+while **all** install/reload/host-root authority remains false.
+
+This is a user-namespace/container root fixture, not installation on a booted
+native systemd or AlmaLinux SELinux-enforcing host. The write in the workflow
+is confined to its short-lived Docker image and never to the GitHub runner's
+filesystem or a deployed REPOCACHE host. No package transaction, real
+service activation, privileged helper delegation, or native journal/recovery
+has yet been validated by this test.
