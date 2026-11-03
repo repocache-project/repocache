@@ -22,7 +22,7 @@ from repocache.server_protected_state_inspect_v1 import (
 from repocache.server_protected_state_store_v1 import (
     JOURNAL_NAME, JOURNAL_TMP_NAME, MAX_JOURNAL_BYTES,
     MAX_STATE_BYTES, ROLLBACK_NAME, STAGE_NAME,
-    _locked, _read_file, _read_journal, _read_state,
+    _locked, _read_file, _read_journal, _read_state, _hash,
 )
 
 _COMPARE_FIELDS = ("sha256", "uid", "gid", "mode", "dev", "ino")
@@ -169,6 +169,76 @@ def _inspect_locked_under_root(
             report["candidate_preview_only"] = True
         return report
 
+
+
+
+def _preview_recovery_under_root(
+    root_fd: int, *, owner_uid: int,
+) -> dict[str, Any]:
+    """Fixture-only locked recovery diagnosis: no mutation or authorization."""
+    if (type(root_fd) is not int or root_fd < 0
+            or type(owner_uid) is not int or owner_uid < 0):
+        _deny("PROTECTED_RECOVERY_PREVIEW_ARGUMENT_INVALID")
+    with _locked(root_fd, owner_uid) as state_dir:
+        journal = _read_journal(state_dir, owner_uid)
+        temp = _read_file(
+            state_dir, JOURNAL_TMP_NAME, owner_uid, MAX_JOURNAL_BYTES
+        )
+        stage = _read_file(state_dir, STAGE_NAME, owner_uid, MAX_STATE_BYTES)
+        rollback = _read_file(
+            state_dir, ROLLBACK_NAME, owner_uid, MAX_STATE_BYTES
+        )
+        state, current = _read_state(state_dir, owner_uid)
+        if journal is None:
+            if stage is not None:
+                _deny("PROTECTED_ORPHAN_STAGE_REQUIRES_REVIEW")
+            if rollback is not None:
+                _deny("PROTECTED_ORPHAN_ROLLBACK_REQUIRES_REVIEW")
+            action = ("DISCARD_UNPUBLISHED_JOURNAL" if temp is not None
+                      else "CLEAN")
+        else:
+            if temp is not None:
+                _deny("PROTECTED_ORPHAN_JOURNAL_TEMP_REQUIRES_REVIEW")
+            previous, next_digest, _ = journal
+            if _hash(current) not in (next_digest, _hash(previous)):
+                _deny("PROTECTED_RECOVERY_DRIFT")
+            if stage is not None and current != previous:
+                _deny("PROTECTED_RECOVERY_DRIFT")
+            action = "ROLLBACK_PENDING_STATE"
+        # Refuse detectable races with writers that do not honor flock.
+        if (
+            _read_journal(state_dir, owner_uid) != journal
+            or _read_file(
+                state_dir, JOURNAL_TMP_NAME, owner_uid, MAX_JOURNAL_BYTES
+            ) != temp
+            or _read_file(
+                state_dir, STAGE_NAME, owner_uid, MAX_STATE_BYTES
+            ) != stage
+            or _read_file(
+                state_dir, ROLLBACK_NAME, owner_uid, MAX_STATE_BYTES
+            ) != rollback
+            or _read_state(state_dir, owner_uid) != (state, current)
+        ):
+            _deny("PROTECTED_RECOVERY_INPUT_CHANGED")
+        _safe_directory(root_fd, owner_uid)
+        return {
+            "schema_version": 1,
+            "status": "LOCKED_READ_ONLY_RECOVERY_PREVIEW",
+            "recovery_action": action,
+            "recovery_required": action != "CLEAN",
+            "observed_state_generation": (
+                0 if state is None else state["state_generation"]
+            ),
+            "exclusive_state_lock_held_during_inspection": True,
+            "recovery_executed": False,
+            "operator_authorization_verified": False,
+            "protected_manifest_provenance_verified": False,
+            "mount_namespace_acl_selinux_verified": False,
+            "nginx_syntax_verified": False,
+            "authorizes_state_mutation": False,
+            "authorizes_nginx_reload": False,
+            "authorizes_catalog_publication": False,
+        }
 
 
 def _verify_current_root_fd(root_fd: int) -> None:

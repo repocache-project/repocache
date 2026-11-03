@@ -13,11 +13,12 @@ from repocache.server_locked_manifest_reconcile_v1 import (
     _inspect_locked_under_root,
     _match_manifest,
     _candidate_action,
+    _preview_recovery_under_root,
     preview_current_namespace_locked_candidate,
 )
 from repocache.server_protected_state_store_v1 import (
-    JOURNAL_NAME, JOURNAL_TMP_NAME, LOCK_NAME, STAGE_NAME,
-    ProtectedStateStoreError, _commit_under_root, _locked,
+    JOURNAL_NAME, JOURNAL_TMP_NAME, LOCK_NAME, STAGE_NAME, STATE_NAME,
+    ProtectedStateStoreError, _commit_under_root, _recover_under_root, _locked,
 )
 
 
@@ -530,3 +531,147 @@ def test_candidate_preview_rechecks_absent_include_without_mutation(
     assert len(observations) == 2
     assert observations[0] == observations[1]
     assert not (layout[2] / "repocache-managed.conf").exists()
+
+
+def recovery_preview(layout):
+    fd, _, _, uid = layout
+    return _preview_recovery_under_root(fd, owner_uid=uid)
+
+
+def test_recovery_preview_clean_is_repeatable_and_read_only(layout):
+    _, folder, includes, _ = layout
+    before = sorted(p.name for p in folder.iterdir())
+    report = recovery_preview(layout)
+    assert recovery_preview(layout) == report
+    assert report["recovery_action"] == "CLEAN"
+    assert report["recovery_required"] is False
+    assert report["observed_state_generation"] == 0
+    for flag in (
+        "recovery_executed", "authorizes_state_mutation",
+        "authorizes_nginx_reload", "authorizes_catalog_publication",
+        "operator_authorization_verified", "nginx_syntax_verified",
+    ):
+        assert report[flag] is False
+    assert sorted(p.name for p in folder.iterdir()) == before
+    assert list(includes.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("phase", "expected", "journal_file"),
+    [
+        ("journal_tmp_durable", "DISCARD_UNPUBLISHED_JOURNAL", JOURNAL_TMP_NAME),
+        ("journal_durable", "ROLLBACK_PENDING_STATE", JOURNAL_NAME),
+        ("stage_durable", "ROLLBACK_PENDING_STATE", JOURNAL_NAME),
+        ("replace_durable", "ROLLBACK_PENDING_STATE", JOURNAL_NAME),
+    ],
+)
+def test_recovery_preview_classifies_crashes_without_mutating(
+    layout, phase, expected, journal_file,
+):
+    root, directory, _, uid = layout
+
+    def crash(at):
+        if at == phase:
+            raise RuntimeError("simulated crash")
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        _commit_under_root(
+            root, state(), owner_uid=uid,
+            expected_generation=0, inject_fault=crash,
+        )
+    before = {p.name: p.read_bytes() for p in directory.iterdir()}
+    report = recovery_preview(layout)
+    assert report["recovery_action"] == expected
+    assert report["recovery_required"] is True
+    assert report["recovery_executed"] is False
+    assert journal_file in before
+    assert {p.name: p.read_bytes() for p in directory.iterdir()} == before
+    assert recovery_preview(layout) == report
+
+    # The separate, private fixture-only recovery still works afterwards.
+    _recover_under_root(root, owner_uid=uid)
+    assert recovery_preview(layout)["recovery_action"] == "CLEAN"
+
+
+def test_recovery_preview_rejects_valid_but_unjournalled_state_drift(layout):
+    root, directory, _, uid = layout
+
+    def crash(phase):
+        if phase == "replace_durable":
+            raise RuntimeError("simulated crash")
+
+    with pytest.raises(RuntimeError):
+        _commit_under_root(
+            root, state(), owner_uid=uid,
+            expected_generation=0, inject_fault=crash,
+        )
+    previous = (directory / STATE_NAME).read_bytes()
+    altered = previous.replace(b"a" * 64, b"b" * 64)
+    assert altered != previous
+    (directory / STATE_NAME).write_bytes(altered)
+    with pytest.raises(LockedManifestInspectionError, match="RECOVERY_DRIFT"):
+        recovery_preview(layout)
+    assert (directory / STATE_NAME).read_bytes() == altered
+    assert (directory / JOURNAL_NAME).is_file()
+
+
+def test_recovery_preview_refuses_orphan_stage_without_cleanup(layout):
+    _, directory, _, _ = layout
+    stage = directory / STAGE_NAME
+    stage.write_bytes(b"unfinished")
+    stage.chmod(0o600)
+    with pytest.raises(LockedManifestInspectionError, match="ORPHAN_STAGE"):
+        recovery_preview(layout)
+    assert stage.read_bytes() == b"unfinished"
+
+
+def test_recovery_preview_refuses_lock_contention(layout):
+    root, _, _, uid = layout
+    with _locked(root, uid):
+        with pytest.raises(ProtectedStateStoreError, match="LOCK_UNAVAILABLE"):
+            recovery_preview(layout)
+
+
+def test_recovery_preview_rechecks_pending_journal(layout, monkeypatch):
+    import repocache.server_locked_manifest_reconcile_v1 as module
+    root, directory, _, uid = layout
+
+    def crash(phase):
+        if phase == "journal_durable":
+            raise RuntimeError("simulated crash")
+
+    with pytest.raises(RuntimeError):
+        _commit_under_root(
+            root, state(), owner_uid=uid,
+            expected_generation=0, inject_fault=crash,
+        )
+    actual = module._read_journal
+    calls = 0
+
+    def changed_read(fd, owner):
+        nonlocal calls
+        calls += 1
+        value = actual(fd, owner)
+        if calls == 2:
+            assert value is not None
+            old, _, original = value
+            return old, "f" * 64, original
+        return value
+
+    monkeypatch.setattr(module, "_read_journal", changed_read)
+    with pytest.raises(LockedManifestInspectionError, match="RECOVERY_INPUT_CHANGED"):
+        recovery_preview(layout)
+    assert calls == 2
+    assert (directory / JOURNAL_NAME).is_file()
+
+
+@pytest.mark.parametrize("bad", [True, -1, None, "0"])
+def test_recovery_preview_rejects_invalid_fixture_root_without_fs_access(
+    layout, bad,
+):
+    _, directory, _, uid = layout
+    with pytest.raises(
+        LockedManifestInspectionError, match="RECOVERY_PREVIEW_ARGUMENT_INVALID"
+    ):
+        _preview_recovery_under_root(bad, owner_uid=uid)
+    assert sorted(p.name for p in directory.iterdir()) == [LOCK_NAME]

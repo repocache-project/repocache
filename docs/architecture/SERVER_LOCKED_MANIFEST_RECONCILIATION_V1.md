@@ -60,3 +60,33 @@ External TLS, cache, logs, metrics, configuration and client sources are
 untouched.
 
 Focused tests: python -m pytest -q tests/test_server_locked_manifest_reconcile_v1.py
+
+
+## Read-only protected-state crash recovery preview — #31 increment
+
+The private _preview_recovery_under_root classifies the existing #222
+protected-state journal while holding the exclusive descriptor-pinned lock.
+It is an isolated-fixture-only diagnostic, NOT a CLI, a public privileged
+recovery API or a mutation/approval capability. Fixed owner-checked journal,
+stage, rollback and state bytes are re-read under the lock before returning.
+
+- CLEAN: no pending journal, stage or rollback.
+- DISCARD_UNPUBLISHED_JOURNAL: an owned unpublished temporary journal exists.
+- ROLLBACK_PENDING_STATE: a published journal matches the old/new state
+  digest boundary; a separate explicitly invoked recovery is required.
+- Any unowned/malformed file, state drift, conflicting temp, unexpected
+  orphan stage/rollback or detectable concurrent change: refuse without
+  touching the filesystem.
+
+This classification does not guarantee that subsequent recovery will
+succeed. The output contains no journal content, file bytes or secrets;
+recovery_executed, authorizes_state_mutation, authorizes_nginx_reload and
+authorizes_catalog_publication always remain FALSE. The existing #222
+fixture-only mutation API stays separate and is exercised in tests solely
+to prove that simulated recovery can return the state to CLEAN.
+
+This journal covers only inert protected JSON state, NOT native NGINX
+configuration, full-context nginx -t, reload, TLS, service availability,
+package upgrades or active repository discovery. It does not establish
+operator approval, host-root, mount/ACL/SELinux provenance or production
+readiness. All five original #31 operational criteria remain NOT VERIFIED.
