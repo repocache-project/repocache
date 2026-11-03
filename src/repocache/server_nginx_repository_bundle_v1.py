@@ -8,9 +8,10 @@ whether to activate a staged configuration and publish discovery.
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
-from repocache.server_install_v1 import MAX_INT, validate_install_document
+from repocache.server_install_v1 import MAX_INT, _path, validate_install_document
 from repocache.server_nginx_pin_render_v1 import (
     PinnedNginxError,
     render_pinned_upstream_fragments,
@@ -48,6 +49,17 @@ def render_repository_nginx_bundle_candidate(
         raise NginxRepositoryBundleError("NGINX_BUNDLE_DOCUMENT_INVALID") from None
     if snapshot["expected_state_generation"] != expected_state_generation:
         raise NginxRepositoryBundleError("NGINX_BUNDLE_STALE_GENERATION")
+
+    # Validate the fixed CA path even with zero desired-active repositories.
+    # Inactive outputs must not become an input-validation bypass.
+    if (type(ca_bundle_path) is not str or len(ca_bundle_path) > 2048
+            or re.fullmatch(r"/[A-Za-z0-9_./+-]+", ca_bundle_path, re.ASCII)
+            is None):
+        raise NginxRepositoryBundleError("NGINX_BUNDLE_CA_INVALID")
+    try:
+        _path(ca_bundle_path, "CA reference")
+    except ValueError:
+        raise NginxRepositoryBundleError("NGINX_BUNDLE_CA_INVALID") from None
 
     active: dict[str, dict[str, Any]] = {}
     for repository in snapshot["repositories"]:
