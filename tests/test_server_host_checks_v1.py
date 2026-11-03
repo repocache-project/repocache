@@ -239,7 +239,7 @@ def test_capture_skips_host_probes_on_unsupported_os_and_retains_false_auth(monk
 
 @pytest.mark.parametrize("release,python", [
     ("ID=debian\nVERSION_ID=13\n", (3, 13)),
-    ("ID=almalinux\\nVERSION_ID=10\\n", (3, 12)),
+    ("ID=almalinux\nVERSION_ID=10\n", (3, 12)),
 ])
 def test_invalid_machine_identity_never_reaches_host_probes(
     monkeypatch, release, python,
