@@ -68,7 +68,7 @@ def _should_run_pull_request(changed_paths: tuple[str, ...]) -> bool:
 @pytest.mark.parametrize("name", OPTIONAL_CLIENT_WORKFLOWS)
 def test_supplementary_client_workflows_only_ignore_markdown_on_pr(name: str) -> None:
     header = _read_trigger(name)
-    assert header.endswith("\n" + TRIGGER.rstrip("\n"))
+    assert header.endswith("\n" + TRIGGER)
     assert header.count("  pull_request:") == 1
     assert header.count("  workflow_dispatch:") == 1
     assert "\n  push:" not in header
