@@ -1,6 +1,6 @@
 # Locked protected-manifest versus live NGINX include observation v1
 
-**Tracking:** primary issue #31 / milestone v0.6.0; related #18, #25, #27 and #95. **Dependency fulfilled:** [PR #222](https://github.com/teixemf/repocache/pull/222) was independently authorized and merged into protected `main` as `955360fb7686f632d7d0090994008e10159f23b3`, providing the protected state schema and recovery implementation. Under the adopted release workflow, this PR targets the protected `integration/v0.6.0` branch (baseline `a1739a42cf5baac78bb3f8beb2bd02ee362447e9`), which already contains the #222 storage core. It remains OPEN and Ready for review, **not merged**, and separately requires exact-HEAD CI and explicit maintainer authorization before integration. Synthetic tests do not verify production installation.
+**Tracking:** primary issue #31 / milestone v0.6.0; related #18, #25, #27 and #95. **Dependency fulfilled:** [PR #222](https://github.com/teixemf/repocache/pull/222) was independently authorized and merged into protected `main` as `955360fb7686f632d7d0090994008e10159f23b3`, providing the protected state schema and recovery implementation. Under the adopted release workflow, this PR targets the protected `integration/v0.6.0` branch (baseline `a1739a42cf5baac78bb3f8beb2bd02ee362447e9`), which already contains the #222 storage core. PR #224 subsequently merged into integration/v0.6.0 as ac13ba3847420560685c2156681fb2379af73d36 on 2026-11-03; the previous OPEN status was historical. Synthetic tests do not verify production installation.
 
 ## Fixed-purpose read-only contract
 
@@ -30,3 +30,29 @@ UID 0 in a user namespace, chroot or container and '/' in a non-host mount names
 Focused: python -m pytest -q tests/test_server_locked_manifest_reconcile_v1.py
 
 Fixtures exercise Linux directory-FD traversal and flock, no-op and stale-generation behavior, foreign include refusal, symlink/hardlink/FIFO rejection, pending journal/orphan-stage refusal, metadata match/mismatch for every manifest field, and absence of network/process calls. A synthetic positive UID-0 manifest comparison is verified by a pure helper; it is NOT a real privileged NGINX include approval or native root-owned installation demonstration. Exact-HEAD CI must be executed and inspected before any PASS claim. No merge, signing, tagging, publication, deployment or protected operation is authorized.
+
+
+## Locked candidate pre-staging gate — incremental #31 work
+
+The new read-only preview_current_namespace_locked_candidate function validates
+bounded (at most 256 KiB), strict UTF-8, NUL-free candidate bytes against the
+actual managed include under the same exclusive protected-state lock. It
+refuses foreign includes, manifest/inode drift, stale generations, symlinks,
+unsafe directories, pending journals and orphan state stages. Its redacted
+candidate_action is WOULD_CREATE, UNCHANGED or WOULD_REPLACE. No candidate
+bytes, digest, identity lease or operator credentials are returned. Existing
+write, NGINX validation/reload/exposure and catalog authority flags remain
+FALSE; effective root UID in a container is not trusted host-root authority.
+
+This joins the earlier untrusted caller-snapshot candidate preview (#216) to
+the real locked live-inode observation (#224). It does NOT stage files, execute
+full-context native nginx -t, activate NGINX, commit a manifest or roll back.
+After the lock is released, the preview MUST NOT be reused as write authority.
+A future reviewed privileged transaction must recheck under the same lock
+held across durable staging, native NGINX validation, reload and journalled
+rollback. APT/DNF package-manager and systemd operations are not atomically
+reversible through rename; separate compensating recovery is still required.
+External TLS, cache, logs, metrics, configuration and client sources are
+untouched.
+
+Focused tests: python -m pytest -q tests/test_server_locked_manifest_reconcile_v1.py

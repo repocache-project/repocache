@@ -8,10 +8,12 @@ The caller-FD entry remains private and intended only for Linux fixtures.
 from __future__ import annotations
 
 from contextlib import ExitStack
+import hashlib
 import os
 from typing import Any
 
 from repocache.server_install_v1 import MAX_INT
+from repocache.server_managed_include_v1 import MAX_CANDIDATE_BYTES
 from repocache.server_managed_include_fd_v1 import observe_managed_include_at
 from repocache.server_protected_state_inspect_v1 import (
     _DIRECTORY_FLAGS, _INCLUDE_SEGMENTS, _identity,
@@ -61,8 +63,29 @@ def _match_manifest(
     return "MANIFEST_MATCHES_OBSERVED_INCLUDE"
 
 
+def _validate_candidate_bytes(value: Any) -> None:
+    """Bounded input validation, not an NGINX syntax check."""
+    if (type(value) is not bytes
+            or not 1 <= len(value) <= MAX_CANDIDATE_BYTES
+            or b"\x00" in value):
+        _deny("MANAGED_CANDIDATE_INVALID")
+    try:
+        value.decode("utf-8", "strict")
+    except UnicodeError:
+        _deny("MANAGED_CANDIDATE_NOT_UTF8")
+
+
+def _candidate_action(candidate: bytes, observation: dict[str, Any] | None) -> str:
+    """Inert comparison after live manifest checks under a held lock."""
+    if observation is None:
+        return "WOULD_CREATE"
+    return ("UNCHANGED" if hashlib.sha256(candidate).hexdigest()
+            == observation["sha256"] else "WOULD_REPLACE")
+
+
 def _inspect_locked_under_root(
-    root_fd: int, *, owner_uid: int, expected_generation: int
+    root_fd: int, *, owner_uid: int, expected_generation: int,
+    candidate_bytes: bytes | None = None,
 ) -> dict[str, Any]:
     """Private fixture-only entry, never a privileged authorization oracle.
 
@@ -73,6 +96,8 @@ def _inspect_locked_under_root(
             or owner_uid < 0 or type(expected_generation) is not int
             or not 0 <= expected_generation <= MAX_INT):
         _deny("MANIFEST_INSPECTION_ARGUMENT_INVALID")
+    if candidate_bytes is not None:
+        _validate_candidate_bytes(candidate_bytes)
     with _locked(root_fd, owner_uid) as state_dir:
         # Never silently recover on a read-only check. If an interrupted
         # transaction exists, the designated recovery operation must run first.
@@ -102,6 +127,8 @@ def _inspect_locked_under_root(
             status = _match_manifest(
                 manifest, observation, expected_owner_uid=owner_uid
             )
+            action = (_candidate_action(candidate_bytes, observation)
+                      if candidate_bytes is not None else None)
             # Re-read the exact same protected content under the held lock,
             # even if another root-capable actor modified it without flock.
             _, after = _read_state(state_dir, owner_uid)
@@ -109,7 +136,7 @@ def _inspect_locked_under_root(
                 _deny("PROTECTED_STATE_CHANGED_DURING_INSPECTION")
             _recheck(chain, owner_uid)
             _safe_directory(root_fd, owner_uid)
-        return {
+        report = {
             "schema_version": 1,
             "status": "LOCKED_READ_ONLY_RECONCILIATION",
             "include_status": status,
@@ -128,6 +155,11 @@ def _inspect_locked_under_root(
             "authorizes_nginx_reload": False,
             "authorizes_catalog_publication": False,
         }
+        if candidate_bytes is not None:
+            # Never return an inode lease or authorization beyond the lock.
+            report["candidate_action"] = action
+            report["candidate_preview_only"] = True
+        return report
 
 
 
@@ -173,6 +205,31 @@ def inspect_current_namespace_locked_manifest(
         # Only describes the root path opened in this process's namespace.
         # It does not prove trusted host ancestry, privilege delegation,
         # SELinux/ACL correctness or operator provenance.
+        return {**result, "current_namespace_root_path_verified": True}
+    finally:
+        os.close(root_fd)
+
+
+def preview_current_namespace_locked_candidate(
+    *, expected_generation: int, candidate_bytes: bytes
+) -> dict[str, Any]:
+    """Preview only; root UID in a container is not trusted host authority."""
+    _validate_candidate_bytes(candidate_bytes)
+    if type(expected_generation) is not int or not 0 <= expected_generation <= MAX_INT:
+        _deny("MANIFEST_INSPECTION_ARGUMENT_INVALID")
+    if os.geteuid() != 0:
+        _deny("CURRENT_NAMESPACE_ROOT_PRIVILEGE_REQUIRED")
+    try:
+        root_fd = os.open("/", _DIRECTORY_FLAGS)
+    except OSError:
+        _deny("CURRENT_NAMESPACE_ROOT_OPEN_REFUSED")
+    try:
+        _verify_current_root_fd(root_fd)
+        result = _inspect_locked_under_root(
+            root_fd, owner_uid=0, expected_generation=expected_generation,
+            candidate_bytes=candidate_bytes,
+        )
+        _verify_current_root_fd(root_fd)
         return {**result, "current_namespace_root_path_verified": True}
     finally:
         os.close(root_fd)

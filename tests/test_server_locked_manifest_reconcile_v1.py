@@ -12,6 +12,8 @@ from repocache.server_locked_manifest_reconcile_v1 import (
     LockedManifestInspectionError,
     _inspect_locked_under_root,
     _match_manifest,
+    _candidate_action,
+    preview_current_namespace_locked_candidate,
 )
 from repocache.server_protected_state_store_v1 import (
     JOURNAL_NAME, JOURNAL_TMP_NAME, LOCK_NAME, STAGE_NAME,
@@ -364,3 +366,116 @@ def test_current_namespace_root_fd_is_not_a_fixture_authorization(layout):
     fd, _, _, _ = layout
     with pytest.raises(LockedManifestInspectionError):
         module._verify_current_root_fd(fd)
+
+
+def preview(layout, content, generation=0):
+    fd, _, _, uid = layout
+    return _inspect_locked_under_root(
+        fd, owner_uid=uid, expected_generation=generation,
+        candidate_bytes=content,
+    )
+
+
+def test_locked_candidate_preview_idempotent_and_read_only(layout):
+    _, state_dir, include_dir, _ = layout
+    before = sorted(p.name for p in state_dir.iterdir())
+    report = preview(layout, b"# candidate\n")
+    assert preview(layout, b"# candidate\n") == report
+    assert report["candidate_action"] == "WOULD_CREATE"
+    assert report["candidate_preview_only"] is True
+    for flag in ("authorizes_write", "authorizes_nginx_reload",
+                 "authorizes_catalog_publication", "nginx_syntax_verified",
+                 "operator_authorization_verified"):
+        assert report[flag] is False
+    assert sorted(p.name for p in state_dir.iterdir()) == before
+    assert list(include_dir.iterdir()) == []
+
+
+def test_candidate_actions_compare_digest_but_do_not_expose_it():
+    assert _candidate_action(b"# managed test\n", observed()) == "UNCHANGED"
+    assert _candidate_action(b"# revised\n", observed()) == "WOULD_REPLACE"
+    assert _candidate_action(b"# new\n", None) == "WOULD_CREATE"
+
+
+@pytest.mark.parametrize("bad", [
+    b"", b"\x00", b"a" * (256 * 1024 + 1), b"\xff",
+    "text", bytearray(b"text"), True,
+])
+def test_invalid_candidates_refused_without_disk_access(layout, bad):
+    _, state_dir, include_dir, _ = layout
+    before = sorted(p.name for p in state_dir.iterdir())
+    with pytest.raises(LockedManifestInspectionError, match="MANAGED_CANDIDATE"):
+        preview(layout, bad)
+    assert sorted(p.name for p in state_dir.iterdir()) == before
+    assert list(include_dir.iterdir()) == []
+
+
+def test_preflight_refuses_foreign_file_without_replacement(layout):
+    path = include(layout, b"external owner config")
+    with pytest.raises(LockedManifestInspectionError, match="FOREIGN"):
+        preview(layout, b"# replacement\n")
+    assert path.read_bytes() == b"external owner config"
+
+
+def test_preflight_refuses_stale_generation(layout):
+    persist(layout, state())
+    with pytest.raises(LockedManifestInspectionError, match="GENERATION_STALE"):
+        preview(layout, b"# candidate\n", generation=0)
+
+
+def test_preflight_refuses_lock_contention(layout):
+    fd, _, _, uid = layout
+    with _locked(fd, uid):
+        with pytest.raises(ProtectedStateStoreError, match="LOCK_UNAVAILABLE"):
+            preview(layout, b"# candidate\n")
+
+
+def test_preflight_refuses_interrupted_state_transaction(layout):
+    fd, folder, _, uid = layout
+
+    def interrupt(phase):
+        if phase == "journal_durable":
+            raise RuntimeError("synthetic interruption")
+
+    with pytest.raises(RuntimeError):
+        _commit_under_root(fd, state(), expected_generation=0,
+                           owner_uid=uid, inject_fault=interrupt)
+    journal = (folder / JOURNAL_NAME).read_bytes()
+    with pytest.raises(LockedManifestInspectionError, match="RECOVERY_REQUIRED"):
+        preview(layout, b"# candidate\n")
+    assert (folder / JOURNAL_NAME).read_bytes() == journal
+
+
+def test_preflight_refuses_symlink_without_changes(layout, tmp_path):
+    path = layout[2] / "repocache-managed.conf"
+    path.symlink_to(tmp_path / "external")
+    with pytest.raises(ValueError):
+        preview(layout, b"# candidate\n")
+    assert path.is_symlink()
+
+
+def test_public_candidate_preflight_refuses_nonroot_before_open(monkeypatch):
+    import repocache.server_locked_manifest_reconcile_v1 as module
+    monkeypatch.setattr(module.os, "geteuid", lambda: 1001)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("unexpected host access")
+
+    monkeypatch.setattr(module.os, "open", forbidden)
+    with pytest.raises(LockedManifestInspectionError, match="PRIVILEGE_REQUIRED"):
+        preview_current_namespace_locked_candidate(
+            expected_generation=0, candidate_bytes=b"# candidate\n",
+        )
+
+
+def test_public_candidate_preflight_rejects_bad_bytes_before_open(monkeypatch):
+    import repocache.server_locked_manifest_reconcile_v1 as module
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("unexpected host access")
+
+    monkeypatch.setattr(module.os, "open", forbidden)
+    with pytest.raises(LockedManifestInspectionError, match="CANDIDATE_INVALID"):
+        preview_current_namespace_locked_candidate(
+            expected_generation=0, candidate_bytes=b"\x00",
+        )
