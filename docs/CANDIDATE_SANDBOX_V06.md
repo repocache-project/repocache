@@ -28,6 +28,13 @@ The candidate executor now drains subprocess stdout and stderr incrementally wit
 
 **Pre-execution/integration status:** The source change must pass exact-HEAD CI on both userspaces and security assessment before any partial PASS is recorded. No merge, signing, release or online activation is authorized. GitHub milestone is v0.7.0; v0.6 wording in historical files is not release authority.
 
+
+## 2026-11-03 — Private temporary filesystem disk cap (Gate A increment)
+
+The production Bubblewrap invocation now uses \`--size 67108864 --tmpfs /tmp\`, enforcing a **64 MiB maximum for the candidate-private temporary filesystem per sandboxed command**. The option must immediately precede its \`--tmpfs\` mount. The real Debian 13 and AlmaLinux 10 **userspace** CI probe invokes a malicious candidate that attempts to write over 64 MiB into \`/tmp\`: only an actual \`ENOSPC\` and an unchanged active manifest count as PASS. An immutable command-shape regression prevents dropping/misplacing the limit. The trusted system Python venv bootstrap, staged wheel download and persistent candidate workspace are separate and not protected by this particular quota.
+
+This is **not** a staging workspace filesystem quota, whole-process-tree memory/CPU/PID cgroup limit, guarantee against all disk-pressure paths, or native Debian/AlmaLinux/SELinux acceptance. Those Gate A/Gate B criteria remain NOT VERIFIED. This change does not enable activation or authorize merge.
+
 ## Acceptance and limitations
 
 1. **PASS (unit policy only):** missing/symlinked/insecure/setuid helper rejected before network; command-generation tests confirm rootless namespace flags, minimal read-only runtime, one writable workspace, cleared environment and no host network.

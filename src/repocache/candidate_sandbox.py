@@ -23,6 +23,8 @@ class SandboxError(RuntimeError):
 
 
 BWRAP = Path("/usr/bin/bwrap")
+# A per-invocation private /tmp cap; NOT a quota for the persistent staging bind.
+TMPFS_MAX_BYTES = 64 * 1024 * 1024
 _ALLOWED_OWNED_COMMANDS = {
     ("--version",),
     ("--help",),
@@ -201,7 +203,7 @@ def command(workspace: Path, argv: list[str], *,
         "--ro-bind-try", "/etc/group", "/etc/group",
         "--ro-bind-try", "/etc/nsswitch.conf", "/etc/nsswitch.conf",
         "--proc", "/proc", "--dev", "/dev",
-        "--tmpfs", "/tmp",
+        "--size", str(TMPFS_MAX_BYTES), "--tmpfs", "/tmp",
     ]
     # Mountpoint directories in the new empty namespace. Host-managed state
     # elsewhere (including sibling generations) is never made visible.

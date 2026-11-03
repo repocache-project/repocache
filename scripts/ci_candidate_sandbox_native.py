@@ -200,6 +200,29 @@ print('SANDBOX_ESCAPE_PROBES_PASS')
             raise AssertionError("Hostile candidate stdout escaped capture budget")
         check(marker.read_bytes() == original,
               "stdout flood left installed state unchanged")
+
+        # A real tmpfs quota must reject a hostile candidate that fills
+        # sandbox-private /tmp. This does NOT quota the persistent staging bind.
+        console.write_text(
+            "#!/usr/bin/python3\n"
+            "import errno,pathlib\n"
+            "try:\n"
+            "    with pathlib.Path('/tmp/exhaustion-probe').open('wb') as out:\n"
+            "        for _ in range(66):\n"
+            "            out.write(b'x' * 1048576)\n"
+            "except OSError as exc:\n"
+            "    assert exc.errno == errno.ENOSPC, f'unexpected tmpfs error: {exc}'\n"
+            "else:\n"
+            "    raise AssertionError('private tmpfs exceeded 64 MiB quota')\n"
+            "print('TMPFS_QUOTA_ENFORCED')\n",
+            encoding="utf-8")
+        console.chmod(0o700)
+        output = candidate_sandbox.run_isolated(
+            [str(console), "--version"], workspace=work, timeout=30)
+        check(output == "TMPFS_QUOTA_ENFORCED",
+              "private candidate tmpfs actually refuses disk exhaustion")
+        check(marker.read_bytes() == original,
+              "tmpfs exhaustion never changed active release state")
     finally:
         shutil.rmtree(work)
     check(marker.read_bytes() == original, "last known good state preserved")
