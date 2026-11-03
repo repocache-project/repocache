@@ -1,8 +1,9 @@
 """Non-authorizing local NGINX transaction boundary observation (#27).
 
 This ties the conservative fresh-host refusal to #31's read-only locked
-pre-package state reader (which does not require an installed NGINX include). It does NOT hold a lock across a native package
-transaction, authorize an operator, inspect all processes/listeners, download
+pre-package state reader (which does not require an installed NGINX
+include). It does NOT hold a lock across a native package transaction,
+authorize an operator, inspect all processes/listeners, download
 packages, install NGINX, or activate any service.
 """
 from __future__ import annotations
@@ -57,7 +58,8 @@ class NativeNginxLocalBoundaryV1:
                            "NGINX_NONINITIAL_STATE_REFUSED",
                        ) else "NOT VERIFIED"),
             "footprint_code": self.footprint_code,
-            "locked_manifest_read_completed": observed,
+            "locked_manifest_read_completed": False,
+            "locked_prepackage_state_read_completed": observed,
             "current_namespace_root_observed": observed,
             "root_euid_observed": self.code in (
                 "PROTECTED_STATE_UNVERIFIED", "LOCAL_READ_ONLY_SNAPSHOT_OBSERVED"
