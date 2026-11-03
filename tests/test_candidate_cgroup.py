@@ -25,6 +25,7 @@ def delegated(tmp_path, monkeypatch):
     for node in (service, candidates):
         (node / "cgroup.subtree_control").write_text("cpu memory pids\n")
     (candidates / "cgroup.procs").write_text("")
+    (candidates / "cgroup.events").write_text("populated 0\nfrozen 0\n")
     # The kernel cgroup.kill controller is write-only, unlike cgroup.procs.
     for key in (*candidate_cgroup.LEAF_LIMITS, "cgroup.kill"):
         (candidates / key).write_text("")
@@ -62,6 +63,7 @@ def test_noncanonical_hierarchy_refuses(delegated, source, contents):
 @pytest.mark.parametrize("case", [
     "no-cpu", "no-memory", "no-pids", "parent-populated",
     "symlink-candidates", "missing-kill", "shared-candidates",
+    "descendant-populated",
 ])
 def test_missing_or_unsafe_delegation_fails_closed(delegated, case):
     _, service, _, candidates, _, _ = delegated
@@ -79,6 +81,8 @@ def test_missing_or_unsafe_delegation_fails_closed(delegated, case):
         (candidates / "cgroup.kill").unlink()
     elif case == "shared-candidates":
         candidates.chmod(0o777)
+    elif case == "descendant-populated":
+        (candidates / "cgroup.events").write_text("populated 1\n")
     with pytest.raises(candidate_cgroup.CgroupGateError):
         _gate(delegated)
 
@@ -89,21 +93,23 @@ def test_hierarchy_rejects_root_uid(delegated, monkeypatch):
         _gate(delegated)
 
 
-def test_limit_controller_contract_and_readback(tmp_path, monkeypatch):
-    leaf = tmp_path / "leaf"
+def test_limit_controller_contract_and_readback(delegated, monkeypatch):
+    _, _, _, candidates, _, _ = delegated
+    leaf = candidates / ("candidate-" + "a" * 32)
     leaf.mkdir(mode=0o700)
     (leaf / "cgroup.procs").write_text("")
     for name, initial in candidate_cgroup.LEAF_LIMITS.items():
         (leaf / name).write_text(initial)
     monkeypatch.setattr(candidate_cgroup.os, "geteuid", lambda: os.stat(leaf).st_uid)
-    candidate_cgroup.write_leaf_limits(leaf)
+    candidate_cgroup.write_leaf_limits(_gate(delegated), leaf)
     for key, value in candidate_cgroup.LEAF_LIMITS.items():
         assert (leaf / key).read_text() == value
 
 
 @pytest.mark.parametrize("case", ["populated", "missing", "symlink", "readback"])
-def test_limit_configuration_must_never_silently_continue(tmp_path, monkeypatch, case):
-    leaf = tmp_path / "leaf"
+def test_limit_configuration_must_never_silently_continue(delegated, monkeypatch, case):
+    _, _, _, candidates, _, _ = delegated
+    leaf = candidates / ("candidate-" + "b" * 32)
     leaf.mkdir()
     (leaf / "cgroup.procs").write_text("42" if case == "populated" else "")
     for name in candidate_cgroup.LEAF_LIMITS:
@@ -120,7 +126,7 @@ def test_limit_configuration_must_never_silently_continue(tmp_path, monkeypatch,
                             lambda p: "wrong" if p.name == "memory.max"
                             else p.read_text())
     with pytest.raises(candidate_cgroup.CgroupGateError):
-        candidate_cgroup.write_leaf_limits(leaf)
+        candidate_cgroup.write_leaf_limits(_gate(delegated), leaf)
 
 
 def test_no_interpreter_or_shell_is_launched_by_cgroup_preflight(
@@ -145,3 +151,19 @@ def test_write_only_cgroup_kill_gate_is_not_read(delegated, monkeypatch):
     monkeypatch.setattr(candidate_cgroup, "_read", forbid_kill_reads)
     assert _gate(delegated).candidates == candidates
     assert kill.stat().st_size == 0
+
+
+def test_limit_write_refuses_unrelated_directory(delegated, tmp_path):
+    other = tmp_path / ("candidate-" + "c" * 32)
+    other.mkdir()
+    with pytest.raises(candidate_cgroup.CgroupGateError,
+                       match="outside verified delegation"):
+        candidate_cgroup.write_leaf_limits(_gate(delegated), other)
+
+
+def test_limit_write_refuses_untrusted_leaf_name(delegated):
+    _, _, _, candidates, _, _ = delegated
+    wrong = candidates / "candidate-../escape"
+    with pytest.raises(candidate_cgroup.CgroupGateError,
+                       match="outside verified delegation"):
+        candidate_cgroup.write_leaf_limits(_gate(delegated), wrong)

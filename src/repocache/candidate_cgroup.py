@@ -124,6 +124,9 @@ def require_delegation(*, root: Path = CGROUP_ROOT,
             raise CgroupGateError("Missing delegated cpu/memory/pids controllers")
     if _read(candidates / "cgroup.procs").strip():
         raise CgroupGateError("Candidate cgroup parent contains processes")
+    # cgroup.procs covers only this level; cgroup.events includes descendants.
+    if "populated 0" not in _read(candidates / "cgroup.events").splitlines():
+        raise CgroupGateError("Candidate cgroup subtree is already populated")
     # cgroup-v2 controller files and cgroup.kill must exist before accepting
     # a delegated subtree. Group limits will be applied to individual leaves.
     for control in (*LEAF_LIMITS, "cgroup.procs"):
@@ -142,13 +145,16 @@ def require_delegation(*, root: Path = CGROUP_ROOT,
     return Delegation(service=service, manager=manager, candidates=candidates)
 
 
-def write_leaf_limits(leaf: Path) -> None:
+def write_leaf_limits(delegation: Delegation, leaf: Path) -> None:
     """Configure an *empty* new leaf; never claim it launches a process.
 
     A future supervised launcher must create this leaf under an accepted
     Delegation, attach before exec, and fail closed on any write/readback
     mismatch. No caller may use this as a standalone isolation mechanism.
     """
+    if (leaf.parent != delegation.candidates
+            or not re.fullmatch(r"candidate-[a-f0-9]{32}", leaf.name)):
+        raise CgroupGateError("Candidate leaf is outside verified delegation")
     _directory(leaf, owned=True)
     if _read(leaf / "cgroup.procs").strip():
         raise CgroupGateError("Cannot configure a populated candidate leaf")
