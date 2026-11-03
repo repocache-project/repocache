@@ -25,6 +25,7 @@ def delegated(tmp_path, monkeypatch):
     for node in (service, candidates):
         (node / "cgroup.subtree_control").write_text("cpu memory pids\n")
     (candidates / "cgroup.procs").write_text("")
+    # The kernel cgroup.kill controller is write-only, unlike cgroup.procs.
     for key in (*candidate_cgroup.LEAF_LIMITS, "cgroup.kill"):
         (candidates / key).write_text("")
     return root, service, manager, candidates, proc, mountinfo
@@ -128,3 +129,19 @@ def test_no_interpreter_or_shell_is_launched_by_cgroup_preflight(
         raise AssertionError("preflight must not launch a process")
     monkeypatch.setattr(candidate_cgroup.os, "system", forbidden)
     _gate(delegated)
+
+
+def test_write_only_cgroup_kill_gate_is_not_read(delegated, monkeypatch):
+    _, _, _, candidates, _, _ = delegated
+    kill = candidates / "cgroup.kill"
+    kill.chmod(0o200)
+    original = candidate_cgroup._read
+
+    def forbid_kill_reads(path):
+        if path == kill:
+            raise AssertionError("cgroup.kill must never be read or probed")
+        return original(path)
+
+    monkeypatch.setattr(candidate_cgroup, "_read", forbid_kill_reads)
+    assert _gate(delegated).candidates == candidates
+    assert kill.read_bytes() == b""

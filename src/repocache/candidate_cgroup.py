@@ -126,8 +126,17 @@ def require_delegation(*, root: Path = CGROUP_ROOT,
         raise CgroupGateError("Candidate cgroup parent contains processes")
     # cgroup-v2 controller files and cgroup.kill must exist before accepting
     # a delegated subtree. Group limits will be applied to individual leaves.
-    for control in (*LEAF_LIMITS, "cgroup.kill", "cgroup.procs"):
+    for control in (*LEAF_LIMITS, "cgroup.procs"):
         _read(candidates / control)
+    # cgroup.kill is a write-only kernel interface: never attempt to read it
+    # (or write a probe value, which would terminate the entire subtree).
+    kill = candidates / "cgroup.kill"
+    try:
+        if (not stat.S_ISREG(kill.lstat().st_mode)
+                or not os.access(kill, os.W_OK)):
+            raise CgroupGateError("Cannot safely terminate candidate processes")
+    except OSError as exc:
+        raise CgroupGateError("Missing cgroup kill controller") from exc
     if not os.access(candidates, os.W_OK):
         raise CgroupGateError("Candidate cgroup subtree is read-only")
     return Delegation(service=service, manager=manager, candidates=candidates)
