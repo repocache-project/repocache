@@ -72,23 +72,23 @@ class NativePayloadRehearsalV1:
         }
 
 
-def _download_command(distro: str, work: Path) -> tuple[list[str], Path]:
+def _download_command(distro: str, work: Path) -> tuple[list[str], list[str], Path]:
     """Use the identical fixed APT/DNF4 source and trust configuration."""
     if distro == "debian":
         refresh, _ = _apt_commands(work)
         # -d/--download-only is essential: apt-get install never invokes dpkg.
         # The empty isolated dpkg status prevents host-state installation
         # decisions; cache and sources are strictly private/fixed.
-        return ([*refresh[:-1], "--assume-yes", "--download-only",
-                 "--no-install-recommends", "install", "nginx"],
+        return (refresh, [*refresh[:-1], "--assume-yes", "--download-only",
+                          "--no-install-recommends", "install", "nginx"],
                 work / "archives")
     refresh, _ = _dnf_commands(work)
     output = work / "payloads"
     output.mkdir(mode=0o700)
     # DNF4 --downloadonly does not execute an RPM transaction. DNF is confined
     # to the private installroot/cache and the fixed signed distro sources.
-    return ([*refresh[:-2], "--downloadonly", f"--downloaddir={output}",
-             "--setopt=install_weak_deps=False", "install", "nginx"], output)
+    return (refresh, [*refresh[:-2], "--downloadonly", f"--downloaddir={output}",
+                     "--setopt=install_weak_deps=False", "install", "nginx"], output)
 
 
 def _artifacts(directory: Path, extension: str) -> tuple[Path, ...] | None:
@@ -213,9 +213,7 @@ def rehearse_native_nginx_downloads(
             distro, "NATIVE_PREPARATION_NOT_VERIFIED", 0)
     with tempfile.TemporaryDirectory(prefix="repocache-native-payload-") as tmp:
         work = Path(tmp)
-        command, output_dir = _download_command(distro, work)
-        refresh = (_apt_commands(work)[0] if distro == "debian"
-                   else _dnf_commands(work)[0])
+        refresh, command, output_dir = _download_command(distro, work)
         _, error = _run(refresh, work=work, runner=runner)
         if error:
             return NativePayloadRehearsalV1(
