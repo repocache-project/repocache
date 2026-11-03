@@ -432,7 +432,7 @@ def test_unfiltered_protected_main_dependency_gates_are_fail_closed():
     workflow = (ROOT / ".github/workflows/tests.yml").read_text(encoding="utf-8")
     header, jobs = workflow.split("\njobs:\n", 1)
     assert "  pull_request:" in header
-    assert "    branches: [main, release/v0.4.0" in header
+    assert "    branches: [main, 'release/**', 'integration/**']" in header
     assert "    paths:" not in header
     assert "contents: write" not in workflow
     assert "--publish" not in workflow
