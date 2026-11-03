@@ -20,6 +20,17 @@ def test_lifecycle_is_generic_and_respects_main_linear_history():
     assert "Do not reuse production" in doc
 
 
+def test_adoption_requires_main_bootstrap_and_both_active_lane_pushes():
+    doc = (ROOT / "docs/RELEASE_LIFECYCLE.md").read_text("utf-8")
+    for token in (
+        "PR #230", "PR #183", "PR #231", "one-time",
+        "protected `main`", "integration/v0.6.0",
+        "integration/v0.7.0", "nine required live `push` contexts",
+        "NOT VERIFIED", "not authorize the exception",
+    ):
+        assert token in doc
+
+
 def test_official_release_build_is_still_manually_tagged_from_main():
     workflow = (WORKFLOWS / "release.yml").read_text("utf-8")
     assert "on:\n  workflow_dispatch:\n" in workflow
