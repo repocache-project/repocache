@@ -65,6 +65,8 @@ def _expected_paths(
             raise IntegrityMismatch("Invalid expected inventory entry")
         parts = path.split("/")
         directories.update("/".join(parts[:i]) for i in range(1, len(parts)))
+    if len(directories) > max_entries:
+        raise IntegrityMismatch("Expected directory count exceeded")
     if any(path in directories for path in expected):
         raise IntegrityMismatch("Inventory file/directory collision")
     return directories
@@ -106,11 +108,22 @@ def verify_regular_tree(
         total = 0
         count = 0
 
+        def bounded_names(directory_fd: int) -> list[str]:
+            # os.listdir(fd) would allocate an unbounded list from hostile
+            # directories before we could check its size.
+            names: list[str] = []
+            with os.scandir(directory_fd) as entries:
+                for entry in entries:
+                    if len(names) >= 2 * max_entries:
+                        raise IntegrityMismatch("Runtime directory entry limit exceeded")
+                    names.append(entry.name)
+            return names
+
         def walk(directory_fd: int, prefix: str, depth: int) -> None:
             nonlocal count, total
             if depth > 32:
                 raise IntegrityMismatch("Runtime directory depth exceeded")
-            initial = os.listdir(directory_fd)
+            initial = bounded_names(directory_fd)
             if len(initial) + count + len(visited_directories) > 2 * max_entries + 1:
                 raise IntegrityMismatch("Runtime entry count exceeded")
             if len(set(initial)) != len(initial):
@@ -178,7 +191,7 @@ def verify_regular_tree(
                     raise IntegrityMismatch("Unexpected runtime entry type")
                 if _identity(os.stat(name, dir_fd=directory_fd, follow_symlinks=False)) != _identity(before):
                     raise IntegrityMismatch("Runtime path changed during measurement")
-            if set(os.listdir(directory_fd)) != set(initial):
+            if set(bounded_names(directory_fd)) != set(initial):
                 raise IntegrityMismatch("Runtime directory changed during measurement")
 
         walk(root_fd, "", 0)
