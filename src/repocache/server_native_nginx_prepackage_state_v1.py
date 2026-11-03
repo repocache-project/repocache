@@ -12,6 +12,9 @@ import os
 from typing import Any
 
 from repocache.server_locked_manifest_reconcile_v1 import _verify_current_root_fd
+from repocache.server_native_nginx_package_journal_v1 import (
+    NATIVE_PENDING_NAME, NATIVE_TMP_NAME, MAX_NATIVE_JOURNAL_BYTES,
+)
 from repocache.server_protected_state_inspect_v1 import _DIRECTORY_FLAGS
 from repocache.server_protected_state_store_v1 import (
     JOURNAL_TMP_NAME, JOURNAL_NAME, STAGE_NAME, ROLLBACK_NAME,
@@ -35,6 +38,12 @@ def _check_under_lock(directory: int) -> dict[str, Any]:
     # a clean first installation.
     if _read_journal(directory, 0) is not None:
         _deny("PREPACKAGE_STATE_RECOVERY_REQUIRED")
+    # Native APT/DNF effects are not atomically reversible like the #31 JSON.
+    # Their distinct persisted marker must block pre-package authorization
+    # even if the ordinary #31 state generation is still absent.
+    for name in (NATIVE_PENDING_NAME, NATIVE_TMP_NAME):
+        if _read_file(directory, name, 0, MAX_NATIVE_JOURNAL_BYTES) is not None:
+            _deny("PREPACKAGE_NATIVE_EFFECTS_RECONCILIATION_REQUIRED")
     for name, limit in (
         (JOURNAL_TMP_NAME, MAX_JOURNAL_BYTES),
         (STAGE_NAME, MAX_STATE_BYTES),
