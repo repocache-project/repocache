@@ -68,7 +68,8 @@ def test_positive_synthetic_locked_read_is_still_not_installer_authority(
     assert calls == ["prepackage"]
     assert report["distribution"] == distro
     assert report["code"] == "LOCAL_READ_ONLY_SNAPSHOT_OBSERVED"
-    assert report["locked_manifest_read_completed"]
+    assert report["locked_prepackage_state_read_completed"]
+    assert not report["locked_manifest_read_completed"]
     assert report["root_euid_observed"]
     assert report["status"] == "NOT VERIFIED"
     assert not report["host_root_namespace_authenticated"]
@@ -81,7 +82,7 @@ def test_positive_synthetic_locked_read_is_still_not_installer_authority(
 
 
 @pytest.mark.parametrize("conflict", [
-    "/etc/nginx", "/usr/sbin/nginx", "/var/lib/repocache/server",
+    "/etc/nginx", "/usr/sbin/nginx", "/var/log/nginx",
 ])
 def test_foreign_footprint_refused_before_root_or_protected_inspection(conflict):
     def owned(path):
