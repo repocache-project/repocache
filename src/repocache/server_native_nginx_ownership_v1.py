@@ -31,9 +31,13 @@ _NGINX_MARKERS = (
     "/lib/systemd/system/nginx.service",
     "/etc/systemd/system/nginx.service",
     "/etc/systemd/system/nginx.service.d",
+    "/etc/systemd/system/nginx.socket",
+    "/run/systemd/system/nginx.service",
+    "/etc/init.d/nginx",
     "/run/nginx.pid",
     "/var/run/nginx.pid",
     "/var/lib/nginx",
+    "/var/lib/repocache/server",
     "/var/log/nginx",
 )
 
