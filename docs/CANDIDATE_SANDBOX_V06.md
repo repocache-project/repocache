@@ -135,3 +135,5 @@ The new candidate_cgroup.entry_argv constructor requires a verified delegated cg
 The CI negative integration test uses a normal temporary file as a stand-in for cgroup.procs and a harmless Python marker executable. It proves the source-level order and refusal after membership-file substitution, NOT actual kernel cgroup attachment, aggregate resource limits, or delegated systemd behavior.
 
 IMPORTANT: This entry constructor is intentionally NOT yet wired to the deployed run_isolated executor. Full fresh-leaf lifecycle, group kill/drain and OOM/PID observation, persistent staging disk quota, native host provisioning and independently commissioned issue-specific security assessment remain NOT VERIFIED. No automatic fallback, production activation or merge authorization is created.
+
+The pre-exec entry argv now also verifies the *canonical* inherited prlimit flag vector and Bubblewrap executable. Missing or altered limits, a shell replacement, or a different executable are refused before a child can be started. Mocked tests use a harmless system-Python payload substituted for the inner Bubblewrap command; no production sandbox policy is weakened.

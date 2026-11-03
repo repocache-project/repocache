@@ -6,7 +6,7 @@ import stat
 
 import pytest
 
-from repocache import candidate_cgroup
+from repocache import candidate_cgroup, candidate_sandbox
 
 
 @pytest.fixture
@@ -183,13 +183,17 @@ def _configured_leaf(delegated, suffix="d"):
 def _trusted_command(marker):
     # Testing only: a harmless system Python payload, not a third-party wheel.
     code = "import pathlib,sys;pathlib.Path(sys.argv[1]).write_text('ran')"
-    return ["/usr/bin/prlimit", "--", "/usr/bin/python3",
-            "-I", "-S", "-c", code, str(marker)]
+    return candidate_sandbox._limited_command([
+        "/usr/bin/python3", "-I", "-S", "-c", code, str(marker)])
 
 
 def test_pre_exec_wrapper_places_child_before_executing_payload(
-        delegated, tmp_path):
+        delegated, tmp_path, monkeypatch):
     import subprocess
+    # A harmless OS Python script substitutes for the *inner* bwrap target;
+    # this fixture is not a native cgroup/kernel isolation claim.
+    monkeypatch.setattr(candidate_sandbox, "BWRAP",
+                        __import__("pathlib").Path("/usr/bin/python3"))
     leaf = _configured_leaf(delegated)
     marker = tmp_path / "payload-executed"
     argv = candidate_cgroup.entry_argv(
@@ -204,11 +208,13 @@ def test_pre_exec_wrapper_places_child_before_executing_payload(
 
 @pytest.mark.parametrize("case", [
     "missing", "symlink", "directory", "unconfigured", "populated",
-    "wrong-argv", "wrong-path",
+    "wrong-argv", "wrong-path", "missing-limit", "wrong-executable",
 ])
 def test_pre_exec_refuses_before_payload_if_membership_is_untrusted(
-        delegated, tmp_path, case):
+        delegated, tmp_path, monkeypatch, case):
     import subprocess
+    monkeypatch.setattr(candidate_sandbox, "BWRAP",
+                        __import__("pathlib").Path("/usr/bin/python3"))
     leaf = _configured_leaf(delegated, "e")
     marker = tmp_path / "must-not-execute"
     cmd = _trusted_command(marker)
@@ -218,10 +224,15 @@ def test_pre_exec_refuses_before_payload_if_membership_is_untrusted(
         (leaf / "cgroup.procs").write_text("12345")
     elif case == "wrong-argv":
         cmd[0] = "/bin/sh"
+    elif case == "missing-limit":
+        cmd.pop(1)
+    elif case == "wrong-executable":
+        cmd[cmd.index("--") + 1] = "/bin/sh"
     elif case == "wrong-path":
         leaf = tmp_path / ("candidate-" + "f" * 32)
         leaf.mkdir()
-    if case in ("unconfigured", "populated", "wrong-argv", "wrong-path"):
+    if case in ("unconfigured", "populated", "wrong-argv", "wrong-path",
+                "missing-limit", "wrong-executable"):
         with pytest.raises(candidate_cgroup.CgroupGateError):
             candidate_cgroup.entry_argv(_gate(delegated), leaf, cmd)
     else:
@@ -237,12 +248,15 @@ def test_pre_exec_refuses_before_payload_if_membership_is_untrusted(
     assert not marker.exists()
 
 
-def test_entry_requires_pinned_resource_limits(delegated):
+def test_entry_requires_pinned_resource_limits(delegated, monkeypatch):
+    monkeypatch.setattr(candidate_sandbox, "BWRAP",
+                        __import__("pathlib").Path("/usr/bin/python3"))
     leaf = _configured_leaf(delegated)
     (leaf / "cpu.max").unlink()
     with pytest.raises(candidate_cgroup.CgroupGateError):
         candidate_cgroup.entry_argv(
-            _gate(delegated), leaf, ["/usr/bin/prlimit", "--", "/bin/true"])
+            _gate(delegated), leaf,
+            candidate_sandbox._limited_command(["/usr/bin/python3", "--version"]))
 
 
 

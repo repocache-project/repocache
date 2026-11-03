@@ -234,10 +234,18 @@ def entry_argv(delegation: Delegation, leaf: Path,
             or not re.fullmatch(r"candidate-[a-f0-9]{32}", leaf.name)):
         raise CgroupGateError("Candidate entry escapes approved cgroup subtree")
     _directory(leaf, owned=True)
-    if (len(limited_command) < 3
-            or limited_command[0] != "/usr/bin/prlimit"
-            or "--" not in limited_command[1:]):
-        raise CgroupGateError("Candidate bootstrap must require prlimit")
+    # Do not let the entry bootstrap become a generic same-UID executor.
+    # Require the exact trusted prlimit flags and Bubblewrap argv generated
+    # by the separate allowlisted candidate policy, with no missing ceilings.
+    from repocache import candidate_sandbox
+    try:
+        separator = limited_command.index("--")
+    except ValueError as exc:
+        raise CgroupGateError("Missing canonical candidate limit separator") from exc
+    wrapped = limited_command[separator + 1:]
+    if (not wrapped or wrapped[0] != str(candidate_sandbox.BWRAP)
+            or limited_command != candidate_sandbox._limited_command(wrapped)):
+        raise CgroupGateError("Noncanonical limited Bubblewrap invocation")
     _trusted_interpreter(SYSTEM_PYTHON)
     if _read(leaf / "cgroup.procs").strip():
         raise CgroupGateError("Cannot attach to populated candidate leaf")
