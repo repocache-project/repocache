@@ -2,6 +2,19 @@
 
 Status: **proposal / preparatory CI only**. This document does not supersede the protected `main` governance, authorize any merge, or change a GitHub ruleset.
 
+## Feasibility blocker verified 2026-11-03
+
+**GitHub-owned repository type:** `teixemf` is a personal User account, not an Organization. The GitHub documentation at <https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue> currently limits native Merge Queue to public organization-owned repositories, or private organization-owned repositories using GitHub Enterprise Cloud. Native Merge Queue is therefore **not available for the repository in its present ownership configuration**. A dedicated exact-branch ruleset alone cannot fix this. The three `merge_group` additions are dormant preparatory compatibility only; do not regard this PR as enabling a working queue.
+
+Two paths require an explicit maintainer architecture choice:
+
+- **Organization path:** transfer the repository to a GitHub organization, after a separately authorized migration plan and audit of actions, repository refs, secrets, URLs, apps, branch protection and rollback. Do not infer transfer authorization from CI preparation.
+- **Personal-account path:** retain current ownership and design a custom integration coordinator. Preserve required GitHub status checks, PR-only protections and a source-bound admission gate. Serialize only integration decisions; re-fetch target SHA and PR HEAD immediately before the merge, compare expected SHAs and refuse stale evidence. A normal workflow-level concurrency group is **not** by itself an atomic merge queue or a substitute for validation of the recomputed merge result.
+
+GitHub Actions concurrency now documents an optional `queue: max` mode for up to 100 pending runs, but order is not guaranteed and this feature does not itself revalidate a PR against the base after another merge. Any custom coordinator must demonstrate safe admission, locking, fail-closed rollback and prevention of race conditions across `integration/v*` branches. See <https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency>.
+
+**STOP before activation:** Do not activate or merge this preparatory PR as a complete solution. Decide the ownership/queue architecture, then revise the implementation and run the relevant tests. Automatic merge authorization remains proposed, not adopted.
+
 ## Maintainer-approved scope to prepare
 
 The maintainer authorized preparing conditional automatic merges **only for `integration/v*`** on 2026-11-03. `release/v*`, `main`, signing, tags, publication, production activation, destructive operations and ruleset changes remain subject to separate explicit authorization. Until a separately reviewed governance change becomes effective and activation is explicitly authorized, each merge still requires permission for the exact PR/HEAD.
