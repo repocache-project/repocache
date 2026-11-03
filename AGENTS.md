@@ -35,7 +35,7 @@ GitHub is the source of truth for *state*; accepted specifications and decisions
 
 ## 4. Mandatory change and merge process
 
-Follow [docs/DEVELOPMENT_WORKFLOW.md](docs/DEVELOPMENT_WORKFLOW.md). Work in a focused branch and PR, trace a primary issue/milestone under [PR milestone governance](docs/PR_MILESTONE_GOVERNANCE.md), and read [testing evidence requirements](docs/TESTING.md).
+Follow [docs/DEVELOPMENT_WORKFLOW.md](docs/DEVELOPMENT_WORKFLOW.md) and the [generic release lifecycle](docs/RELEASE_LIFECYCLE.md). For any selected stable `vX.Y.Z`, route feature PRs to `integration/vX.Y.Z`, stabilization to `release/vX.Y.Z`, and only approved final promotions/hotfixes to `main`. Work in a focused branch and PR, trace a primary issue/milestone under [PR milestone governance](docs/PR_MILESTONE_GOVERNANCE.md), and read [testing evidence requirements](docs/TESTING.md).
 
 For each original acceptance criterion, record **PASS**, **FAIL** or **NOT VERIFIED** and cite executed evidence at the exact relevant SHA. Verify failures, regressions, compatibility, installation, upgrade and security boundaries where applicable. A test file being present is not a test result.
 
