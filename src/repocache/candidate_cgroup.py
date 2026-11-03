@@ -173,3 +173,77 @@ def write_leaf_limits(delegation: Delegation, leaf: Path) -> None:
             raise CgroupGateError("Cannot impose mandatory cgroup limits") from exc
         if _read(target).strip() != value:
             raise CgroupGateError("Cgroup controller did not enforce requested limit")
+
+
+# Trusted OS Python only: it runs a literal, isolated stdlib bootstrap before
+# prlimit/bwrap. Avoid subprocess preexec_fn: Python fork hooks are unsafe when
+# the long-lived manager has other threads.
+SYSTEM_PYTHON = Path("/usr/bin/python3")
+_ENTRY_CODE = (
+    "import os,sys\n"
+    "try:\n"
+    " fd=os.open(sys.argv[1],os.O_WRONLY|os.O_NOFOLLOW|os.O_CLOEXEC)\n"
+    " try:\n"
+    "  if os.write(fd,b'0') != 1: os._exit(125)\n"
+    " finally:\n"
+    "  os.close(fd)\n"
+    " os.execv(sys.argv[2],sys.argv[2:])\n"
+    "except (OSError,ValueError):\n"
+    " os._exit(125)\n"
+)
+
+
+def _trusted_interpreter(path: Path) -> None:
+    """Permit only the OS-owned Python symlink and resolved OS binary."""
+    if path != SYSTEM_PYTHON:
+        raise CgroupGateError("Noncanonical candidate bootstrap interpreter")
+    try:
+        resolved = path.resolve(strict=True)
+        link = path.lstat()
+        binary = resolved.lstat()
+        parent = resolved.parent.lstat()
+    except (OSError, RuntimeError) as exc:
+        raise CgroupGateError("Required native candidate bootstrap unavailable") from exc
+    if (resolved.parent != Path("/usr/bin")
+            or not re.fullmatch(r"python3[.][0-9]+", resolved.name)
+            or not (stat.S_ISLNK(link.st_mode) or stat.S_ISREG(link.st_mode))
+            or link.st_uid != 0 or link.st_mode & (0o022 | stat.S_ISUID | stat.S_ISGID)
+            or not stat.S_ISREG(binary.st_mode) or binary.st_uid != 0
+            or binary.st_mode & (0o022 | stat.S_ISUID | stat.S_ISGID)
+            or not binary.st_mode & 0o111
+            or not stat.S_ISDIR(parent.st_mode) or parent.st_uid != 0
+            or parent.st_mode & 0o022):
+        raise CgroupGateError("Untrusted native candidate bootstrap interpreter")
+
+
+def entry_argv(delegation: Delegation, leaf: Path,
+               limited_command: list[str]) -> list[str]:
+    """Construct an attach-BEFORE-exec wrapper, not a standalone launcher.
+
+    The supervisor must allocate a unique, freshly limited candidate leaf,
+    hold it throughout the child lifetime and kill/drain residual descendants.
+    No untrusted process code can run until the bootstrap writes '0' to
+    cgroup.procs, which attaches the calling process before os.execv.
+    """
+    if (leaf.parent != delegation.candidates
+            or not re.fullmatch(r"candidate-[a-f0-9]{32}", leaf.name)):
+        raise CgroupGateError("Candidate entry escapes approved cgroup subtree")
+    _directory(leaf, owned=True)
+    if (len(limited_command) < 3
+            or limited_command[0] != "/usr/bin/prlimit"
+            or "--" not in limited_command[1:]):
+        raise CgroupGateError("Candidate bootstrap must require prlimit")
+    _trusted_interpreter(SYSTEM_PYTHON)
+    if _read(leaf / "cgroup.procs").strip():
+        raise CgroupGateError("Cannot attach to populated candidate leaf")
+    for control, desired in LEAF_LIMITS.items():
+        if _read(leaf / control).strip() != desired:
+            raise CgroupGateError("Candidate resource limit is not enforced")
+    procs = leaf / "cgroup.procs"
+    try:
+        if not stat.S_ISREG(procs.lstat().st_mode):
+            raise CgroupGateError("Untrusted cgroup membership control")
+    except OSError as exc:
+        raise CgroupGateError("Missing cgroup membership control") from exc
+    return [str(SYSTEM_PYTHON), "-I", "-S", "-c", _ENTRY_CODE,
+            str(procs), *limited_command]

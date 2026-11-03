@@ -127,3 +127,11 @@ Provisioning required before any operational adoption (the stage remains non-act
 **Gate A:** source-level delegation/limit-policy implementation and unit negatives can be assessed; **NOT VERIFIED:** complete safe attachment, group-level exhaustion, kill/drain, staging quotas, native package/service provisioning, independently commissioned issue-specific security review and exact-HEAD CI. **Gate B:** #149 booted native kernels/SELinux and #83/#84/#85 genuine signed candidate/activation/rollback remain mandatory. Do not close #112 or merge #113 on the strength of the preflight tests alone.
 
 References for Linux controller semantics: Linux kernel cgroup v2 documentation and systemd CGROUP_DELEGATION guidance (see official upstream documentation). Native systemd integration requires a separate reviewed design and executable host evidence.
+
+## 2026-11-03 — Trusted attach-before-exec cgroup bootstrap (source-level increment)
+
+The new candidate_cgroup.entry_argv constructor requires a verified delegated cgroup, a fresh correctly named empty candidate leaf with exact cgroup controller limits already applied, a pinned root-owned system Python binary, and an explicit prlimit command. It builds a trusted OS Python invocation with isolated -I -S flags. The bootstrap writes 0 to cgroup.procs with O_NOFOLLOW, then execs prlimit and Bubblewrap. A missing, swapped or unwritable membership control terminates the bootstrap before candidate code executes. It avoids the unsafe Python Popen preexec_fn hook.
+
+The CI negative integration test uses a normal temporary file as a stand-in for cgroup.procs and a harmless Python marker executable. It proves the source-level order and refusal after membership-file substitution, NOT actual kernel cgroup attachment, aggregate resource limits, or delegated systemd behavior.
+
+IMPORTANT: This entry constructor is intentionally NOT yet wired to the deployed run_isolated executor. Full fresh-leaf lifecycle, group kill/drain and OOM/PID observation, persistent staging disk quota, native host provisioning and independently commissioned issue-specific security assessment remain NOT VERIFIED. No automatic fallback, production activation or merge authorization is created.

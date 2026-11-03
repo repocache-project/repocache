@@ -167,3 +167,79 @@ def test_limit_write_refuses_untrusted_leaf_name(delegated):
     with pytest.raises(candidate_cgroup.CgroupGateError,
                        match="outside verified delegation"):
         candidate_cgroup.write_leaf_limits(_gate(delegated), wrong)
+
+
+
+def _configured_leaf(delegated, suffix="d"):
+    _, _, _, candidates, _, _ = delegated
+    leaf = candidates / ("candidate-" + suffix * 32)
+    leaf.mkdir(mode=0o700)
+    (leaf / "cgroup.procs").write_text("")
+    for name, value in candidate_cgroup.LEAF_LIMITS.items():
+        (leaf / name).write_text(value)
+    return leaf
+
+
+def _trusted_command(marker):
+    # Testing only: a harmless system Python payload, not a third-party wheel.
+    code = "import pathlib,sys;pathlib.Path(sys.argv[1]).write_text('ran')"
+    return ["/usr/bin/prlimit", "--", "/usr/bin/python3",
+            "-I", "-S", "-c", code, str(marker)]
+
+
+def test_pre_exec_wrapper_places_child_before_executing_payload(
+        delegated, tmp_path):
+    import subprocess
+    leaf = _configured_leaf(delegated)
+    marker = tmp_path / "payload-executed"
+    argv = candidate_cgroup.entry_argv(
+        _gate(delegated), leaf, _trusted_command(marker))
+    assert argv[:4] == ["/usr/bin/python3", "-I", "-S", "-c"]
+    assert argv[5] == str(leaf / "cgroup.procs")
+    result = subprocess.run(argv, text=True, capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr[-400:]
+    assert (leaf / "cgroup.procs").read_text() == "0"
+    assert marker.read_text() == "ran"
+
+
+@pytest.mark.parametrize("case", [
+    "missing", "symlink", "directory", "unconfigured", "populated",
+    "wrong-argv", "wrong-path",
+])
+def test_pre_exec_refuses_before_payload_if_membership_is_untrusted(
+        delegated, tmp_path, case):
+    import subprocess
+    leaf = _configured_leaf(delegated, "e")
+    marker = tmp_path / "must-not-execute"
+    cmd = _trusted_command(marker)
+    if case == "unconfigured":
+        (leaf / "memory.max").write_text("max")
+    elif case == "populated":
+        (leaf / "cgroup.procs").write_text("12345")
+    elif case == "wrong-argv":
+        cmd[0] = "/bin/sh"
+    elif case == "wrong-path":
+        leaf = tmp_path / ("candidate-" + "f" * 32)
+        leaf.mkdir()
+    if case in ("unconfigured", "populated", "wrong-argv", "wrong-path"):
+        with pytest.raises(candidate_cgroup.CgroupGateError):
+            candidate_cgroup.entry_argv(_gate(delegated), leaf, cmd)
+    else:
+        argv = candidate_cgroup.entry_argv(_gate(delegated), leaf, cmd)
+        procs = leaf / "cgroup.procs"
+        procs.unlink()
+        if case == "symlink":
+            procs.symlink_to(tmp_path / "outside")
+        elif case == "directory":
+            procs.mkdir()
+        result = subprocess.run(argv, text=True, capture_output=True, timeout=10)
+        assert result.returncode != 0
+    assert not marker.exists()
+
+
+def test_entry_requires_pinned_resource_limits(delegated):
+    leaf = _configured_leaf(delegated)
+    (leaf / "cpu.max").unlink()
+    with pytest.raises(candidate_cgroup.CgroupGateError):
+        candidate_cgroup.entry_argv(
+            _gate(delegated), leaf, ["/usr/bin/prlimit", "--", "/bin/true"])
