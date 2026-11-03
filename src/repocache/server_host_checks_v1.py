@@ -407,11 +407,15 @@ def assess_deployment_host(
 ) -> NativePreflightReport:
     """Pure assembly. Unknown/unsupported OS can never inherit probe PASS."""
     baseline = assess_native_host(facts, intent=intent)
-    os_supported = any(
-        c.name == "supported_os_and_python" and c.status is PreflightStatus.PASS
+    # Invalid OS/Python or machine identity is terminal. Never mix a failing
+    # identity with otherwise positive host probes, even when injected by a
+    # caller of this pure assembly API.
+    identity_failed = any(
+        c.name in ("supported_os_and_python", "architecture_identity")
+        and c.status is PreflightStatus.FAIL
         for c in baseline.checks
     )
-    if not os_supported:
+    if identity_failed:
         return baseline
     if (type(probes) is not HostProbeResults or type(probes.checks) is not tuple
             or len(probes.checks) != len(_PROBE_CODES)
@@ -444,8 +448,10 @@ def inspect_deployment_host(
     valid = validate_install_document(document, for_apply=False)
     facts = capture_native_host_facts()
     baseline = assess_native_host(facts, intent=intent)
-    if any(c.name == "supported_os_and_python" and c.status is PreflightStatus.FAIL
-           for c in baseline.checks):
+    # Do not inspect local files, sockets or services after an invalid
+    # OS/Python or architecture identity. The report stays non-authorizing.
+    if any(c.name in ("supported_os_and_python", "architecture_identity")
+           and c.status is PreflightStatus.FAIL for c in baseline.checks):
         return baseline
     from repocache.server_install_v1 import validate_os_identity
     system = validate_os_identity(facts.os_release, facts.python_version)
