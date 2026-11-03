@@ -261,7 +261,12 @@ def test_invalid_machine_identity_never_reaches_host_probes(
     report = host.inspect_deployment_host(doc)
     assert byname(report.checks, "supported_os_and_python").status is PreflightStatus.PASS
     assert byname(report.checks, "architecture_identity").status is PreflightStatus.FAIL
-    assert not set(host._PROBE_CODES).intersection(c.name for c in report.checks)
+    # The baseline deliberately includes an unresolved listener readiness
+    # marker. Only the probe-specific observation may never be appended.
+    assert byname(report.checks, "listen_port_conflicts").code == "LISTENER_OWNERSHIP_UNVERIFIED"
+    assert not (set(host._PROBE_CODES) - {"listen_port_conflicts"}).intersection(
+        c.name for c in report.checks
+    )
     assert report.has_failures
     assert not report.all_verified and not report.authorizes_installation
     assert "../unsupported" not in json.dumps(report.to_dict())
