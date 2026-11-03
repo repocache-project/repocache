@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -713,3 +714,47 @@ def test_declarative_nginx_preview_has_no_network_subprocess_or_file_write(monke
     assert result["authorizes_state_commit"] is False
     assert result["authorizes_nginx_activation"] is False
     assert result["active_exposure_verified"] is False
+
+
+@pytest.mark.skipif(shutil.which("nginx") is None, reason="packaged nginx unavailable")
+def test_declarative_lifecycle_candidate_passes_disposable_packaged_nginx_t(tmp_path):
+    """Only parse a generated candidate in an isolated fixture, never reload."""
+    import subprocess
+
+    native_ca = next((path for path in (
+        "/etc/ssl/certs/ca-certificates.crt",
+        "/etc/pki/tls/certs/ca-bundle.crt",
+    ) if Path(path).is_file()), None)
+    if native_ca is None:
+        pytest.skip("packaged CA bundle unavailable")
+    current = document()
+    current["expected_state_generation"] = 1
+    proposed = copy.deepcopy(current)
+    for repo in proposed["repositories"]:
+        repo["desired_state"] = "active"
+    pins = {
+        repo["id"]: copy.deepcopy(_PUBLIC_PINS)
+        for repo in proposed["repositories"]
+    }
+    rendered = _nginx_preview(current, proposed, pins=pins, ca=native_ca)
+    assert rendered["proposed_repository_ids"] == [
+        "almalinux-baseos", "debian-trixie-main",
+    ]
+    config = tmp_path / "nginx.conf"
+    config.write_text(
+        f"pid {tmp_path / 'nginx.pid'};\n"
+        f"error_log {tmp_path / 'error.log'} notice;\n"
+        "events {}\nhttp { access_log off;\n"
+        + rendered["http_upstream_fragment"]
+        + "server { listen 127.0.0.1:19991;\n"
+        + rendered["server_location_fragment"]
+        + "}\n}\n",
+        encoding="utf-8",
+    )
+    process = subprocess.run(
+        [shutil.which("nginx"), "-t", "-c", str(config), "-p", str(tmp_path)],
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    assert process.returncode == 0, process.stderr
+    assert rendered["authorizes_nginx_activation"] is False
+    assert rendered["authorizes_catalog_publication"] is False

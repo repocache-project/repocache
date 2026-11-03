@@ -131,3 +131,20 @@ python3 -m pytest -q tests/test_server_repository_reconcile_v1.py
 Full PR and distro-specific NGINX tests are separate exact-HEAD evidence
 requirements. The original #95 operational AC1–AC7 and #28 live activation
 acceptance remain NOT VERIFIED by this composition.
+
+
+## Exact-HEAD native syntax coverage
+
+The existing #28 `.github/workflows/server-nginx-pins-native.yml`
+path filters now include the #95 lifecycle reconciler and its tests.
+In its Debian 13 and AlmaLinux 10 disposable packaged-NGINX containers, the
+workflow invokes the existing strict #28 pin/redirect tests **plus**
+`tests/test_server_repository_reconcile_v1.py`. The latter includes a
+fixture-only full `nginx -t` for the two-layout declarative composition,
+using a private temporary `nginx.conf` and no running service. On a host
+without packaged NGINX, that test is explicitly SKIPPED rather than
+misrepresented as PASS.
+
+This syntax fixture cannot verify the privileged managed include, complete
+cache zones/HIT, authenticated approval, root ownership, actual reload,
+operational rollback or client catalog, which remain NOT VERIFIED.
