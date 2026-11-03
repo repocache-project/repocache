@@ -211,17 +211,23 @@ and receives issue/milestone-aligned feature PRs individually. A new
 `release/vX.Y.Z` is created only at an expressly approved stabilization
 cut from the accepted integration HEAD. It accepts only candidate stabilization
 fixes, with regression validation on the exact resulting HEAD. After all
-release criteria PASS, a separate exact-SHA promotion PR targets protected
-`main`, retaining candidate tag and artifact provenance (do not squash the
-identified final source commit). Private owner signing, tags, Draft staging,
-publication and production activation each need separate explicit approval.
+stabilization-stage criteria PASS, a separately authorized PR promotes the
+reviewed release source to protected `main` by one of the permitted
+**squash/rebase** methods (the live main ruleset requires linear history).
+That promotion changes the source commit SHA when necessary: repeat all
+mandatory exact-HEAD tests, freeze the **resulting protected-main commit**,
+and **only then** authorize the stable tag and official unsigned build.
+Never sign, publish, or claim exact-SHA parity for an unpromoted release
+branch commit. Private owner signing, tags, Draft staging, publication
+and production activation each need separate explicit approval.
 There is **no** automatic feature merge, branch creation, deployment or signing.
 
 Optional alpha/beta tests can use isolated real Debian 13 and AlmaLinux 10
 hosts. They require explicit test authorization, isolated identities and
 exact candidate hashes; they do not make a release publishable or authorize
 production activation. The existing final signed-candidate gate for #76 is
-**not** replaced by exploratory prereleases.
+**not** replaced by exploratory prereleases; current `release.yml` still
+requires the tag commit to be an ancestor of protected `main`.
 
 The CI pattern proposed in PR #183 uses unfiltered `'integration/**'` and
 `'release/**'` `push` triggers in the three mandatory workflows so every
