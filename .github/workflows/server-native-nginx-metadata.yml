@@ -13,6 +13,8 @@ on:
       - 'tests/test_server_native_nginx_prepackage_state_v1.py'
       - 'scripts/smoke_server_native_package_metadata.py'
       - 'scripts/smoke_server_native_nginx_prepackage_state.py'
+      - 'scripts/smoke_server_native_nginx_container_install.py'
+      - 'tests/test_server_native_nginx_container_install.py'
       - 'docs/architecture/SERVER_NATIVE_NGINX_PACKAGES_V1.md'
       - '.github/workflows/server-native-nginx-metadata.yml'
   workflow_dispatch:
@@ -64,4 +66,42 @@ jobs:
               install -d -m 0700 /var/lib/repocache/server
               install -m 0600 /dev/null /var/lib/repocache/server/.state-v1.lock
               PYTHONPATH=src python3 scripts/smoke_server_native_nginx_prepackage_state.py
+            '
+
+  native-container-install:
+    name: Container-only native NGINX install and syntax (${{ matrix.image }})
+    needs: native-metadata
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ['debian:trixie-slim', 'almalinux:10']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install authenticated distro NGINX inside throwaway Docker only
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          # This runs only inside a brand-new disposable image, never on the
+          # runner. Package scripts may modify THIS container's filesystem;
+          # no systemd, SELinux, host-root or production acceptance is implied.
+          docker run --rm --network bridge \
+            --mount "type=bind,source=$PWD,target=/workspace,readonly" \
+            --workdir /workspace '${{ matrix.image }}' \
+            sh -ec '
+              if command -v apt-get >/dev/null 2>&1; then
+                if ! command -v python3 >/dev/null 2>&1 || ! test -s /etc/ssl/certs/ca-certificates.crt; then
+                  apt-get update -qq
+                  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 ca-certificates >/dev/null
+                fi
+              else
+                if ! command -v python3 >/dev/null 2>&1 || ! test -s /etc/pki/tls/certs/ca-bundle.crt; then
+                  dnf install -y python3 ca-certificates >/dev/null
+                fi
+              fi
+              REPOCACHE_NATIVE_TEST_CONTAINER=CONFIRMED_DISPOSABLE_DOCKER_ONLY \
+                PYTHONPATH=src python3 scripts/smoke_server_native_nginx_container_install.py
             '
