@@ -166,7 +166,7 @@ repocache
 │   ├── enable
 │   └── disable
 ├── deployment                   [planned provisioning]
-│   ├── preflight
+│   ├── preflight --file FILE
 │   ├── install --file FILE
 │   ├── status
 │   ├── verify
@@ -274,6 +274,52 @@ repocache service reload --yes
 - `service reload --yes` retains acknowledgement from the existing command contract. `--yes` is not OS authorization. NGINX config validation precedes delegated reload; refuse unmanaged instances and unsafe paths. No global `sudo` privileges or generic privileged subprocess runner.
 - `config apply` owns only explicitly declared, validated managed files. It does not overwrite arbitrary operator NGINX configuration, trust stores, certificates, package-manager sources or unrelated service state.
 
+**Read-only server configuration validation (PR #209, #107, v0.6.0 increment):**
+
+```console
+repocache config validate --file server-install-v1.json
+repocache --json config validate --file server-install-v1.json
+repocache config validate --file server-install-v1.json --json
+```
+
+This noninteractive preflight accepts the strict **server-install v1 JSON** input
+contract (not YAML), uses the canonical parser with `for_apply=False`, and
+reads at most 1 MiB plus one byte from a regular file. Final symlinks, special
+files, unavailable/unreadable input and malformed or oversized documents fail
+closed with bounded, redacted errors (exit status 2). Finite JSON responses use
+the shared version-1 envelope; successful output contains only
+`VALIDATION_ONLY`, repository and active-intent counts, and
+`authorizes_installation=false`. No input configuration, secret, filename or
+upstream information is echoed.
+
+Validation never authorizes an active repository, checks the actual host,
+modifies managed files or state, generates catalog data, invokes `nginx -t`,
+reloads services, downloads packages, or provisions the server. The later
+`config apply` and `deployment install` commands remain distinct, dependent
+operations with their own security and acceptance gates under #18/#28/#95;
+their planned syntax below is **not** a claim of implementation. Real
+Debian 13 and AlmaLinux 10 operational provisioning is not validated by this
+read-only CLI increment.
+
+**Read-only native deployment preflight (#26, incremental CLI):**
+
+```console
+repocache deployment preflight --file server-install-v1.json --json
+repocache --json deployment preflight --file server-install-v1.json
+```
+
+The command validates the same strict, bounded JSON input as `config validate`
+before any local host observation, then reports existing native OS/UID/ports,
+storage/NGINX/TLS/systemd/SELinux diagnostics with static, redacted English
+guidance. It does not execute package managers, probe upstream networks,
+perform package metadata refresh, change files/services or authorize
+deployment. Because this userspace check remains partial, its finite
+version-1 JSON response always has `ok=false`, an explicit
+`PREFLIGHT_NOT_READY` error, `can_install=false` and exit status **1**.
+Unreadable/invalid JSON fails before host probing with exit status **2**.
+The original #26 missing-native-package outcome remains dependent on #27;
+the library and CLI are not a complete installer readiness certificate.
+
 ### 4.5 Configuration, provisioning, application updates
 
 Three different change scopes:
@@ -367,7 +413,7 @@ No release-operator command is presumed implemented by this document.
 
 In normal text mode, results go to stdout and errors/warnings to stderr. A failure does not become a success because the command printed a JSON document. An idempotent no-op may succeed but must be distinguishable from a fresh mutation when reported.
 
-The **minimum semantic fields** to preserve in a versioned JSON implementation are `ok` (boolean), `error.code` (stable symbolic identifier on failure) and `error.message` (redacted, actionable string on failure). A `schema_version` field and per-operation result records are recommended implementation details; their exact normative schema version and fields must be verified by integration tests before the first release of this new contract.
+The **minimum semantic fields** to preserve in a versioned JSON implementation are `ok` (boolean), `error.code` (stable symbolic identifier on failure) and `error.message` (redacted, actionable string on failure). The [CLI JSON/exit contract v1](CLI_ERROR_CONTRACT_V1.md) now specifies `schema_version: 1`, retained operation-specific fields and an explicit compatibility-preserving numeric status table. This integration-stage mapping must pass tests on all three executables before it is promoted as a stable public interface.
 
 Illustrative JSON *shape* (not proof of implemented field names):
 
@@ -405,7 +451,7 @@ Do not misrepresent a sequence of JSON lines as a single JSON document. Until a 
 
 Symbolic error identifiers are stable uppercase/underscore names, not translations of prose; e.g. `REPOSITORY_NOT_FOUND`, `REPOSITORY_CONFLICT`, `INVALID_CONFIG`, `PERMISSION_DENIED`, `UNSAFE_PURGE`, `UPSTREAM_UNAVAILABLE`, `INVALID_RELEASE`, `BUSY`, `PARTIAL_FAILURE`. Names are candidates for the cross-executable error registry, not an indication that all handlers exist.
 
-**Approved invariant:** exit 0 for successful operations, including a safe idempotent no-op; nonzero for required failures and partial batch failures. No numeric code is assigned here for partial success. The maintainer approved uniform categories in principle and explicitly delegated **the final numeric mapping and edge cases to the separate `repocache-client` architecture session**. Once that work is accessible, produce one registry covering all three executables and run compatibility tests against the published v0.4.0 behavior. Do not invent that session's decisions or prematurely freeze 1/2/3/4/5/75 as a normative new map.
+**Approved invariant:** exit 0 for successful operations, including safe idempotent no-ops; nonzero for required and partial-batch failures. The [v1 integration registry](CLI_ERROR_CONTRACT_V1.md) preserves observed existing exit statuses `0`, `1`, `2`, `3` and `75` across all three frontends; these include deliberately retained command-specific compatibility exceptions (in particular updater failures returning 2 and client repository-validation failures returning 3). It does **not** introduce a new universal partial-batch number or renumber approved client `check`. Any final mapping for not-yet-implemented operations still requires explicit issue-level approval and execution evidence.
 
 Published v0.4.0 provides command-specific meanings (for example updater busy uses 75; client `check` uses distinct nonzero statuses). The redesigned interface may deliberately break some non-mandated old mappings, but this must be documented explicitly and never silently change the already approved client contracts.
 

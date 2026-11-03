@@ -13,13 +13,57 @@ import re
 import sys
 import tempfile
 import tomllib
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from repocache import wheelhouse
+import build_release as source_builder
 from build_release import build_release
+from ci_offline_wheels import verify_first_party_modules
+
+
+# Frozen from immutable public v0.4.0 tag, src/repocache/upgrade.py
+# Git blob: 94c0fd495414ed6cfcbf25ba231b2cd9d972c49e. The installed v0.4 updater refuses any
+# added/removed source archive member, even if the new candidate is signed.
+# New v0.5 modules belong in the separately verified first-party wheel.
+LEGACY_V04_SOURCE_MEMBERS = frozenset((
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "pyproject.toml",
+    "install.sh",
+    "platform_check.py",
+    "release-policy.json",
+    "docs/PRODUCTION_EXISTING_NGINX.md",
+    "src/repocache/__init__.py",
+    "src/repocache/cli.py",
+    "src/repocache/core.py",
+    "src/repocache/catalog.py",
+    "src/repocache/rendering.py",
+    "src/repocache/tui.py",
+    "src/repocache/updater.py",
+    "src/repocache/releases.py",
+    "src/repocache/upgrade.py",
+    "src/repocache/signatures.py",
+    "src/repocache/recovery.py",
+    "src/repocache/wheelhouse.py",
+    "client/repocache_client.py",
+    "client/install.sh",
+    "scripts/bootstrap-rootless.sh",
+    "scripts/repocache-launcher.sh",
+))
+
+
+def verify_legacy_source_inventory() -> None:
+    """Refuse an archive layout that the immutable public v0.4 updater rejects."""
+    declared = source_builder.FILES
+    if (len(declared) != len(LEGACY_V04_SOURCE_MEMBERS)
+            or set(declared) != LEGACY_V04_SOURCE_MEMBERS):
+        raise ValueError("Candidate source inventory differs from immutable v0.4.0 updater")
 
 
 def sha(raw: bytes) -> str:
@@ -43,6 +87,7 @@ def read_lock(name: str) -> dict[str, tuple[str, str]]:
 
 
 def verify(output: Path) -> None:
+    verify_legacy_source_inventory()
     version = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
     bundle = output / ("repocache-v" + version + ".tar.gz")
     wheel_bundle = output / (bundle.name + ".wheelhouse.tar.gz")
@@ -58,6 +103,20 @@ def verify(output: Path) -> None:
         contents = wheelhouse.verified_extract(
             from_zip, sha(from_zip), clean / "wheels")
         wheelhouse.verify_application_wheel(contents, version)
+        # The immutable public v0.4.0 updater refuses any extra source TAR
+        # members. v0.5 first-party modules must therefore travel in the
+        # publisher-signed application wheel, which is checked byte-for-byte
+        # against the exact reviewed checkout BEFORE the owner's key unlocks.
+        # Do not rely only on a previous CI build: artifacts are mutable until
+        # independently signed. Never execute candidate wheel code here.
+        application = sorted((contents.parent / "wheels").glob(
+            "repocache_control-" + version + "-*.whl"))
+        if len(application) != 1:
+            raise ValueError("Missing or ambiguous first-party candidate wheel")
+        try:
+            verify_first_party_modules(ROOT, application[0])
+        except (OSError, ValueError, RuntimeError, zipfile.BadZipFile) as exc:
+            raise ValueError("Candidate first-party wheel differs from reviewed source") from exc
         if ((contents.parent / "THIRD_PARTY_NOTICES.md").read_bytes()
                 != (ROOT / "THIRD_PARTY_NOTICES.md").read_bytes()):
             raise ValueError("Wheelhouse license notices differ from authenticated source")

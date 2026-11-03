@@ -3,12 +3,21 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 import typer
+from typer.core import TyperGroup
+
+# Typer 0.26+ embeds Click; earlier supported Typer releases use Click directly.
+try:
+    from typer._click.exceptions import UsageError as _UsageError
+except ImportError:
+    from click.exceptions import UsageError as _UsageError
+
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import BarColumn, Progress, TextColumn
@@ -21,7 +30,39 @@ from repocache.core import (
     metrics as metrics_report, nginx_config, service_status, snapshot, _tail_bytes,
 )
 
-app = typer.Typer(help="REPOCACHE Control Center | NGINX proxy CLI/TUI management",
+class _StructuredErrorGroup(TyperGroup):
+    """Emit one JSON error for parser failures without dispatching a command.
+
+    The legacy text parser remains unchanged. Typer versions can use Click
+    directly or Typer's vendored Click; only usage exceptions are intercepted.
+    """
+
+    def main(self, args=None, prog_name=None, complete_var=None,
+             standalone_mode=True, **extra):
+        arguments = list(sys.argv[1:] if args is None else args)
+        if "--json" not in arguments:
+            return super().main(args=args, prog_name=prog_name,
+                                complete_var=complete_var,
+                                standalone_mode=standalone_mode, **extra)
+        try:
+            result = super().main(args=arguments, prog_name=prog_name,
+                                  complete_var=complete_var,
+                                  standalone_mode=False, **extra)
+        except _UsageError as exc:
+            emit_json({"schema_version": 1, "ok": False, "error": {
+                "code": "INVALID_ARGUMENT", "message": exc.format_message()}})
+            if standalone_mode:
+                raise SystemExit(2) from None
+            raise typer.Exit(2) from None
+        if isinstance(result, int) and result:
+            if standalone_mode:
+                raise SystemExit(result)
+            raise typer.Exit(result)
+        return result
+
+
+app = typer.Typer(cls=_StructuredErrorGroup,
+                  help="REPOCACHE Control Center | NGINX proxy CLI/TUI management",
                   add_completion=True, rich_markup_mode="rich", invoke_without_command=True)
 repos_app = typer.Typer(help="Inspect and test repositories", no_args_is_help=True)
 cache_app = typer.Typer(help="Inspect cache and storage", no_args_is_help=True)
@@ -31,6 +72,7 @@ logs_app = typer.Typer(help="Read and follow logs", no_args_is_help=True)
 service_app = typer.Typer(help="NGINX status and safe operations", no_args_is_help=True)
 update_app = typer.Typer(help="Discover trusted GitHub Releases and manage server upgrades", no_args_is_help=False)
 config_app = typer.Typer(help="Configuration checks and discovery", no_args_is_help=True)
+deployment_app = typer.Typer(help="Read-only native deployment diagnostics", no_args_is_help=True)
 catalog_app = typer.Typer(help="Explicitly approved read-only repository catalog", no_args_is_help=True)
 app.add_typer(repos_app, name="repos")
 app.add_typer(repos_app, name="repo", hidden=True)
@@ -41,6 +83,7 @@ app.add_typer(logs_app, name="logs")
 app.add_typer(logs_app, name="log", hidden=True)
 app.add_typer(service_app, name="service")
 app.add_typer(config_app, name="config")
+app.add_typer(deployment_app, name="deployment")
 app.add_typer(catalog_app, name="catalog")
 app.add_typer(update_app, name="update")
 console = Console()
@@ -57,16 +100,17 @@ def _json_enabled(ctx: typer.Context, local: bool = False) -> bool:
 def _require_text_output(ctx: typer.Context) -> None:
     """Fail before side effects for a command without a finite JSON contract."""
     if _json_enabled(ctx):
-        emit_json({"ok": False, "error": {
+        emit_json({"schema_version": 1, "ok": False, "error": {
             "code": "UNSUPPORTED_OUTPUT_MODE",
             "message": "This command does not support --json."}})
         raise typer.Exit(2)
 
 
 def _cli_error(ctx: typer.Context, code: str, message: str,
-               status: int = 1) -> None:
-    if _json_enabled(ctx):
-        emit_json({"ok": False, "error": {"code": code, "message": message}})
+               status: int = 1, local_json: bool = False) -> None:
+    if _json_enabled(ctx, local_json):
+        emit_json({"schema_version": 1, "ok": False,
+                   "error": {"code": code, "message": message}})
     else:
         typer.echo(f"ERROR [{code}]: {message}", err=True)
     raise typer.Exit(status)
@@ -77,7 +121,21 @@ def settings() -> Settings:
 
 
 def emit_json(data: Dict[str, Any]) -> None:
-    print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
+    """Add v1 fields without discarding the operation's established fields."""
+    result = {"schema_version": 1, **data}
+    result.setdefault("ok", not bool(result.get("error")))
+    if result["ok"] is False:
+        error = result.get("error")
+        if not isinstance(error, dict):
+            code = {"busy": "BUSY", "offline": "OFFLINE",
+                    "authentication-required": "AUTHENTICATION_REQUIRED"}.get(
+                        result.get("status"), "OPERATION_FAILED")
+            result["error"] = {
+                "code": code,
+                "message": str(error) if error is not None
+                else "Operation reported a required failure.",
+            }
+    print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
 
 
 def human_bytes(value: Any) -> str:
@@ -286,7 +344,8 @@ def show_metrics(ctx: typer.Context, period: str = typer.Option("24h", "--period
         return
     table = Table(title=f"◈ Metrics · {period} (log sample)", border_style="cyan", show_header=False)
     for label, value in [("Requests", str(data["requests"])), ("Cache HIT", str(data["hit"])),
-                         ("Cache MISS", str(data["miss"])),
+                         ("Cache MISS", str(data["miss"])), ("Cache BYPASS", str(data.get("bypass", 0))),
+                         ("Sample quality", data.get("coverage", "unknown")),
                          ("HIT rate", f"{data['hit_rate']}%" if data["hit_rate"] is not None else "N/A"),
                          ("HTTP 5xx", str(data["errors_5xx"]) if data["errors_5xx"] is not None else "N/A"),
                          ("Bytes served (when recorded)", human_bytes(data["bytes_sent"])),
@@ -437,6 +496,109 @@ def config_check(ctx: typer.Context) -> None:
         raise typer.Exit(1)
 
 
+
+def _read_server_install_request(
+    ctx: typer.Context, file: Path, json_output: bool,
+) -> dict:
+    """Bounded read-only v1 JSON parser shared by validate and preflight.
+
+    File failures are redacted before any host observation. A final symlink,
+    directory or blocking special file is never accepted as configuration.
+    """
+    from repocache.server_install_v1 import (
+        MAX_DOCUMENT_BYTES, InstallInputError, parse_install_bytes,
+    )
+
+    flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(file, flags)
+        with os.fdopen(fd, "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise OSError("Not a regular file")
+            payload = stream.read(MAX_DOCUMENT_BYTES + 1)
+    except (OSError, ValueError):
+        _cli_error(ctx, "CONFIG_UNAVAILABLE", "Cannot read a regular configuration file.",
+                   status=2, local_json=json_output)
+    try:
+        return parse_install_bytes(payload, for_apply=False)
+    except (InstallInputError, ValueError):
+        _cli_error(ctx, "CONFIG_INVALID", "Configuration failed strict v1 validation.",
+                   status=2, local_json=json_output)
+
+
+@config_app.command("validate")
+def config_validate(
+    ctx: typer.Context,
+    file: Path = typer.Option(..., "--file", help="Read-only server-install v1 JSON input"),
+    json_output: bool = typer.Option(False, "--json", help="One bounded v1 JSON result"),
+) -> None:
+    """Validate a complete proposed server configuration without applying it."""
+    candidate = _read_server_install_request(ctx, file, json_output)
+    summary = {
+        "ok": True, "status": "VALIDATION_ONLY",
+        "kind": "repocache.server.install",
+        "repository_count": len(candidate["repositories"]),
+        "active_intent_count": sum(
+            repo["desired_state"] == "active" for repo in candidate["repositories"]
+        ),
+        "authorizes_installation": False,
+    }
+    if _json_enabled(ctx, json_output):
+        emit_json(summary)
+    else:
+        console.print("Validated server-install v1 input (read-only; no activation).")
+        console.print(f"Repositories: {summary['repository_count']}")
+        console.print("No NGINX configuration, service or catalog has been changed.")
+
+
+@deployment_app.command("preflight")
+def deployment_preflight(
+    ctx: typer.Context,
+    file: Path = typer.Option(..., "--file", help="Strict server-install v1 JSON input"),
+    json_output: bool = typer.Option(False, "--json", help="One redacted v1 JSON result"),
+) -> None:
+    """Report local host observations; never authorize or perform installation."""
+    # The configuration parser must succeed before *any* local host probing.
+    candidate = _read_server_install_request(ctx, file, json_output)
+    from repocache.server_host_checks_v1 import inspect_deployment_host
+    from repocache.server_preflight_guidance_v1 import explain_native_preflight
+    from repocache.server_install_v1 import InstallInputError
+
+    try:
+        report = inspect_deployment_host(candidate, intent="inspect")
+        guidance = explain_native_preflight(report)
+    except (InstallInputError, OSError, UnicodeError, TypeError, ValueError):
+        _cli_error(ctx, "PREFLIGHT_UNAVAILABLE",
+                   "Read-only native host observations could not be verified.",
+                   status=1, local_json=json_output)
+
+    # This stage deliberately cannot give a GO, even if every local probe PASSes:
+    # native package trust (#27), rollout/state ownership and execution gates
+    # are separate. A partial report must not be mistaken for a readiness token.
+    status = "FAIL" if report.has_failures else "NOT_VERIFIED"
+    message = ("Native preflight found a failed local check."
+               if report.has_failures else
+               "Native preflight is partial; installation is not authorized.")
+    result = {
+        "ok": False, "status": status,
+        "kind": "repocache.server.native-preflight.partial",
+        "can_install": False, "authorizes_installation": False,
+        "checks": list(guidance),
+        "error": {"code": "PREFLIGHT_NOT_READY", "message": message},
+    }
+    if _json_enabled(ctx, json_output):
+        emit_json(result)
+    else:
+        console.print("Read-only deployment preflight (no installation or activation).")
+        for item in guidance:
+            console.print(
+                f"{item['status']} [{item['code']}]: {item['guidance']}"
+            )
+        typer.echo(f"ERROR [PREFLIGHT_NOT_READY]: {message}", err=True)
+    raise typer.Exit(1)
+
+
 @config_app.command("show")
 def config_show(ctx: typer.Context) -> None:
     """Show configuration sources and paths (without credentials)."""
@@ -521,6 +683,17 @@ def update_main(ctx: typer.Context,
     """Install a compatible, verified release; refuse uncertain downgrades."""
     if ctx.invoked_subcommand is not None:
         return
+    _perform_signed_update(
+        ctx, version=version, bundle=bundle, checksum=checksum,
+        manifest=manifest, signature=signature, wheels=wheels,
+        json_output=json_output)
+
+
+def _perform_signed_update(ctx: typer.Context, *, version: Optional[str],
+                           bundle: Optional[Path], checksum: Optional[Path],
+                           manifest: Optional[Path], signature: Optional[Path],
+                           wheels: Optional[Path], json_output: bool) -> None:
+    """Single existing authenticated updater path for legacy and v1 CLI."""
     from repocache.updater import apply, UpdateError, UpdateBusyError
     from repocache.releases import DiscoveryError
     try:
@@ -541,6 +714,36 @@ def update_main(ctx: typer.Context,
     else:
         console.print(f"REPOCACHE {result['version']}: {result['status']} "
                       f"(previously {result['previous_version']})")
+
+
+@update_app.command("install")
+def update_install(
+        ctx: typer.Context,
+        version: str = typer.Argument(..., help="Exact stable X.Y.Z release version"),
+        bundle: Optional[Path] = typer.Option(
+            None, "--bundle", help="Verified local release tar.gz bundle"),
+        checksum: Optional[Path] = typer.Option(
+            None, "--checksum", help="Matching local SHA-256 checksum"),
+        manifest: Optional[Path] = typer.Option(
+            None, "--manifest", help="Owner-signed release manifest"),
+        signature: Optional[Path] = typer.Option(
+            None, "--signature", help="Detached Ed25519 manifest signature"),
+        wheels: Optional[Path] = typer.Option(
+            None, "--wheelhouse", help="Signed, hash-pinned offline dependencies"),
+        json_output: bool = typer.Option(False, "--json", help="JSON status")) -> None:
+    """Install exactly one verified compatible release (no implicit latest)."""
+    from repocache import releases
+
+    # Validate before updater locks, network requests, filesystem writes or
+    # installation. The updater still owns signing and compatibility checks.
+    if (len(version) > 64 or version == "0.0.0" or
+            releases._version("v" + version) is None):
+        _cli_error(ctx, "INVALID_VERSION", "Expected a stable X.Y.Z version.",
+                   status=2, local_json=json_output)
+    _perform_signed_update(
+        ctx, version=version, bundle=bundle, checksum=checksum,
+        manifest=manifest, signature=signature, wheels=wheels,
+        json_output=json_output)
 
 
 @catalog_app.command("publish")

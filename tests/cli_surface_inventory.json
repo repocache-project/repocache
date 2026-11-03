@@ -11,7 +11,10 @@
     "config",
     "config check",
     "config show",
+    "config validate",
     "dashboard",
+    "deployment",
+    "deployment preflight",
     "health",
     "log",
     "log follow",
@@ -42,6 +45,7 @@
     "system status",
     "update",
     "update check",
+    "update install",
     "update list"
   ],
   "client": [
@@ -58,7 +62,17 @@
     "repos sync"
   ],
   "release_operator": {
-    "status": "planned-not-installed",
-    "issue": 88
+    "status": "partial-workstation-only",
+    "issue": 88,
+    "paths": [
+      "environment",
+      "environment check",
+      "candidate",
+      "candidate prepare",
+      "candidate sign",
+      "candidate stage",
+      "candidate status",
+      "candidate publish"
+    ]
   }
 }

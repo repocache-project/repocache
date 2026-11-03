@@ -2,7 +2,12 @@
 from __future__ import annotations
 
 import json
+import os
+import re
+import sqlite3
 import time
+from pathlib import Path
+from urllib.parse import urlsplit
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 
@@ -15,10 +20,15 @@ from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import DataTable, Footer, Header, Sparkline, Static, TabbedContent, TabPane
 
 from repocache.rendering import safe_markup
+from repocache.submissions import SubmissionQueue, SubmissionError
 from repocache.cli import human_bytes
 from repocache.core import (
-    Settings, _tail_bytes, disk_status, health, metrics, probe_upstream, service_status, snapshot,
+    Settings, _tail_bytes, disk_status, health, metrics, probe_upstream, service_status, snapshot, timestamp,
 )
+
+
+# This path is fixed in production: never honour untrusted environment overrides.
+SUBMISSION_QUEUE_PATH = Path("/var/lib/repocache/submissions/queue.sqlite3")
 
 
 class RepoCacheApp(App):
@@ -31,10 +41,16 @@ class RepoCacheApp(App):
         ("2", "tab('repos')", "Repositories"),
         ("3", "tab('metrics')", "Metrics"),
         ("4", "tab('diagnostics')", "Diagnostics"),
+        ("5", "tab('submissions')", "Submissions"),
+        ("y", "review_selected", "Review proposal"),
+        ("n", "reject_selected", "Reject proposal"),
+        ("u", "undo_review", "Undo review"),
         ("p", "period", "Period"),
         ("a", "toggle_auto", "Auto ON/OFF"),
         ("i", "refresh_interval", "Interval"),
         ("t", "probe_selected", "Probe selected repo"),
+        ("f", "filter_selected_metrics", "Metrics for repo"),
+        ("g", "global_metrics", "All metrics"),
     ]
     CSS = """
     Screen { background: #0a1220; color: #dce8f8; }
@@ -53,6 +69,7 @@ class RepoCacheApp(App):
     #requests-graph { height: 5; margin-bottom: 1; min-width: 30; }
     #histogram { height: 8; min-width: 30; }
     #repo-table { height: 1fr; min-height: 8; background: #101e30; }
+    #proposal-table { height: 1fr; min-height: 8; background: #101e30; }
     #repo-note { min-height: 3; height: auto; }
     #repo-detail { height: 10; }
     #metric-info { height: 10; }
@@ -82,6 +99,12 @@ class RepoCacheApp(App):
         self._selected_repo: str = ""
         self._probe_results: Dict[str, Dict[str, str]] = {}
         self._repo_activity: Dict[str, str] = {}
+        self._metrics_filter: str | None = None
+        self._proposal_versions: Dict[str, int] = {}
+        self._proposal_digests: Dict[str, str] = {}
+        self._selected_proposal = ""
+        self._review_confirmation: tuple[str, str] | None = None
+        self._last_review: tuple[str, int] | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -102,13 +125,18 @@ class RepoCacheApp(App):
             with TabPane("▤ REPOSITORIES", id="repos"):
                 yield Static("Discovering NGINX proxy routes…", id="repo-note", classes="note")
                 yield DataTable(id="repo-table", cursor_type="row", zebra_stripes=True)
-                yield Static("Select a repository to inspect. Press T for an on-demand upstream probe.", id="repo-detail", classes="panel")
+                yield Static("Select a repository to inspect. Press T to probe or F for its metrics.", id="repo-detail", classes="panel")
             with TabPane("▥ METRICS", id="metrics"):
                 with VerticalScroll():
-                    yield Static("Metrics observed in request logs", id="metric-info", classes="panel")
+                    yield Static("Metrics observed in request logs (G: all repositories)", id="metric-info", classes="panel")
                     yield Static("REQUEST VOLUME PER HOUR", id="metric-title", classes="note")
                     yield Sparkline(None, id="histogram", min_color="#215ca7", max_color="#27e6c2")
                     yield Static("Time ranges and limitations", id="metric-details", classes="panel")
+            with TabPane("✚ SUBMISSIONS", id="submissions"):
+                yield Static("No network intake is activated by this screen.", classes="note")
+                yield Static("Root-only review of pending metadata", id="proposal-note", classes="panel")
+                yield DataTable(id="proposal-table", cursor_type="row", zebra_stripes=True)
+                yield Static("Select a proposal, then press Y/Y to review or N/N to reject. U undoes the last decision. Review never publishes routes.", id="proposal-detail", classes="panel")
             with TabPane("✚ DAYGNOSTICS", id="diagnostics"):
                 yield Static("Local checks — configuration is not changed.", classes="note")
                 yield DataTable(id="health-table", cursor_type="row", zebra_stripes=True)
@@ -118,6 +146,8 @@ class RepoCacheApp(App):
     def on_mount(self) -> None:
         repo_table = self.query_one("#repo-table", DataTable)
         repo_table.add_columns("Repository", "Location", "Upstream")
+        proposal_table = self.query_one("#proposal-table", DataTable)
+        proposal_table.add_columns("Proposal ID", "OS", "Type", "Upstream host", "Transport")
         health_table = self.query_one("#health-table", DataTable)
         health_table.add_columns("Check", "Status", "Details")
         self.poll(force=True)
@@ -149,6 +179,11 @@ class RepoCacheApp(App):
                 data["disk"] = disk_status(self.settings.cache_dir)
                 data["metrics"] = metrics(self.settings, hours=self.periods[self.period_index])
                 diagnostics = None
+            if self._metrics_filter is not None:
+                data = dict(data)
+                data["metrics"] = metrics(
+                    self.settings, hours=self.periods[self.period_index],
+                    repo=self._metrics_filter)
             try:
                 lines, _ = _tail_bytes(self.settings.metrics_log, max_bytes=40_000)
                 activity = [self._short_event(line) for line in lines[-7:]]
@@ -160,17 +195,24 @@ class RepoCacheApp(App):
 
     @staticmethod
     def _short_event(line: str) -> str:
+        """Display only validated telemetry fields; raw requests can contain secrets."""
         try:
             obj = json.loads(line)
             if isinstance(obj, dict):
-                when = str(obj.get("time_iso8601") or obj.get("timestamp") or obj.get("time") or "?")
-                code = str(obj.get("status") or obj.get("http_status") or "?")
-                cache = str(obj.get("upstream_cache_status") or obj.get("cache_status") or "-")
-                uri = str(obj.get("request_uri") or obj.get("uri") or obj.get("request") or "")
-                return f"{when[11:19]:8}  {code:3}  {cache:10}  {uri[:95]}"
+                stamp = timestamp(obj.get("time_iso8601") or obj.get("timestamp") or obj.get("time"))
+                when = stamp.strftime("%H:%M:%S") if stamp else "?"
+                raw_code = str(obj.get("status") or obj.get("http_status") or "")
+                code = raw_code if (len(raw_code) == 3 and raw_code.isascii()
+                                    and raw_code.isdigit() and 100 <= int(raw_code) <= 599) else "?"
+                raw_cache = str(obj.get("upstream_cache_status") or obj.get("cache_status") or "")
+                cache = raw_cache.upper() if raw_cache.upper() in {
+                    "HIT", "MISS", "BYPASS", "EXPIRED", "STALE",
+                    "UPDATING", "REVALIDATED"
+                } else "-"
+                return f"{when:8}  {code:3}  {cache:10}"
         except (ValueError, TypeError):
             pass
-        return line[:128]
+        return "Malformed log record (details suppressed)"
 
     def _error(self, message: str) -> None:
         self._busy = False
@@ -201,7 +243,7 @@ class RepoCacheApp(App):
             info = "[yellow]Disk unavailable[/yellow]\n" + escape(str(disk.get("reason", "")))
         self.query_one("#disk", Static).update(safe_markup(info))
         cache_info = (f"[bold cyan]CACHE STATISTICS[/bold cyan]\n"
-                      f"HIT: {m['hit']}  |  MISS: {m['miss']}\n"
+                      f"HIT: {m['hit']}  |  MISS: {m['miss']}  |  BYPASS: {m.get('bypass', 0)}\n"
                       f"HTTP 5xx: {m['errors_5xx'] if m['available'] else 'N/A'}\n"
                       f"[dim]Other cache statuses are included in the HIT-rate denominator[/dim]")
         self.query_one("#cache", Static).update(safe_markup(cache_info))
@@ -209,15 +251,16 @@ class RepoCacheApp(App):
         self.query_one("#requests-graph", Sparkline).data = series
         self.query_one("#histogram", Sparkline).data = series
         granularity = "DAY" if m["series_unit"] == "day" else "HOUR"
-        title = f"REQUESTS/{granularity} · UTC · {self.period_labels[self.period_index]}"
+        scope = "ALL ROUTES" if self._metrics_filter is None else self._metrics_filter
+        title = f"REQUESTS/{granularity} · UTC · {self.period_labels[self.period_index]} · {scope}"
         if not m["available"]:
             title += "  — N/A (no samples)"
         self.query_one("#requests-title", Static).update(title)
         self.query_one("#metric-title", Static).update(title)
-        metric_info = (f"[bold cyan]METRICS · Last {self.period_labels[self.period_index]}[/]\n"
+        metric_info = (f"[bold cyan]METRICS · Last {self.period_labels[self.period_index]} · {escape(scope)}[/]\n"
                        f"Requests (sample): {m['requests'] if m['available'] else 'N/A'}    "
                        f"HIT rate: {str(m['hit_rate']) + '%' if m['hit_rate'] is not None else 'N/A'}\n"
-                       f"HIT: {m['hit']}    MISS: {m['miss']}    Cache status observed: {m['cache_observed']}\n"
+                       f"HIT: {m['hit']}    MISS: {m['miss']}    BYPASS: {m.get('bypass', 0)}\n"
                        f"5xx: {m['errors_5xx'] if m['errors_5xx'] is not None else 'N/A'}    "
                        f"Bytes served*: {human_bytes(m['bytes_sent']) if m['available'] else 'N/A'}\n"
                        f"Average duration*: {str(m['avg_request_ms']) + ' ms' if m['avg_request_ms'] is not None else 'N/A'}\n"
@@ -226,6 +269,7 @@ class RepoCacheApp(App):
         period_note = ("[bold]Observed time range[/bold]\n" +
                        f"First record: {escape(m['first_seen'] or 'N/A')}\n"
                        f"Last record: {escape(m['last_seen'] or 'N/A')}\n"
+                       f"Sample quality: {escape(m.get('coverage', 'unknown'))}\n" +
                        f"[dim]{escape(m['detail'])}[/dim]" +
                        ("\n[yellow]Sample truncated to 8 MB![/yellow]" if m["truncated"] else ""))
         self.query_one("#metric-details", Static).update(safe_markup(period_note))
@@ -284,6 +328,7 @@ class RepoCacheApp(App):
         info.append("Location: " + selected["path"] + "\n")
         info.append("Upstream: " + selected["upstream"] + "\n")
         info.append("Discovery: " + str(self._latest.get("nginx_config_source", "unknown")) + "\n")
+        info.append("Press F to show filtered metrics for this repository.\n")
         info.append("Recently active (24h log sample): " +
                     self._repo_activity.get(selected["path"], "unknown") + "\n")
         probe = self._probe_results.get(selected["path"])
@@ -296,6 +341,15 @@ class RepoCacheApp(App):
         self.query_one("#repo-detail", Static).update(info)
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        if event.data_table.id == "proposal-table":
+            ident = str(event.row_key.value)
+            if ident in self._proposal_versions:
+                self._selected_proposal = ident
+                self._review_confirmation = None
+                self.query_one("#proposal-detail", Static).update(
+                    "Selected proposal " + ident[:12] +
+                    ". Review = Y twice, reject = N twice. Neither action publishes a route.")
+            return
         if event.data_table.id != "repo-table":
             return
         selected = next((item for item in self._all_repos
@@ -365,8 +419,115 @@ class RepoCacheApp(App):
         mode = (f"AUTO {self.refresh_intervals[self.refresh_interval_index]}s" if self.refresh_enabled else "MANUAL")
         self.sub_title = f"{self._latest.get('service', 'N/A').upper()} · {mode} · P: period"
 
+    def _refresh_submissions(self) -> None:
+        table = self.query_one("#proposal-table", DataTable)
+        table.clear()
+        self._selected_proposal = ""
+        self._review_confirmation = None
+        self._proposal_versions = {}
+        self._proposal_digests = {}
+        label = self.query_one("#proposal-note", Static)
+        if os.geteuid() != 0:
+            label.update("Administrator OS identity required (root). No proposals shown.")
+            return
+        if not SUBMISSION_QUEUE_PATH.is_file() or SUBMISSION_QUEUE_PATH.is_symlink():
+            label.update("No trusted submission queue configured. Intake remains disabled.")
+            return
+        try:
+            proposals = SubmissionQueue(SUBMISSION_QUEUE_PATH).pending()
+            self._proposal_versions = {p["id"]: p["version"] for p in proposals}
+            self._proposal_digests = {p["id"]: p["metadata_digest"] for p in proposals}
+            for proposal in proposals:
+                # Treat persisted queue rows as untrusted. A corrupt or
+                # service-UID-tampered record must fail closed, not crash TUI.
+                records = proposal["repositories"]
+                if not isinstance(records, list) or not records or not isinstance(records[0], dict):
+                    raise SubmissionError("invalid_stored_proposal", 503)
+                first = records[0]
+                uri = first.get("url")
+                if not isinstance(uri, str) or len(uri) > 2048:
+                    raise SubmissionError("invalid_stored_proposal", 503)
+                # Show only canonical hostname, never path, query, or raw body.
+                host = urlsplit(uri).hostname or "invalid"
+                if not re.fullmatch(r"[a-zA-Z0-9.-]{1,253}", host):
+                    raise SubmissionError("invalid_stored_proposal", 503)
+                table.add_row(proposal["id"][:12], proposal["os"] + " " +
+                              proposal["version_os"], first["type"], host,
+                              "HTTP (review)" if first["insecure_http"] else "HTTPS",
+                              key=proposal["id"])
+            label.update(f"{len(proposals)} pending proposal(s). Only the first origin per proposal is shown.")
+        except (SubmissionError, OSError, ValueError, IndexError, KeyError, TypeError, sqlite3.Error):
+            table.clear()
+            self._proposal_versions = {}
+            self._proposal_digests = {}
+            label.update("Cannot access a validated submission queue; no decisions permitted.")
+
+    def _decide(self, action: str) -> None:
+        if (self.query_one(TabbedContent).active != "submissions" or
+                os.geteuid() != 0):
+            self.notify("Administrator review is unavailable.", severity="warning")
+            return
+        ident = self._selected_proposal
+        if (not ident or ident not in self._proposal_versions or
+                ident not in self._proposal_digests):
+            self.notify("Select a pending proposal first.", severity="warning")
+            return
+        if self._review_confirmation != (ident, action):
+            self._review_confirmation = (ident, action)
+            self.notify("Press the same action again to confirm. Review does not publish.", severity="warning")
+            return
+        version = self._proposal_versions[ident]
+        self._review_confirmation = None
+        try:
+            SubmissionQueue(SUBMISSION_QUEUE_PATH).decide(
+                ident, action, expected_version=version,
+                expected_digest=self._proposal_digests[ident])
+        except (SubmissionError, OSError, ValueError):
+            self.notify("Review could not be completed; refresh the queue.", severity="error")
+            return
+        self._last_review = (ident, version + 1)
+        self.notify("Decision recorded in local audit; no route was published.")
+        self._refresh_submissions()
+
+    def action_review_selected(self) -> None:
+        self._decide("review")
+
+    def action_reject_selected(self) -> None:
+        self._decide("reject")
+
+    def action_undo_review(self) -> None:
+        if (os.geteuid() != 0 or self.query_one(TabbedContent).active != "submissions"
+                or self._last_review is None):
+            self.notify("No authorized decision to undo.", severity="warning")
+            return
+        ident, version = self._last_review
+        self._last_review = None
+        try:
+            SubmissionQueue(SUBMISSION_QUEUE_PATH).decide(
+                ident, "reopen", expected_version=version)
+            self.notify("Proposal reopened; audit trail retained.")
+        except (SubmissionError, OSError, ValueError):
+            self.notify("Cannot undo this decision; review the audit.", severity="error")
+        self._refresh_submissions()
+
+    def action_filter_selected_metrics(self) -> None:
+        selected = self._selected()
+        if selected is None:
+            self.notify("Select an approved repository route first.", severity="warning")
+            return
+        self._metrics_filter = selected["path"]
+        self.query_one(TabbedContent).active = "metrics"
+        self.poll(force=True)
+
+    def action_global_metrics(self) -> None:
+        self._metrics_filter = None
+        self.query_one(TabbedContent).active = "metrics"
+        self.poll(force=True)
+
     def action_tab(self, pane: str) -> None:
         self.query_one(TabbedContent).active = pane
+        if pane == "submissions":
+            self._refresh_submissions()
 
     def action_period(self) -> None:
         self.period_index = (self.period_index + 1) % len(self.periods)
