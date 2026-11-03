@@ -634,6 +634,34 @@ def test_wrong_address_width_cannot_claim_network_inventory_complete(monkeypatch
     )
 
 
+@pytest.mark.parametrize("family", ["tcp", "tcp6"])
+@pytest.mark.parametrize("invalid", ["wrong_width", "bad_port", "missing_separator"])
+def test_malformed_remote_endpoint_cannot_claim_port_free(monkeypatch, family, invalid):
+    """A broken remote endpoint means the whole kernel port inventory is uncertain."""
+    ipv6 = family == "tcp6"
+    original = proc6((4443, "01")) if ipv6 else proc((4443, "01"))
+    remote = (b"00000000000000000000000000000000:0000" if ipv6
+              else b"00000000:0000")
+    replacement = {
+        "wrong_width": b"00000000:0000" if ipv6
+                       else b"00000000000000000000000000000000:0000",
+        "bad_port": remote[:-4] + b"GGGG",
+        "missing_separator": remote.replace(b":", b""),
+    }[invalid]
+    damaged = original.replace(remote, replacement)
+    assert damaged != original
+    with pytest.raises(ValueError):
+        host._parse_tcp_listeners(damaged, ipv6=ipv6)
+
+    monkeypatch.setattr(host, "_read_fixed", lambda path, limit:
+                        damaged if path.endswith("/" + family)
+                        else proc6() if path.endswith("/tcp6") else proc())
+    result = host._port_check(spec())
+    assert (result.status, result.code) == (
+        PreflightStatus.NOT_VERIFIED, "LISTEN_PORT_INVENTORY_INCOMPLETE",
+    )
+
+
 def test_tls_intermediate_symlink_and_denied_parent_are_distinct(monkeypatch):
     """RC-196-02: safe virtual ancestors, without world-writable /tmp masking."""
     import stat
