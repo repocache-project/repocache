@@ -11,9 +11,13 @@ from dataclasses import dataclass
 import hashlib
 import math
 import socket
+import time
 from typing import Any, Callable
 
-from repocache.server_bounded_dns_v1 import bounded_getaddrinfo
+from repocache.server_bounded_dns_v1 import (
+    DEFAULT_DNS_SECONDS,
+    bounded_getaddrinfo,
+)
 from repocache.server_install_v1 import ID, MAX_INT, validate_install_document
 from repocache.server_upstream_rotation_v1 import (
     MIN_REFRESH_INTERVAL_SECONDS,
@@ -24,6 +28,9 @@ from repocache.server_upstream_rotation_v1 import (
 MAX_FAILURE_BACKOFF_SECONDS = 3600
 INITIAL_FAILURE_BACKOFF_SECONDS = 60
 MAX_JITTER_SECONDS = 60
+# A whole refresh may resolve many allowed hosts; per-host timeouts alone
+# would allow a 32-host DNS pass to occupy the scheduler for minutes.
+MAX_REFRESH_CYCLE_SECONDS = 15.0
 
 
 class UpstreamScheduleError(ValueError):
@@ -53,6 +60,29 @@ def _jitter(repository_id: str) -> int:
     return hashlib.sha256(repository_id.encode("ascii")).digest()[0] % (
         MAX_JITTER_SECONDS + 1
     )
+
+
+def _cycle_bounded_resolver() -> Callable[..., list[tuple[Any, ...]]]:
+    """Limit the entire built-in multi-host DNS pass, not only each child.
+
+    Use a real monotonic clock rather than the caller's scheduling hint.
+    Test-injected resolvers remain explicit non-production fixtures.
+    """
+    deadline = time.monotonic() + MAX_REFRESH_CYCLE_SECONDS
+
+    def resolve(host: str, port: int, *, family: int, type: int,
+                proto: int) -> list[tuple[Any, ...]]:
+        remaining = deadline - time.monotonic()
+        if not math.isfinite(remaining) or remaining <= 0:
+            # The upstream planner converts OSError to a fixed, redacted
+            # failure and discards the entire candidate pin set.
+            raise socket.gaierror("DNS refresh: cycle deadline exceeded")
+        return bounded_getaddrinfo(
+            host, port, family=family, type=type, proto=proto,
+            timeout_seconds=min(DEFAULT_DNS_SECONDS, remaining),
+        )
+
+    return resolve
 
 
 def refresh_due(
@@ -129,7 +159,7 @@ def refresh_due(
             repository_id=repository_id,
             current_generation=current_generation,
             previous_pins_by_host=previous_pins_by_host,
-            resolver=bounded_getaddrinfo if resolver is None else resolver,
+            resolver=_cycle_bounded_resolver() if resolver is None else resolver,
         )
     except (UpstreamRotationError, socket.gaierror):
         failures = min(failures + 1, 12)
