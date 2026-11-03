@@ -92,8 +92,8 @@ def scripted_runner(distro, *, problem=None):
             assert "--checksig" in args
             assert any(x.startswith("--dbpath=") for x in args)
             return SimpleNamespace(returncode=0, stdout=(
-                "signatures-name.rpm: digests OK\\n" if problem == "misleading-file-name"
-                else "nginx.rpm: digests OK\\n" if problem == "bad-signature"
+                "signatures-name.rpm: digests OK\n" if problem == "misleading-file-name"
+                else "nginx.rpm: digests OK\n" if problem == "bad-signature"
                 else "nginx.rpm: digests signatures OK\n"), stderr="")
         if args[0] == "/usr/bin/rpm":
             assert any(x.startswith("--dbpath=") for x in args)
