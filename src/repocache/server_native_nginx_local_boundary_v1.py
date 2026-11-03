@@ -1,7 +1,7 @@
 """Non-authorizing local NGINX transaction boundary observation (#27).
 
 This ties the conservative fresh-host refusal to #31's read-only locked
-manifest reconciliation. It does NOT hold a lock across a native package
+pre-package state reader (which does not require an installed NGINX include). It does NOT hold a lock across a native package
 transaction, authorize an operator, inspect all processes/listeners, download
 packages, install NGINX, or activate any service.
 """
@@ -15,10 +15,11 @@ from repocache.server_native_nginx_ownership_v1 import (
     inspect_fresh_nginx_footprint,
 )
 from repocache.server_native_package_plan_v1 import preview_nginx_packages
-from repocache.server_locked_manifest_reconcile_v1 import (
-    LockedManifestInspectionError,
-    inspect_current_namespace_locked_manifest,
+from repocache.server_native_nginx_prepackage_state_v1 import (
+    PrepackageStateInspectionError,
+    inspect_current_namespace_prepackage_state,
 )
+from repocache.server_protected_state_inspect_v1 import _FIXED_STATE_ROOT
 
 _CODES = frozenset({
     "NGINX_FOOTPRINT_REFUSED",
@@ -80,7 +81,7 @@ def inspect_native_nginx_local_boundary(
     lstat: Callable[[str], os.stat_result] = os.lstat,
     geteuid: Callable[[], int] = os.geteuid,
     locked_inspector: Callable[..., dict[str, Any]] = (
-        inspect_current_namespace_locked_manifest
+        inspect_current_namespace_prepackage_state
     ),
 ) -> NativeNginxLocalBoundaryV1:
     """Observe known conflicts and #31 state, without network or mutations.
@@ -94,9 +95,20 @@ def inspect_native_nginx_local_boundary(
     plan = preview_nginx_packages(
         os_release=os_release, python_version=python_version, document=document
     )
+    # The #31 state directory/lock MUST be preprovisioned before a real
+    # package transaction, yet the legacy fresh-footprint scan treated its
+    # very existence as foreign NGINX. Ignore exactly that one code-owned
+    # marker here; the pinned #31 lock reader below verifies it strictly.
+    # The standalone metadata/download probe retains the conservative
+    # unconditional refusal of a pre-existing state directory.
+    def nginx_marker(path: str) -> os.stat_result:
+        if path == _FIXED_STATE_ROOT:
+            raise FileNotFoundError(path)
+        return lstat(path)
+
     footprint = inspect_fresh_nginx_footprint(
         os_release=os_release, python_version=python_version,
-        document=document, lstat=lstat,
+        document=document, lstat=nginx_marker,
     )
     if not footprint.allows_metadata_probe:
         return NativeNginxLocalBoundaryV1(
@@ -113,22 +125,25 @@ def inspect_native_nginx_local_boundary(
     try:
         # Only a generation-0 fresh install is within this boundary.
         # Never try a recovery operation automatically on journal conflicts.
-        state = locked_inspector(expected_generation=0)
-    except (LockedManifestInspectionError, OSError, ValueError, TypeError):
+        state = locked_inspector()
+    except (PrepackageStateInspectionError, OSError, ValueError, TypeError):
         return NativeNginxLocalBoundaryV1(
             plan.distribution, "PROTECTED_STATE_UNVERIFIED", footprint.code
         )
     if (type(state) is not dict
-            or state.get("status") != "LOCKED_READ_ONLY_RECONCILIATION"
-            or state.get("include_status") != "NO_MANAGED_INCLUDE"
+            or state.get("status") != "LOCKED_PREPACKAGE_STATE_ABSENT"
+            or state.get("nginx_include_directory_required") is not False
+            or state.get("nginx_live_manifest_verified") is not False
+            or state.get("native_transaction_journal_prepared") is not False
             or type(state.get("state_generation")) is not int
             or state["state_generation"] != 0
             or state.get("manifest_entry_present") is not False
-            or state.get("include_file_present") is not False
+            or state.get("protected_state_directory_preprovisioned") is not True
             or state.get("exclusive_state_lock_held_during_inspection") is not True
             or state.get("current_namespace_root_path_verified") is not True
             or state.get("operator_authorization_verified") is not False
             or state.get("authorizes_write") is not False
+            or state.get("authorizes_package_installation") is not False
             or state.get("authorizes_nginx_reload") is not False):
         return NativeNginxLocalBoundaryV1(
             plan.distribution, "PROTECTED_STATE_UNVERIFIED", footprint.code
