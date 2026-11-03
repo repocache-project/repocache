@@ -143,8 +143,18 @@ def test_unsigned_candidate_checksum_strict_and_no_executed_download(monkeypatch
         (assets / (name + ".sha256")).write_text(
             hashlib.sha256((assets / name).read_bytes()).hexdigest() + "  " + name + "\n")
     called = []
-    monkeypatch.setattr(release.subprocess, "run", lambda *a, **kw:
-                        called.append(a) or SimpleNamespace(returncode=0))
+    real_popen = release.subprocess.Popen
+
+    def local_verifier(argv, **kwargs):
+        called.append(argv)
+        assert kwargs["start_new_session"] is True
+        assert kwargs["stdout"] == release.subprocess.DEVNULL
+        assert kwargs["stderr"] == release.subprocess.DEVNULL
+        # Use a harmless local verifier, not downloaded or unsigned code.
+        return real_popen([sys.executable, "-c", "import sys;sys.exit(0)"],
+                          **kwargs)
+
+    monkeypatch.setattr(release.subprocess, "Popen", local_verifier)
     release.verify_unsigned(tmp_path, assets, version)
     assert len(called) == 1
     (assets / (base + ".sha256")).write_text("0" * 64 + "  " + base + "\n")
@@ -310,8 +320,11 @@ def test_modified_signer_worktree_refused_before_reading_passphrase(monkeypatch,
         release.sign(version, 3)
 
 
-def test_local_sign_dispatch_preserves_fd_only_secret_and_no_publication(monkeypatch, tmp_path):
+@pytest.mark.parametrize("explicit_path", [False, True])
+def test_local_sign_dispatch_preserves_fd_only_secret_and_no_publication(
+        monkeypatch, tmp_path, explicit_path):
     version = "v0.5.0"
+    expected_name = "owner.pem" if explicit_path else "repocache-release-private.pem"
     release_dir = tmp_path / "candidate"
     scripts = release_dir / "checkout" / "scripts"
     assets = release_dir / "assets"
@@ -325,12 +338,13 @@ def test_local_sign_dispatch_preserves_fd_only_secret_and_no_publication(monkeyp
         "from pathlib import Path\n"
         "def sign_candidate(bundle, private, *, commit, run_id, attempt, password):\n"
         "    assert password == b'correct-secret' and run_id == '21' and attempt == '2'\n"
+        f"    assert private.name == {expected_name!r}\n"
         "    for suffix in ('.manifest.json', '.manifest.json.sig', '.provenance.json', '.provenance.json.sig'):\n"
         "        bundle.with_name(bundle.name + suffix).write_bytes(b'signed fixture')\n"
     )
-    keydir = tmp_path / "repocache-signing"
+    keydir = tmp_path / ("alternate-signing" if explicit_path else "repocache-signing")
     keydir.mkdir()
-    private = keydir / "repocache-release-private.pem"
+    private = keydir / expected_name
     private.write_bytes(b"encrypted test fixture")
     private.chmod(0o600)
     monkeypatch.setattr(release.Path, "home", classmethod(lambda cls: tmp_path))
@@ -346,7 +360,7 @@ def test_local_sign_dispatch_preserves_fd_only_secret_and_no_publication(monkeyp
                         (("a" * 40 + "\n").encode() if "rev-parse" in args else b""))
     saved = []
     monkeypatch.setattr(release, "save_state", lambda _, data: saved.append(data))
-    assert release.sign(version, 3)["phase"] == "signed"
+    assert release.sign(version, 3, str(private) if explicit_path else None)["phase"] == "signed"
     assert len(saved) == 1
     assert saved[0]["phase"] == "signed"
     assert len(saved[0]["assets"]) == 8
@@ -741,3 +755,256 @@ def test_publish_checks_protected_tag_again_after_server_mutation(monkeypatch):
         release.publish("v0.5.0", 100, publication.fingerprint(release, record))
     assert caught.value.code == "POST_PUBLISH_UNVERIFIED"
     assert len(commands) == 1
+
+
+# #88 pre-signing verification: fixture-only, no key bytes or release operations.
+def _mock_environment_readonly(monkeypatch, tmp_path):
+    """Supply a synthetic owner/trust anchor without signing or a GitHub write."""
+    monkeypatch.setattr(release.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(release.Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(release, "root_path", lambda: tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
+    der = b"synthetic-public-der-not-a-key"
+    monkeypatch.setattr(release, "EXPECTED_FINGERPRINT", hashlib.sha256(der).hexdigest())
+    calls = []
+
+    def fake_command(argv, **kwargs):
+        calls.append(tuple(argv))
+        if argv == ["gh", "api", "user"]:
+            return b'{"login":"teixemf"}'
+        if argv[:3] == ["/usr/bin/openssl", "pkey", "-pubin"]:
+            return der
+        if argv in (["git", "--version"], ["gh", "--version"],
+                    ["/usr/bin/openssl", "version"], ["gh", "auth", "status"]):
+            return b"ok"
+        raise AssertionError("Unexpected command in read-only environment check")
+
+    monkeypatch.setattr(release, "command", fake_command)
+    monkeypatch.setattr(release, "gh_json", lambda endpoint: (
+        {"path": ".github/workflows/release.yml"}
+        if endpoint == f"repos/{release.REPO}/actions/workflows/release.yml"
+        else (_ for _ in ()).throw(AssertionError(endpoint))))
+    signer = tmp_path / "repocache-signing/repocache-release-private.pem"
+    return signer, calls
+
+
+@pytest.mark.parametrize("present", [False, True])
+def test_environment_reports_missing_or_private_signer_without_reading_key(
+        monkeypatch, tmp_path, present):
+    signer, calls = _mock_environment_readonly(monkeypatch, tmp_path)
+    if present:
+        signer.parent.mkdir(mode=0o700)
+        signer.write_bytes(b"fixture-only-not-a-private-key")
+        signer.chmod(0o600)
+    result = release.environment()
+    assert result["private_key_present"] is present
+    assert result["status"] == ("ready" if present else "signer_missing")
+    assert ("gh", "auth", "status") in calls
+    assert all(command[:2] != ("gh", "release") for command in calls)
+    assert all("sign" not in command for command in calls)
+
+
+@pytest.mark.parametrize("mode", [0o644, 0o700, 0o400])
+def test_environment_refuses_non_0600_signer_mode(monkeypatch, tmp_path, mode):
+    signer, _ = _mock_environment_readonly(monkeypatch, tmp_path)
+    signer.parent.mkdir(mode=0o700)
+    signer.write_bytes(b"fixture-only")
+    signer.chmod(mode)
+    with pytest.raises(release.OperatorError) as caught:
+        release.environment()
+    assert caught.value.code == "UNSAFE_SIGNER"
+
+
+def test_environment_refuses_existing_signer_symlink(monkeypatch, tmp_path):
+    signer, _ = _mock_environment_readonly(monkeypatch, tmp_path)
+    signer.parent.mkdir(mode=0o700)
+    target = tmp_path / "do-not-read"
+    target.write_bytes(b"fixture-only")
+    target.chmod(0o600)
+    signer.symlink_to(target)
+    with pytest.raises(release.OperatorError) as caught:
+        release.environment()
+    assert caught.value.code == "UNSAFE_SIGNER"
+    assert target.read_bytes() == b"fixture-only"
+
+
+def test_environment_refuses_dangling_signer_symlink(monkeypatch, tmp_path):
+    signer, _ = _mock_environment_readonly(monkeypatch, tmp_path)
+    signer.parent.mkdir(mode=0o700)
+    signer.symlink_to(tmp_path / "nonexistent-private.pem")
+    assert signer.is_symlink() and not signer.exists()
+    with pytest.raises(release.OperatorError) as caught:
+        release.environment()
+    assert caught.value.code == "UNSAFE_SIGNER"
+
+
+def test_environment_rejects_wrong_trust_anchor_before_signer_inspection(
+        monkeypatch, tmp_path):
+    signer, calls = _mock_environment_readonly(monkeypatch, tmp_path)
+    monkeypatch.setattr(release, "EXPECTED_FINGERPRINT", "0" * 64)
+    with pytest.raises(release.OperatorError) as caught:
+        release.environment()
+    assert caught.value.code == "UNTRUSTED_SIGNER"
+    assert not signer.exists()
+    assert all(command[:2] != ("gh", "release") for command in calls)
+
+
+# #88 configurable signer-file location: fixture metadata only, no real key.
+def test_signer_key_file_cli_option_is_action_scoped():
+    parser = release.build_parser()
+    path = "/home/owner/signing/owner.pem"
+    env = parser.parse_args(["environment", "check", "--signer-key-file", path, "--json"])
+    assert env.signer_key_file == path
+    sign = parser.parse_args(["candidate", "sign", "v0.5.0",
+                              "--passphrase-fd", "3", "--signer-key-file", path])
+    assert sign.signer_key_file == path
+    with pytest.raises(release.SyntaxErrorFromParser):
+        parser.parse_args(["candidate", "prepare", "v0.5.0", "--signer-key-file", path])
+
+
+@pytest.mark.parametrize("bad", ["relative.pem", "~/key.pem", "", "/tmp/../key.pem",
+                                 "/tmp//key.pem", "//tmp/key.pem", "/tmp/key.pem/",
+                                 "/tmp/key\n.pem", "/tmp/key\x00.pem",
+                                 "/tmp/" + chr(0xD800) + ".pem", "/"])
+def test_explicit_signer_path_refuses_ambiguous_or_relative_paths(bad):
+    with pytest.raises(release.OperatorError) as caught:
+        release.private_signer_path(bad)
+    assert caught.value.code == "UNSAFE_SIGNER"
+
+
+def test_environment_explicit_signer_path_ready_without_key_read(monkeypatch, tmp_path):
+    default, calls = _mock_environment_readonly(monkeypatch, tmp_path)
+    alternate = tmp_path / "alternate-signing" / "owner.pem"
+    alternate.parent.mkdir(mode=0o700)
+    alternate.write_bytes(b"fixture-not-a-valid-encrypted-pem")
+    alternate.chmod(0o600)
+    result = release.environment(str(alternate))
+    assert result["status"] == "ready"
+    assert result["private_key_present"] is True
+    assert not default.exists()
+    assert all("sign" not in argv for argv in calls)
+
+
+def test_environment_explicit_missing_signer_is_missing(monkeypatch, tmp_path):
+    _mock_environment_readonly(monkeypatch, tmp_path)
+    result = release.environment(str(tmp_path / "private-keys" / "absent.pem"))
+    assert result["status"] == "signer_missing"
+    assert result["private_key_present"] is False
+
+
+@pytest.mark.parametrize("kind", ["symlink", "group_writable"])
+def test_explicit_signer_refuses_unsafe_ancestor(monkeypatch, tmp_path, kind):
+    _mock_environment_readonly(monkeypatch, tmp_path)
+    parent = tmp_path / "keys"
+    if kind == "symlink":
+        actual = tmp_path / "real-keys"
+        actual.mkdir(mode=0o700)
+        parent.symlink_to(actual, target_is_directory=True)
+        key = actual / "owner.pem"
+    else:
+        parent.mkdir(mode=0o770)
+        parent.chmod(0o770)  # Do not depend on the CI runner umask.
+        key = parent / "owner.pem"
+    key.write_bytes(b"synthetic fixture")
+    key.chmod(0o600)
+    with pytest.raises(release.OperatorError) as caught:
+        release.environment(str(parent / "owner.pem"))
+    assert caught.value.code == "UNSAFE_SIGNER"
+
+
+@pytest.mark.parametrize("kind", ["directory", "fifo", "hardlink"])
+def test_explicit_signer_refuses_nonunique_or_nonregular_inode(
+        monkeypatch, tmp_path, kind):
+    _mock_environment_readonly(monkeypatch, tmp_path)
+    parent = tmp_path / "keys"
+    parent.mkdir(mode=0o700)
+    key = parent / "owner.pem"
+    if kind == "directory":
+        key.mkdir(mode=0o700)
+    elif kind == "fifo":
+        os.mkfifo(key, 0o600)
+    else:
+        key.write_bytes(b"fixture")
+        key.chmod(0o600)
+        os.link(key, parent / "another-name")
+    with pytest.raises(release.OperatorError) as caught:
+        release.environment(str(key))
+    assert caught.value.code == "UNSAFE_SIGNER"
+
+
+def test_explicit_signer_rejects_wrong_owner_and_mode(monkeypatch, tmp_path):
+    _mock_environment_readonly(monkeypatch, tmp_path)
+    key = tmp_path / "owner.pem"
+    key.write_bytes(b"synthetic")
+    key.chmod(0o400)
+    with pytest.raises(release.OperatorError) as caught:
+        release.environment(str(key))
+    assert caught.value.code == "UNSAFE_SIGNER"
+    key.chmod(0o600)
+    orig_lstat = release.Path.lstat
+    def wrong_owner_lstat(path, *args, **kwargs):
+        info = orig_lstat(path, *args, **kwargs)
+        if path == key:
+            from types import SimpleNamespace
+            return SimpleNamespace(st_mode=info.st_mode,
+                                   st_uid=os.getuid() + 10000, st_nlink=1)
+        return info
+    monkeypatch.setattr(release.Path, "lstat", wrong_owner_lstat)
+    with pytest.raises(release.OperatorError) as caught:
+        release.environment(str(key))
+    assert caught.value.code == "UNSAFE_SIGNER"
+
+
+def test_cli_explicit_signer_path_uses_same_json_contract(monkeypatch, tmp_path, capsys):
+    _mock_environment_readonly(monkeypatch, tmp_path)
+    path = tmp_path / "key-file.pem"
+    path.write_bytes(b"test fixture")
+    path.chmod(0o600)
+    rc = release.main(["environment", "check", "--signer-key-file", str(path), "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0 and payload["ok"] is True
+    assert payload["result"]["status"] == "ready"
+    assert str(path) not in json.dumps(payload)
+    rc = release.main(["environment", "check", "--signer-key-file", "bad-path", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 1 and payload["error"]["code"] == "UNSAFE_SIGNER"
+    assert "bad-path" not in json.dumps(payload)
+
+
+def test_sign_explicit_signer_missing_refuses_before_secret_fd(monkeypatch, tmp_path):
+    monkeypatch.setattr(release.os, "geteuid", lambda: os.getuid() or 1000)
+    monkeypatch.setattr(release, "read_state", lambda version: {
+        "phase": "prepared", "assets": {}, "version": version})
+    monkeypatch.setattr(release, "verify_state", lambda *args: {})
+    monkeypatch.setattr(release, "read_passphrase", lambda _: 1 / 0)
+    with pytest.raises(release.OperatorError) as caught:
+        release.sign("v0.5.0", 3, str(tmp_path / "absent.pem"))
+    assert caught.value.code == "UNSAFE_SIGNER"
+
+def test_explicit_signer_metadata_access_failure_is_closed(monkeypatch, tmp_path):
+    _mock_environment_readonly(monkeypatch, tmp_path)
+    parent = tmp_path / "unreadable"
+    parent.mkdir(mode=0o700)
+    original = release.Path.lstat
+    def inaccessible(path, *args, **kwargs):
+        if path == parent:
+            raise PermissionError("simulated metadata denial")
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(release.Path, "lstat", inaccessible)
+    with pytest.raises(release.OperatorError) as caught:
+        release.environment(str(parent / "owner.pem"))
+    assert caught.value.code == "UNSAFE_SIGNER"
+    assert str(parent) not in str(caught.value)
+
+def test_unrecognized_signer_path_option_never_echoes_path(monkeypatch, tmp_path, capsys):
+    marker = str(tmp_path / "private-operator-location.pem")
+    rc = release.main(["candidate", "prepare", "v0.5.0",
+                       "--signer-key-file", marker, "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 2 and payload["error"]["code"] == "INVALID_ARGUMENT"
+    assert marker not in json.dumps(payload)
+    rc = release.main(["candidate", "prepare", "v0.5.0",
+                       "--signer-key-file=" + marker, "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 2 and payload["error"]["code"] == "INVALID_ARGUMENT"
+    assert marker not in json.dumps(payload)
