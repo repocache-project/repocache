@@ -80,6 +80,43 @@ The source scan prevents common unsafe signing-key ownership and symlink
 patterns but does not substitute for complete root/LSM/namespace and
 distribution package-trust acceptance.
 
+
+## Conservative fresh-NGINX ownership gate (development-only)
+
+The internal, non-installing
+`server_native_nginx_ownership_v1.inspect_fresh_nginx_footprint()` gate
+revalidates the supported OS, schema and `new-managed-only` policy before
+reading fixed known NGINX paths. A fresh-install request must explicitly
+declare `expected_state_generation: 0`. The gate refuses any existing
+NGINX binary, configuration, conventional service unit, service override,
+PID or cache/log namespace; even a dangling symlink counts as present.
+An inaccessible path also fails closed. Fixed observations contain no
+operator-provided path data, no reads of configuration or key contents, and
+no subprocess or network operations. The probe does not adopt an existing
+NGINX deployment merely because the files are root-owned or contain a
+REPOCACHE-like name.
+
+`prepare_fresh_native_nginx()` can subsequently perform the already
+implemented signed native metadata check **only if** the initial footprint
+inspection observed no known artifacts. It never invokes an installation
+command. A positive footprint snapshot is reported **NOT VERIFIED** for
+installation purposes: it does not prove that all processes, alternate
+service names, listeners, package-manager ownership, protected manifests,
+mount namespaces, inodes, SELinux contexts or concurrent changes are safe.
+Even when the native metadata probe reports PASS, the combined report
+always has `can_install=false`, `authorizes_package_transaction=false`
+and `authorizes_nginx_activation=false`.
+
+This is one conservative early rejection step, **not** a privileged installer
+or the complete ownership acceptance criterion. Before any actual package
+change, a separately approved root helper still needs locked protected-state
+verification (#31), current process/port/systemd ownership checks (#26),
+fresh APT/DNF metadata and RPM/DEB payload authentication, a reviewed
+non-atomic native package transaction/recovery procedure and fresh-host
+configuration ownership. Before service activation, staged complete-context
+`nginx -t`, atomic managed include changes and tested recovery are mandatory
+under #27/#28/#31. No pre-existing NGINX adoption is supported.
+
 ## Mandatory downstream execution boundary (not implemented)
 
 Before a privileged native transaction (#27), implement and separately test
