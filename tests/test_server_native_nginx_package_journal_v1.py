@@ -127,10 +127,32 @@ def test_existing_protected_state_never_adopted_as_fresh(protected_root):
         "ownership_manifest": [],
     }
     state = folder / STATE_NAME
-    state.write_text(json.dumps(document), encoding="ascii")
+    # #31 accepts only its canonical sorted/compact JSON encoding. A
+    # noncanonical fixture is refused *before* the existing-generation gate.
+    state.write_text(
+        json.dumps(document, sort_keys=True, separators=(",", ":")),
+        encoding="ascii",
+    )
     state.chmod(0o600)
     with pytest.raises(NativePackageJournalError,
                        match="^NATIVE_EXISTING_STATE_REFUSED$"):
+        _prepare_native_journal_under_root(fd, owner_uid=uid, distribution="debian")
+    assert not (folder / NATIVE_PENDING_NAME).exists()
+
+
+def test_noncanonical_existing_state_fails_closed(protected_root):
+    fd, folder, uid = protected_root
+    state = folder / STATE_NAME
+    state.write_text(json.dumps({
+        "state_schema_version": 1,
+        "state_generation": 1,
+        "configuration_sha256": "a" * 64,
+        "repositories": [],
+        "ownership_manifest": [],
+    }), encoding="ascii")
+    state.chmod(0o600)
+    with pytest.raises(NativePackageJournalError,
+                       match="^NATIVE_JOURNAL_STATE_UNVERIFIED$"):
         _prepare_native_journal_under_root(fd, owner_uid=uid, distribution="debian")
     assert not (folder / NATIVE_PENDING_NAME).exists()
 
