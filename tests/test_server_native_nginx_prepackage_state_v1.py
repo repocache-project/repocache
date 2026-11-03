@@ -35,7 +35,7 @@ def test_empty_locked_state_requires_no_preexisting_nginx_tree(monkeypatch):
     assert result["authorizes_package_installation"] is False
     assert result["authorizes_nginx_reload"] is False
     assert calls[0] == ("journal", 0)
-    assert len([c for c in calls if c[0] == "file"]) == 3
+    assert len([c for c in calls if c[0] == "file"]) == 5
     assert len([c for c in calls if c[0] == "state"]) == 2
 
 
@@ -137,3 +137,25 @@ def test_no_pkg_service_or_network_calls_are_required(monkeypatch):
     monkeypatch.setattr(subprocess, "run", lambda *_a, **_k:
                         pytest.fail("no external process expected"))
     assert state._check_under_lock(8)["authorizes_package_installation"] is False
+
+
+@pytest.mark.parametrize("name", [
+    state.NATIVE_PENDING_NAME,
+    state.NATIVE_TMP_NAME,
+])
+def test_native_package_transaction_marker_blocks_fresh_snapshot(monkeypatch, name):
+    monkeypatch.setattr(state, "_read_journal", lambda *_: None)
+    monkeypatch.setattr(
+        state, "_read_file",
+        lambda directory, path, uid, limit: b"unknown-native-effects"
+        if path == name else None,
+    )
+    monkeypatch.setattr(
+        state, "_read_state",
+        lambda *_: pytest.fail("never read generation after native effects marker"),
+    )
+    with pytest.raises(
+        state.PrepackageStateInspectionError,
+        match="^PREPACKAGE_NATIVE_EFFECTS_RECONCILIATION_REQUIRED$",
+    ):
+        state._check_under_lock(42)
