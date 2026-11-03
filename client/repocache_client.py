@@ -55,7 +55,8 @@ def _server(value: str) -> str:
         numeric = re.compile(r"(?:[0-9]+|0[xX][0-9A-Fa-f]+)\Z", re.ASCII)
         dns_label = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z", re.ASCII)
         if (len(hostname) > 253 or len(labels) < 2
-                or all(numeric.fullmatch(label) for label in labels)):
+                or all(numeric.fullmatch(label) for label in labels)
+                or any(not dns_label.fullmatch(label) for label in labels)):
             raise ClientError("Server must be a canonical HTTPS origin")
     return value.rstrip("/")
 
