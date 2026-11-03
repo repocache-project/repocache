@@ -191,3 +191,20 @@ def test_constructed_report_cannot_fake_inconsistent_footprint():
             "debian", "LOCAL_READ_ONLY_SNAPSHOT_OBSERVED",
             "EXISTING_NGINX_OWNERSHIP_UNPROVEN",
         )
+
+
+def test_inaccessible_nginx_marker_is_unknown_not_a_proven_conflict():
+    def permission_error(path):
+        if path == "/etc/nginx":
+            raise PermissionError("private marker")
+        raise FileNotFoundError(path)
+
+    report = boundary.inspect_native_nginx_local_boundary(
+        os_release=DEBIAN, python_version=(3, 13), document=document(),
+        lstat=permission_error, geteuid=forbid, locked_inspector=forbid,
+    ).to_dict()
+    assert report["code"] == "NGINX_FOOTPRINT_REFUSED"
+    assert report["footprint_code"] == "NGINX_FOOTPRINT_ACCESS_UNVERIFIED"
+    assert report["status"] == "NOT VERIFIED"
+    assert "private marker" not in json.dumps(report)
+    assert not report["can_install"]
