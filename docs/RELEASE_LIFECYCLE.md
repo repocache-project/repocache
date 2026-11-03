@@ -12,6 +12,43 @@ documentation PRs are accepted and merged on the protected source branch.
 A draft/unmerged policy is not an effective rule. The current default-branch
 workflows and effective GitHub rulesets are the operational authority.
 
+
+## One-time adoption across already protected branches
+
+The current dependency stack is PR #230 (accepted-`main` reconciliation)
+-> PR #183 (version-independent CI) -> PR #231 (this lifecycle).
+Its planned destination is `integration/v0.6.0`. Completing that stack
+**only on `integration/v0.6.0` is not a repository-wide activation**:
+`main` would still publish the former instructions and other existing
+branches, notably `integration/v0.7.0`, would still contain their former
+push-trigger patterns. GitHub Actions evaluates a `push` against the
+workflow configuration present on the pushed ref. The generic patterns
+in another branch cannot supply missing checks.
+
+Before declaring the generic process ADOPTED for all sessions, a
+**separately reviewed and expressly maintainer-authorized one-time
+governance/CI bootstrap into protected `main`** must be agreed and
+executed. The bootstrap should carry only the independently accepted
+version-independent CI and operating instructions, not unrelated
+v0.6.0 functional changes or unfinished release-candidate code. Such
+a bootstrap would be an explicit migration exception to the usual
+rule restricting direct `main` PRs to hotfixes and final promotions:
+this document does not authorize the exception or its merge.
+
+After the bootstrap is actually accepted on `main`, reconcile the
+reviewed CI/documentation changes into each **existing** active
+integration lane, including `integration/v0.6.0` and
+`integration/v0.7.0`, with individually checked PRs. Do not overwrite,
+force-update, bulk retarget or automatically copy features between
+versions. Verify the nine required live `push` contexts on each
+protected exact HEAD after synchronization; a PR-only green result,
+or a new branch that merely exists, is insufficient. Document the
+adopted default-branch SHA and each validated integration-branch SHA.
+Until those checks pass, adoption is **NOT VERIFIED** and other AI
+sessions should remain paused or explicitly constrained to the
+historically effective workflow.
+
+
 ## Branches and allowed changes
 
 | Ref | Purpose | Allowed changes |
