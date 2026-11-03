@@ -132,7 +132,7 @@ def test_multi_host_refresh_has_one_shared_deadline(monkeypatch):
         "secondary.example.invalid"
     )
     clock = iter((100.0, 101.0, 116.0))
-    monkeypatch.setattr(schedule.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(schedule, "monotonic", lambda: next(clock))
     called = []
 
     def fake_worker(host, port, *, family, type, proto, timeout_seconds):
@@ -155,7 +155,7 @@ def test_refresh_cycle_shortens_last_dns_timeout(monkeypatch):
     from repocache import server_dns_refresh_schedule_v1 as schedule
 
     clock = iter((100.0, 114.5))
-    monkeypatch.setattr(schedule.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(schedule, "monotonic", lambda: next(clock))
     timeouts = []
 
     def fake_worker(host, port, *, family, type, proto, timeout_seconds):
