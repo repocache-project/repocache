@@ -160,6 +160,8 @@ def test_explicit_empty_server_does_not_fall_back_to_config(host, capsys):
     "https://0x7f000001", "https://127.1",
     "https://cache.example.org%0a.evil.org", "https://☃.example.org",
     " https://cache.example.org", "https://ca\\che.example.org",
+    "https://cache.example.org?", "https://cache.example.org#",
+    "https://cache.example.org/?", "https://cache.example.org/#",
 ))
 def test_server_rejects_ambiguous_or_noncanonical_origin(origin):
     with pytest.raises(client.ClientError):

@@ -44,7 +44,8 @@ def _server(value: str) -> str:
             or p.password is not None or p.path not in ("", "/")
             or p.query or p.fragment or port == 0 or p.netloc.endswith(":")
             or any(ord(char) < 33 or ord(char) > 126 for char in value)
-            or "\\" in value or "%" in value):
+            or "\\" in value or "%" in value
+        or "?" in value or "#" in value):
         raise ClientError("Server must be a canonical HTTPS origin")
     hostname = p.hostname
     try:

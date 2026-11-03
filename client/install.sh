@@ -46,7 +46,8 @@ if (origin.scheme != "https" or not origin.hostname
         or origin.path not in ("", "/") or origin.query or origin.fragment
         or port == 0 or origin.netloc.endswith(":")
         or any(ord(ch) < 33 or ord(ch) > 126 for ch in value)
-        or "\\" in value or "%" in value):
+        or "\\" in value or "%" in value
+        or "?" in value or "#" in value):
     raise SystemExit("Invalid server: use a canonical HTTPS origin")
 
 hostname = origin.hostname
