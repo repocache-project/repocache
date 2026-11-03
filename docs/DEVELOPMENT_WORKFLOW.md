@@ -27,6 +27,7 @@ If an issue's parents refer to another release (e.g. future online dependency ac
 ## 3. Implementation and integration
 
 - Use a dedicated feature/docs/test/fix branch from a verified base. Respect protected `main`, `release/*` and `integration/*` branches, PR-only routing, strict checks and no force/deletion bypass.
+- Route normal feature work for every selected `vX.Y.Z` to `integration/vX.Y.Z`, stabilization-only fixes to `release/vX.Y.Z` after an approved cut, and only accepted final release promotions or urgent hotfixes to `main`. The official stable tag/sign process follows the newly verified protected-main SHA after permitted linear-history promotion; see [version-independent release lifecycle](RELEASE_LIFECYCLE.md).
 - Never bulk retarget or merge a stacked PR chain: review ancestry, transferred changes and exact current-base diff. Prefer narrow reconciliation where original changes have already been integrated.
 - Preserve functional and security boundaries: Debian 13 and AlmaLinux 10 only, approved client/CLI contracts, APT/DNF failover, safe NGINX/systemd/SELinux operation, secrets isolation, signed metadata and recovery.
 - Add relevant unit, integration, CLI, installation, upgrade, negative-path, failure-injection, regression and security tests. Update English documentation and migration notes in the same PR as code that changes behavior.
