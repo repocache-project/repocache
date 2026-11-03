@@ -92,7 +92,8 @@ def scripted_runner(distro, *, problem=None):
             assert "--checksig" in args
             assert any(x.startswith("--dbpath=") for x in args)
             return SimpleNamespace(returncode=0, stdout=(
-                "nginx.rpm: digests OK\n" if problem == "bad-signature"
+                "signatures-name.rpm: digests OK\\n" if problem == "misleading-file-name"
+                else "nginx.rpm: digests OK\\n" if problem == "bad-signature"
                 else "nginx.rpm: digests signatures OK\n"), stderr="")
         if args[0] == "/usr/bin/rpm":
             assert any(x.startswith("--dbpath=") for x in args)
@@ -166,9 +167,10 @@ def test_negative_native_download_never_promotes_to_install_authority(
     assert all(not x.exists() for x in locations)
 
 
-def test_rpm_digest_only_does_not_count_as_verified_signature(monkeypatch):
+@pytest.mark.parametrize("problem", ["bad-signature", "misleading-file-name"])
+def test_rpm_digest_only_never_becomes_a_valid_signature(monkeypatch, problem):
     monkeypatch.setattr(trust, "_trusted_key", lambda path: True)
-    _, locations, runner = scripted_runner("almalinux", problem="bad-signature")
+    _, locations, runner = scripted_runner("almalinux", problem=problem)
     result = stage.rehearse_native_nginx_downloads(
         os_release=ALMA, python_version=(3, 12),
         document=document(), lstat=absent, runner=runner,

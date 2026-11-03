@@ -168,9 +168,11 @@ def _verify_rpm(
         )
         # rpmkeys may report digest-only OK. Require an actual validated
         # OpenPGP signature class and reject all failure/unknown-key results.
-        if (error or "signatures" not in out.lower()
-                or not out.strip().endswith("OK")
-                or "NOKEY" in out.upper() or "NOT OK" in out.upper()):
+        # Parse the result after the filename delimiter: 'signatures' in
+        # a maliciously named RPM file is never verification evidence.
+        lines = out.strip().splitlines()
+        if (error or len(lines) != 1 or ": " not in lines[0]
+                or lines[0].rsplit(": ", 1)[1] != "digests signatures OK"):
             return "NATIVE_PAYLOAD_SIGNATURE_FAILED"
         name, error = _run(
             ["/usr/bin/rpm", f"--dbpath={db}", "-qp",
