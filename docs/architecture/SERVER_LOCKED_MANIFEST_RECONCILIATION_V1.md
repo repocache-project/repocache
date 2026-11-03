@@ -1,6 +1,6 @@
 # Locked protected-manifest versus live NGINX include observation v1
 
-**Tracking:** primary issue #31 / milestone v0.6.0; related #18, #25, #27 and #95. **Dependency:** unmerged [PR #222](https://github.com/teixemf/repocache/pull/222), its protected state schema and recovery implementation. This increment is a STACKED READ-ONLY DEVELOPMENT PR until #222 receives separate maintainer merge authorization. Synthetic tests do not verify production installation.
+**Tracking:** primary issue #31 / milestone v0.6.0; related #18, #25, #27 and #95. **Dependency fulfilled:** [PR #222](https://github.com/teixemf/repocache/pull/222) was independently authorized and merged into protected `main` as `955360fb7686f632d7d0090994008e10159f23b3`, providing the protected state schema and recovery implementation. This PR has been reconciled onto that exact `main` state but remains DRAFT, unmerged and separately subject to review, exact-HEAD CI and explicit maintainer merge authorization. Synthetic tests do not verify production installation.
 
 ## Fixed-purpose read-only contract
 
