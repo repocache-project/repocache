@@ -123,6 +123,53 @@ def test_changed_public_dns_reproposes_pins_without_manual_ip_maintenance():
     assert result["candidate"]["candidate_pins_by_host"][HOST] == ["8.8.8.8"]
 
 
+def test_multi_host_refresh_has_one_shared_deadline(monkeypatch):
+    """One slow DNS name must not grant every subsequent host 8 more seconds."""
+    from repocache import server_dns_refresh_schedule_v1 as schedule
+
+    doc = document()
+    doc["repositories"][0]["upstream"]["allowed_hosts"].append(
+        "secondary.example.invalid"
+    )
+    clock = iter((100.0, 101.0, 116.0))
+    monkeypatch.setattr(schedule.time, "monotonic", lambda: next(clock))
+    called = []
+
+    def fake_worker(host, port, *, family, type, proto, timeout_seconds):
+        called.append((host, timeout_seconds))
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP,
+                 "", ("8.8.8.8", port))]
+
+    monkeypatch.setattr(schedule, "bounded_getaddrinfo", fake_worker)
+    result = tick(doc=doc, resolver=None)
+    assert result["status"] == "DNS_RETRY_SCHEDULED"
+    assert result["candidate"] is None
+    assert len(called) == 1
+    assert called[0][1] == schedule.DEFAULT_DNS_SECONDS
+    assert result["authorizes_nginx_activation"] is False
+    assert result["authorizes_catalog_publication"] is False
+
+
+def test_refresh_cycle_shortens_last_dns_timeout(monkeypatch):
+    """Remaining cycle budget is enforced even for the first hostname."""
+    from repocache import server_dns_refresh_schedule_v1 as schedule
+
+    clock = iter((100.0, 114.5))
+    monkeypatch.setattr(schedule.time, "monotonic", lambda: next(clock))
+    timeouts = []
+
+    def fake_worker(host, port, *, family, type, proto, timeout_seconds):
+        timeouts.append(timeout_seconds)
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP,
+                 "", ("8.8.8.8", port))]
+
+    monkeypatch.setattr(schedule, "bounded_getaddrinfo", fake_worker)
+    result = tick(resolver=None)
+    assert result["status"] == "PIN_CHANGE_CANDIDATE"
+    assert timeouts == [pytest.approx(0.5)]
+    assert result["authorizes_nginx_activation"] is False
+
+
 def test_failure_is_redacted_and_retries_with_exponential_bounded_backoff():
     def dns_failure(*_a, **_kw):
         raise socket.gaierror("sensitive hostname or DNS response")
