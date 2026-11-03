@@ -19,6 +19,15 @@ It rejects root execution, missing, insecure, symlinked, setuid or setgid execut
 
 No OS packages or root-owned launchers are modified by this draft. No Bubblewrap is installed automatically; missing or unsupported runtime causes early refusal BEFORE downloading wheels. Current legacy signed wheelhouse update remains unchanged.
 
+
+## 2026-11-03 — Approved Gate A / Gate B and bounded-output increment
+
+The maintainer approved separating **implementation-only Gate A (#112/#113)** from mandatory **native operational/release Gate B (#149 and #83/#84/#85)**; the complete original issue acceptance history remains in #112. Neither green CI nor merged inert code allows production activation. Gate A still requires realistic resource containment, negative-path/recovery tests, an issue-specific independent security review, accepted prerequisite integration and separately authorized final-HEAD merge.
+
+The candidate executor now drains subprocess stdout and stderr incrementally with a **combined 1 MiB bound** and a positive wall deadline (at most 300 seconds). Excessive output or a timeout refuses the candidate and terminates its own launcher process group. This prevents unbounded memory accumulation via \`subprocess.run(capture_output=True)\` in the trusted updater; it does **not** implement whole-tree CPU/RAM/PID limits, filesystem quota, global staging disk exhaustion handling, or native SELinux/kernel policy. All those remain **NOT VERIFIED** until their own targeted acceptance. The direct test commands for bounded capture use trusted stdlib Python; the live userspace CI runs the same guard with real Bubblewrap and a candidate emitting over 1 MiB.
+
+**Pre-execution/integration status:** The source change must pass exact-HEAD CI on both userspaces and security assessment before any partial PASS is recorded. No merge, signing, release or online activation is authorized. GitHub milestone is v0.7.0; v0.6 wording in historical files is not release authority.
+
 ## Acceptance and limitations
 
 1. **PASS (unit policy only):** missing/symlinked/insecure/setuid helper rejected before network; command-generation tests confirm rootless namespace flags, minimal read-only runtime, one writable workspace, cleared environment and no host network.

@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import os
 import re
+import selectors
+import signal
 import stat
 import subprocess
+import time
 from pathlib import Path
 
 from repocache import updater
@@ -228,8 +231,92 @@ def command(workspace: Path, argv: list[str], *,
     return args
 
 
+
+# A cap on captured bytes is defense in depth against hostile console output;
+# it is NOT a CPU, process-count, virtual-memory or staging-disk quota.
+MAX_CAPTURE_BYTES = 1024 * 1024
+
+
+def _run_bounded(argv: list[str], *, cwd: Path, timeout: int) -> str:
+    """Drain stdout/stderr incrementally; kill the launcher group on failure.
+
+    An untrusted candidate can print indefinitely. subprocess.run with
+    capture_output=True accumulates unbounded pipe bytes in the trusted
+    updater process. This executor has a strict combined capture budget.
+    The Bubblewrap PID namespace and --die-with-parent still provide the
+    descendant lifetime boundary; native-host policy needs separate proof.
+    """
+    if not isinstance(timeout, int) or not 0 < timeout <= 300:
+        raise updater.UpdateError("Invalid candidate execution deadline")
+    environment = {
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "HOME": "/var/lib/repocache", "LANG": "C.UTF-8",
+        "GIT_TERMINAL_PROMPT": "0",
+        "PIP_CONFIG_FILE": os.devnull, "PIP_NO_INPUT": "1",
+        "PYTHONNOUSERSITE": "1", "PYTHONSAFEPATH": "1",
+    }
+    try:
+        process = subprocess.Popen(
+            argv, cwd=cwd, env=environment, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True)
+    except OSError as exc:
+        raise updater.UpdateError(
+            "Could not start isolated candidate runner") from exc
+    selector = selectors.DefaultSelector()
+    outputs: dict[str, list[bytes]] = {"stdout": [], "stderr": []}
+    total = 0
+    deadline = time.monotonic() + timeout
+    try:
+        assert process.stdout is not None and process.stderr is not None
+        selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+        selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise updater.UpdateError("Candidate sandbox timed out")
+            for key, _ in selector.select(remaining):
+                data = os.read(key.fileobj.fileno(),
+                               min(65536, MAX_CAPTURE_BYTES + 1 - total))
+                if not data:
+                    selector.unregister(key.fileobj)
+                    key.fileobj.close()
+                    continue
+                total += len(data)
+                if total > MAX_CAPTURE_BYTES:
+                    raise updater.UpdateError(
+                        "Candidate sandbox output exceeded limit")
+                outputs[key.data].append(data)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise updater.UpdateError("Candidate sandbox timed out")
+        try:
+            exit_code = process.wait(timeout=remaining)
+        except subprocess.TimeoutExpired as exc:
+            raise updater.UpdateError("Candidate sandbox timed out") from exc
+        stdout = b"".join(outputs["stdout"]).decode("utf-8", errors="replace")
+        stderr = b"".join(outputs["stderr"]).decode("utf-8", errors="replace")
+        if exit_code:
+            raise updater.UpdateError(
+                (stderr or stdout).strip()[:700] or
+                f"Candidate sandbox exited with status {exit_code}")
+        return stdout.strip()
+    finally:
+        selector.close()
+        if process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.stderr is not None:
+            process.stderr.close()
+
+
 def run_isolated(argv: list[str], *, workspace: Path,
                  cwd: Path | None = None, timeout: int = 90) -> str:
     """Execute ONLY after enforceable namespace construction succeeds."""
     commandline = command(workspace, argv, cwd=cwd)
-    return updater._run(commandline, cwd=workspace, timeout=timeout)
+    return _run_bounded(commandline, cwd=workspace, timeout=timeout)

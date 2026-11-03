@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import stat
+import sys
 from pathlib import Path
 
 import pytest
@@ -239,7 +240,7 @@ def test_runtime_dispatch_never_calls_host_pip_or_console_directly(
         invocations.append((argv, cwd, timeout))
         return "verified"
 
-    monkeypatch.setattr(updater, "_run", execute)
+    monkeypatch.setattr(candidate_sandbox, "_run_bounded", execute)
     result = candidate_sandbox.run_isolated(
         _pip(work), workspace=work, cwd=work / "download", timeout=17)
     assert result == "verified"
@@ -248,3 +249,40 @@ def test_runtime_dispatch_never_calls_host_pip_or_console_directly(
     assert argv[0] == "/usr/bin/bwrap"
     assert argv[argv.index("--") + 1:] == _pip(work)
     assert cwd == work and timeout == 17
+
+
+
+@pytest.mark.parametrize("target", ["stdout", "stderr"])
+def test_candidate_capture_budget_rejects_stream_flood(tmp_path, target):
+    stream = "stdout" if target == "stdout" else "stderr"
+    code = (f"import sys; sys.{stream}.write('x' * "
+            f"{candidate_sandbox.MAX_CAPTURE_BYTES + 4096}); "
+            f"sys.{stream}.flush()")
+    with pytest.raises(updater.UpdateError, match="output exceeded limit"):
+        candidate_sandbox._run_bounded(
+            [sys.executable, "-I", "-c", code], cwd=tmp_path, timeout=15)
+
+
+def test_candidate_capture_keeps_stderr_out_of_json_stdout(tmp_path):
+    result = candidate_sandbox._run_bounded(
+        [sys.executable, "-I", "-c",
+         "import sys;sys.stderr.write('notice\\n');print('[1,2]')"],
+        cwd=tmp_path, timeout=15)
+    assert result == "[1,2]"
+
+
+def test_candidate_capture_enforces_wall_deadline(tmp_path):
+    with pytest.raises(updater.UpdateError, match="timed out"):
+        candidate_sandbox._run_bounded(
+            [sys.executable, "-I", "-c", "import time; time.sleep(30)"],
+            cwd=tmp_path, timeout=1)
+
+
+def test_candidate_capture_invalid_deadline_does_not_spawn(tmp_path, monkeypatch):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("unsafe process started before validation")
+    monkeypatch.setattr(candidate_sandbox.subprocess, "Popen", forbidden)
+    for deadline in (0, -1, 301, 1.5, None):
+        with pytest.raises(updater.UpdateError, match="Invalid"):
+            candidate_sandbox._run_bounded(
+                [sys.executable], cwd=tmp_path, timeout=deadline)

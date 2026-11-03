@@ -180,6 +180,26 @@ print('SANDBOX_ESCAPE_PROBES_PASS')
               "detached grandchild cannot outlive terminated bwrap sandbox")
         check(marker.read_bytes() == original,
               "time-limited candidate never changed active release state")
+
+        # The actual Bubblewrap candidate must not exhaust host memory by
+        # flooding stdout. This is an executor resource-defense test, not
+        # proof of cgroup CPU/memory/PID or staging disk quotas.
+        console.write_text(
+            "#!/usr/bin/python3\n"
+            "import sys\n"
+            "sys.stdout.write('x' * 1100000)\n",
+            encoding="utf-8")
+        console.chmod(0o700)
+        try:
+            candidate_sandbox.run_isolated(
+                [str(console), "--version"], workspace=work, timeout=30)
+        except recovery_updater.UpdateError as exc:
+            check("output exceeded limit" in str(exc),
+                  "candidate stdout flood is refused with bounded capture")
+        else:
+            raise AssertionError("Hostile candidate stdout escaped capture budget")
+        check(marker.read_bytes() == original,
+              "stdout flood left installed state unchanged")
     finally:
         shutil.rmtree(work)
     check(marker.read_bytes() == original, "last known good state preserved")
