@@ -1,6 +1,6 @@
 # Locked protected-manifest versus live NGINX include observation v1
 
-**Tracking:** primary issue #31 / milestone v0.6.0; related #18, #25, #27 and #95. **Dependency fulfilled:** [PR #222](https://github.com/teixemf/repocache/pull/222) was independently authorized and merged into protected `main` as `955360fb7686f632d7d0090994008e10159f23b3`, providing the protected state schema and recovery implementation. This PR has been reconciled onto that exact `main` state but remains DRAFT, unmerged and separately subject to review, exact-HEAD CI and explicit maintainer merge authorization. Synthetic tests do not verify production installation.
+**Tracking:** primary issue #31 / milestone v0.6.0; related #18, #25, #27 and #95. **Dependency fulfilled:** [PR #222](https://github.com/teixemf/repocache/pull/222) was independently authorized and merged into protected `main` as `955360fb7686f632d7d0090994008e10159f23b3`, providing the protected state schema and recovery implementation. Under the adopted release workflow, this PR targets the protected `integration/v0.6.0` branch (baseline `a1739a42cf5baac78bb3f8beb2bd02ee362447e9`), which already contains the #222 storage core. It remains OPEN and Ready for review, **not merged**, and separately requires exact-HEAD CI and explicit maintainer authorization before integration. Synthetic tests do not verify production installation.
 
 ## Fixed-purpose read-only contract
 
