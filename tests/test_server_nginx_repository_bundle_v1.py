@@ -74,7 +74,8 @@ def test_two_supported_layouts_render_only_candidate_fragments():
         "authorizes_catalog_publication",
     ):
         assert result[key] is False
-    assert "catalog" not in result
+    assert "catalog_artifact" not in result
+    assert "discovery" not in result
 
 
 def test_declared_disabled_repositories_have_no_route_and_no_catalog():
@@ -127,6 +128,15 @@ def test_active_repository_must_have_durable_id_even_for_preview():
     del doc["repositories"][1]["id"]
     with pytest.raises(NginxRepositoryBundleError, match="UNALLOCATED"):
         render(doc=doc)
+
+
+@pytest.mark.parametrize("bad_ca", [
+    "", "relative/ca.pem", "/etc/certs/../bad.pem",
+    "/etc/ssl/cert.pem;return 200;", "/etc//ssl/ca.pem", None,
+])
+def test_ca_validation_cannot_be_skipped_for_empty_route_set(bad_ca):
+    with pytest.raises(NginxRepositoryBundleError, match="CA_INVALID"):
+        render(doc=document(apt=False, dnf=False), candidates={}, ca=bad_ca)
 
 
 def test_disabled_pins_must_not_be_accepted_as_desired_active_routes():
