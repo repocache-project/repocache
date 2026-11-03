@@ -604,6 +604,36 @@ def test_proc_header_family_mismatch_and_malformed_ipv6_are_unverified(monkeypat
     assert host._port_check(spec()).status is PreflightStatus.NOT_VERIFIED
 
 
+@pytest.mark.parametrize("family", ["tcp", "tcp6"])
+def test_wrong_address_width_cannot_claim_network_inventory_complete(monkeypatch, family):
+    """A syntactically valid address for the other IP family is malformed here."""
+    if family == "tcp":
+        wrong = proc((4443, "01")).replace(
+            b"0100007F:115B", b"00000000000000000000000001000000:115B",
+        )
+        assert wrong != proc((4443, "01"))
+        with pytest.raises(ValueError):
+            host._parse_tcp_listeners(wrong)
+    else:
+        wrong = proc6((4443, "01")).replace(
+            b"00000000000000000000000001000000:115B", b"0100007F:115B",
+        )
+        assert wrong != proc6((4443, "01"))
+        with pytest.raises(ValueError):
+            host._parse_tcp_listeners(wrong, ipv6=True)
+
+    def read_kernel(file, limit):
+        if family == "tcp":
+            return wrong if file.endswith("/tcp") else proc6()
+        return wrong if file.endswith("/tcp6") else proc()
+
+    monkeypatch.setattr(host, "_read_fixed", read_kernel)
+    outcome = host._port_check(spec())
+    assert (outcome.status, outcome.code) == (
+        PreflightStatus.NOT_VERIFIED, "LISTEN_PORT_INVENTORY_INCOMPLETE",
+    )
+
+
 def test_tls_intermediate_symlink_and_denied_parent_are_distinct(monkeypatch):
     """RC-196-02: safe virtual ancestors, without world-writable /tmp masking."""
     import stat
