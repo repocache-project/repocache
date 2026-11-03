@@ -313,3 +313,54 @@ enforcement, host-native privilege authorization, production APT/DNF
 transaction journalling/recovery, idempotent deploy/upgrade, managed
 include ownership, full-context NGINX validation, safe reload or rollback.
 No such test result is reused as evidence of these missing criteria.
+
+## Fixture-only durable native package-effects pending marker
+
+Native package-manager installation is **not atomic** with the existing
+#31 state-v1.json transaction: a crash may leave RPM/DPKG package databases,
+package scripts, systemd preset state or NGINX files only partially changed.
+The new internal
+`server_native_nginx_package_journal_v1._prepare_native_journal_under_root`
+records this possibility **before** any such effect. It is an internal
+caller-FD/owner-UID **test fixture primitive**, not a privileged host entry,
+service activation path or operator approval. The caller-supplied root FD is
+not authenticated and must never be exposed through the server CLI or a
+generic root delegation endpoint.
+
+The v1 marker is a canonical, bounded root/owner-only mode-0600 file at the
+fixed #31 directory name `.native-nginx-v1.pending`. It declares only the
+fixed `nginx` operation and the two supported distro/native manager pairs,
+generation zero and
+`native_package_effects=REQUIRES_EXPLICIT_RECONCILIATION`. It stores no
+credentials, package-manager stdout/stderr or claimed approval. While holding
+the **same #31 pinned exclusive state lock**, the internal writer refuses
+existing state, pending #31 recovery, orphan stage/rollback, a pre-existing
+native pending file or a dangling native temporary. It fsyncs an exclusively
+created temporary journal inode and directory, atomically links the durable
+pending inode without overwrite, fsyncs, unlinks the temporary name and
+fsyncs again. No package manager is called, and the resulting report never
+authorizes installation, service reload or deletion.
+
+An interrupted write may leave only the temporary name or both hard links
+and a partially published record; *every* such case must be treated as
+**unreconciled native effects** and never automatically discarded. The
+pre-package read-only check refuses either native marker even when the #31
+normal state generation is still absent. Synthetic fault injection tests
+exercise the three durable publication boundaries and repeated/concurrent
+refusal with real Linux descriptor/inode/lock fixtures. This mechanism does
+not yet expose an authorized host-root writer; it does not hold the lock
+across an actual APT/DNF transaction, validate live package provenance, or
+solve irreversible native package effects.
+
+**Next integration prerequisite:** a separately operator-authorized fixed
+native root helper must authenticate its own execution, OS/root namespace,
+approved exact install document, already verified native signed package
+bytes, current NGINX/service/port ownership and preflight; then hold the
+correct lock through durable journal publication, package-manager execution,
+post-state verification and a separately audited *non-automatic*
+reconciliation path. This cannot be delegated to a previously returned
+read-only snapshot or a synthetic root fixture. The #31 state writer and
+live-manifest reconcile must also reject any unreconciled #27 package marker
+before they acquire mutation authority; this is a dependency, not something
+the current read-only #31 inspection has proved. No unreviewed implicit
+rollback/purge of distro packages or service takeover is permitted.
