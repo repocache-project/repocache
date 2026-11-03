@@ -8,8 +8,8 @@ from types import SimpleNamespace
 import pytest
 
 from repocache import server_native_nginx_local_boundary_v1 as boundary
-from repocache.server_locked_manifest_reconcile_v1 import (
-    LockedManifestInspectionError,
+from repocache.server_native_nginx_prepackage_state_v1 import (
+    PrepackageStateInspectionError,
 )
 from repocache.server_install_v1 import InstallInputError
 
@@ -29,11 +29,14 @@ def absent(path):
 def locked_snapshot():
     return {
         "schema_version": 1,
-        "status": "LOCKED_READ_ONLY_RECONCILIATION",
-        "include_status": "NO_MANAGED_INCLUDE",
+        "status": "LOCKED_PREPACKAGE_STATE_ABSENT",
+        "nginx_include_directory_required": False,
+        "nginx_live_manifest_verified": False,
+        "native_transaction_journal_prepared": False,
         "state_generation": 0,
         "manifest_entry_present": False,
-        "include_file_present": False,
+        "protected_state_directory_preprovisioned": True,
+        "authorizes_package_installation": False,
         "exclusive_state_lock_held_during_inspection": True,
         "current_namespace_root_path_verified": True,
         "operator_authorization_verified": False,
@@ -54,15 +57,15 @@ def test_positive_synthetic_locked_read_is_still_not_installer_authority(
     release, python, distro,
 ):
     calls = []
-    def reader(*, expected_generation):
-        calls.append(expected_generation)
+    def reader():
+        calls.append("prepackage")
         return locked_snapshot()
 
     report = boundary.inspect_native_nginx_local_boundary(
         os_release=release, python_version=python, document=document(),
         lstat=absent, geteuid=lambda: 0, locked_inspector=reader,
     ).to_dict()
-    assert calls == [0]
+    assert calls == ["prepackage"]
     assert report["distribution"] == distro
     assert report["code"] == "LOCAL_READ_ONLY_SNAPSHOT_OBSERVED"
     assert report["locked_manifest_read_completed"]
@@ -122,9 +125,12 @@ def test_effective_identity_lookup_error_is_non_authorizing():
 @pytest.mark.parametrize("field,value", [
     ("state_generation", 1),
     ("state_generation", True),
-    ("include_status", "MANIFEST_MATCHES_OBSERVED_INCLUDE"),
+    ("nginx_include_directory_required", True),
+    ("nginx_live_manifest_verified", True),
+    ("native_transaction_journal_prepared", True),
     ("manifest_entry_present", True),
-    ("include_file_present", True),
+    ("protected_state_directory_preprovisioned", False),
+    ("authorizes_package_installation", True),
     ("exclusive_state_lock_held_during_inspection", False),
     ("current_namespace_root_path_verified", False),
     ("operator_authorization_verified", True),
@@ -144,13 +150,13 @@ def test_mismatched_or_privileged_state_claim_refused(field, value):
 
 
 @pytest.mark.parametrize("error", [
-    LockedManifestInspectionError("PROTECTED_STATE_RECOVERY_REQUIRED"),
+    PrepackageStateInspectionError("PREPACKAGE_STATE_RECOVERY_REQUIRED"),
     PermissionError("private location"),
     ValueError("unsafe journal"),
 ])
 def test_recovery_lock_or_access_errors_do_not_leak_or_recover(error):
     def reject(**kwargs):
-        assert kwargs == {"expected_generation": 0}
+        assert kwargs == {}
         raise error
 
     report = boundary.inspect_native_nginx_local_boundary(
@@ -208,3 +214,36 @@ def test_inaccessible_nginx_marker_is_unknown_not_a_proven_conflict():
     assert report["status"] == "NOT VERIFIED"
     assert "private marker" not in json.dumps(report)
     assert not report["can_install"]
+
+
+def test_preprovisioned_state_root_is_not_adopted_without_locked_proof():
+    def state_only(path):
+        if path == "/var/lib/repocache/server":
+            return SimpleNamespace(st_mode=0o40700)
+        raise FileNotFoundError(path)
+
+    def reject():
+        raise PrepackageStateInspectionError("PREPACKAGE_STATE_UNVERIFIED")
+
+    report = boundary.inspect_native_nginx_local_boundary(
+        os_release=DEBIAN, python_version=(3, 13), document=document(),
+        lstat=state_only, geteuid=lambda: 0, locked_inspector=reject,
+    ).to_dict()
+    assert report["code"] == "PROTECTED_STATE_UNVERIFIED"
+    assert not report["can_install"]
+
+
+def test_preprovisioned_state_root_needs_locked_reader_even_when_other_paths_absent():
+    def state_only(path):
+        if path == "/var/lib/repocache/server":
+            return SimpleNamespace(st_mode=0o40700)
+        raise FileNotFoundError(path)
+
+    report = boundary.inspect_native_nginx_local_boundary(
+        os_release=ALMA, python_version=(3, 12), document=document(),
+        lstat=state_only, geteuid=lambda: 0,
+        locked_inspector=lambda: locked_snapshot(),
+    ).to_dict()
+    assert report["code"] == "LOCAL_READ_ONLY_SNAPSHOT_OBSERVED"
+    assert not report["authorizes_package_transaction"]
+    assert not report["native_package_journal_prepared"]
