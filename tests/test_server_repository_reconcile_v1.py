@@ -15,6 +15,7 @@ from repocache.server_repository_reconcile_v1 import (
     plan_declarative_reconciliation,
     preview_declarative_state_alignment,
     plan_inert_persistence_transition,
+    preview_declarative_nginx_candidate,
 )
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "docs/examples/server-install-v1.json"
@@ -512,3 +513,203 @@ def test_inert_persistence_preview_does_not_call_writer(monkeypatch):
         _inert_state_snapshot(config), current_generation=1,
     )
     assert result["authorizes_state_commit"] is False
+
+
+# #95 + merged #28 candidate integration: pure preview, never a live route.
+
+
+_CA = "/etc/ssl/certs/ca-certificates.crt"
+_HOST = "mirror.example.invalid"
+_PUBLIC_PINS = {_HOST: ["8.8.8.8", "2001:4860:4860::8888"]}
+
+
+def _nginx_preview(current, proposed, *, state=None, pins=None, ca=_CA):
+    if state is None:
+        state = _inert_state_snapshot(current)
+    if pins is None:
+        pins = {
+            row["id"]: copy.deepcopy(_PUBLIC_PINS)
+            for row in proposed["repositories"]
+            if row["desired_state"] == "active"
+        }
+    return preview_declarative_nginx_candidate(
+        current, proposed, state, current_generation=1,
+        candidate_pins_by_repository=pins, ca_bundle_path=ca,
+    )
+
+
+def test_declarative_enable_generates_pinned_nginx_candidate_without_authority():
+    current = document()
+    current["expected_state_generation"] = 1
+    proposed = copy.deepcopy(current)
+    proposed["repositories"] = [copy.deepcopy(current["repositories"][0])]
+    proposed["repositories"][0]["desired_state"] = "active"
+    before = copy.deepcopy(current), copy.deepcopy(proposed)
+    result = _nginx_preview(current, proposed)
+    assert result["status"] == "UNTRUSTED_NGINX_CANDIDATE_ONLY"
+    assert result["declarative_change_requested"] is True
+    assert result["expected_state_generation"] == 1
+    assert result["proposed_state_generation"] == 2
+    assert result["fresh_approval_required_ids"] == ["debian-trixie-main"]
+    assert result["desired_new_route_ids"] == ["debian-trixie-main"]
+    assert result["desired_withdraw_route_ids"] == []
+    assert result["desired_retained_route_ids"] == []
+    assert result["proposed_repository_ids"] == ["debian-trixie-main"]
+    assert result["pin_count"] == 2
+    assert "upstream repocache_pin_debian_trixie_main" in result["http_upstream_fragment"]
+    assert "server 8.8.8.8:443;" in result["http_upstream_fragment"]
+    assert "server mirror.example.invalid:" not in result["http_upstream_fragment"]
+    assert "location ^~ /__repocache/repos/" in result["server_location_fragment"]
+    assert "proxy_ssl_verify on;" in result["server_location_fragment"]
+    assert "proxy_ssl_server_name on;" in result["server_location_fragment"]
+    assert "proxy_pass $" not in result["server_location_fragment"]
+    assert "catalog_artifact" not in result
+    assert "discovery" not in result
+    assert result["requires_nginx_t_and_activation"] is True
+    assert result["requires_trusted_locked_recheck"] is True
+    for field in (
+        "trusted_state_provenance_verified", "operator_approval_verified",
+        "active_exposure_verified", "configuration_digest_binding_verified",
+        "reservation_history_verified", "authorizes_state_commit",
+        "authorizes_nginx_activation", "authorizes_catalog_publication",
+        "authorizes_cache_cleanup",
+    ):
+        assert result[field] is False
+    assert (current, proposed) == before
+
+
+def test_declarative_disable_withdraws_only_desired_route_and_retains_cache():
+    current = document()
+    current["expected_state_generation"] = 1
+    current["repositories"][0]["desired_state"] = "active"
+    proposed = copy.deepcopy(current)
+    proposed["repositories"] = [copy.deepcopy(current["repositories"][0])]
+    proposed["repositories"][0]["desired_state"] = "disabled"
+    result = _nginx_preview(current, proposed, pins={})
+    assert result["desired_withdraw_route_ids"] == ["debian-trixie-main"]
+    assert result["desired_new_route_ids"] == []
+    assert result["proposed_repository_ids"] == []
+    assert result["http_upstream_fragment"] == ""
+    assert result["server_location_fragment"] == ""
+    assert result["authorizes_cache_cleanup"] is False
+    assert result["authorizes_catalog_publication"] is False
+
+
+def test_declarative_preview_preserves_omitted_active_repository():
+    current = document()
+    current["expected_state_generation"] = 1
+    current["repositories"][0]["desired_state"] = "active"
+    proposed = copy.deepcopy(current)
+    proposed["repositories"] = []
+    result = _nginx_preview(
+        current, proposed,
+        pins={"debian-trixie-main": copy.deepcopy(_PUBLIC_PINS)},
+    )
+    assert result["declarative_change_requested"] is False
+    assert result["proposed_state_generation"] == 1
+    assert result["desired_retained_route_ids"] == ["debian-trixie-main"]
+    assert result["proposed_repository_ids"] == ["debian-trixie-main"]
+
+
+def test_declarative_preview_renders_both_supported_layouts_deterministically():
+    current = document()
+    current["expected_state_generation"] = 1
+    proposed = copy.deepcopy(current)
+    for repo in proposed["repositories"]:
+        repo["desired_state"] = "active"
+    both = {
+        "debian-trixie-main": copy.deepcopy(_PUBLIC_PINS),
+        "almalinux-baseos": copy.deepcopy(_PUBLIC_PINS),
+    }
+    first = _nginx_preview(current, proposed, pins=both)
+    assert first["proposed_repository_ids"] == [
+        "almalinux-baseos", "debian-trixie-main",
+    ]
+    assert first["server_location_fragment"].count("location ^~ /__repocache/repos/") == 2
+    reversed_current = copy.deepcopy(current)
+    reversed_current["repositories"].reverse()
+    reversed_proposed = copy.deepcopy(proposed)
+    reversed_proposed["repositories"].reverse()
+    flipped = {
+        k: {_HOST: list(reversed(v[_HOST]))}
+        for k, v in reversed(list(both.items()))
+    }
+    second = _nginx_preview(reversed_current, reversed_proposed, pins=flipped)
+    # Only the generated, sorted NGINX candidate matters, not input order.
+    assert first["http_upstream_fragment"] == second["http_upstream_fragment"]
+    assert first["server_location_fragment"] == second["server_location_fragment"]
+
+
+@pytest.mark.parametrize("bad", [
+    {},
+    {"debian-trixie-main": copy.deepcopy(_PUBLIC_PINS),
+     "almalinux-baseos": copy.deepcopy(_PUBLIC_PINS)},
+    {"debian-trixie-main": {_HOST: ["127.0.0.1"]}},
+    {"debian-trixie-main": {_HOST: ["8.8.8.8", "169.254.169.254"]}},
+    {"debian-trixie-main": {"private.example.invalid": ["8.8.8.8"]}},
+    [],
+])
+def test_declarative_nginx_preview_refuses_incomplete_foreign_unsafe_pins(bad):
+    current = document()
+    current["expected_state_generation"] = 1
+    proposed = copy.deepcopy(current)
+    proposed["repositories"][0]["desired_state"] = "active"
+    with pytest.raises(ReconciliationPlanError, match="nginx preview: unsafe candidate") as exc:
+        _nginx_preview(current, proposed, pins=bad)
+    assert "169.254.169.254" not in str(exc.value)
+    assert "private.example.invalid" not in str(exc.value)
+
+
+def test_declarative_nginx_preview_checks_ca_even_without_routes():
+    current = document()
+    current["expected_state_generation"] = 1
+    with pytest.raises(ReconciliationPlanError, match="nginx preview: unsafe candidate"):
+        _nginx_preview(current, copy.deepcopy(current), ca="../not-a-ca")
+
+
+def test_declarative_nginx_preview_refuses_protected_state_drift():
+    current = document()
+    current["expected_state_generation"] = 1
+    proposed = copy.deepcopy(current)
+    state = _inert_state_snapshot(current)
+    state["repositories"][0]["canonical_identity_sha256"] = "0" * 64
+    with pytest.raises(ReconciliationPlanError, match="state alignment"):
+        _nginx_preview(current, proposed, state=state, pins={})
+
+
+def test_declarative_nginx_preview_rejects_identity_reassignment():
+    current = document()
+    current["expected_state_generation"] = 1
+    proposed = copy.deepcopy(current)
+    proposed["repositories"][0]["upstream"]["base_url"] = (
+        "https://other.example.invalid/debian/"
+    )
+    proposed["repositories"][0]["upstream"]["allowed_hosts"] = [
+        "other.example.invalid"
+    ]
+    with pytest.raises(ReconciliationPlanError, match="identity reassignment"):
+        _nginx_preview(current, proposed, pins={})
+
+
+def test_declarative_nginx_preview_has_no_network_subprocess_or_file_write(monkeypatch):
+    import os
+    import socket
+    import subprocess
+    import repocache.server_protected_state_store_v1 as state_store
+
+    def denied(*args, **kwargs):
+        raise AssertionError("preview must not access the host")
+    monkeypatch.setattr(os, "replace", denied)
+    monkeypatch.setattr(socket, "getaddrinfo", denied)
+    monkeypatch.setattr(subprocess, "run", denied)
+    monkeypatch.setattr(state_store, "_commit_under_root", denied)
+    current = document()
+    current["expected_state_generation"] = 1
+    proposed = copy.deepcopy(current)
+    proposed["repositories"][0]["desired_state"] = "active"
+    result = _nginx_preview(current, proposed, pins={
+        "debian-trixie-main": copy.deepcopy(_PUBLIC_PINS),
+    })
+    assert result["authorizes_state_commit"] is False
+    assert result["authorizes_nginx_activation"] is False
+    assert result["active_exposure_verified"] is False

@@ -21,6 +21,9 @@ from repocache.server_repository_plan_v1 import (
 from repocache.server_protected_state_store_v1 import (
     ProtectedStateStoreError, validate_protected_state,
 )
+from repocache.server_nginx_repository_bundle_v1 import (
+    NginxRepositoryBundleError, render_repository_nginx_bundle_candidate,
+)
 
 
 class ReconciliationPlanError(ValueError):
@@ -270,4 +273,83 @@ def plan_inert_persistence_transition(
         "configuration_digest_binding_verified": False,
         "reservation_history_verified": False,
         "approval_provenance_verified": False,
+    }
+
+
+def preview_declarative_nginx_candidate(
+    current_document: dict[str, Any],
+    proposed_document: dict[str, Any],
+    protected_snapshot: dict[str, Any],
+    *,
+    current_generation: int,
+    candidate_pins_by_repository: dict[str, dict[str, list[str]]],
+    ca_bundle_path: str,
+) -> dict[str, Any]:
+    """Compose a #95 lifecycle intent with #28's inert NGINX renderer.
+
+    All input, including a caller-provided protected snapshot and DNS pins,
+    is UNTRUSTED. A desired-active route is not proof of an approved, installed
+    or exposed repository. The output is deliberately not a complete NGINX
+    include, commit request, activated route list, or discovery catalog.
+    A future privileged owner MUST reauthenticate and validate the complete
+    exact generation, approval, DNS, CA, managed ownership and rollback state
+    under its native transaction lock.
+    """
+    # First freeze the untrusted declarative inputs into validated copies.
+    # A caller mutating their dict later cannot silently change the preview.
+    current = validate_install_document(current_document, for_apply=True)
+    proposed = validate_install_document(proposed_document, for_apply=True)
+    transition = plan_inert_persistence_transition(
+        current, proposed, protected_snapshot,
+        current_generation=current_generation,
+    )
+    candidate = transition["candidate_document"]
+    try:
+        bundle = render_repository_nginx_bundle_candidate(
+            candidate,
+            expected_state_generation=current_generation,
+            candidate_pins_by_repository=candidate_pins_by_repository,
+            ca_bundle_path=ca_bundle_path,
+        )
+    except NginxRepositoryBundleError:
+        # Error codes deliberately omit rejected hostnames, IPs, secret paths.
+        raise ReconciliationPlanError("nginx preview: unsafe candidate") from None
+
+    current_active = {
+        repo["id"] for repo in current["repositories"]
+        if repo["desired_state"] == "active"
+    }
+    candidate_active = {
+        repo["id"] for repo in candidate["repositories"]
+        if repo["desired_state"] == "active"
+    }
+    if bundle["proposed_repository_ids"] != sorted(candidate_active):
+        raise ReconciliationPlanError("nginx preview: inconsistent candidate")
+
+    return {
+        "schema_version": 1,
+        "status": "UNTRUSTED_NGINX_CANDIDATE_ONLY",
+        "expected_state_generation": current_generation,
+        "proposed_state_generation": transition["proposed_state_generation"],
+        "declarative_change_requested": transition["changed"],
+        "fresh_approval_required_ids": transition["fresh_approval_required_ids"],
+        "deployment_approval_required": transition["deployment_approval_required"],
+        "desired_new_route_ids": sorted(candidate_active - current_active),
+        "desired_withdraw_route_ids": sorted(current_active - candidate_active),
+        "desired_retained_route_ids": sorted(current_active & candidate_active),
+        "proposed_repository_ids": bundle["proposed_repository_ids"],
+        "pin_count": bundle["pin_count"],
+        "http_upstream_fragment": bundle["http_upstream_fragment"],
+        "server_location_fragment": bundle["server_location_fragment"],
+        "requires_nginx_t_and_activation": True,
+        "requires_trusted_locked_recheck": True,
+        "trusted_state_provenance_verified": False,
+        "operator_approval_verified": False,
+        "active_exposure_verified": False,
+        "configuration_digest_binding_verified": False,
+        "reservation_history_verified": False,
+        "authorizes_state_commit": False,
+        "authorizes_nginx_activation": False,
+        "authorizes_catalog_publication": False,
+        "authorizes_cache_cleanup": False,
     }

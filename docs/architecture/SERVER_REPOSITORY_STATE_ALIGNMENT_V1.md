@@ -83,3 +83,51 @@ tombstone history, capacity (install v1 <=500 vs state v1 <=32), and an
 authenticated authorizer under the same state lock. An immutable-identity
 migration or force-cleanup is separately blocked pending approved ownership
 and recovery design. No PR is merge-ready merely because this fixture passes.
+
+
+## Declarative lifecycle → inert NGINX candidates (#95 with merged #28)
+
+`preview_declarative_nginx_candidate` composes **the existing** validated
+#95 transition planner with #28's already merged
+`render_repository_nginx_bundle_candidate`. It accepts current and partial
+proposed install-v1 configuration, an untrusted inert state-v1 snapshot,
+an exact generation, complete candidate DNS pin sets for **every desired-active
+repository** (and none for disabled IDs), and a syntactically valid CA path.
+The first step freezes validated declarative input, confirms ID/identity/
+desired-state alignment and rejects stale generations, source identity
+reassignment, missing persistent IDs or invalid partial updates.
+The second delegates to #28 for complete public-address pin validation,
+host/SNI/TLS-verifying HTTPS fragments, redirect isolation, NGINX ordering
+and bounded output. A missing, extra, unsafe or disabled-repository pin fails
+the entire candidate, not only the individual route. No DNS lookup occurs.
+
+The output distinguishes **changes in desired intent**, not live service
+state: `desired_new_route_ids`, `desired_withdraw_route_ids`, and
+`desired_retained_route_ids` describe the candidate diff against the
+current untrusted declaration. They do **not** attest that any route currently
+exists or will be activated. Normal desired disablement does not clean a
+cache. The output contains only proposed NGINX fragments, never a client
+discovery artifact. Every state-write, NGINX-activation, catalog and cache
+cleanup authorization remains false; no filesystem, network or subprocess
+operation is performed by this function. No `nginx -t` or packaged-NGINX
+reload has been executed by this pure adapter. A complete managed include
+and cache directives remain independent design/testing work.
+
+Before actual apply, the #31 protected owner must independently authenticate
+administrator approval, canonical and recoverable install configuration bytes,
+generation and all-time ID/tombstone state **under the same native lock**.
+The #28 owner must then pin authorised DNS identities, stage a complete managed
+include, validate actual packaged NGINX, control reload/exposure/rollback,
+and publish an atomic active-only catalog only after successful exposure.
+No authority may be inferred from an untrusted candidate, synthetic approval
+hash, desired state or CI-green result.
+
+Focused #95+#28 regression command:
+
+```sh
+python3 -m pytest -q tests/test_server_repository_reconcile_v1.py
+```
+
+Full PR and distro-specific NGINX tests are separate exact-HEAD evidence
+requirements. The original #95 operational AC1–AC7 and #28 live activation
+acceptance remain NOT VERIFIED by this composition.
