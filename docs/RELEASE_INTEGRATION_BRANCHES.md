@@ -1,18 +1,51 @@
-# Release integration lanes — v0.5.0 and v0.6.0
+# Release integration lanes — historical v0.5.0 and next-public v0.6.0
 
-**Status (2026-10-25):** PR #158 merged into protected `main` and its
-v0.5.0/v0.6.0 `push` filters are active. Protected lane push CI was exercised
-through PRs #170 and #171 (issue #157). The future-lane glob proposed by
-issue #175 is **not active until separately accepted and merged**. Neither
-CI nor a branch name establishes a signed or production-ready release.
+**Status (2026-10-26):** PR #158 is merged into protected `main`
+(`9e213d7beb6534181e3ff418a890c5fdf2db2017`), and the reviewed
+CI backports #170 and #171 are merged into protected `integration/v0.5.0`
+(`48fed70f4e67a6db45c1b4cba6098e4d6b718f9b`) and
+`integration/v0.6.0` (`d5aa5704075e6ba3c02f677cf94cc30a9451e61a`),
+respectively. **Both** protected integration refs have real `push` events
+with all nine required checks successful (11/11 total checks on each).
+Infrastructure issue #157 is closed after that verification. No integration
+branch is a signed or production-ready release.
+
+## Approved current public-release direction (2026-11-02)
+
+The maintainer has **cancelled the intermediate public v0.5.0 release target**.
+**v0.6.0 is the next public release target** and must install and operate a
+complete NGINX-backed Debian 13 / AlmaLinux 10 REPOCACHE server. Existing
+v0.5.0 protected integration-branch pushes remain valid **historical CI
+evidence**, not acceptance of any public v0.5.0 release. Preserve their exact
+commits, workflow runs, ruleset history and test outcomes; do not delete,
+rename, force-push or repurpose the protected historical branch.
+
+Original [#76](https://github.com/teixemf/repocache/issues/76) and
+[#88](https://github.com/teixemf/repocache/issues/88) release gates are now
+tracked in the v0.6.0 milestone with **no criteria waived**. Require a real,
+independently owner-signed **public v0.4.0 -> v0.6.0** upgrade, both supported
+native OS acceptance, rollback/security checks and authorized publication.
+The approved legacy schema-1/offline-wheelhouse release profile remains the
+default until an independently reviewed explicit policy/format decision;
+the proposed online/source-only v0.7.0 stack is not a dependency assumed
+by this CI-lane document. See the [adopted next public release plan](RELEASE_TARGET_V0.6.0.md)
+(merged in PR #226 on 2026-11-02; documentation approval is not operational acceptance).
+
+The already completed #157 live-push checks below remain historical PASS.
+At the historical 2026-11-02 checkpoint, generic branch push coverage
+was still under [#175](https://github.com/teixemf/repocache/issues/175)
+/ draft PR #183. Check current protected-branch code and live Actions before
+claiming adoption. Do not infer release readiness,
+a working server installer, active network services, or signing authority
+from CI runs on integration branches.
 
 ## Canonical branches and provenance
 
 | Branch | Initial base / purpose |
 | --- | --- |
 | `main` | Reviewed primary history; original v0.4.0 release remains immutable |
-| `integration/v0.5.0` | Created 2026-10-24 from `main` SHA `bba3286be209eee85e3b7d8702edaa10af1bfe57`; v0.5.x consolidation |
-| `integration/v0.6.0` | Created from `integration/v0.5.0` at the SAME baseline SHA; future online profile |
+| `integration/v0.5.0` | Historical protected v0.5.x integration lane, created 2026-10-24 from `main` SHA `bba3286be209eee85e3b7d8702edaa10af1bfe57`; retain for audit, not for a public v0.5.0 release |
+| `integration/v0.6.0` | Created from `integration/v0.5.0` at the SAME baseline SHA; now the next-public complete-server target. The future online/source-only dependency profile is v0.7.0 work, not a default property of this lane |
 | `release/v0.4.0` | Historical protected release reference; do not rewrite |
 | `integration/v0.5.0-governed-submissions-gate-a`, `integration/v0.5.0-metrics-submissions-tui` | Existing **feature-specific** experimental branches. Not release integration; do not bulk merge or delete |
 
@@ -26,16 +59,17 @@ version assertions.
 1. Changes originate in focused `feat/`, `fix/`, `test/`, `ci/` or
    `docs/` branches, with an issue reference, a draft/reviewable PR and
    measurable acceptance criteria.
-2. Route only v0.5-target changes to `integration/v0.5.0` after reviewing
-   issue milestone, stack ancestry and overlap with work already merged into
-   `main`. **A green CI run alone does not authorize integration.** Each
-   acceptance criterion must be PASS, with executed evidence; any FAIL or NOT
-   VERIFIED blocks merge. Explicit maintainer approval is mandatory.
-3. v0.6 may incorporate **approved, stable** v0.5 integration state through a
-   dedicated reviewed synchronization PR
-   `integration/v0.5.0` → `integration/v0.6.0`. Do not automatically
-   propagate unaccepted v0.5 work, and do not directly merge feature-level
-   0.5 integration branches into 0.6.
+2. **No new public-v0.5 release-target work:** retain `integration/v0.5.0`
+   as a protected historical CI/provenance lane. Route any still-applicable
+   functionality or release gate to the approved v0.6.0 workstream under its
+   actual issues/milestones. **A green CI run alone does not authorize
+   integration.** Every applicable acceptance criterion must be PASS; a FAIL
+   or NOT VERIFIED blocks merge. Explicit maintainer approval is mandatory.
+3. Do **not** automatically propagate the old v0.5 integration state into
+   v0.6.0 merely to advance the release. Compare its actual content against
+   protected `main` and the current v0.6 lane; reconcile only uniquely needed,
+   accepted changes through a narrow reviewed PR. Do not bulk merge the
+   historical lane or old feature-level integration branches into v0.6.0.
 4. Route v0.6-target PRs to `integration/v0.6.0` only after reconciling their
    parent PRs, signature/lock contracts and the main-vs-integration diff.
    Avoid mass PR base retargeting: the current #99 → #151 chain is stacked,
@@ -47,7 +81,7 @@ version assertions.
    authorization. Signing, tagging and publication are **separately
    authorized** operations.
 
-## Initial PR and issue routing snapshot (2026-10-24)
+## Historical PR and issue routing snapshot (2026-10-24)
 
 | Work / issue | Release lane | Status / next action |
 | --- | --- | --- |
@@ -68,10 +102,11 @@ GitHub immediately before each change; never infer the release from a PR title.
 
 ## Continuous integration
 
-PR #158 (merged) added nonprivileged `push` triggers for both existing
-integration branches. The #175 proposal would replace those literal names
-with `integration/**` in FOUR workflows, preserving the nine mandatory
-unfiltered contexts plus a separate path-filtered compatibility check:
+Merged PR #158 added nonprivileged `push` triggers for the two named release
+integration branches to FOUR existing workflows, preserving the original nine
+mandatory unfiltered contexts plus a separate path-filtered compatibility check.
+PR #170 propagated that reviewed CI to the protected v0.5.0 lane; merged
+PR #171 did the same for protected v0.6.0. Both have verified live `push` CI:
 
 - `.github/workflows/tests.yml`: four jobs for Python 3.12/3.13 unit, CLI v1,
   mandatory security tests and Debian/Alma source bundle integrity.
@@ -89,22 +124,54 @@ legacy/offline/rollback and platform-specific jobs must continue to be
 required during appropriate PR/release gates; review their actual workflow
 branch filters before declaring complete `push` coverage.
 
+## Live integration push evidence and nine exact required contexts
+
+| Branch/event | SHA | Result and limitation |
+| --- | --- | --- |
+| `main` after PR #158 squash | `9e213d7beb6534181e3ff418a890c5fdf2db2017` | **PASS:** 9/9 required Actions contexts; this does not exercise a protected release-integration push |
+| `integration/v0.5.0` after PR #170 | `48fed70f4e67a6db45c1b4cba6098e4d6b718f9b` | **PASS:** real branch `push` with 11/11 successful checks, including all nine required; [Tests #40145596050](https://github.com/teixemf/repocache/actions/runs/40145596050), [offline #40145596035](https://github.com/teixemf/repocache/actions/runs/40145596035), [rollback #40145596044](https://github.com/teixemf/repocache/actions/runs/40145596044), [upstream #40145596053](https://github.com/teixemf/repocache/actions/runs/40145596053) |
+| `integration/v0.6.0` after merged PR #171 | `d5aa5704075e6ba3c02f677cf94cc30a9451e61a` | **PASS:** real protected-branch `push`, 11/11 successful check-runs including the nine required; [Tests #40182254261](https://github.com/teixemf/repocache/actions/runs/40182254261), [offline #40182254440](https://github.com/teixemf/repocache/actions/runs/40182254440), [rollback #40182254313](https://github.com/teixemf/repocache/actions/runs/40182254313), [upstream #40182254256](https://github.com/teixemf/repocache/actions/runs/40182254256). These are userspace/CI checks, not signed candidate acceptance |
+
+The **nine exact mandatory contexts** (Actions app `15368`) are:
+`Unit tests (Python 3.12)`, `Unit tests (Python 3.13)`,
+`Bundle integrity and unsigned-source refusal (almalinux10)`,
+`Bundle integrity and unsigned-source refusal (debian13)`,
+`Offline wheels (almalinux:10)`, `Offline wheels (debian:trixie-slim)`,
+`Signed release and native offline dependency artifact`,
+`Synthetic rootless update and rollback (almalinux:10)`, and
+`Synthetic rootless update and rollback (debian:trixie-slim)`.
+The separately path-filtered `Real PyPI pinned wheels` jobs are valuable
+compatibility evidence but are **not** required unconditionally.
+
+**NOT VERIFIED / follow-up #175:** current workflow `push` filters explicitly
+name only `integration/v0.5.0` and `integration/v0.6.0`. The GitHub
+ruleset covers a wider `integration/*` family. Draft PR #183 proposes
+`integration/**` push coverage (including experimental branches), but its
+policy approval, primary-issue milestone and review are unresolved; the
+milestone governance job has failed on its HEAD. Do not treat that proposed
+policy as merged or silently broaden triggers to experimental branches. Neither a successful CI run nor this documentation
+authorizes a feature merge, owner signing, staging, publication or production
+activation.
+
 CI in GitHub-hosted containers is not actual booted native-kernel/SELinux,
 owner-signed candidate acceptance, release publication or production
 installation.
 
 ## Branch protection — active ruleset and remaining verification
 
-**Observed 2026-10-24:** active GitHub ruleset `#25793496` matches
+**Reverified 2026-10-26:** active GitHub ruleset `#25793496` matches
 `refs/heads/integration/*` and nested integration refs. It requires PRs,
 strictly up-to-date nine GitHub Actions check contexts, resolved review
 threads, and rejects force pushes/deletion with **no bypass actors**.
 The exact required contexts match protected-main ruleset `#25436501`
 (GitHub Actions app `15368`). Its `required_approving_review_count: 0`
-does **not** prove an independent security review or waive the project's
-documented reviewer gate. Ruleset presence is **PASS (API inspection)**;
-live v0.5.0/v0.6.0 integration push CI is verified, but future-lane
-push coverage, review acceptance and full release gates remain **NOT VERIFIED**.
+does **not** prove an independent security review or waive any
+issue-specific mandatory security-review criteria. The adopted project-wide
+policy does not require a global independent review for ordinary PRs.
+Ruleset presence is **PASS (API inspection)**;
+real protected-branch `push` CI on **both** v0.5.0 and v0.6.0 is **PASS**.
+Future-lane policy #175, new feature-PR reviews, and the actual owner-signed
+release/security acceptance gates remain **NOT VERIFIED**.
 
 The following operator controls remain to be verified or strengthened
 before accepting feature changes into **either** integration branch:
@@ -130,31 +197,37 @@ publisher-signature/native acceptance is NOT VERIFIED or FAIL.
 
 Do not merge release integration branches merely to keep GitHub green.
 
-## Proposed future-lane CI coverage (#175; NOT YET ADOPTED)
 
-This PR **proposes** running all three mandatory unfiltered workflows on
-`push` to `integration/**`. GitHub Actions `**` matches nested paths:
-`integration/v0.7.0` and `integration/maintenance/v0.7.0` would both run.
-Experimental branches such as `integration/v0.5.0-experiment` would also
-run all nine checks intentionally, matching the active protected ruleset
-`integration/*` / `integration/**/*`. Lightweight experiments should use
-`feat/`, `test/` or `ci/` feature namespaces and still pass mandatory PR
-checks before promotion. This is a reviewable naming policy, **not** approval
-to create, rename, delete or promote any protected branch.
+## Version-independent lane routing (2026-11-03 maintainer direction)
 
-To add a genuinely authorized future integration lane, first record the
-release milestone, exact reviewed base SHA and stack ancestry. Create and
-update the lane only through the protected, approved PR process; do not push
-directly or bypass rules to test the filter. Verify all nine named contexts
-on the real lane's `push` (both Python interpreters, Debian/Alma source
-integrity and offline wheels, synthetic artifact and both rollback jobs).
-Until such a branch and its push exist, future-lane operational coverage is
-**NOT VERIFIED** even if static tests and existing lane pushes pass.
+For every maintainer-selected stable version `vX.Y.Z`, the intended pipeline
+is `feature/*` -> `integration/vX.Y.Z` -> `release/vX.Y.Z` -> `main`.
+`main` accepts only independently authorized hotfixes and final release
+promotions, not regular feature PRs. Backport accepted `main` hotfixes into
+each affected active integration or release lane through reviewed PRs.
 
-`native-upstream-wheels.yml` stays supplemental and path-filtered for both
-PR and push; it cannot be a required tenth context for docs-only changes.
-No `pull_request_target`, privileged trigger, write permission, new
-release dispatch, signing authority, secret access, tag, publication or
-production activation is added. Authentic owner-signed #76 and native
-Gate B #49 remain separate. The primary #175 milestone and review/merge
-acceptance must be resolved before this proposal can be merged.
+A future `integration/vX.Y.Z` starts from a verified accepted baseline
+and receives issue/milestone-aligned feature PRs individually. A new
+`release/vX.Y.Z` is created only at an expressly approved stabilization
+cut from the accepted integration HEAD. It accepts only candidate stabilization
+fixes, with regression validation on the exact resulting HEAD. After all
+release criteria PASS, a separate exact-SHA promotion PR targets protected
+`main`, retaining candidate tag and artifact provenance (do not squash the
+identified final source commit). Private owner signing, tags, Draft staging,
+publication and production activation each need separate explicit approval.
+There is **no** automatic feature merge, branch creation, deployment or signing.
+
+Optional alpha/beta tests can use isolated real Debian 13 and AlmaLinux 10
+hosts. They require explicit test authorization, isolated identities and
+exact candidate hashes; they do not make a release publishable or authorize
+production activation. The existing final signed-candidate gate for #76 is
+**not** replaced by exploratory prereleases.
+
+The CI pattern proposed in PR #183 uses unfiltered `'integration/**'` and
+`'release/**'` `push` triggers in the three mandatory workflows so every
+future version receives nine required job contexts; the upstream wheel check
+remains supplemental/path-filtered. These patterns intentionally also cover
+legacy/experimental refs under the protected namespaces. Keep lightweight
+experiments in `feat/*`, `test/*` or `ci/*`. The active GitHub rulesets,
+not this documentation, enforce protected-branch changes. **Until #183 is
+merged, exact-version triggers in protected `main` still govern.**

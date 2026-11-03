@@ -1,4 +1,7 @@
-"""Static future-lane CI contract (#175); not evidence of a real protected push."""
+"""Future-version integration and release lane CI contract (#175).
+
+Static assertions do not establish real protected-branch push evidence.
+"""
 from __future__ import annotations
 
 import re
@@ -8,11 +11,15 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
 MANDATORY = ("tests.yml", "offline-wheelhouse.yml", "upgrade-distros.yml")
-BRANCHES = ("main", "release/v0.4.0", "integration/**")
+BRANCHES = ("main", "release/**", "integration/**")
 JOBS = {
     "tests.yml": (
         "Unit tests (Python $" + "{{ matrix.python-version }})",
         "Bundle integrity and unsigned-source refusal ($" + "{{ matrix.platform }})",
+        "Unprivileged native dependency evidence",
+        "Native Dependency Security Gate",
+        "Gate read-only graph source ($" + "{{ matrix.target }})",
+        "Dependency Graph Security Gate",
     ),
     "offline-wheelhouse.yml": (
         "Offline wheels ($" + "{{ matrix.os }})",
@@ -69,7 +76,8 @@ def _required(name, text):
         assert "paths:" not in block and "paths-ignore:" not in block
     assert "permissions:\n  contents: read\n\njobs:" in text
     assert "persist-credentials: false" in text
-    assert not re.search(r"(?m)^    if:|^    continue-on-error:", text)
+    required_jobs = text.split("  dependency-native-validation:", 1)[0] if name == "tests.yml" else text
+    assert not re.search(r"(?m)^    if:|^    continue-on-error:", required_jobs)
     assert tuple(re.findall(r"(?m)^    name: (.+)$", text)) == JOBS[name]
     for matrix in MATRICES[name]:
         assert matrix in text
@@ -88,20 +96,19 @@ def _glob(pattern, branch):
 
 
 def test_future_nested_and_experimental_branches_are_intentionally_covered():
-    for branch in ("main", "release/v0.4.0", "integration/v0.5.0",
+    for branch in ("main", "release/v0.4.0", "release/v0.6.0", "release/v0.7.0", "integration/v0.5.0",
                    "integration/v0.6.0", "integration/v0.7.0",
                    "integration/maintenance/v0.7.0",
                    "integration/v0.5.0-experiment"):
         assert any(_glob(pattern, branch) for pattern in BRANCHES)
-    for branch in ("feature/v0.7.0", "integrations/v0.7.0",
-                   "release/v0.4.1", "release/v0.7.0"):
+    for branch in ("feature/v0.7.0", "integrations/v0.7.0", "releases/v0.4.1", "releasecandidate/v0.7.0"):
         assert not any(_glob(pattern, branch) for pattern in BRANCHES)
 
 
 def test_upstream_wheels_remains_path_filtered_and_supplemental():
     text = (WORKFLOWS / "native-upstream-wheels.yml").read_text("utf-8")
-    assert _events(text) == {"push", "pull_request", "workflow_dispatch"}
-    assert _branches(text) == ("main", "integration/**")
+    assert _events(text) == {"workflow_call", "push", "pull_request", "workflow_dispatch"}
+    assert _branches(text) == BRANCHES
     assert "paths:" in _event_block(text, "push")
     assert "paths:" in _event_block(text, "pull_request")
     assert "permissions:\n  contents: read\n\njobs:" in text
