@@ -273,3 +273,43 @@ is confined to its short-lived Docker image and never to the GitHub runner's
 filesystem or a deployed REPOCACHE host. No package transaction, real
 service activation, privileged helper delegation, or native journal/recovery
 has yet been validated by this test.
+
+## Genuine native package install rehearsal, ephemeral containers only
+
+The new `native-container-install` job runs **after** the existing signed
+metadata, download-only and real #31 lock checks passed. It starts a brand-new
+throwaway Debian 13 or AlmaLinux 10 Docker image with the repository bind mount
+read-only. In this test container alone,
+`scripts/smoke_server_native_nginx_container_install.py` requires a literal
+CI-only opt-in, the Docker sentinel and root EUID before allowing *any*
+native package-manager command. These are deliberate test misfire guards,
+**not** a security boundary for running this script on a real server.
+
+For Debian, it reuses the official HTTPS apt-secure sources and OS-owned
+archive key in `_apt_commands` with current **container**
+`/var/lib/dpkg/status`, authenticated fresh lists, no external sources,
+unsigned fallback or package-manager input from the install document.
+For AlmaLinux, it reuses the official signed BaseOS/AppStream DNF4 profile
+with `gpgcheck=1`, `repo_gpgcheck=1`, TLS validation, disabled unreviewed
+repositories/plugins and only removes the scratch-installroot override
+because the *container itself* is the disposable install target.
+
+The script executes a native `apt-get install nginx` or `dnf install nginx`
+inside that disposable image, checks actual package-manager ownership/status,
+then runs only `/usr/sbin/nginx -t -q` to validate the distro-default
+configuration syntax. It never explicitly starts or reloads a service,
+changes a real host, publishes catalog entries, installs REPOCACHE or
+modifies production protected state. Distribution post-install scripts are
+still package-manager code running **inside the isolated container**;
+the evidence does not claim that such scripts never request service actions.
+All native manager output is suppressed to redacted static error codes.
+Unit tests cover the exact fixed commands, signed-source restrictions and
+container/root/foreign-NGINX refusals.
+
+A PASS on this job is meaningful **container package transaction and
+distro-default NGINX syntax** evidence only. It is not the #27 native-host
+acceptance test: Docker does not demonstrate systemd PID1, real SELinux
+enforcement, host-native privilege authorization, production APT/DNF
+transaction journalling/recovery, idempotent deploy/upgrade, managed
+include ownership, full-context NGINX validation, safe reload or rollback.
+No such test result is reused as evidence of these missing criteria.
