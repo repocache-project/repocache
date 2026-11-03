@@ -10,7 +10,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from repocache.server_native_package_trust_v1 import inspect_native_nginx_metadata
+from repocache.server_native_nginx_ownership_v1 import prepare_fresh_native_nginx
 
 
 def classified_ci_runner(args, **kwargs):
@@ -77,7 +77,7 @@ def main() -> int:
         (root / "docs/examples/server-install-v1.json").read_text(encoding="utf-8")
     )
     release = Path("/etc/os-release").read_text(encoding="utf-8")
-    report = inspect_native_nginx_metadata(
+    report = prepare_fresh_native_nginx(
         os_release=release,
         python_version=(sys.version_info.major, sys.version_info.minor),
         document=document,
@@ -86,10 +86,10 @@ def main() -> int:
     # The report is static/redacted; do not print native stdout/stderr, URL,
     # package key material, host source definitions, or files from the cache.
     print(json.dumps(report, sort_keys=True))
-    assert report["authorizes_installation"] is False
+    assert report["authorizes_package_transaction"] is False
     assert report["can_install"] is False
-    assert report["payload_signature_verified"] is False
-    if report["code"] != "NATIVE_CANDIDATE_OBSERVED":
+    assert report["footprint"]["existing_instance_adoption_allowed"] is False
+    if (report["footprint"]["code"] != "FRESH_NGINX_FOOTPRINT_NOT_OBSERVED"\n            or report["metadata"] is None\n            or report["metadata"]["code"] != "NATIVE_CANDIDATE_OBSERVED"\n            or report["metadata"]["payload_signature_verified"] is not False):
         return 1
     return 0
 
