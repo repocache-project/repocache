@@ -3,7 +3,7 @@
 **Scope:** v0.6.0 managed repository backend. **Status:** approved
 operator requirement; implementation **PARTIAL / NOT OPERATIONAL**.
 PR #215 is merged as the non-activating DNS/pin/NGINX foundation.
-Draft PR #227 adds bounded candidate DNS lookup and scheduling hints; neither
+PR #227 adds bounded candidate DNS lookup, multi-host cycle deadlines and scheduling hints; neither
 PR constitutes service installation or production activation. The maintainer explicitly selected
 **Option A with automatic updates**: no administrator shall need to
 maintain upstream IP addresses manually when approved mirrors change DNS.
@@ -50,10 +50,10 @@ maintain upstream IP addresses manually when approved mirrors change DNS.
 | Work item | Acceptance |
 | --- | --- |
 | Strict, bounded, complete caller-supplied DNS snapshot rejection | Merged in PR #215; static no-network validation only |
-| Explicit, bounded DNS refresh of approved active hosts | Pure candidate planner merged in #215; bounded isolated resolver proposed in draft #227, CI/acceptance pending |
+| Explicit, bounded DNS refresh of approved active hosts | Pure candidate planner merged in #215; bounded isolated resolver and shared cycle budget implemented in PR #227; exact-HEAD CI/acceptance independent |
 | Semantic no-op detection and changed pin candidate | Merged and native tested in #215; #227 proposes scheduled attempt deduplication (not an activation commit) |
-| Periodic daemon/timer with jitter, backoff and safe recovery | Jitter/backoff candidate scheduling in draft #227; no installed daemon/timer or durable, service-safe recovery |
-| Protected state/ID authorization, locking, journalling and generation | NOT IMPLEMENTED |
+| Periodic daemon/timer with jitter, backoff and safe recovery | Jitter/backoff candidate scheduling in PR #227; no installed daemon/timer or durable, service-safe recovery |
+| Protected state/ID authorization, locking, journalling and generation | PRs #222/#224 merged as inert protected-state and read-only locked-manifest foundations; privileged writer, trusted approval and activation still NOT IMPLEMENTED |
 | Deterministic candidate NGINX upstream/location fragments (literal IP, hostname TLS, redirect denial) | Merged in #215; isolated packaged NGINX TLS/SNI, redirect and syntax tests; not production SSRF proof |
 | Actual pinned NGINX runtime enforcement, staging/reload/rollback | NOT IMPLEMENTED |
 | Atomic verified exposure and derived catalog, native cache HIT/integrity | NOT IMPLEMENTED |
