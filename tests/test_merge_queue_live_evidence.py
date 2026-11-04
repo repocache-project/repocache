@@ -144,3 +144,52 @@ def test_future_main_is_not_eligible():
     data["pulls/17"]["base"]["ref"] = "main"
     with pytest.raises(EvidenceError):
         collect(FakeAPI(data))
+
+
+class FakeHTTPResponse:
+    def __init__(self, data: bytes):
+        self.data = data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def read(self, limit):
+        assert limit == 2_000_001
+        return self.data
+
+
+class FakeHTTP:
+    def __init__(self):
+        self.requests = []
+
+    def open(self, request, timeout):
+        self.requests.append((request, timeout))
+        return FakeHTTPResponse(b'{"ok": true}')
+
+
+def test_http_reader_is_restricted_to_canonical_get_and_no_redirects():
+    from scripts.ci.merge_queue_live_evidence import GitHubReader
+    client = GitHubReader()
+    fake = FakeHTTP()
+    client._opener = fake
+    assert client.get("") == {"ok": True}
+    assert client.get("pulls/245") == {"ok": True}
+    assert [request.full_url for request, _ in fake.requests] == [
+        "https://api.github.com/repos/repocache-project/repocache",
+        "https://api.github.com/repos/repocache-project/repocache/pulls/245",
+    ]
+    assert all(request.get_method() == "GET" for request, _ in fake.requests)
+    assert all(timeout == 15 for _, timeout in fake.requests)
+
+
+@pytest.mark.parametrize("path", [
+    "//attacker.invalid", "/another/repo", "../other", ".git",
+    "https://attacker.invalid", "pulls/../1", "foo//bar",
+])
+def test_http_reader_rejects_noncanonical_request_paths(path):
+    from scripts.ci.merge_queue_live_evidence import GitHubReader
+    with pytest.raises(EvidenceError):
+        GitHubReader().get(path)
