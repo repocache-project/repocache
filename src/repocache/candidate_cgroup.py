@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import re
 import stat
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -260,3 +261,57 @@ def entry_argv(delegation: Delegation, leaf: Path,
         raise CgroupGateError("Missing cgroup membership control") from exc
     return [str(SYSTEM_PYTHON), "-I", "-S", "-c", _ENTRY_CODE,
             str(procs), *limited_command]
+
+
+def kill_and_drain_leaf(delegation: Delegation, leaf: Path, *,
+                        timeout: float = 5.0) -> None:
+    """Kill all tasks in one owned candidate leaf, await empty, remove it.
+
+    Only a caller already holding an exclusive fresh-leaf lease may invoke
+    this function. It NEVER targets the service or candidates parent.
+    The kernel owns the virtual files: rmdir removes the empty cgroup
+    directly, without unlinking or recursively deleting any filesystem.
+    """
+    if (not isinstance(timeout, (float, int)) or isinstance(timeout, bool)
+            or not 0 <= timeout <= 30):
+        raise CgroupGateError("Invalid candidate cleanup deadline")
+    if (leaf.parent != delegation.candidates
+            or not re.fullmatch(r"candidate-[a-f0-9]{32}", leaf.name)):
+        raise CgroupGateError("Candidate cleanup escapes approved subtree")
+    _directory(delegation.candidates, owned=True)
+    _directory(leaf, owned=True)
+    kill = leaf / "cgroup.kill"
+    events = leaf / "cgroup.events"
+    try:
+        if (not stat.S_ISREG(kill.lstat().st_mode)
+                or not os.access(kill, os.W_OK)):
+            raise CgroupGateError("Untrusted candidate kill controller")
+        # Validate the event controller before sending a kill.
+        event_lines = _read(events).splitlines()
+        if not any(line in ("populated 0", "populated 1")
+                   for line in event_lines):
+            raise CgroupGateError("Unverifiable candidate population status")
+        descriptor = os.open(
+            kill, os.O_WRONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            if os.write(descriptor, b"1") != 1:
+                raise CgroupGateError("Incomplete candidate cgroup kill")
+        finally:
+            os.close(descriptor)
+    except OSError as exc:
+        raise CgroupGateError("Cannot terminate candidate cgroup") from exc
+
+    deadline = time.monotonic() + timeout
+    while True:
+        status = _read(events).splitlines()
+        if "populated 0" in status:
+            break
+        if "populated 1" not in status:
+            raise CgroupGateError("Unverifiable candidate cgroup drain")
+        if time.monotonic() >= deadline:
+            raise CgroupGateError("Candidate cgroup remains populated")
+        time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+    try:
+        leaf.rmdir()
+    except OSError as exc:
+        raise CgroupGateError("Cannot remove drained candidate cgroup") from exc

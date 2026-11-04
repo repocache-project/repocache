@@ -268,3 +268,109 @@ def test_system_python_symlink_metadata_is_accepted_but_untrusted_path_denied():
                        match="Noncanonical"):
         candidate_cgroup._trusted_interpreter(
             __import__("pathlib").Path("/usr/local/bin/python3"))
+
+
+
+def _mock_cleanup_leaf(delegated):
+    _, _, _, candidates, _, _ = delegated
+    leaf = candidates / ("candidate-" + "9" * 32)
+    leaf.mkdir(mode=0o700)
+    (leaf / "cgroup.kill").write_text("")
+    (leaf / "cgroup.events").write_text("populated 0\n")
+    return leaf
+
+
+def test_candidate_cgroup_kill_drain_is_scoped_and_never_reads_kill(
+        delegated, monkeypatch):
+    leaf = _mock_cleanup_leaf(delegated)
+    original_read = candidate_cgroup._read
+    removed = []
+
+    def guarded_read(path):
+        if path.name == "cgroup.kill":
+            raise AssertionError("The kernel kill controller is write-only")
+        return original_read(path)
+
+    def pretend_kernel_rmdir(path):
+        removed.append(path)
+
+    monkeypatch.setattr(candidate_cgroup, "_read", guarded_read)
+    monkeypatch.setattr(candidate_cgroup.os, "rmdir", pretend_kernel_rmdir)
+    candidate_cgroup.kill_and_drain_leaf(_gate(delegated), leaf)
+    assert (leaf / "cgroup.kill").read_text() == "1"
+    assert removed == [leaf]
+    # The parent delegation must never be killed or removed.
+    assert (delegated[3] / "cgroup.kill").read_text() == ""
+
+
+def test_candidate_cgroup_cleanup_times_out_without_removing_populated_leaf(
+        delegated, monkeypatch):
+    leaf = _mock_cleanup_leaf(delegated)
+    (leaf / "cgroup.events").write_text("populated 1\n")
+    removed = []
+
+    monkeypatch.setattr(candidate_cgroup.os, "rmdir",
+                        lambda path: removed.append(path))
+    with pytest.raises(candidate_cgroup.CgroupGateError,
+                       match="remains populated"):
+        candidate_cgroup.kill_and_drain_leaf(
+            _gate(delegated), leaf, timeout=0)
+    assert (leaf / "cgroup.kill").read_text() == "1"
+    assert not removed
+
+
+@pytest.mark.parametrize("kind", ["outside", "symlink", "missing-events",
+                                   "invalid-events", "no-kill"])
+def test_cgroup_cleanup_invalid_target_refuses_without_killing(
+        delegated, tmp_path, kind):
+    leaf = _mock_cleanup_leaf(delegated)
+    outside = tmp_path / "outside"
+    outside.write_text("untouched")
+    if kind == "outside":
+        target = tmp_path / leaf.name
+        target.mkdir()
+        with pytest.raises(candidate_cgroup.CgroupGateError,
+                           match="outside approved subtree"):
+            candidate_cgroup.kill_and_drain_leaf(_gate(delegated), target)
+    else:
+        kill = leaf / "cgroup.kill"
+        events = leaf / "cgroup.events"
+        if kind == "symlink":
+            kill.unlink()
+            kill.symlink_to(outside)
+        elif kind == "missing-events":
+            events.unlink()
+        elif kind == "invalid-events":
+            events.write_text("unexpected 0\n")
+        elif kind == "no-kill":
+            kill.unlink()
+        with pytest.raises(candidate_cgroup.CgroupGateError):
+            candidate_cgroup.kill_and_drain_leaf(_gate(delegated), leaf)
+    assert outside.read_text() == "untouched"
+    assert (delegated[3] / "cgroup.kill").read_text() == ""
+
+
+def test_candidate_cgroup_cleanup_requires_real_rmdir_success(
+        delegated, monkeypatch):
+    import errno
+    leaf = _mock_cleanup_leaf(delegated)
+
+    def busy(path):
+        raise OSError(errno.EBUSY, "Still in use", path)
+
+    monkeypatch.setattr(candidate_cgroup.os, "rmdir", busy)
+    with pytest.raises(candidate_cgroup.CgroupGateError,
+                       match="Cannot remove drained"):
+        candidate_cgroup.kill_and_drain_leaf(_gate(delegated), leaf)
+    assert (leaf / "cgroup.kill").read_text() == "1"
+
+
+@pytest.mark.parametrize("deadline", [-1, 31, None, True, "5"])
+def test_candidate_cgroup_cleanup_rejects_invalid_timeout_before_kill(
+        delegated, deadline):
+    leaf = _mock_cleanup_leaf(delegated)
+    with pytest.raises(candidate_cgroup.CgroupGateError,
+                       match="Invalid candidate cleanup deadline"):
+        candidate_cgroup.kill_and_drain_leaf(
+            _gate(delegated), leaf, timeout=deadline)
+    assert (leaf / "cgroup.kill").read_text() == ""
