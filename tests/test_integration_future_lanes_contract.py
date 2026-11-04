@@ -66,12 +66,12 @@ def _branches(text):
 
 
 def _required(name, text):
-    events = {"push", "pull_request"}
+    events = {"push", "pull_request", "merge_group"}
     if name != "tests.yml":
         events.add("workflow_dispatch")
     assert _events(text) == events
     assert _branches(text) == BRANCHES
-    for event in ("push", "pull_request"):
+    for event in ("push", "pull_request", "merge_group"):
         block = _event_block(text, event)
         assert "paths:" not in block and "paths-ignore:" not in block
     assert "permissions:\n  contents: read\n\njobs:" in text
@@ -84,7 +84,7 @@ def _required(name, text):
 
 
 @pytest.mark.parametrize("name", MANDATORY)
-def test_nine_required_contexts_unfiltered_on_pr_and_future_push(name):
+def test_nine_required_contexts_unfiltered_on_pr_future_push_and_merge_group(name):
     _required(name, (WORKFLOWS / name).read_text("utf-8"))
 
 
