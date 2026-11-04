@@ -127,6 +127,55 @@ def test_text_mode_and_help_do_not_authorize_or_activate(monkeypatch):
     assert "preflight" in help_result.output
 
 
+@pytest.mark.parametrize("release,python", [
+    ("ID=debian\nVERSION_ID=13\n", (3, 13)),
+    ("ID=almalinux\nVERSION_ID=10\n", (3, 12)),
+])
+def test_preflight_repeats_without_local_file_mutation(
+    tmp_path, monkeypatch, release, python,
+):
+    """Exercise the real read-only probes with both supported OS identities.
+
+    The runner is still an Ubuntu userspace fixture, NOT either native host.
+    """
+    config = tmp_path / "candidate.json"
+    config.write_bytes(EXAMPLE.read_bytes())
+    existing = tmp_path / "existing-nginx-and-state-sentinel"
+    existing.write_bytes(b"third-party data must remain untouched")
+    original = {
+        p.name: (p.read_bytes(), p.stat().st_mtime_ns)
+        for p in (config, existing)
+    }
+
+    monkeypatch.setattr(
+        host, "capture_native_host_facts",
+        lambda: NativeHostFacts(
+            os_release=release, python_version=python,
+            machine="x86_64", euid=1000,
+            native_manager_visible=True, running_in_venv=False,
+        ),
+    )
+    args = [
+        "deployment", "preflight", "--file", str(config), "--json",
+    ]
+    first = RUNNER.invoke(cli.app, args, input="")
+    second = RUNNER.invoke(cli.app, args, input="")
+    assert first.exit_code == second.exit_code == 1
+    assert json.loads(first.stdout) == json.loads(second.stdout)
+    result = json.loads(first.stdout)
+    assert result["ok"] is False and result["can_install"] is False
+    assert result["authorizes_installation"] is False
+    assert any(item["check"] == "supported_os_and_python"
+               and item["status"] == "PASS" for item in result["checks"])
+    assert result["status"] in ("FAIL", "NOT_VERIFIED")
+    assert str(config) not in first.stdout
+    assert set(path.name for path in tmp_path.iterdir()) == set(original)
+    assert {
+        p.name: (p.read_bytes(), p.stat().st_mtime_ns)
+        for p in (config, existing)
+    } == original
+
+
 def test_read_only_existing_validation_output_unchanged():
     result = RUNNER.invoke(cli.app, [
         "config", "validate", "--file", str(EXAMPLE), "--json",
