@@ -24,9 +24,9 @@ def test_all_nine_required_contexts_are_merge_group_eligible():
     for name in REQUIRED:
         source = (WORKFLOWS / name).read_text(encoding="utf-8")
         trigger = source.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
-        assert "\n  pull_request:" in trigger, name
-        assert "\n  merge_group:" in trigger, name
-        assert "paths:" not in trigger, name
+        assert "  pull_request:" in ("\n" + trigger), name
+        assert "  merge_group:" in ("\n" + trigger), name
+        assert "paths:" not in trigger and "paths-ignore:" not in trigger, name
         assert "permissions:\n  contents: read" in source, name
         assert "persist-credentials: false" in source, name
         for context in expected[name]:
