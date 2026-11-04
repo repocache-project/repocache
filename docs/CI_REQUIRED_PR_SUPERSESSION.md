@@ -31,3 +31,11 @@ These operational and efficiency criteria are NOT VERIFIED until piloted.
 Any forward-port to protected main, v0.7.0 or future lanes requires a separate
 review of the source and exact-HEAD CI. Rollback must use an ordinary reviewed
 revert PR, not direct changes to protected branches or bypass of required CI.
+
+## Live pilot setup
+
+A follow-up documentation-only commit on the same open PR is used to check
+whether a new pull_request revision supersedes the preceding required-CI
+workflow runs. Both revisions have the same reviewed concurrency expressions.
+This marker is not itself acceptance evidence; use the actual GitHub run
+conclusions and current exact-HEAD check statuses for PASS/FAIL decisions.
