@@ -74,7 +74,7 @@ def _required(name, text):
     for event in ("push", "pull_request", "merge_group"):
         block = _event_block(text, event)
         assert "paths:" not in block and "paths-ignore:" not in block
-    assert "permissions:\n  contents: read\n\njobs:" in text
+    assert "permissions:\n  contents: read\n\nconcurrency:\n" in text
     assert "persist-credentials: false" in text
     required_jobs = text.split("  dependency-native-validation:", 1)[0] if name == "tests.yml" else text
     assert not re.search(r"(?m)^    if:|^    continue-on-error:", required_jobs)
