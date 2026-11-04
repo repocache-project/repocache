@@ -2,6 +2,9 @@ name: Client Shared Source Atomic Sandbox
 
 on:
   pull_request:
+    paths-ignore:
+      - '*.md'
+      - '**/*.md'
   workflow_dispatch:
 
 permissions:

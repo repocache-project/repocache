@@ -2,6 +2,9 @@ name: Native Client Fallback Probe
 
 on:
   pull_request:
+    paths-ignore:
+      - '*.md'
+      - '**/*.md'
   workflow_dispatch:
 
 permissions:

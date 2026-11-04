@@ -2,6 +2,9 @@ name: Client Source Preflight Native
 
 on:
   pull_request:
+    paths-ignore:
+      - '*.md'
+      - '**/*.md'
   workflow_dispatch:
 
 permissions:
