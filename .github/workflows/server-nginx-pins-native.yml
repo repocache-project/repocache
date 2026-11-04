@@ -8,8 +8,14 @@ on:
       - 'src/repocache/server_upstream_address_preflight_v1.py'
       - 'src/repocache/server_upstream_rotation_v1.py'
       - 'src/repocache/server_nginx_pin_render_v1.py'
+      - 'src/repocache/server_bounded_dns_v1.py'
+      - 'src/repocache/server_dns_refresh_schedule_v1.py'
+      - 'src/repocache/server_nginx_repository_bundle_v1.py'
       - 'tests/test_server_nginx_pin_*'
       - 'tests/test_server_upstream_*'
+      - 'tests/test_server_bounded_dns_v1.py'
+      - 'tests/test_server_dns_refresh_schedule_v1.py'
+      - 'tests/test_server_nginx_repository_bundle_v1.py'
   push:
     branches: [main]
     paths:
@@ -18,8 +24,14 @@ on:
       - 'src/repocache/server_upstream_address_preflight_v1.py'
       - 'src/repocache/server_upstream_rotation_v1.py'
       - 'src/repocache/server_nginx_pin_render_v1.py'
+      - 'src/repocache/server_bounded_dns_v1.py'
+      - 'src/repocache/server_dns_refresh_schedule_v1.py'
+      - 'src/repocache/server_nginx_repository_bundle_v1.py'
       - 'tests/test_server_nginx_pin_*'
       - 'tests/test_server_upstream_*'
+      - 'tests/test_server_bounded_dns_v1.py'
+      - 'tests/test_server_dns_refresh_schedule_v1.py'
+      - 'tests/test_server_nginx_repository_bundle_v1.py'
 
 permissions:
   contents: read
@@ -71,4 +83,7 @@ jobs:
             tests/test_server_nginx_pin_render_v1.py \
             tests/test_server_nginx_pin_redirect_integration.py \
             tests/test_server_upstream_rotation_v1.py \
-            tests/test_server_upstream_address_preflight_v1.py
+            tests/test_server_upstream_address_preflight_v1.py \
+            tests/test_server_bounded_dns_v1.py \
+            tests/test_server_dns_refresh_schedule_v1.py \
+            tests/test_server_nginx_repository_bundle_v1.py
