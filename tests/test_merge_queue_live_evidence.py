@@ -74,7 +74,7 @@ def test_successful_mocked_github_reads_still_cannot_admit():
                                      expected_base=BASE)
     assert errors
     assert any("authenticated maintainer" in error for error in errors)
-    assert any("criterion" in error for error in errors)
+    assert any("criteria" in error for error in errors)
     assert api.requested.count("pulls/17") == 4
 
 
