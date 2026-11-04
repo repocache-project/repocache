@@ -86,7 +86,7 @@ GitHub's administrative UI is required for ruleset edits when the
 available GitHub connector does not have repository administration access.
 No queue activation has been attempted by this proposal.
 
-## Operator-controlled admission (current adopted permission model)
+## Operator-controlled admission (conditional delegation proposed; NOT ACTIVE until adopted)
 
 GitHub Merge Queue **does not inspect the original issue acceptance
 ledger** and does not guarantee that an actor has been explicitly authorized
@@ -100,9 +100,16 @@ maintainer-controlled action:
 2. Report PASS / FAIL / NOT VERIFIED with inspectable evidence. Any
    applicable FAIL or mandatory NOT VERIFIED blocks admission. Mark the PR
    ready for review only if applicable acceptance is satisfied.
-3. Obtain **separate explicit maintainer permission** for that PR and
-   evaluated HEAD to enter the queue. Authorization does not carry over
-   to a changed PR head or target; reconfirm evidence before clicking.
+3. Until the governance amendment is merged on protected `main`, obtain
+   **separate explicit maintainer permission** for the PR and evaluated
+   HEAD to enter the queue. After adoption, routine accepted-scope PRs
+   targeting an exact `integration/vMAJOR.MINOR.PATCH` lane may use the
+   maintainer's **standing conditional authorization** *only* after a
+   responsible operator actively verifies every original criterion as
+   PASS, all applicable CI as success, exact head/base identities and
+   absence of architecture, security, scope or unresolved review risk.
+   Exceptional cases require specific permission. Any changed PR head
+   or base invalidates prior evidence; re-evaluate before clicking.
 4. The authorized operator chooses **Add to merge queue** in GitHub.
    **Never enable auto-enqueue based solely on green CI.** A GitHub
    collaborator's technical ability to enqueue is *not* maintainer
@@ -152,6 +159,10 @@ and to integrate the designated disposable PR/HEAD:
    only exact targets or create separate exact-branch rulesets. Never
    weaken the existing nine contexts to make a pilot pass.
 
-**Operations not authorized by this document:** merge of any PR, rule
-creation/activation, bypass, release tagging/signing/publishing, deployment
-or destructive changes. Keep the pilot separate from main/release promotions.
+**Authority boundary:** this proposal grants no authority to merge itself or
+activate a queue rule. The future standing integration-merge delegation is
+conditional on the governance amendment being separately reviewed and
+merged on protected `main` and applies only to fully accepted routine
+`integration/vMAJOR.MINOR.PATCH` PRs. The initial pilot and activation,
+exceptional merges, bypass, release tagging/signing/publishing, deployment
+and destructive changes remain separately authorized.
