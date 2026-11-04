@@ -136,6 +136,9 @@ def evaluate_verified_evidence(snapshot: Mapping[str, Any]) -> list[str]:
 
     if not isinstance(snapshot.get("milestone"), str) or not snapshot["milestone"].strip():
         errors.append("missing release milestone")
+    versioned = re.fullmatch(r"integration/(v[0-9]+\.[0-9]+\.[0-9]+)", target) if isinstance(target, str) else None
+    if versioned and snapshot.get("milestone") != versioned.group(1):
+        errors.append("milestone does not match versioned integration branch")
     if snapshot.get("unresolved_review_threads") != 0:
         errors.append("review thread resolution not verified")
     if snapshot.get("blocking_reviews") != 0:

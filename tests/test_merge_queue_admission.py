@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import re
 
 import pytest
 
@@ -82,6 +83,7 @@ def test_complete_mock_evidence(stage):
     (("criteria_evidence", 0, "tested_sha"), "f" * 40),
     (("criteria_evidence", 0, "evidence_ref"), ""),
     (("milestone",), ""),
+    (("milestone",), "v0.7.0"),
     (("unresolved_review_threads",), 1),
     (("blocking_reviews",), 1),
     (("material_security_findings",), 1),
@@ -148,4 +150,6 @@ def test_future_versioned_lanes_allowed_in_pure_policy():
         snapshot = valid_snapshot()
         snapshot["pull_request"]["base_ref"] = target
         snapshot["maintainer_decision"]["base_ref"] = target
+        if re.fullmatch(r"integration/v[0-9]+\.[0-9]+\.[0-9]+", target):
+            snapshot["milestone"] = target.removeprefix("integration/")
         assert evaluate_verified_evidence(snapshot) == []
