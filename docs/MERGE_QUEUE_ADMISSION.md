@@ -112,10 +112,7 @@ Example, using exact values from the current GitHub PR (the returned status
 is **always NOT VERIFIED**, even if all nine CI checks pass):
 
 ```sh
-python -m scripts.ci.merge_queue_live_evidence 
-  --pr <number> 
-  --expected-head <40-character-PR-head-SHA> 
-  --expected-base <40-character-protected-target-SHA>
+python -m scripts.ci.merge_queue_live_evidence --pr NUMBER --expected-head PR_HEAD_SHA --expected-base TARGET_HEAD_SHA
 ```
 
 Optional `GITHUB_TOKEN` is used only for authenticated GET requests and
