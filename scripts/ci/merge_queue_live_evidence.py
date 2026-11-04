@@ -47,7 +47,7 @@ class GitHubReader:
         self._opener = urllib.request.build_opener(_NoRedirect())
 
     def get(self, path: str) -> Any:
-        if not isinstance(path, str) or not path or path.startswith(("/", ".")):
+        if not isinstance(path, str) or path.startswith(("/", ".")):
             raise EvidenceError("invalid GitHub API path")
         if "://" in path or "//" in path or ".." in path:
             raise EvidenceError("unsafe GitHub API path")
@@ -58,7 +58,10 @@ class GitHubReader:
         }
         if self._token:
             headers["Authorization"] = "Bearer " + self._token
-        request = urllib.request.Request(API_ROOT + path, headers=headers, method="GET")
+        request = urllib.request.Request(
+            API_ROOT + path if path else API_ROOT.rstrip("/"),
+            headers=headers, method="GET",
+        )
         try:
             with self._opener.open(request, timeout=15) as response:
                 payload = response.read(2_000_001)
