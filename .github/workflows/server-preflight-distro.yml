@@ -1,0 +1,144 @@
+name: Server Preflight Distro Containers
+
+on:
+  pull_request:
+    paths:
+      - 'src/repocache/server_install_v1.py'
+      - 'src/repocache/server_preflight_v1.py'
+      - 'src/repocache/server_host_checks_v1.py'
+      - 'tests/test_server_install_v1.py'
+      - 'tests/test_server_preflight_v1.py'
+      - 'tests/test_server_host_checks_v1.py'
+      - '.github/workflows/server-preflight-distro.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  preflight-userspace:
+    name: Read-only local preflight tests (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: debian13
+            image: debian:trixie-slim
+          - platform: almalinux10
+            image: almalinux:10
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install test-only OS Python and pytest inside disposable container
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          # Bootstrap only the disposable CI container, not the host or
+          # preflight implementation. Do not install NGINX or services.
+          if [ '${{ matrix.platform }}' = 'debian13' ]; then
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq
+            apt-get install -y -qq --no-install-recommends python3 python3-pytest
+          else
+            dnf -y -q --enablerepo=crb install python3 python3-pytest
+          fi
+          python3 --version
+          python3 -m pytest --version
+      - name: Observe actual distro OS/Python and native manager (non-authorizing)
+        shell: bash
+        env:
+          PYTHONPATH: src
+          PYTHONDONTWRITEBYTECODE: '1'
+          EXPECTED_PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -Eeuo pipefail
+          python3 -B - <<'PY'
+          import os
+          from repocache.server_install_v1 import validate_os_identity
+          from repocache.server_preflight_v1 import (
+              PreflightStatus, capture_native_host_facts, inspect_native_host,
+          )
+
+          expected = {
+              "debian13": ("debian", (3, 13)),
+              "almalinux10": ("almalinux", (3, 12)),
+          }
+          distribution, python = expected[os.environ["EXPECTED_PLATFORM"]]
+          facts = capture_native_host_facts()  # Genuine container OS identity.
+          assert facts.python_version == python
+          assert validate_os_identity(facts.os_release, facts.python_version) == distribution
+          assert facts.native_manager_visible is True
+
+          report = inspect_native_host()
+          checks = {check.name: check for check in report.checks}
+          assert checks["supported_os_and_python"].status is PreflightStatus.PASS
+          assert checks["architecture_identity"].status is PreflightStatus.PASS
+          assert checks["native_package_manager_binary"].status is PreflightStatus.PASS
+          # A syntactically valid machine is NOT an approved architecture.
+          assert checks["architecture_supported"].status is PreflightStatus.NOT_VERIFIED
+          assert checks["native_package_availability"].status is PreflightStatus.NOT_VERIFIED
+          assert not report.all_verified and not report.authorizes_installation
+          assert report.to_dict()["can_install"] is False
+          # Never print /etc/os-release, host paths, or full diagnostics.
+          print("PASS: supported OS/Python and manager observed; installation not authorized")
+
+          # Exercise the actual local probes twice with the inert example
+          # rather than granting readiness based only on injected fixtures.
+          # Compare only local metadata; do not expose real paths or contents.
+          import json
+          from pathlib import Path
+          from repocache.server_host_checks_v1 import inspect_deployment_host
+
+          example = Path("docs/examples/server-install-v1.json")
+          original = example.read_bytes()
+          before_example = example.stat()
+          protected_paths = (
+              "/etc/nginx/conf.d/repocache-managed.conf",
+              "/var/lib/repocache/server",
+              "/var/cache/nginx/repocache-managed",
+              "/var/log/nginx/repocache-managed",
+          )
+
+          def observed_metadata(path):
+              try:
+                  info = os.lstat(path)
+              except FileNotFoundError:
+                  return None
+              return (info.st_mode, info.st_uid, info.st_gid, info.st_size,
+                      info.st_ino, info.st_mtime_ns, info.st_ctime_ns)
+
+          before_paths = tuple(observed_metadata(p) for p in protected_paths)
+          document = json.loads(original)
+          first = inspect_deployment_host(document, intent="inspect")
+          second = inspect_deployment_host(document, intent="inspect")
+          assert first.to_dict() == second.to_dict()
+          assert not first.all_verified and not first.authorizes_installation
+          assert first.to_dict()["can_install"] is False
+          after_example = example.stat()
+          assert example.read_bytes() == original
+          assert (before_example.st_size, before_example.st_mtime_ns,
+                  before_example.st_ctime_ns) == (
+                      after_example.st_size, after_example.st_mtime_ns,
+                      after_example.st_ctime_ns)
+          assert tuple(observed_metadata(p) for p in protected_paths) == before_paths
+          print("PASS: repeated local probes and protected path metadata unchanged")
+          PY
+          # Docker userspace is NOT booted native systemd or SELinux evidence.
+      - name: Execute read-only positive and negative preflight regressions
+        shell: bash
+        env:
+          PYTHONPATH: src
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          set -Eeuo pipefail
+          python3 -B -m pytest -q -rs \
+            tests/test_server_install_v1.py \
+            tests/test_server_preflight_v1.py \
+            tests/test_server_host_checks_v1.py
+          # This is distro userspace/container evidence, NOT a booted
+          # systemd or SELinux enforcing/managed-label acceptance test.
