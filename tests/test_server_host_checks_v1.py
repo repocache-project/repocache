@@ -237,6 +237,45 @@ def test_capture_skips_host_probes_on_unsupported_os_and_retains_false_auth(monk
     assert not result.authorizes_installation
 
 
+@pytest.mark.parametrize("release,python", [
+    ("ID=debian\nVERSION_ID=13\n", (3, 13)),
+    ("ID=almalinux\nVERSION_ID=10\n", (3, 12)),
+])
+def test_invalid_machine_identity_never_reaches_host_probes(
+    monkeypatch, release, python,
+):
+    """Malformed architecture fails before any native host probe on both OSes."""
+    from dataclasses import replace
+
+    doc = json.loads(
+        (Path(__file__).parents[1] / "docs/examples/server-install-v1.json")
+        .read_text(encoding="utf-8")
+    )
+    invalid = replace(fact(release, python), machine="../unsupported")
+    monkeypatch.setattr(host, "capture_native_host_facts", lambda: invalid)
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("Invalid machine identity reached local host probes")
+
+    monkeypatch.setattr(host, "_capture_host_probes", forbidden)
+    report = host.inspect_deployment_host(doc)
+    assert byname(report.checks, "supported_os_and_python").status is PreflightStatus.PASS
+    assert byname(report.checks, "architecture_identity").status is PreflightStatus.FAIL
+    # The baseline deliberately includes an unresolved listener readiness
+    # marker. Only the probe-specific observation may never be appended.
+    assert byname(report.checks, "listen_port_conflicts").code == "LISTENER_OWNERSHIP_UNVERIFIED"
+    assert not (set(host._PROBE_CODES) - {"listen_port_conflicts"}).intersection(
+        c.name for c in report.checks
+    )
+    assert report.has_failures
+    assert not report.all_verified and not report.authorizes_installation
+    assert "../unsupported" not in json.dumps(report.to_dict())
+
+    # A caller cannot inject positive host observations after identity failure.
+    injected = host.assess_deployment_host(invalid, complete_probes())
+    assert injected == report
+
+
 def test_inspect_uses_strict_validated_document_and_report(monkeypatch):
     doc = json.loads((Path(__file__).parents[1]/"docs/examples/server-install-v1.json").read_text())
     monkeypatch.setattr(host,"capture_native_host_facts",lambda:fact())
@@ -563,6 +602,64 @@ def test_proc_header_family_mismatch_and_malformed_ipv6_are_unverified(monkeypat
         return proc()
     monkeypatch.setattr(host, "_read_fixed", denied)
     assert host._port_check(spec()).status is PreflightStatus.NOT_VERIFIED
+
+
+@pytest.mark.parametrize("family", ["tcp", "tcp6"])
+def test_wrong_address_width_cannot_claim_network_inventory_complete(monkeypatch, family):
+    """A syntactically valid address for the other IP family is malformed here."""
+    if family == "tcp":
+        wrong = proc((4443, "01")).replace(
+            b"0100007F:115B", b"00000000000000000000000001000000:115B",
+        )
+        assert wrong != proc((4443, "01"))
+        with pytest.raises(ValueError):
+            host._parse_tcp_listeners(wrong)
+    else:
+        wrong = proc6((4443, "01")).replace(
+            b"00000000000000000000000001000000:115B", b"0100007F:115B",
+        )
+        assert wrong != proc6((4443, "01"))
+        with pytest.raises(ValueError):
+            host._parse_tcp_listeners(wrong, ipv6=True)
+
+    def read_kernel(file, limit):
+        if family == "tcp":
+            return wrong if file.endswith("/tcp") else proc6()
+        return wrong if file.endswith("/tcp6") else proc()
+
+    monkeypatch.setattr(host, "_read_fixed", read_kernel)
+    outcome = host._port_check(spec())
+    assert (outcome.status, outcome.code) == (
+        PreflightStatus.NOT_VERIFIED, "LISTEN_PORT_INVENTORY_INCOMPLETE",
+    )
+
+
+@pytest.mark.parametrize("family", ["tcp", "tcp6"])
+@pytest.mark.parametrize("invalid", ["wrong_width", "bad_port", "missing_separator"])
+def test_malformed_remote_endpoint_cannot_claim_port_free(monkeypatch, family, invalid):
+    """A broken remote endpoint means the whole kernel port inventory is uncertain."""
+    ipv6 = family == "tcp6"
+    original = proc6((4443, "01")) if ipv6 else proc((4443, "01"))
+    remote = (b"00000000000000000000000000000000:0000" if ipv6
+              else b"00000000:0000")
+    replacement = {
+        "wrong_width": b"00000000:0000" if ipv6
+                       else b"00000000000000000000000000000000:0000",
+        "bad_port": remote[:-4] + b"GGGG",
+        "missing_separator": remote.replace(b":", b""),
+    }[invalid]
+    damaged = original.replace(remote, replacement)
+    assert damaged != original
+    with pytest.raises(ValueError):
+        host._parse_tcp_listeners(damaged, ipv6=ipv6)
+
+    monkeypatch.setattr(host, "_read_fixed", lambda path, limit:
+                        damaged if path.endswith("/" + family)
+                        else proc6() if path.endswith("/tcp6") else proc())
+    result = host._port_check(spec())
+    assert (result.status, result.code) == (
+        PreflightStatus.NOT_VERIFIED, "LISTEN_PORT_INVENTORY_INCOMPLETE",
+    )
 
 
 def test_tls_intermediate_symlink_and_denied_parent_are_distinct(monkeypatch):
