@@ -1,6 +1,6 @@
 # Locked protected-manifest versus live NGINX include observation v1
 
-**Tracking:** primary issue #31 / milestone v0.6.0; related #18, #25, #27 and #95. **Dependency fulfilled:** [PR #222](https://github.com/teixemf/repocache/pull/222) was independently authorized and merged into protected `main` as `955360fb7686f632d7d0090994008e10159f23b3`, providing the protected state schema and recovery implementation. Under the adopted release workflow, this PR targets the protected `integration/v0.6.0` branch (baseline `a1739a42cf5baac78bb3f8beb2bd02ee362447e9`), which already contains the #222 storage core. PR #224 subsequently merged into integration/v0.6.0 as ac13ba3847420560685c2156681fb2379af73d36 on 2026-11-03; the previous OPEN status was historical. Synthetic tests do not verify production installation.
+**Tracking:** primary issue #31 / milestone v0.6.0; related #18, #25, #27, #28 and #95. **Dependency fulfilled:** [PR #222](https://github.com/repocache-project/repocache/pull/222) was independently authorized and merged into protected `main` as `955360fb7686f632d7d0090994008e10159f23b3`, providing the protected state schema and recovery implementation. Under the adopted release workflow, this PR targets the protected `integration/v0.6.0` branch (baseline `a1739a42cf5baac78bb3f8beb2bd02ee362447e9`), which already contains the #222 storage core. PR #224 subsequently merged into integration/v0.6.0 as ac13ba3847420560685c2156681fb2379af73d36 on 2026-11-03; the previous OPEN status was historical. Synthetic tests do not verify production installation.
 
 ## Fixed-purpose read-only contract
 
@@ -90,3 +90,23 @@ configuration, full-context nginx -t, reload, TLS, service availability,
 package upgrades or active repository discovery. It does not establish
 operator approval, host-root, mount/ACL/SELinux provenance or production
 readiness. All five original #31 operational criteria remain NOT VERIFIED.
+
+## Integration-lane reconciliation (2026-11-04)
+
+The protected integration/v0.6.0 branch advanced through the accepted
+inert native NGINX packaging/prepackage boundary (#27, PR #229, commit
+d03192f96ad1ee03623acd674813363340922cb4) and bounded DNS plus inert
+NGINX candidate preparation (#28, PR #227, commit
+2388476f94f2f4c620d760c5acdcba4c5d2e6f4d). The #31 feature branch
+is merged forward with both exact integration commits and retains only its
+original three-file feature delta. No privileged native activation or
+installer implementation is inferred from these preparatory merges.
+
+The related #95/#214 work has identified an unresolved architectural
+boundary: install-v1 supports up to 500 repositories while inert protected
+state-v1 stores up to 32, without stable removal tombstones or active-service
+observed-state semantics. The stored configuration digest and approval
+reference are not by themselves authenticated configuration or operator
+authorization. Do not connect this fixture-only preview to a real
+privileged writer or NGINX apply until versioned state/config/approval and
+activation ownership are jointly reviewed with #95 and #28.
