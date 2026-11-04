@@ -4,6 +4,8 @@ on:
   push:
     branches: [main, 'release/**', 'integration/**']
   pull_request:
+  # Required merge-queue checks must execute on the synthesized merge group.
+  merge_group:
 
 permissions:
   contents: read
