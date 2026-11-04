@@ -117,6 +117,8 @@ def test_upstream_wheels_remains_path_filtered_and_supplemental():
 
 @pytest.mark.parametrize(("name", "before", "after"), [
     ("tests.yml", "  pull_request:\n", "  pull_request_target:\n"),
+    ("tests.yml", "  merge_group:\n", ""),
+    ("upgrade-distros.yml", "  merge_group:\n", ""),
     ("tests.yml", "    name: Unit tests (Python ", "    name: Unit suite (Python "),
     ("tests.yml", "python-version: ['3.12', '3.13']", "python-version: ['3.12']"),
     ("tests.yml", "branches: [main,", "branches: [feature/*, main,"),
