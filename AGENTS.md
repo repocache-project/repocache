@@ -1,7 +1,7 @@
 # REPOCACHE — AI agent operating guide
 
 **Audience:** AI-assisted and human contributors. **Scope:** repository-wide.
-**Canonical code and documentation:** the reviewed default branch of [teixemf/repocache](https://github.com/teixemf/repocache), plus current GitHub issues, PRs, checks and approvals.
+**Canonical code and documentation:** the reviewed protected default branch of [repocache-project/repocache](https://github.com/repocache-project/repocache), plus current GitHub issues, PRs, checks and approvals.
 
 This file is the short entry point, not a replacement for the architecture, security and release contracts. Read [the development workflow](docs/DEVELOPMENT_WORKFLOW.md) for implementation steps and [the v0.5.0 scope ledger](docs/RELEASE_SCOPE_V0.5.0.md) when working on that release. Read files from the **actual current default branch**; a proposed file in an unmerged PR is not an adopted policy.
 
