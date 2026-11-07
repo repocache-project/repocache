@@ -418,8 +418,8 @@ def _preview_v1_migration_blockers_under_root(
         # The legacy validated reader refuses any proposed-v2 coexistence,
         # including an incomplete stage or symlink, under the shared lock.
         legacy, before = _read_state(directory, owner_uid)
-        if legacy is None:
-            _refuse("LEGACY_STATE_ABSENT")
+        # Unpublished/unfinished legacy bootstrap may have no current state:
+        # recovery takes precedence over reporting a clean absence.
         # No reading a snapshot as migratable while prior v1 recovery is
         # pending, even if the current state bytes remain valid.
         for name, limit in (
@@ -430,6 +430,8 @@ def _preview_v1_migration_blockers_under_root(
         ):
             if _read_file(directory, name, owner_uid, limit) is not None:
                 _refuse("LEGACY_RECOVERY_REQUIRED")
+        if legacy is None:
+            _refuse("LEGACY_STATE_ABSENT")
         _, after = _read_state(directory, owner_uid)
         if before != after:
             _refuse("LEGACY_STATE_CHANGED")
