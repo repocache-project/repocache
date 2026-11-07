@@ -399,6 +399,30 @@ fixture tests can verify refusal/nonmutation and lock behavior, but only
 a separately approved schema and host transaction can implement actual
 migration. This PR does not adopt the proposed v2 persistence format.
 
+### Read-only proposed v2 recovery journal preview
+
+Private `_preview_proposed_v2_recovery_under_root` reuses #31's fixed
+state-directory exclusive FD lock and rejects concurrent writers, malformed
+snapshots, unsafe files, conflicting legacy v1 state, orphan stage/rollback,
+journal-temp collisions and journal/state digest drift. It reads only the
+proposed v2 fixture files; it neither invokes recovery nor alters live
+NGINX, publishes catalog state, provisions a root helper or deletes bytes.
+
+The bounded report distinguishes a clean state, an unpublished journal
+temporary inode, a durable journal before the state replace, and an
+interrupted post-replace journal. It discloses no repository details,
+configuration bytes, digest, root path or key material. All authorization,
+host-service recovery and catalogue/NGINX flags remain FALSE. In particular
+a report of an interrupted transaction is **not** an authorization to run
+the private recovery function, which itself is still fixture-only.
+
+Tests cover the four fault points on both initial and existing v2 snapshots,
+verify byte-for-byte nonmutation, refusal of modified state/orphan stages and
+lock contention, and ensure the diagnostic calls no mutating filesystem
+operation. CI distro-container results do not prove native systemd/SELinux
+safety, power-loss durability or an accepted v1→v2 migration. The v2 format
+remains proposed and does not become a shipped persisted-state contract.
+
 ### Current namespace v1 migration refusal diagnostic
 
 The internal `inspect_current_namespace_v1_migration_blockers()` entry
