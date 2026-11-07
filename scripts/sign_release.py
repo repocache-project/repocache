@@ -17,6 +17,11 @@ import tempfile
 import time
 from pathlib import Path
 
+# The immutable public v0.4.0 verifier requires this schema-1 publisher
+# identity even when the source-run and asset URLs are under the new org.
+PUBLISHER_REPO = "teixemf/repocache"
+
+
 def sign(bundle: Path, key: Path, key_id: str, commit: str,
          issued_at: int, expires_at: int, wheelhouse_sha256: str | None = None,
          *, passphrase: bytes | None = None):
@@ -50,7 +55,7 @@ def sign(bundle: Path, key: Path, key_id: str, commit: str,
             raise ValueError("Cannot read release policy")
         policy_digest = hashlib.sha256(content.read(policy_member.size + 1)).hexdigest()
     document = {
-        "schema": 1, "key_id": key_id, "repository": "teixemf/repocache",
+        "schema": 1, "key_id": key_id, "repository": PUBLISHER_REPO,
         "channel": "stable", "version": version, "commit": commit,
         "archive": bundle.name,
         "archive_sha256": hashlib.sha256(bundle.read_bytes()).hexdigest(),

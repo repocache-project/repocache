@@ -25,7 +25,10 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-REPO = "teixemf/repocache"
+# New GitHub origin, but legacy schema-1 manifests MUST retain their signed
+# publisher identity so immutable v0.4.0 can authenticate the upgrade.
+REPO = "repocache-project/repocache"
+PUBLISHER_REPO = "teixemf/repocache"
 API = "https://api.github.com/repos/" + REPO
 ROOT = Path(__file__).resolve().parents[1]
 KEY = ROOT / "keys/repocache-2026-10.pem"
@@ -73,9 +76,9 @@ def sha(data: bytes) -> str:
 
 def normal(tag: str, commit: str, release_id: int, run_id: int, attempt: int):
     # This initial gate is intentionally reviewed for one upgrade baseline:
-    # actual public v0.4.0 -> signed v0.5.0. Refuse later versions until a
-    # reviewed PR changes BOTH this trust policy and the public baseline.
-    require(tag == "v0.5.0",
+    # real public v0.4.0 -> signed v0.6.0 with unchanged schema-1 eight
+    # asset profile. Do not authorize other tags or online/source-only profiles.
+    require(tag == "v0.6.0",
             "Unreviewed candidate: prior public release baseline must be updated")
     require(COMMIT.fullmatch(commit) is not None
             and type(release_id) is int and release_id > 0
@@ -253,7 +256,7 @@ def authenticate(tag: str, commit: str, run_id: int, attempt: int,
                                   "issued_at", "expires_at"},
             "Malformed signed publisher manifest")
     require(manifest["schema"] == 1 and manifest["key_id"] == "repocache-2026-10"
-            and manifest["repository"] == REPO
+            and manifest["repository"] == PUBLISHER_REPO
             and manifest["channel"] == "stable"
             and manifest["version"] == tag[1:] and manifest["commit"] == commit
             and manifest["archive"] == base
