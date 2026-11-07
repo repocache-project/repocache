@@ -141,20 +141,35 @@ def test_packaged_nginx_accepts_fragments_without_activation(tmp_path):
     ) if Path(p).is_file()), None)
     if native_ca is None:
         pytest.skip("packaged CA bundle unavailable")
-    candidate = render(ca=native_ca)
+    doc = document()
+    doc["deployment"]["paths"]["cache_root"] = str(tmp_path / "candidate_cache")
+    (tmp_path / "candidate_cache" / "debian-trixie-main").mkdir(
+        parents=True, mode=0o700,
+    )
+    candidate = render(doc=doc, ca=native_ca)
     conf = tmp_path / "nginx.conf"
     conf.write_text(
         f"pid {tmp_path / 'nginx.pid'};\n"
         f"error_log {tmp_path / 'error.log'} notice;\n"
         "events {}\nhttp { access_log off;\n"
+        f"client_body_temp_path {tmp_path / 'candidate_client_temp'};\n"
+        f"proxy_temp_path {tmp_path / 'candidate_proxy_temp'};\n"
+        f"fastcgi_temp_path {tmp_path / 'candidate_fastcgi_temp'};\n"
+        f"uwsgi_temp_path {tmp_path / 'candidate_uwsgi_temp'};\n"
+        f"scgi_temp_path {tmp_path / 'candidate_scgi_temp'};\n"
         + candidate["http_upstream_fragment"]
         + "server { listen 127.0.0.1:19991;\n"
         + candidate["server_location_fragment"]
         + "}\n}\n",
         encoding="utf-8",
     )
+    for name in ("candidate_client_temp", "candidate_proxy_temp",
+                 "candidate_fastcgi_temp", "candidate_uwsgi_temp",
+                 "candidate_scgi_temp"):
+        (tmp_path / name).mkdir()
     observed = subprocess.run(
-        [shutil.which("nginx"), "-t", "-c", str(conf), "-p", str(tmp_path)],
+        [shutil.which("nginx"), "-t", "-e", str(tmp_path / "nginx-startup.log"),
+         "-c", str(conf), "-p", str(tmp_path)],
         capture_output=True, text=True, timeout=10, check=False,
     )
     assert observed.returncode == 0, observed.stderr
@@ -201,3 +216,40 @@ def test_dnf_baseos_candidate_renders_from_metadata_without_source_changes():
     assert "proxy_ssl_verify on;" in output["server_location_fragment"]
     assert output["authorizes_nginx_activation"] is False
     assert doc == before
+
+
+def test_cache_zone_is_per_repository_and_sensitive_requests_bypass():
+    candidate = render()
+    upstream = candidate["http_upstream_fragment"]
+    location = candidate["server_location_fragment"]
+    assert "proxy_cache_path /var/cache/nginx/repocache-managed/debian-trixie-main " in upstream
+    assert "keys_zone=repocache_cache_debian_trixie_main:16m" in upstream
+    assert "inactive=604800s max_size=10737418240" in upstream
+    assert "proxy_cache repocache_cache_debian_trixie_main;" in location
+    assert "proxy_cache_valid 200 60s;" in location
+    assert "proxy_cache_methods GET HEAD;" in location
+    assert "proxy_cache_lock on;" in location
+    assert 'proxy_cache_key "$scheme|$proxy_host|$request_uri";' in location
+    for field in ("$http_authorization", "$http_cookie"):
+        assert field in location
+    assert "proxy_cache_use_stale" not in location
+    assert "proxy_ignore_headers Cache-Control" not in location
+    assert candidate["authorizes_nginx_activation"] is False
+
+
+def test_cache_inheritance_resolves_each_local_override():
+    doc = document()
+    doc["deployment"]["cache_policy"]["global"].update({
+        "inactive_seconds": 900, "max_size_bytes": 8192,
+    })
+    doc["repositories"][0]["cache_overrides"] = {
+        "inactive_seconds": 120,
+    }
+    first = render(doc=doc)["http_upstream_fragment"]
+    assert "inactive=120s max_size=8192" in first
+    doc["repositories"][0]["cache_overrides"] = {
+        "max_size_bytes": 4096,
+    }
+    second = render(doc=doc)["http_upstream_fragment"]
+    assert "inactive=900s max_size=4096" in second
+    assert first != second

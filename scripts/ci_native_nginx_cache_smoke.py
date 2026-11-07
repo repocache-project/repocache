@@ -170,6 +170,9 @@ def check_candidate_syntax(root: Path, nginx: str) -> None:
         item["desired_state"] = "active"
         if item["kind"] == "dnf":
             item["id"] = "almalinux-baseos"
+    document["deployment"]["paths"]["cache_root"] = str(root / "candidate_cache")
+    for item in document["repositories"]:
+        (root / "candidate_cache" / item["id"]).mkdir(parents=True, mode=0o700)
     pins = {
         item["id"]: {HOST: ["8.8.8.8"]}
         for item in document["repositories"]
