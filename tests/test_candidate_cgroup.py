@@ -519,3 +519,67 @@ def test_candidate_leaf_never_runs_as_root(delegated, monkeypatch):
     with pytest.raises(candidate_cgroup.CgroupGateError, match="Root"):
         with candidate_cgroup.candidate_leaf(gate):
             pytest.fail("Root cannot create an untrusted candidate leaf")
+
+
+
+def _quota_mount(tmp_path, monkeypatch, *, fstype="tmpfs", opts="rw",
+                 blocks=None, free=None, inodes=50000):
+    from types import SimpleNamespace
+    parent = tmp_path / "online-preparations"
+    parent.mkdir(mode=0o700)
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text(
+        f"42 31 0:44 / {parent} {opts},nosuid,nodev - {fstype} tmpfs rw\n")
+    monkeypatch.setattr(candidate_cgroup.os, "geteuid",
+                        lambda: parent.stat().st_uid)
+    blocks = blocks if blocks is not None else (
+        candidate_cgroup.STAGING_MAX_BYTES // 4096)
+    free = free if free is not None else blocks
+    usage = SimpleNamespace(f_frsize=4096, f_blocks=blocks,
+                            f_bavail=free, f_files=inodes)
+    monkeypatch.setattr(candidate_cgroup.os, "statvfs", lambda path: usage)
+    return parent, mountinfo
+
+
+def test_verified_private_tmpfs_has_kernel_enforced_capacity(tmp_path, monkeypatch):
+    parent, mount = _quota_mount(tmp_path, monkeypatch)
+    candidate_cgroup.require_staging_tmpfs(parent, mountinfo=mount)
+
+
+@pytest.mark.parametrize("case", [
+    "not-mounted", "ext4", "read-only", "oversized",
+    "insufficient-free", "too-many-inodes", "symlink",
+])
+def test_missing_or_unbounded_staging_quota_refuses(tmp_path, monkeypatch, case):
+    if case == "ext4":
+        args = {"fstype": "ext4"}
+    elif case == "read-only":
+        args = {"opts": "ro"}
+    elif case == "oversized":
+        args = {"blocks": candidate_cgroup.STAGING_MAX_BYTES // 4096 + 1}
+    elif case == "insufficient-free":
+        args = {"free": 0}
+    elif case == "too-many-inodes":
+        args = {"inodes": candidate_cgroup.STAGING_MAX_INODES + 1}
+    else:
+        args = {}
+    parent, mount = _quota_mount(tmp_path, monkeypatch, **args)
+    if case == "not-mounted":
+        mount.write_text("42 31 0:44 / /elsewhere rw - tmpfs tmpfs rw\n")
+    elif case == "symlink":
+        real = tmp_path / "real-staging"
+        parent.rename(real)
+        parent.symlink_to(real, target_is_directory=True)
+    with pytest.raises(candidate_cgroup.CgroupGateError):
+        candidate_cgroup.require_staging_tmpfs(parent, mountinfo=mount)
+
+
+def test_resource_counters_detect_oom_and_pid_exhaustion(delegated):
+    leaf = _configured_leaf(delegated)
+    (leaf / "memory.events").write_text("low 0\nhigh 0\nmax 1\noom 2\noom_kill 3\n")
+    (leaf / "pids.events").write_text("max 4\n")
+    assert candidate_cgroup.resource_events(leaf) == (2, 3, 4)
+    (leaf / "memory.events").write_text("oom unexpected\noom_kill 3\n")
+    with pytest.raises(candidate_cgroup.CgroupGateError,
+                       match="mandatory candidate resource counter"):
+        candidate_cgroup.resource_events(leaf)
