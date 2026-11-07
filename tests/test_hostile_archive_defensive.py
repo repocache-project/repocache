@@ -168,7 +168,7 @@ def test_signed_manifest_can_authenticate_rejected_tar_layout(tmp_path, monkeypa
     payload = archive([(PREFIX + "unexpected", "regular", b"unsigned-content-not-executed")])
     now = int(time.time())
     doc = {"schema": 1, "key_id": "publisher-2026",
-           "repository": "teixemf/repocache", "channel": "stable",
+           "repository": "repocache-project/repocache", "channel": "stable",
            "version": VERSION, "commit": "a" * 40,
            "archive": "repocache-v" + VERSION + ".tar.gz",
            "archive_sha256": hashlib.sha256(payload).hexdigest(),

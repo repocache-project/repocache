@@ -43,7 +43,7 @@ def _manifest(archive: bytes, version: str, *, schema: int = 2,
     document = {
         "schema": schema,
         "key_id": "publisher-2026",
-        "repository": "teixemf/repocache",
+        "repository": "repocache-project/repocache",
         "channel": "stable",
         "version": version,
         "commit": "a" * 40,
