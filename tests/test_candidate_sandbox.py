@@ -359,3 +359,124 @@ def test_candidate_resource_limits_inherit_in_linux_child(tmp_path):
         0,
     ]
     assert observed == ",".join(str(value) for value in expected)
+
+
+
+def _mock_supervisor(workspace, monkeypatch):
+    from contextlib import contextmanager
+    from repocache import candidate_cgroup
+    _, work = workspace
+    leaf = work.parent / ("candidate-" + "a" * 32)
+    events = []
+
+    def delegation():
+        events.append("delegation")
+        return "verified"
+
+    def staging(path):
+        assert path == work.parent
+        events.append("tmpfs-quota")
+
+    @contextmanager
+    def lease(gate):
+        assert gate == "verified"
+        events.append("limited-leaf")
+        try:
+            yield leaf
+        finally:
+            events.append("kill-drain")
+
+    def entry(gate, path, argv):
+        assert gate == "verified" and path == leaf
+        assert argv[0] == "/usr/bin/prlimit"
+        assert argv[argv.index("--") + 1] == "/usr/bin/bwrap"
+        events.append("attach-before-exec")
+        return ["trusted-bootstrap"]
+
+    def counters(path):
+        assert path == leaf
+        events.append("resource-counters")
+        return (0, 0, 0)
+
+    def run(argv, *, cwd, timeout, prelimited=False):
+        assert prelimited is True and argv == ["trusted-bootstrap"]
+        assert cwd == work
+        events.append("execute")
+        return "ok"
+
+    monkeypatch.setattr(candidate_cgroup, "require_delegation", delegation)
+    monkeypatch.setattr(candidate_cgroup, "require_staging_tmpfs", staging)
+    monkeypatch.setattr(candidate_cgroup, "candidate_leaf", lease)
+    monkeypatch.setattr(candidate_cgroup, "entry_argv", entry)
+    monkeypatch.setattr(candidate_cgroup, "resource_events", counters)
+    monkeypatch.setattr(candidate_sandbox, "_run_bounded", run)
+    return events
+
+
+def test_cgroup_supervisor_joins_before_exec_and_drains(workspace, monkeypatch):
+    _, work = workspace
+    events = _mock_supervisor(workspace, monkeypatch)
+    result = candidate_sandbox.run_cgroup_isolated(_pip(work), workspace=work)
+    assert result == "ok"
+    assert events == [
+        "delegation", "tmpfs-quota", "limited-leaf",
+        "resource-counters", "attach-before-exec", "execute",
+        "resource-counters", "kill-drain",
+    ]
+
+
+def test_cgroup_supervisor_refuses_resource_exhaustion(workspace, monkeypatch):
+    from repocache import candidate_cgroup
+    _, work = workspace
+    events = _mock_supervisor(workspace, monkeypatch)
+    counters = iter([(0, 0, 0), (0, 1, 0)])
+    monkeypatch.setattr(candidate_cgroup, "resource_events",
+                        lambda leaf: next(counters))
+    with pytest.raises(updater.UpdateError, match="aggregate memory or PID"):
+        candidate_sandbox.run_cgroup_isolated(_pip(work), workspace=work)
+    assert events[-1] == "kill-drain"
+
+
+def test_cgroup_supervisor_drains_after_child_timeout(workspace, monkeypatch):
+    _, work = workspace
+    events = _mock_supervisor(workspace, monkeypatch)
+    def timeout(*args, **kwargs):
+        raise updater.UpdateError("Candidate timed out")
+    monkeypatch.setattr(candidate_sandbox, "_run_bounded", timeout)
+    with pytest.raises(updater.UpdateError, match="Candidate timed out"):
+        candidate_sandbox.run_cgroup_isolated(_pip(work), workspace=work)
+    assert events[-1] == "kill-drain"
+
+
+@pytest.mark.parametrize("missing", ["delegation", "tmpfs"])
+def test_cgroup_supervisor_refuses_before_command_when_boundary_missing(
+        workspace, monkeypatch, missing):
+    from repocache import candidate_cgroup
+    _, work = workspace
+    def forbidden(*args, **kwargs):
+        pytest.fail("No unsandboxed command may start")
+    monkeypatch.setattr(candidate_sandbox, "command", forbidden)
+    monkeypatch.setattr(candidate_sandbox, "_run_bounded", forbidden)
+    if missing == "delegation":
+        def reject():
+            raise candidate_cgroup.CgroupGateError("Missing delegation")
+        monkeypatch.setattr(candidate_cgroup, "require_delegation", reject)
+    else:
+        monkeypatch.setattr(candidate_cgroup, "require_delegation", lambda: "ok")
+        def reject(parent):
+            raise candidate_cgroup.CgroupGateError("Missing bounded tmpfs")
+        monkeypatch.setattr(candidate_cgroup, "require_staging_tmpfs", reject)
+    with pytest.raises(candidate_cgroup.CgroupGateError):
+        candidate_sandbox.run_cgroup_isolated(_pip(work), workspace=work)
+
+
+def test_prelimited_bounded_runner_rejects_untrusted_bootstrap(
+        tmp_path, monkeypatch):
+    def forbidden(*args, **kwargs):
+        pytest.fail("Untrusted prelimited command must not spawn")
+    monkeypatch.setattr(candidate_sandbox.subprocess, "Popen", forbidden)
+    with pytest.raises(candidate_sandbox.SandboxError,
+                       match="Untrusted cgroup candidate bootstrap"):
+        candidate_sandbox._run_bounded(
+            [sys.executable, "-I", "-c", "print('bad')"],
+            cwd=tmp_path, timeout=2, prelimited=True)
