@@ -15,6 +15,7 @@ import pytest
 from repocache.server_repository_plan_v1 import _canonical_identity
 from repocache.server_protected_state_store_v1 import (
     JOURNAL_NAME as LEGACY_JOURNAL,
+    JOURNAL_TMP_NAME as LEGACY_JOURNAL_TMP,
     LOCK_NAME,
     ProtectedStateStoreError,
     _commit_under_root as commit_legacy,
@@ -915,3 +916,32 @@ def test_v1_migration_preflight_refuses_v2_coexistence_and_lock_contention(
         preview_v1_migration(fd, owner_uid=uid)
     assert v2_link.is_symlink()
     assert (folder / "state-v1.json").is_file()
+
+
+@pytest.mark.parametrize("phase,pending", [
+    ("journal_tmp_durable", LEGACY_JOURNAL_TMP),
+    ("journal_durable", LEGACY_JOURNAL),
+])
+def test_v1_migration_preflight_prioritizes_interrupted_bootstrap(
+    fixture_root, phase, pending,
+):
+    fd, folder, uid = fixture_root
+
+    def stop(point):
+        if point == phase:
+            raise RuntimeError("interrupted initial v1 commit")
+
+    with pytest.raises(RuntimeError, match="interrupted initial v1 commit"):
+        commit_legacy(
+            fd, _legacy_state(), owner_uid=uid,
+            expected_generation=0, inject_fault=stop,
+        )
+    original = (folder / pending).read_bytes()
+    assert not (folder / "state-v1.json").exists()
+    with pytest.raises(ProposedV2PersistenceError, match="LEGACY_RECOVERY_REQUIRED"):
+        preview_v1_migration(fd, owner_uid=uid)
+    assert (folder / pending).read_bytes() == original
+    assert not (folder / V2_STATE).exists()
+    recover_legacy(fd, owner_uid=uid)
+    with pytest.raises(ProposedV2PersistenceError, match="LEGACY_STATE_ABSENT"):
+        preview_v1_migration(fd, owner_uid=uid)
