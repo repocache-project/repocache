@@ -50,3 +50,29 @@ only from successfully active state under #95/#28. This renderer does not
 provision ownership, activate NGINX, publish catalog data or guarantee
 stock NGINX cache-manager or disk-pressure behavior. The 1 MiB zone
 is a conservative initial bound and is NOT evidence of live key capacity.
+
+## Exercise the actual generated production candidate in isolation
+
+A second disposable execution in `scripts/ci_generated_nginx_route_cache_smoke.py`
+first lets the unchanged production candidate renderer validate the required
+PUBLIC numeric pin for both APT/DNF upstreams. **After** validation and
+solely for this Docker-only runtime test, it replaces exactly two numeric
+upstream endpoint lines with a loopback TLS server. The public-IP/SSRF
+policy in production remains unchanged and refuses localhost/private pins.
+A generated candidate uses per-repository cache directories in the ephemeral
+container root, real trusted temporary upstream HTTPS certificate, approved
+`proxy_ssl_name` and observed upstream SNI, and the exact generated
+proxy/cache location directives. Real NGINX then serves each of four APT/DNF
+metadata/package fixture bytes on a `MISS` followed by `HIT` from the
+separate per-repository caches, with only one origin GET. Repeat negative
+checks show authenticated/cookie responses are never cached, and invalid
+paths, 3xx and X-Accel redirects remain blocked. A test-only readout header
+reports NGINX's real `$upstream_cache_status`.
+
+This **narrows the earlier code/fixture gap** but remains a deliberate,
+visible *test-only numeric pin transformation*. It does not establish that a
+trusted live DNS resolver supplied the public candidate addresses, that
+native signed APT/DNF upstream metadata is valid, that an authenticated
+operator/state generation authorized activation or that a real server was
+installed. Never promote the loopback substitution to production code or
+allow a user-supplied IP through the strict pin validator.
