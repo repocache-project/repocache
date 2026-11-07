@@ -297,7 +297,7 @@ def test_candidate_prlimit_requires_root_owned_non_setuid_binary(
     monkeypatch.setattr(updater, "_require_service_account", lambda: None)
     # Substitute a known root-owned regular executable for the primary helper
     # so this test cannot pass merely because bwrap is absent on CI runners.
-    monkeypatch.setattr(candidate_sandbox, "BWRAP", Path("/usr/bin/env"))
+    monkeypatch.setattr(candidate_sandbox, "BWRAP", Path("/usr/bin/true"))
     monkeypatch.setattr(candidate_sandbox, "_verify_patch_level", lambda: None)
     missing = tmp_path / "prlimit-missing"
     monkeypatch.setattr(candidate_sandbox, "PRLIMIT", missing)

@@ -330,7 +330,7 @@ def test_cgroup_cleanup_invalid_target_refuses_without_killing(
         target = tmp_path / leaf.name
         target.mkdir()
         with pytest.raises(candidate_cgroup.CgroupGateError,
-                           match="outside approved subtree"):
+                           match="escapes approved subtree"):
             candidate_cgroup.kill_and_drain_leaf(_gate(delegated), target)
     else:
         kill = leaf / "cgroup.kill"

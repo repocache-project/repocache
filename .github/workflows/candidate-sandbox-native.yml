@@ -39,14 +39,31 @@ jobs:
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
             apparmor-profiles apparmor-utils
-          profile=/usr/share/apparmor/extra-profiles/bwrap-userns-restrict
-          test -f "$profile"
-          sudo install -m 0644 "$profile" /etc/apparmor.d/bwrap-userns-restrict
-          sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
+          # Ubuntu 26.04 packages this root-owned profile at /etc/apparmor.d;
+          # Ubuntu 24.04 uses the optional, packaged extra-profiles location.
+          # Never overwrite a distro profile or relax userns globally.
+          packaged=/usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+          installed=/etc/apparmor.d/bwrap-userns-restrict
+          if [[ -e "$installed" || -L "$installed" ]]; then
+            test -f "$installed" && test ! -L "$installed"
+            test "$(stat -c %u "$installed")" = 0
+            dpkg-query -S "$installed" | grep -Eq '^apparmor(:[^:]+)?:'
+          else
+            test -f "$packaged" && test ! -L "$packaged"
+            test "$(stat -c %u "$packaged")" = 0
+            dpkg-query -S "$packaged" | grep -Eq '^apparmor-profiles(:[^:]+)?:'
+            sudo install -m 0644 "$packaged" "$installed"
+          fi
+          # Permit ONLY the vendor-provided profile with an explicit userns
+          # allowance. The kernel and AppArmor policy must both stay active.
+          grep -Eq '^[[:space:]]*profile[[:space:]]+bwrap[[:space:]]' "$installed"
+          grep -Eq '^[[:space:]]*userns,' "$installed"
+          sudo apparmor_parser -r "$installed"
           if [[ -r /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
             test "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = 1
           fi
           sudo aa-status
+          sudo aa-status | grep -Eq '^[[:space:]]*bwrap([[:space:]]|$)'
       - name: Probe patched OS package, forbidden host access and real hash-locked wheel execution
         shell: bash
         run: bash scripts/ci_candidate_sandbox_container.sh '${{ matrix.distro }}'
