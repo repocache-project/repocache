@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from repocache import application_wheel, candidate_sandbox, online_deps, online_generation, signed_dependency_staging, updater
+from repocache import application_wheel, candidate_cgroup, candidate_sandbox, online_deps, online_generation, signed_dependency_staging, updater
 
 
 WHEEL = online_deps.Wheel(
@@ -149,7 +149,11 @@ def rootless_staging(tmp_path, monkeypatch):
     # Mock only the secure executor boundary: subprocess handling itself
     # remains under test by existing failure-injection fixtures.
     monkeypatch.setattr(candidate_sandbox, "require_executor", sandbox_ready)
-    monkeypatch.setattr(candidate_sandbox, "run_isolated", simulated_isolated_run)
+    monkeypatch.setattr(candidate_cgroup, "require_delegation",
+                        lambda: observations.append("cgroup-delegation-verified"))
+    monkeypatch.setattr(candidate_cgroup, "require_staging_tmpfs",
+                        lambda parent: observations.append("staging-quota-verified"))
+    monkeypatch.setattr(candidate_sandbox, "run_cgroup_isolated", simulated_isolated_run)
     return root, observations, active
 
 
@@ -518,7 +522,7 @@ def test_candidate_subprocesses_never_fall_back_to_updater_run_on_sandbox_failur
         assert "download" in events
         events.append("sandbox-rejected")
         raise candidate_sandbox.SandboxError("Unprivileged namespace denied")
-    monkeypatch.setattr(candidate_sandbox, "run_isolated", isolation_error)
+    monkeypatch.setattr(candidate_sandbox, "run_cgroup_isolated", isolation_error)
     with pytest.raises(online_generation.PreparationInstallError,
                        match="rehearsal failed"):
         _rehearse()
@@ -527,3 +531,34 @@ def test_candidate_subprocesses_never_fall_back_to_updater_run_on_sandbox_failur
     assert "run-install-app" not in events
     assert not list((root / "online-preparations").iterdir())
     assert events[-1] == "lock-release"
+
+
+
+def test_missing_cgroup_delegation_refuses_before_download(rootless_staging, monkeypatch):
+    root, events, _ = rootless_staging
+
+    def unavailable():
+        raise candidate_cgroup.CgroupGateError("No cgroup v2 delegation")
+
+    monkeypatch.setattr(candidate_cgroup, "require_delegation", unavailable)
+    with pytest.raises(online_generation.PreparationInstallError,
+                       match="isolation is unavailable"):
+        _rehearse()
+    assert "download" not in events
+    assert "run-venv" not in events
+    assert not (root / "online-preparations").exists()
+
+
+def test_missing_bounded_staging_refuses_before_download(rootless_staging, monkeypatch):
+    root, events, _ = rootless_staging
+
+    def unavailable(parent):
+        raise candidate_cgroup.CgroupGateError("No private tmpfs quota")
+
+    monkeypatch.setattr(candidate_cgroup, "require_staging_tmpfs", unavailable)
+    with pytest.raises(online_generation.PreparationInstallError,
+                       match="rehearsal failed"):
+        _rehearse()
+    assert "download" not in events
+    assert "run-venv" not in events
+    assert not list((root / "online-preparations").iterdir())
