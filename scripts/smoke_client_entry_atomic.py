@@ -156,8 +156,12 @@ def independent_transaction_failure_recovery(root):
     try:
         try:
             wrapper.apply_entry_sandbox(root, dnf_candidate, dnf_stage, URL)
-        except OSError as exc:
-            assert "injected sandbox I/O failure" in str(exc)
+        except stage.StageError as exc:
+            # The path-safety boundary deliberately wraps OS failures in a
+            # stable refusal. Preserve the injected failure as its cause.
+            assert "Unsafe repository source pathname" in str(exc)
+            assert isinstance(exc.__cause__, OSError)
+            assert "injected sandbox I/O failure" in str(exc.__cause__)
         else:
             raise AssertionError("Injected second-source write unexpectedly succeeded")
     finally:
