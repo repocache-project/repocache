@@ -138,3 +138,90 @@ actual recovery of a native NGINX installation. There is still no CLI
 registration, writable recovery helper, staging, `nginx -t`, reload or
 catalog writer. The five original #31 operational acceptance criteria
 remain NOT VERIFIED; no application or service activation is authorized.
+
+
+## Proposed v2 persistence bridge — review-only architecture for #31 ↔ #95 ↔ #28
+
+**Status: PROPOSED / NOT ADOPTED / NOT PERSISTED / NOT ACTIVATABLE.**
+The existing protected state-v1 schema, 32-item limit, lock/journal and
+fixture-only writer **remain byte-for-byte unchanged**. This branch adds a
+standalone *pure* proposed v2 snapshot/transition checker,
+`preview_proposed_v2_state_transition(...)`. It refuses all mutation,
+NGINX reload, active-catalog publication, cache cleanup and authentication
+claims. It does not read any real root-owned files, grant approval, migrate
+a v1 host or implement the native installation lifecycle.
+
+### Closed proposed snapshot contract
+
+- `state_schema_version=2` (unrecognised and refused by current v1 writer).
+  State generation is strictly 1..signed 64-bit max, with expected-generation
+  CAS for the proposed next generation. Bootstrap from no prior snapshot
+  requires expected generation zero. A v1-to-v2 conversion is **not**
+  automatically authorised and requires a separately reviewed migration.
+- `configuration_base64`: canonical ASCII-escaped, sorted/compact JSON
+  encoding of the complete strictly validated install-v1 document. Decoded
+  payload max 1 MiB, no duplicate keys, strict UTF-8, exact canonical
+  re-encoding, including full deployment and repo policy/TLS reference
+  data (never private TLS key bytes). Document expected generation equals
+  the proposed stored generation. The full configuration bytes are retained
+  so crash recovery need not trust an unavailable external digest alone.
+  `configuration_sha256` must hash those exact canonical decoded bytes.
+- `repository_records`: zero to 500 unique, explicit durable IDs with the
+  existing shared #95 canonical source/layout identity SHA-256, desired
+  active/disabled state and **only** observed `not-activated` (no synthetic
+  claim of verified live exposure). These records must match the entire
+  validated document exactly, without adopting a partial repository list.
+- `id_reservations`: at most 10,000 bounded, uniquely identified and
+  unique-identity entries with `allocated` or `retired`. Allocated IDs
+  exactly match present repositories. Between full successive snapshots,
+  *every* historic reservation must survive unchanged in identity; an
+  allocated item may become retired but retired items may never return to
+  allocated. The 10,000-record bound is the existing #95 pure planner bound;
+  exhaustion **fails closed** pending a separately authorised migration.
+  The ledger cannot silently discard history to make room. No removal ever
+  authorises deleting cached packages or force-cleanup.
+- `approval_reference`: closed source (`operator` or `audited-request`),
+  decision digest, exact configuration digest and expected previous generation.
+  These are **cross-consistency references, not authenticated approvals**.
+  The future privileged interface must authenticate operator identity,
+  operator intent and applicable decision scope independently under its own
+  OS-root-owned transaction lock, rather than interpreting this JSON
+  as trusted input.
+
+The pure checker validates bounds, the precise next-generation CAS,
+configuration byte/digest binding, repository and reservation set equality,
+immutable historical ID/identity and retirement continuity. It returns
+**no decoded configuration bytes, approval digest or identity lease** and
+reports authority flags FALSE. A caller-supplied prior snapshot is
+untrusted: the checker cannot prove that it includes the entire historically
+reserved set. Its `reservation_history_authoritative=false` is not
+weakened by a passing check. Existing #95 PR #214 remains the owner of
+declarative reconciliation and already-merged #28 owns NGINX candidate
+generation; no duplicate implementation is added here.
+
+### Required native persistence and activation boundary (NOT IMPLEMENTED)
+
+1. Define and review a new actual persisted v2 format and crash-safe
+   journal/recovery plus explicit v1 migration/refusal policy. Verify that
+   configured full bytes, immutable reservations and active-status evidence
+   fit the protected storage and recovery bounds before any public writer.
+2. A constrained privileged helper must acquire its own authenticated
+   host-root descriptor and OS-owned lock, independently validate signed
+   release/operator decision, pin exact v2 bytes and actual NGINX inode,
+   check filesystem/mount/ACL/SELinux provenance, and enforce real
+   expected-generation CAS. An untrusted v2 preview is not a write token.
+3. Prepare only verified owned managed include files, stage complete NGINX
+   context, execute packaged `nginx -t`, use controlled reload with
+   durable known-good state and rollback across reload failure.
+   Package-manager/systemd effects need separately documented compensation.
+4. Publish only verified **actually exposed** enabled repositories into
+   the versioned derived active-only catalog, atomically after validation.
+   On partial failure preserve/restage known-good host state, catalog and
+   cache, refusing foreign configuration and inconsistent exposure.
+
+Original #31 operational tests (Debian 13 and AlmaLinux 10 real install,
+repeat install, upgrade with TLS/cache/history retention, staging/syntax/
+reload rollback and interrupted recovery) remain **NOT VERIFIED**.
+Original #95 and #28 operational acceptance remains NOT VERIFIED. The
+proposed bridge is testable coordination work, not adoption of a new
+protected-state format or approval of a native writer.

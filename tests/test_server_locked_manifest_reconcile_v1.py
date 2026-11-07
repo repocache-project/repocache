@@ -1,8 +1,10 @@
 """Bounded Linux fixed-path lock + manifest reconciliation tests (#31)."""
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
+import json
 import os
 from pathlib import Path
 
@@ -13,6 +15,7 @@ from repocache.server_locked_manifest_reconcile_v1 import (
     _inspect_locked_under_root,
     _match_manifest,
     _candidate_action,
+    preview_proposed_v2_state_transition,
     _preview_recovery_under_root,
     preview_current_namespace_locked_candidate,
 )
@@ -773,3 +776,219 @@ def test_public_recovery_preview_closes_root_after_refusal(monkeypatch):
     assert len(visited) == 1
     with pytest.raises(OSError):
         os.fstat(visited[0])
+
+
+
+def v2_install_document(count=2, *, generation=1):
+    example = (Path(__file__).resolve().parents[1] /
+               "docs/examples/server-install-v1.json")
+    document = json.loads(example.read_text(encoding="utf-8"))
+    document["expected_state_generation"] = generation
+    template = document["repositories"][0]
+    repos = []
+    for index in range(count):
+        item = copy.deepcopy(template)
+        item["id"] = f"repo-{index}"
+        item["upstream"]["base_url"] = (
+            f"https://mirror{index}.example.invalid/debian/"
+        )
+        item["upstream"]["allowed_hosts"] = [
+            f"mirror{index}.example.invalid"
+        ]
+        repos.append(item)
+    document["repositories"] = repos
+    return document
+
+
+def proposed_v2_state(document, *, generation, prior=None):
+    from repocache.server_repository_plan_v1 import _canonical_identity
+    doc = copy.deepcopy(document)
+    doc["expected_state_generation"] = generation
+    raw = json.dumps(
+        doc, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    records = []
+    for repo in doc["repositories"]:
+        records.append({
+            "id": repo["id"],
+            "canonical_identity_sha256": hashlib.sha256(
+                _canonical_identity(repo).encode("utf-8")
+            ).hexdigest(),
+            "desired_state": repo["desired_state"],
+            "observed_state": "not-activated",
+        })
+    reservations = [{
+        "id": item["id"],
+        "canonical_identity_sha256": item["canonical_identity_sha256"],
+        "status": "allocated",
+    } for item in records]
+    if prior is not None:
+        existing = {row["id"]: row for row in reservations}
+        for item in prior["id_reservations"]:
+            if item["id"] not in existing:
+                reservations.append({
+                    **item,
+                    "status": "retired",
+                })
+    return {
+        "state_schema_version": 2,
+        "state_generation": generation,
+        "configuration_base64": base64.b64encode(raw).decode("ascii"),
+        "configuration_sha256": hashlib.sha256(raw).hexdigest(),
+        "repository_records": records,
+        "id_reservations": reservations,
+        "approval_reference": {
+            "source": "operator",
+            "decision_sha256": "d" * 64,
+            "configuration_sha256": hashlib.sha256(raw).hexdigest(),
+            "expected_generation": generation - 1,
+        },
+    }
+
+
+def v2_preview(candidate, *, expected=0, previous=None):
+    return preview_proposed_v2_state_transition(
+        candidate, expected_generation=expected,
+        previous_snapshot=previous,
+    )
+
+
+@pytest.mark.parametrize("count", [0, 2, 32, 33, 500])
+def test_proposed_v2_contract_scales_without_changing_store_v1(count):
+    doc = v2_install_document(count)
+    snapshot = proposed_v2_state(doc, generation=1)
+    report = v2_preview(snapshot)
+    assert report["status"] == "PROPOSED_UNTRUSTED_V2_CONTRACT_ONLY"
+    assert report["repository_count"] == count
+    assert report["reserved_id_count"] == count
+    assert report["configuration_digest_matches_canonical_payload"] is True
+    for flag in (
+        "operator_authorization_verified",
+        "protected_snapshot_provenance_verified",
+        "reservation_history_authoritative",
+        "observed_nginx_exposure_verified",
+        "native_transaction_verified",
+        "authorizes_write",
+        "authorizes_nginx_reload",
+        "authorizes_catalog_publication",
+        "authorizes_cache_cleanup",
+    ):
+        assert report[flag] is False
+    from repocache.server_protected_state_store_v1 import (
+        ProtectedStateStoreError, validate_protected_state,
+    )
+    # A proposed v2 snapshot is never silently treated as v1 persisted state.
+    with pytest.raises(ProtectedStateStoreError):
+        validate_protected_state(snapshot)
+
+
+def test_proposed_v2_retirement_preserves_id_and_identity():
+    original = v2_install_document()
+    prev = proposed_v2_state(original, generation=1)
+    next_doc = copy.deepcopy(original)
+    next_doc["repositories"] = next_doc["repositories"][:1]
+    next_state = proposed_v2_state(next_doc, generation=2, prior=prev)
+    report = v2_preview(next_state, expected=1, previous=prev)
+    assert report["removed_repository_count"] == 1
+    assert report["repository_count"] == 1
+    assert report["reserved_id_count"] == 2
+    assert next_state["id_reservations"][-1]["status"] == "retired"
+    # An id that was ever retired cannot be silently made active again.
+    resurrected = copy.deepcopy(next_state)
+    resurrected["id_reservations"][-1]["status"] = "allocated"
+    with pytest.raises(LockedManifestInspectionError, match="RESERVATION"):
+        v2_preview(resurrected, expected=1, previous=prev)
+
+
+def test_proposed_v2_retired_id_cannot_reappear_in_later_generation():
+    start = proposed_v2_state(v2_install_document(), generation=1)
+    reduced = v2_install_document(1)
+    removed = proposed_v2_state(reduced, generation=2, prior=start)
+    readded = proposed_v2_state(v2_install_document(), generation=3)
+    with pytest.raises(LockedManifestInspectionError, match="RESERVATION"):
+        v2_preview(readded, expected=2, previous=removed)
+
+
+@pytest.mark.parametrize("mutation", [
+    "digest", "payload", "schema", "intent", "identity", "reservation",
+    "approval", "generation", "unknown", "observed", "uncanonical",
+])
+def test_proposed_v2_rejects_untrusted_or_inconsistent_inputs(mutation):
+    snapshot = proposed_v2_state(v2_install_document(), generation=1)
+    if mutation == "digest":
+        snapshot["configuration_sha256"] = "b" * 64
+    elif mutation == "payload":
+        snapshot["configuration_base64"] = base64.b64encode(
+            b'{"private-token":"no"}'
+        ).decode("ascii")
+    elif mutation == "schema":
+        snapshot["state_schema_version"] = 1
+    elif mutation == "intent":
+        snapshot["repository_records"][0]["desired_state"] = "active"
+    elif mutation == "identity":
+        snapshot["repository_records"][0]["canonical_identity_sha256"] = "f" * 64
+    elif mutation == "reservation":
+        snapshot["id_reservations"].pop()
+    elif mutation == "approval":
+        snapshot["approval_reference"]["configuration_sha256"] = "a" * 64
+    elif mutation == "generation":
+        snapshot["state_generation"] = 2
+    elif mutation == "unknown":
+        snapshot["new_permission"] = True
+    elif mutation == "observed":
+        snapshot["repository_records"][0]["observed_state"] = "verified-active"
+    else:
+        raw = base64.b64decode(snapshot["configuration_base64"])
+        snapshot["configuration_base64"] = base64.b64encode(
+            raw + b" "
+        ).decode("ascii")
+        snapshot["configuration_sha256"] = hashlib.sha256(
+            raw + b" "
+        ).hexdigest()
+        snapshot["approval_reference"]["configuration_sha256"] = (
+            snapshot["configuration_sha256"]
+        )
+    with pytest.raises(LockedManifestInspectionError, match="PROPOSED_V2_"):
+        v2_preview(snapshot)
+
+
+def test_proposed_v2_fail_closed_on_501_repositories():
+    snapshot = proposed_v2_state(v2_install_document(501), generation=1)
+    with pytest.raises(LockedManifestInspectionError, match="PROPOSED_V2_"):
+        v2_preview(snapshot)
+
+
+def test_proposed_v2_rejects_disappeared_tombstone_and_changed_identity():
+    old = proposed_v2_state(v2_install_document(2), generation=1)
+    same = proposed_v2_state(v2_install_document(2), generation=2, prior=old)
+    same["id_reservations"] = same["id_reservations"][:-1]
+    with pytest.raises(LockedManifestInspectionError, match="RESERVATION"):
+        v2_preview(same, expected=1, previous=old)
+    changed = proposed_v2_state(v2_install_document(2), generation=2)
+    changed["id_reservations"][0]["canonical_identity_sha256"] = "e" * 64
+    with pytest.raises(LockedManifestInspectionError, match="RESERVATION"):
+        v2_preview(changed, expected=1, previous=old)
+
+
+@pytest.mark.parametrize("bad", [None, True, -1, 2**63, "0"])
+def test_proposed_v2_rejects_invalid_expected_generation(bad):
+    state = proposed_v2_state(v2_install_document(), generation=1)
+    with pytest.raises(LockedManifestInspectionError, match="EXPECTED_GENERATION"):
+        v2_preview(state, expected=bad)
+
+
+def test_proposed_v2_does_not_touch_host_or_mutate_caller(monkeypatch):
+    import socket
+    import subprocess
+    original = proposed_v2_state(v2_install_document(), generation=1)
+    before = copy.deepcopy(original)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("side effect in pure v2 contract check")
+
+    monkeypatch.setattr(socket, "socket", forbidden)
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    monkeypatch.setattr(os, "open", forbidden)
+    monkeypatch.setattr(os, "replace", forbidden)
+    assert v2_preview(original)["authorizes_write"] is False
+    assert original == before
