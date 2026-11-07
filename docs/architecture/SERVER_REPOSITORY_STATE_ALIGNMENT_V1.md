@@ -290,3 +290,46 @@ the exact separation between old and new generations, strict install-v1
 revalidation, and false mutation/activation/catalog/cleanup permissions.
 This does not imply that #31's proposed v2 design has been accepted, or
 that persistent v2 interoperation has been executed.
+
+
+## v1-independent pure lifecycle planner for proposed #31 v2 integration
+
+The existing `preview_repository_lifecycle_nginx_candidate` remains the
+**strict legacy state-v1 wrapper**. Its current-state alignment and 32-record
+ceiling are unchanged; it still rejects snapshots that cannot be represented
+by the protected v1 schema. Nothing silently upgrades, trusts or persists v2.
+
+The new `preview_repository_lifecycle_nginx_from_untrusted_document` is
+the very same non-authorising #95 operation/NGINX planner, but with no
+caller-provided state-v1 snapshot argument. It consumes only a complete,
+strictly validated install-v1 document, an expected generation, operation
+intent and candidate DNS pins. This removes the **pure-planning** dependency
+on the obsolete 32-record limit: the existing install-v1 validator can
+handle up to 500 repositories, consistent with the **proposed/unmerged**
+#31 v2 target. It reuses the existing #95 explicit add/update/enable/
+disable/remove rules, #28 pinned HTTPS renderer, current-generation vs
+next-generation candidate separation, immutable ID checks, desired-state
+deltas, no-op behavior, tombstone and cache-retention intent. The old
+wrapper delegates to it only *after* the strict v1 alignment check.
+
+**Security boundary:** the new function is intentionally named
+`from_untrusted_document`: merely supplying a full document (even one
+apparently decoded from a v2 snapshot) proves **no** source ownership,
+historic ID reservations, operator authorization, generation CAS, held
+lock, observed NGINX exposure, active catalog, TLS trust or cache safety.
+All returned state/NGINX/catalog/cleanup permissions remain false. It is
+not a public privileged API, a second state reader, a lock/writer, a
+v1→v2 migration, an adopted v2 format or a way to skip #31 validation.
+The eventual **#31-owned trusted transaction** must independently pin and
+revalidate its source bytes, actual persisted v2 state and all-time
+reservations *under the OS-owned lock*, authenticate a scoped operator
+decision, then apply/recheck all downstream NGINX and recovery gates.
+An untrusted result cannot authorize the transaction even if it matches
+a later protected read.
+
+Tests compare old/new behavior at v1-compatible capacities; exercise
+strict v1 refusal alongside successful pure planning with 33 and 500
+disabled repositories, unchanged and rotated trust, future generation
+validation, reserved-ID re-use refusal, unsafe pins, synthetic bootstrap
+and absence of host-side effects. These results are pure functional
+compatibility evidence, **not native two-OS operational acceptance**.

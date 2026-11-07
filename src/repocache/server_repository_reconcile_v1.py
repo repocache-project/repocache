@@ -423,19 +423,45 @@ def preview_repository_lifecycle_nginx_candidate(
     candidate_pins_by_repository: dict[str, dict[str, list[str]]],
     ca_bundle_path: str,
 ) -> dict[str, Any]:
-    """Preview add/update/enable/disable/remove via existing #95/#28 planners.
+    """Backward-compatible v1 snapshot guard plus inert lifecycle preview.
 
-    This is a *non-authorizing* composition of untrusted input snapshots.
-    Unlike partial reconciliation, an explicit remove changes the candidate
-    repository set. Removal never implies cache deletion; a future protected
-    state store must persist an all-time ID tombstone and authoritatively
-    withdraw routes/catalog under its own lock. The caller's reserved-ID
-    snapshot is not a trusted ledger, even when validation succeeds.
+    Refuse unaligned v1 state before executing the shared pure planner.
+    This does NOT establish provenance or authorize a protected write.
     """
     current = validate_install_document(current_document, for_apply=True)
     preview_declarative_state_alignment(
         current, protected_snapshot, current_generation=current_generation
     )
+    return preview_repository_lifecycle_nginx_from_untrusted_document(
+        current, current_generation=current_generation, operation=operation,
+        repository_id=repository_id, proposed_repository=proposed_repository,
+        reserved_ids=reserved_ids,
+        candidate_pins_by_repository=candidate_pins_by_repository,
+        ca_bundle_path=ca_bundle_path,
+    )
+
+
+def preview_repository_lifecycle_nginx_from_untrusted_document(
+    current_document: dict[str, Any],
+    *,
+    current_generation: int,
+    operation: str,
+    repository_id: str | None = None,
+    proposed_repository: dict[str, Any] | None = None,
+    reserved_ids: set[str] | frozenset[str] | None = None,
+    candidate_pins_by_repository: dict[str, dict[str, list[str]]],
+    ca_bundle_path: str,
+) -> dict[str, Any]:
+    """Plan against a full untrusted install-v1 document without a v1 store.
+
+    Accepts up to the install-v1 limit (500 repositories), independently
+    of the legacy protected state-v1 32-record constraint. This is suitable
+    ONLY as a pure planning primitive for a *future* #31-proven read from
+    an adopted, authenticated protected state version, not an alternative
+    read/validation/locking/writing path. The caller must not infer authority
+    from successful output, including for generation zero bootstrap.
+    """
+    current = validate_install_document(current_document, for_apply=True)
     try:
         intent = plan_repository_change(
             current,

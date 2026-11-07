@@ -18,6 +18,7 @@ from repocache.server_repository_reconcile_v1 import (
     plan_inert_persistence_transition,
     preview_declarative_nginx_candidate,
     preview_repository_lifecycle_nginx_candidate,
+    preview_repository_lifecycle_nginx_from_untrusted_document,
 )
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "docs/examples/server-install-v1.json"
@@ -1154,3 +1155,167 @@ def test_explicit_generation_exhaustion_never_returns_commit_candidate():
                 "debian-trixie-main": copy.deepcopy(_PUBLIC_PINS),
             }, ca_bundle_path=_CA,
         )
+
+
+# The v1 state reader supports at most 32 records. The proposed #31 v2
+# reader supports up to 500 but is not adopted or available on this branch.
+# Keep the pure lifecycle planner usable without v1 and strictly non-authorizing.
+
+
+def _untrusted_document_at_capacity(count):
+    base = document()
+    base["expected_state_generation"] = 1
+    source = copy.deepcopy(base["repositories"][0])
+    generated = []
+    for index in range(count):
+        repo = copy.deepcopy(source)
+        repo["id"] = f"repo-{index}"
+        hostname = f"mirror{index}.example.invalid"
+        repo["upstream"]["base_url"] = f"https://{hostname}/debian/"
+        repo["upstream"]["allowed_hosts"] = [hostname]
+        repo["desired_state"] = "disabled"
+        generated.append(repo)
+    base["repositories"] = generated
+    return base
+
+
+def _preview_without_v1_snapshot(current, operation, *, repository_id=None,
+                                 proposed_repository=None, reserved_ids=None,
+                                 pins=None):
+    return preview_repository_lifecycle_nginx_from_untrusted_document(
+        current, current_generation=current["expected_state_generation"],
+        operation=operation, repository_id=repository_id,
+        proposed_repository=proposed_repository, reserved_ids=reserved_ids,
+        candidate_pins_by_repository={} if pins is None else pins,
+        ca_bundle_path=_CA,
+    )
+
+
+@pytest.mark.parametrize("count", [33, 500])
+def test_pure_lifecycle_planner_can_handle_full_install_limit_without_v1_state(count):
+    from repocache.server_install_v1 import validate_install_document
+
+    current = _untrusted_document_at_capacity(count)
+    before = copy.deepcopy(current)
+    proposal = copy.deepcopy(current["repositories"][0])
+    proposal["layout"]["release_key_refs"] = [
+        "file:/etc/repocache/keys/rotated-archive.gpg"
+    ]
+    result = _preview_without_v1_snapshot(
+        current, "update", repository_id=proposal["id"],
+        proposed_repository=proposal,
+    )
+    assert result["changed"] is True
+    assert result["expected_state_generation"] == 1
+    assert result["proposed_state_generation"] == 2
+    assert len(result["candidate_document"]["repositories"]) == count
+    assert len(result["next_generation_configuration_preview"]["repositories"]) == count
+    assert result["next_generation_configuration_preview"]["expected_state_generation"] == 2
+    assert validate_install_document(result["next_generation_configuration_preview"],
+                                     for_apply=True) == result["next_generation_configuration_preview"]
+    assert result["desired_new_route_ids"] == []
+    assert result["proposed_repository_ids"] == []
+    assert result["authorizes_state_commit"] is False
+    assert result["authorizes_nginx_activation"] is False
+    assert result["authorizes_catalog_publication"] is False
+    assert result["trusted_id_ledger_verified"] is False
+    assert current == before
+    with pytest.raises(ReconciliationPlanError, match="invalid state snapshot"):
+        preview_repository_lifecycle_nginx_candidate(
+            current, _inert_state_snapshot(current), current_generation=1,
+            operation="disable", repository_id="repo-0",
+            candidate_pins_by_repository={}, ca_bundle_path=_CA,
+        )
+
+
+def test_pure_document_planner_matches_existing_v1_wrapper_at_supported_capacity():
+    current = document()
+    current["expected_state_generation"] = 1
+    proposal = copy.deepcopy(current["repositories"][0])
+    proposal["desired_state"] = "active"
+    inputs = {
+        "current_generation": 1, "operation": "update",
+        "repository_id": proposal["id"],
+        "proposed_repository": proposal,
+        "candidate_pins_by_repository": {
+            proposal["id"]: copy.deepcopy(_PUBLIC_PINS),
+        },
+        "ca_bundle_path": _CA,
+    }
+    legacy = preview_repository_lifecycle_nginx_candidate(
+        current, _inert_state_snapshot(current), **copy.deepcopy(inputs),
+    )
+    future = preview_repository_lifecycle_nginx_from_untrusted_document(
+        current, **copy.deepcopy(inputs),
+    )
+    assert future == legacy
+    assert future["active_exposure_verified"] is False
+    assert future["authorizes_nginx_activation"] is False
+
+
+def test_pure_document_preview_refuses_untrusted_generation_and_reserved_id_reuse():
+    current = _untrusted_document_at_capacity(2)
+    with pytest.raises(ReconciliationPlanError, match="invalid or unreserved"):
+        preview_repository_lifecycle_nginx_from_untrusted_document(
+            current, current_generation=2, operation="disable",
+            repository_id="repo-0", candidate_pins_by_repository={},
+            ca_bundle_path=_CA,
+        )
+    new = copy.deepcopy(current["repositories"][0])
+    new["id"] = "retired-apt"
+    new["upstream"]["base_url"] = "https://new.example.invalid/debian/"
+    new["upstream"]["allowed_hosts"] = ["new.example.invalid"]
+    with pytest.raises(ReconciliationPlanError, match="invalid or unreserved"):
+        _preview_without_v1_snapshot(
+            current, "add", proposed_repository=new,
+            reserved_ids={"repo-0", "repo-1", "retired-apt"},
+        )
+
+
+def test_pure_document_preview_refuses_unsafe_pins_and_host_side_effects(monkeypatch):
+    import os
+    import socket
+    import subprocess
+    import repocache.server_protected_state_store_v1 as state_store
+
+    def denied(*args, **kwargs):
+        raise AssertionError("pure planner attempted to access the host")
+
+    monkeypatch.setattr(os, "replace", denied)
+    monkeypatch.setattr(socket, "getaddrinfo", denied)
+    monkeypatch.setattr(subprocess, "run", denied)
+    monkeypatch.setattr(state_store, "_commit_under_root", denied)
+
+    current = document()
+    current["expected_state_generation"] = 1
+    safe = _preview_without_v1_snapshot(current, "disable",
+                                        repository_id="debian-trixie-main")
+    for flag in ("authorizes_state_commit", "authorizes_nginx_activation",
+                 "authorizes_catalog_publication", "authorizes_cache_cleanup",
+                 "trusted_id_ledger_verified", "approval_provenance_verified"):
+        assert safe[flag] is False
+    with pytest.raises(ReconciliationPlanError, match="unsafe nginx candidate"):
+        _preview_without_v1_snapshot(
+            current, "enable", repository_id="debian-trixie-main",
+            pins={"debian-trixie-main": {
+                "mirror.example.invalid": ["127.0.0.1"],
+            }},
+        )
+
+
+def test_pure_document_bootstrap_is_untrusted_and_never_committable():
+    current = _untrusted_document_at_capacity(0)
+    current["expected_state_generation"] = 0
+    proposal = copy.deepcopy(document()["repositories"][0])
+    proposal["id"] = "new-bootstrap-repo"
+    result = _preview_without_v1_snapshot(
+        current, "add", proposed_repository=proposal, reserved_ids=set(),
+    )
+    assert result["expected_state_generation"] == 0
+    assert result["proposed_state_generation"] == 1
+    assert result["next_generation_configuration_preview"]["expected_state_generation"] == 1
+    assert result["new_repository_ids"] == ["new-bootstrap-repo"]
+    assert result["id_eligibility"] == "CALLER_SNAPSHOT_ONLY"
+    assert result["requires_trusted_locked_recheck"] is True
+    assert result["authorizes_state_commit"] is False
+    assert result["authorizes_nginx_activation"] is False
