@@ -178,7 +178,9 @@ def test_signed_stage_uses_exclusive_rootless_transaction_and_never_activates(
         "activated": False,
     }
     assert events == ["lock-acquire", "recover", "signed-lock-verified",
-                      "owned-wheel-verified", "isolation-verified", "download", "run-venv",
+                      "owned-wheel-verified", "isolation-verified",
+                      "cgroup-delegation-verified", "staging-quota-verified",
+                      "download", "run-venv",
                       "run-install-deps", "owned-wheel-verified", "run-install-app",
                       "run-check", "run-list", "run-cli-version", "run-cli-help",
                       "run-cli-help", "run-tui-import", "lock-release"]
