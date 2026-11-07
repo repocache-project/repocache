@@ -380,6 +380,25 @@ back even though there is not yet an *approved durable transaction* linking
 the actual include, persisted v2 state, live exposure, and catalog. The five
 original #31 operational criteria still require booted native host evidence.
 
+### Read-only v1 migration blockers under the existing shared lock
+
+The private `_preview_v1_migration_blockers_under_root` is a fixture-only
+locked diagnosis for an already-existing v1 snapshot. It requires a valid
+v1 state, refuses pending v1 journals, orphan stages, conflicting v2 names
+(including symlinks), and concurrent lock acquisition. It reads the
+protected v1 state twice and returns only a redacted generation, repository
+count and manifest count alongside permanently FALSE config-history,
+operator, host-root, NGINX, migration, activation and catalog authority
+indicators. There is no caller-provided configuration or migration token.
+
+Even a clean v1 state with zero repositories cannot prove a lossless
+migration: persisted v1 has no recoverable canonical configuration bytes
+or all-time historical ID ledger. This diagnostic deliberately reports
+`LEGACY_V1_MIGRATION_BLOCKED` and never writes either version. Executed
+fixture tests can verify refusal/nonmutation and lock behavior, but only
+a separately approved schema and host transaction can implement actual
+migration. This PR does not adopt the proposed v2 persistence format.
+
 ### v1 → proposed v2 migration and privileged authority: unresolved gates
 
 **No migration is executed or enabled by this PR.** The v1 snapshot stores a
