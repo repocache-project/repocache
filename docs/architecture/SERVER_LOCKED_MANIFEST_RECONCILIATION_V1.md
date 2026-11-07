@@ -399,6 +399,25 @@ fixture tests can verify refusal/nonmutation and lock behavior, but only
 a separately approved schema and host transaction can implement actual
 migration. This PR does not adopt the proposed v2 persistence format.
 
+### Current namespace v1 migration refusal diagnostic
+
+The internal `inspect_current_namespace_v1_migration_blockers()` entry
+uses the same read-only, fixed `/` descriptor and pre/post root-inode
+identity checks as existing protected-state diagnostics. It requires effective
+UID 0, takes no caller-selected path, UID, root FD, configuration or journal,
+and closes the descriptor on both success and failure. It delegates to the
+existing exclusive-lock v1 preflight; a pending journal, unsafe filesystem
+entry, divergent state or v2 coexistence remains a refusal, not an automatic
+repair or migration. The output is only a redacted blocker report with all
+migration/NGINX/catalog and operator/host-root authorization fields false.
+
+This function is **not** wired into the CLI, installer, sudo/polkit or a
+privileged helper. A container-root namespace is not native host-root proof.
+It neither migrates v1 nor advances the five original #31 host acceptance
+criteria. Its regression tests cover unprivileged denial before filesystem
+access, pinned current-root identity, substituted descriptor refusal and
+descriptor cleanup on failure.
+
 ### v1 → proposed v2 migration and privileged authority: unresolved gates
 
 **No migration is executed or enabled by this PR.** The v1 snapshot stores a
