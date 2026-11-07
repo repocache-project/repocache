@@ -44,6 +44,9 @@ FIXTURES = {
         "application/x-rpm", b"RPM\x00immutable-disposable-test"
     ),
     "/apt/accel": ("application/octet-stream", b"UPSTREAM-ACCEL-HEADER-IGNORED"),
+    "/apt/dists/trixie/Release.gpg": (
+        "application/octet-stream", b"PUBLIC-DISPOSABLE-RELEASE-SIGNATURE",
+    ),
 }
 
 
@@ -87,6 +90,14 @@ def make_backend(counts: collections.Counter[str], lock: threading.Lock):
                 self.send_error(404)
                 return
             mimetype, body = item
+            # Deliberately return personalized bytes with a PUBLIC cache
+            # directive: the proxy must never store credentialed responses.
+            if self.path == "/apt/dists/trixie/Release.gpg":
+                auth, cookie = self.headers.get("Authorization"), self.headers.get("Cookie")
+                if auth:
+                    body = b"PRIVATE-AUTH:" + auth.encode("ascii")
+                elif cookie:
+                    body = b"PRIVATE-COOKIE:" + cookie.encode("ascii")
             self.send_response(200)
             self.send_header("Content-Type", mimetype)
             self.send_header("Content-Length", str(len(body)))
@@ -125,6 +136,8 @@ def config(root: Path, port: int, upstream: int, cert: Path, key: Path) -> Path:
             "    proxy_cache_valid 200 10m;\n"
             "    proxy_cache_methods GET HEAD;\n"
             "    proxy_cache_lock on;\n"
+            "    proxy_cache_bypass $http_authorization $http_cookie;\n"
+            "    proxy_no_cache $http_authorization $http_cookie;\n"
             "    proxy_ignore_headers X-Accel-Redirect;\n"
             "    proxy_hide_header X-Accel-Redirect;\n"
             "    proxy_redirect off;\n"
@@ -221,8 +234,9 @@ def check_candidate_syntax(root: Path, nginx: str) -> None:
 
 
 def request(url: str, context: ssl.SSLContext, *,
-            method: str = "GET") -> tuple[int, bytes, str, dict[str, str]]:
-    r = urllib.request.Request(url, method=method)
+            method: str = "GET", headers: dict[str, str] | None = None,
+            ) -> tuple[int, bytes, str, dict[str, str]]:
+    r = urllib.request.Request(url, method=method, headers=headers or {})
     try:
         with urllib.request.urlopen(r, context=context, timeout=3) as response:
             return (response.status, response.read(),
@@ -320,6 +334,36 @@ def main() -> None:
                         "stock NGINX cache prevents repeat upstream " + prefix +
                         " metadata/package fetch",
                     )
+            auth_url = base + "debian-trixie-main/dists/trixie/Release.gpg"
+            a = request(auth_url, ctx, headers={"Authorization": "Bearer first"})
+            b = request(auth_url, ctx, headers={"Authorization": "Bearer second"})
+            require(
+                a[1] == b"PRIVATE-AUTH:Bearer first" and
+                b[1] == b"PRIVATE-AUTH:Bearer second" and
+                a[2] == b[2] == "BYPASS",
+                "two different bearer tokens are never stored or cross-served",
+            )
+            public = request(auth_url, ctx)
+            repeat_public = request(auth_url, ctx)
+            require(
+                public[:3] == (
+                    200, FIXTURES["/apt/dists/trixie/Release.gpg"][1], "MISS"
+                ) and repeat_public[2] == "HIT" and
+                repeat_public[1] == public[1],
+                "credentialed response never poisons anonymous signed metadata",
+            )
+            cookie = request(auth_url, ctx, headers={"Cookie": "session=test"})
+            require(
+                cookie[1] == b"PRIVATE-COOKIE:session=test" and
+                cookie[2] == "BYPASS" and
+                request(auth_url, ctx)[2] == "HIT",
+                "cookie-specific response bypasses and cannot poison public HIT",
+            )
+            with lock:
+                calls = counts["/apt/dists/trixie/Release.gpg"]
+            require(
+                calls == 4, "native cache makes no upstream repeat for public object",
+            )
             require(
                 request(base + "unapproved/foo", ctx)[0] == 404,
                 "unapproved route does not access backend",
