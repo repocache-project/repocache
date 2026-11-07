@@ -126,6 +126,83 @@ tool.apply_entry_sandbox(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5])
     assert proc.returncode == -signal.SIGKILL, proc.stderr
 
 
+def independent_transaction_failure_recovery(root):
+    """A failure or crash on one source must not roll back another source.
+
+    This is a private /tmp laboratory, NOT an installed multi-file writer.
+    """
+    apt_relative = "etc/apt/sources.list.d/isolated-success.list"
+    apt_before = FILES["etc/apt/sources.list.d/mixture.list"]
+    apt_path, apt_candidate, apt_stage, _ = fixture(root, apt_relative, apt_before)
+    dnf_relative = "etc/yum.repos.d/isolated-failure.repo"
+    dnf_before = FILES["etc/yum.repos.d/mixture.repo"]
+    dnf_path, dnf_candidate, dnf_stage, _ = fixture(root, dnf_relative, dnf_before)
+
+    assert wrapper.apply_entry_sandbox(
+        root, apt_candidate, apt_stage, URL)["state"] == "installed"
+    apt_applied = apt_path.read_bytes()
+    apt_inode = apt_path.stat().st_ino
+    assert apt_applied != apt_before
+    assert_siblings(apt_relative, apt_before, apt_applied)
+
+    # Inject a failure AFTER the second source's durable journal and
+    # temporary file exist but BEFORE its atomic rename.
+    original_replace = atomic._replace
+
+    def injected_io_error(*args):
+        raise OSError(5, "injected sandbox I/O failure before rename")
+
+    atomic._replace = injected_io_error
+    try:
+        try:
+            wrapper.apply_entry_sandbox(root, dnf_candidate, dnf_stage, URL)
+        except stage.StageError as exc:
+            # The path-safety boundary deliberately wraps OS failures in a
+            # stable refusal. Preserve the injected failure as its cause.
+            assert "Unsafe repository source pathname" in str(exc)
+            assert isinstance(exc.__cause__, OSError)
+            assert "injected sandbox I/O failure" in str(exc.__cause__)
+        else:
+            raise AssertionError("Injected second-source write unexpectedly succeeded")
+    finally:
+        atomic._replace = original_replace
+
+    pending = dnf_path.parent / (".repocache-atomic-" + dnf_stage)
+    assert dnf_path.read_bytes() == dnf_before
+    assert pending.is_file()
+    assert apt_path.read_bytes() == apt_applied
+    assert apt_path.stat().st_ino == apt_inode
+
+    # Recovery of only the second journal must preserve the first commit.
+    recovered = wrapper.recover_entry_sandbox(root, dnf_candidate, dnf_stage, URL)
+    assert recovered["state"] == "not-applied"
+    assert dnf_path.read_bytes() == dnf_before
+    assert not pending.exists()
+    assert apt_path.read_bytes() == apt_applied
+    assert apt_path.stat().st_ino == apt_inode
+    assert atomic.recover_sandbox(root, apt_stage)["status"] == "installed"
+
+    # In a fresh third source, SIGKILL immediately after rename should
+    # restore only that source, never the previously committed APT source.
+    crash_relative = "etc/yum.repos.d/isolated-crash.repo"
+    crash_path, crash_candidate, crash_stage, _ = fixture(
+        root, crash_relative, dnf_before)
+    interrupted_install(root, crash_candidate, crash_stage)
+    assert crash_path.read_bytes() != dnf_before
+    assert wrapper.recover_entry_sandbox(
+        root, crash_candidate, crash_stage, URL)["state"] == "restored"
+    assert crash_path.read_bytes() == dnf_before
+    assert apt_path.read_bytes() == apt_applied
+    assert apt_path.stat().st_ino == apt_inode
+
+    # Successful changes remain independently reversible after other failures.
+    assert wrapper.rollback_entry_sandbox(
+        root, apt_candidate, apt_stage, URL)["state"] == "restored"
+    assert apt_path.read_bytes() == apt_before
+    assert dnf_path.read_bytes() == dnf_before
+    assert crash_path.read_bytes() == dnf_before
+
+
 def main():
     assert os.geteuid() == 0, "Native positive sandbox scenario requires UID 0"
     with tempfile.TemporaryDirectory(prefix="rc-shared-atomic-") as private:
@@ -168,6 +245,9 @@ def main():
             assert restored["state"] == "restored"
             assert source.read_bytes() == original
             assert_siblings(relative, original, changed)
+
+        # A failed source cannot roll back another successfully installed source.
+        independent_transaction_failure_recovery(root)
 
         # Sibling changed after planning => stale stage must never apply.
         other = "etc/apt/sources.list.d/conflict.list"
@@ -223,7 +303,7 @@ def main():
             raise AssertionError("Unsupported source xattrs were overwritten")
         assert path.read_bytes() == before
 
-    print("PASS: mixed-file atomic apply/rollback, preserved siblings, drift and SIGKILL recovery")
+    print("PASS: mixed-file atomic apply/rollback, independent failure isolation, preserved siblings, drift and SIGKILL recovery")
 
 
 if __name__ == "__main__":
