@@ -44,3 +44,24 @@ These are **container-level sandbox proofs**, not installation, real package upg
 - Human code/security review, #142 parent integration, reconciliation with pending #135/#137, and explicit maintainer merge authorization.
 
 No merge, release, production changes or enablement of `repos sync --apply` is authorized by this experimental implementation.
+
+## Independent-repository failure isolation (sandbox regression)
+
+The same native Debian 13 and AlmaLinux 10 smoke now stages one APT .list
+and two DNF .repo source files independently. It installs the first APT
+candidate, then injects a deterministic I/O failure after the second source's
+protected journal and same-directory temporary file have been written but
+before its rename. Recovery verifies that second intent and removes only its
+own temporary file, leaving the successfully installed APT source unchanged
+in both bytes and inode identity. A separate child-process SIGKILL after a
+third source rename similarly recovers only that source; the first APT source
+remains installed and can still be rolled back independently.
+
+This proves per-file failure isolation in private lab fixtures, including
+full-byte preservation of unrelated sibling entries. It is not a cross-file
+atomic commit protocol and does not prove per-repository rollback when
+multiple repositories share the same file. A shared file remains the
+indivisible atomic replacement unit; operations affecting multiple entries
+in that file must be sequenced against a new verified baseline or refused.
+No source writes outside marked /tmp fixtures, installed helper, production
+sync --apply, SELinux enforcing or real APT/DNF failover are enabled.
