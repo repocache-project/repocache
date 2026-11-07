@@ -323,3 +323,30 @@ a booted native host, systemd/SELinux, a genuine power cut, actual
 NGINX syntax/reload, TLS/cache/metrics retention, foreign live host
 ownership or signed administrator approval. Full #31 operational
 acceptance remains NOT VERIFIED.
+
+
+### Locked persisted configuration → existing #28 NGINX candidate
+
+The private `_preview_persisted_v2_nginx_candidate_under_root`
+reads and verifies the exact proposed v2 snapshot/digest and generation
+**under the existing protected state lock**. Pending journals, legacy v1
+state, stale generations, untrusted/oversized pin maps, invalid DNS/IP
+pins and state drift refuse the whole preview. It decodes only the
+validated canonical install-v1 bytes from the actual locked fixture
+state, passes the full document to the **already merged #28 renderer**
+and re-reads the persisted bytes before returning. There is no duplicate
+#95 lifecycle planner or second NGINX route/approval source.
+
+The output is **still candidate-only**, with host-root, authenticated
+operator, actual NGINX include manifest, NGINX syntax, observed exposure,
+activation and catalog-publication authority all FALSE. It is neither
+an on-host CLI nor an operator permission token.
+
+The two-distro fixture workflow installs **distro-packaged NGINX**
+inside its disposable container and executes a separate `nginx -t`
+against a generated temporary config containing the persisted
+two-layout (APT and DNF) candidate. No running NGINX service is
+reloaded, no real managed include/certificate is replaced, and no
+catalog is published. Native booted systemd/SELinux, authenticated
+activation, actual service rollback and original #31 acceptance
+remain NOT VERIFIED.

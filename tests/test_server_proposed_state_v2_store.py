@@ -6,6 +6,8 @@ import copy
 import hashlib
 import json
 import os
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -25,6 +27,7 @@ from repocache.server_proposed_state_v2_store import (
     ProposedV2PersistenceError,
     _commit_proposed_v2_under_root as commit,
     _recover_proposed_v2_under_root as recover,
+    _preview_persisted_v2_nginx_candidate_under_root as render_persisted,
 )
 
 
@@ -516,3 +519,161 @@ def test_real_process_exit_and_recovery_in_second_process(
     assert apply(fixture_root, proposal, expected=generation)["status"] == (
         "COMMITTED_INERT_V2"
     )
+
+
+
+def two_layout_active_snapshot():
+    source = (Path(__file__).resolve().parents[1] /
+              "docs/examples/server-install-v1.json")
+    doc = json.loads(source.read_text(encoding="utf-8"))
+    doc["expected_state_generation"] = 1
+    doc["repositories"][1]["id"] = "almalinux-baseos"
+    for repository in doc["repositories"]:
+        repository["desired_state"] = "active"
+    return snapshot(generation=1, doc=doc)
+
+
+def pinned_two_layouts():
+    return {
+        name: {"mirror.example.invalid": ["8.8.8.8", "2001:4860:4860::8888"]}
+        for name in ("debian-trixie-main", "almalinux-baseos")
+    }
+
+
+def persisted_render(layout, *, generation=1, pins=None):
+    fd, _, uid = layout
+    return render_persisted(
+        fd, owner_uid=uid, expected_generation=generation,
+        candidate_pins_by_repository=(
+            pinned_two_layouts() if pins is None else pins
+        ),
+        ca_bundle_path="/etc/ssl/certs/ca-certificates.crt",
+    )
+
+
+def test_locked_persisted_v2_produces_only_non_authorizing_nginx_candidate(
+    fixture_root,
+):
+    _, folder, _ = fixture_root
+    state = two_layout_active_snapshot()
+    apply(fixture_root, state)
+    before = (folder / V2_STATE).read_bytes()
+    result = persisted_render(fixture_root)
+    assert result["status"] == "LOCKED_FIXTURE_V2_NGINX_CANDIDATE_ONLY"
+    assert result["proposed_repository_ids"] == [
+        "almalinux-baseos", "debian-trixie-main",
+    ]
+    assert "proxy_ssl_verify on;" in result["server_location_fragment"]
+    assert "proxy_ssl_server_name on;" in result["server_location_fragment"]
+    assert "proxy_pass https://" in result["server_location_fragment"]
+    assert "proxy_pass http://" not in result["server_location_fragment"]
+    assert result["persisted_config_bytes_and_digest_consistent"] is True
+    assert result["exclusive_state_lock_held_during_preview"] is True
+    for key in (
+        "trusted_host_root_verified", "operator_authorization_verified",
+        "live_include_manifest_verified", "nginx_syntax_verified",
+        "active_exposure_verified", "authorizes_nginx_activation",
+        "authorizes_catalog_publication",
+    ):
+        assert result[key] is False
+    assert (folder / V2_STATE).read_bytes() == before
+    assert not (folder / V2_JOURNAL).exists()
+
+
+@pytest.mark.parametrize("bad", [
+    {}, {"debian-trixie-main": {"mirror.example.invalid": ["8.8.8.8"]}},
+    {**pinned_two_layouts(), "unknown-repo": {"mirror.example.invalid": ["8.8.8.8"]}},
+    {**pinned_two_layouts(), "almalinux-baseos": {
+        "mirror.example.invalid": ["169.254.169.254"],
+    }},
+    {**pinned_two_layouts(), "almalinux-baseos": {
+        "wrong.example.invalid": ["8.8.8.8"],
+    }},
+])
+def test_locked_persisted_v2_refuses_missing_extra_unsafe_pins(
+    fixture_root, bad,
+):
+    _, folder, _ = fixture_root
+    apply(fixture_root, two_layout_active_snapshot())
+    original = (folder / V2_STATE).read_bytes()
+    with pytest.raises(ProposedV2PersistenceError, match="NGINX_CANDIDATE_REFUSED"):
+        persisted_render(fixture_root, pins=bad)
+    assert (folder / V2_STATE).read_bytes() == original
+    assert not (folder / V2_JOURNAL).exists()
+
+
+def test_locked_persisted_v2_refuses_stale_and_uncommitted_state(fixture_root):
+    fd, folder, uid = fixture_root
+    with pytest.raises(ProposedV2PersistenceError, match="STATE_ABSENT"):
+        persisted_render(fixture_root)
+    old = two_layout_active_snapshot()
+    apply(fixture_root, old)
+    with pytest.raises(ProposedV2PersistenceError, match="STALE_GENERATION"):
+        persisted_render(fixture_root, generation=2)
+
+    updated = snapshot(count=1, generation=2, previous=old)
+    def stop(phase):
+        if phase == "journal_durable":
+            raise RuntimeError("interrupt")
+
+    with pytest.raises(RuntimeError):
+        apply(fixture_root, updated, expected=1, inject=stop)
+    with pytest.raises(ProposedV2PersistenceError, match="RECOVERY_REQUIRED"):
+        persisted_render(fixture_root)
+    assert rollback(fixture_root)["state_generation"] == 1
+    assert persisted_render(fixture_root)["proposed_repository_ids"] == [
+        "almalinux-baseos", "debian-trixie-main",
+    ]
+
+
+def test_locked_persisted_v2_renderer_refuses_lock_contention(fixture_root):
+    fd, _, uid = fixture_root
+    apply(fixture_root, two_layout_active_snapshot())
+    with _locked(fd, uid):
+        with pytest.raises(ProtectedStateStoreError, match="LOCK_UNAVAILABLE"):
+            persisted_render(fixture_root)
+
+
+@pytest.mark.skipif(
+    shutil.which("nginx") is None,
+    reason="disposable distro-packaged nginx unavailable",
+)
+def test_persisted_v2_nginx_t_succeeds_without_touching_live_config(
+    fixture_root, tmp_path,
+):
+    ca = next((
+        p for p in (
+            "/etc/ssl/certs/ca-certificates.crt",
+            "/etc/pki/tls/certs/ca-bundle.crt",
+        ) if Path(p).is_file()
+    ), None)
+    if ca is None:
+        pytest.skip("disposable container CA bundle unavailable")
+    state = two_layout_active_snapshot()
+    apply(fixture_root, state)
+    fd, folder, uid = fixture_root
+    pinned = render_persisted(
+        fd, owner_uid=uid, expected_generation=1,
+        candidate_pins_by_repository=pinned_two_layouts(),
+        ca_bundle_path=ca,
+    )
+    assert pinned["nginx_syntax_verified"] is False
+    before = (folder / V2_STATE).read_bytes()
+    conf = tmp_path / "nginx.conf"
+    conf.write_text(
+        f"pid {tmp_path / 'nginx.pid'};\n"
+        f"error_log {tmp_path / 'nginx-error.log'} notice;\n"
+        "events {}\nhttp { access_log off;\n"
+        + pinned["http_upstream_fragment"]
+        + "server { listen 127.0.0.1:19991;\n"
+        + pinned["server_location_fragment"]
+        + "}\n}\n",
+        encoding="utf-8",
+    )
+    finished = subprocess.run(
+        [shutil.which("nginx"), "-t", "-c", str(conf), "-p", str(tmp_path)],
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    assert finished.returncode == 0, finished.stderr
+    assert (folder / V2_STATE).read_bytes() == before
+    assert not (folder / V2_JOURNAL).exists()

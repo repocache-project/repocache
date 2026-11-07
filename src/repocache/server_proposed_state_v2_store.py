@@ -26,7 +26,10 @@ from repocache.server_protected_state_store_v1 import (
     _canonical, _closed, _hash, _json, _locked, _read_file,
     _unlink_known, _write_exclusive,
 )
-from repocache.server_install_v1 import MAX_INT
+from repocache.server_install_v1 import MAX_INT, parse_install_bytes
+from repocache.server_nginx_repository_bundle_v1 import (
+    NginxRepositoryBundleError, render_repository_nginx_bundle_candidate,
+)
 
 V2_STATE = "state-v2.json"
 V2_JOURNAL = ".state-v2.pending"
@@ -337,3 +340,66 @@ def _recover_proposed_v2_under_root(
         return _report(
             status, 0 if state is None else state["state_generation"]
         )
+
+
+def _preview_persisted_v2_nginx_candidate_under_root(
+    root_fd: int, *, owner_uid: int,
+    expected_generation: int,
+    candidate_pins_by_repository: Any,
+    ca_bundle_path: str,
+) -> dict[str, Any]:
+    """Fixture-only locked persisted config → existing #28 renderer.
+
+    This is NOT an approval oracle, native validator, public host writer or
+    service activation path. It returns untrusted candidate NGINX fragments.
+    """
+    if (type(expected_generation) is not int
+            or not 1 <= expected_generation <= MAX_INT):
+        _refuse("EXPECTED_GENERATION_INVALID")
+    # Freeze untrusted input within a bound before taking the state lock.
+    try:
+        pin_raw = _canonical(candidate_pins_by_repository, limit=1024 * 1024)
+        pins = _json(pin_raw, limit=1024 * 1024)
+    except (ValueError, TypeError, OverflowError, RecursionError):
+        _refuse("PINS_INVALID")
+    with _locked(root_fd, owner_uid) as directory:
+        _legacy_refusal(directory, owner_uid)
+        if _pending(directory, owner_uid):
+            _refuse("RECOVERY_REQUIRED")
+        state, before = _read_v2(directory, owner_uid)
+        if state is None:
+            _refuse("STATE_ABSENT")
+        if state["state_generation"] != expected_generation:
+            _refuse("STALE_GENERATION")
+        # _read_v2 validated the full canonical payload/digest and exact
+        # record/ledger correspondence, but NOT operator approval or host root.
+        document = parse_install_bytes(
+            base64.b64decode(state["configuration_base64"]), for_apply=True
+        )
+        try:
+            candidate = render_repository_nginx_bundle_candidate(
+                document,
+                expected_state_generation=expected_generation,
+                candidate_pins_by_repository=pins,
+                ca_bundle_path=ca_bundle_path,
+            )
+        except (NginxRepositoryBundleError, ValueError, TypeError):
+            _refuse("NGINX_CANDIDATE_REFUSED")
+        _, after = _read_v2(directory, owner_uid)
+        if before != after:
+            _refuse("STATE_CHANGED_DURING_RENDER")
+        return {
+            **candidate,
+            "status": "LOCKED_FIXTURE_V2_NGINX_CANDIDATE_ONLY",
+            "persisted_config_bytes_and_digest_consistent": True,
+            "exclusive_state_lock_held_during_preview": True,
+            "fixture_only": True,
+            "trusted_host_root_verified": False,
+            "operator_authorization_verified": False,
+            "live_include_manifest_verified": False,
+            "nginx_syntax_verified": False,
+            "active_exposure_verified": False,
+            "authorizes_nginx_activation": False,
+            "authorizes_catalog_publication": False,
+        }
+
