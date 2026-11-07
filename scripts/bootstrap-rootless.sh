@@ -81,12 +81,12 @@ done
 if [[ -e /usr/local/bin/repocache || -L /usr/local/bin/repocache ]]; then
   if [[ ! -f /usr/local/bin/repocache || -L /usr/local/bin/repocache ]] ||
       ! grep -Fq 'REPOCACHE ROOTLESS LAUNCHER' /usr/local/bin/repocache; then
-    echo "Unmanaged or pre-public launcher detected; in-place migration is unsupported in v0.4.0; refusing overwrite" >&2
+    echo "Unmanaged or older launcher detected; migration is unsupported; refusing overwrite" >&2
     exit 1
   fi
 fi
 if [[ -e /usr/bin/repocache || -L /usr/bin/repocache ]]; then
-  echo "Pre-public /usr/bin/repocache detected; in-place migration to v0.4.0 is unsupported" >&2
+  echo "Unmanaged /usr/bin/repocache detected; migration is unsupported" >&2
   exit 1
 fi
 if ! id repocache >/dev/null 2>&1; then
