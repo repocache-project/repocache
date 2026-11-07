@@ -30,6 +30,7 @@ from repocache.server_proposed_state_v2_store import (
     _recover_proposed_v2_under_root as recover,
     _preview_persisted_v2_nginx_candidate_under_root as render_persisted,
     _preview_v1_migration_blockers_under_root as preview_v1_migration,
+    _preview_proposed_v2_recovery_under_root as preview_v2_recovery,
 )
 
 
@@ -1048,3 +1049,138 @@ def test_current_namespace_v1_migration_closes_root_after_refusal(monkeypatch):
     assert len(visited) == 1
     with pytest.raises(OSError):
         os.fstat(visited[0])
+
+
+def v2_recovery_preview(layout):
+    fd, _, uid = layout
+    return preview_v2_recovery(fd, owner_uid=uid)
+
+
+def test_v2_read_only_recovery_preview_clean_and_committed(fixture_root):
+    _, folder, _ = fixture_root
+    before = sorted(p.name for p in folder.iterdir())
+    empty = v2_recovery_preview(fixture_root)
+    assert empty["status"] == "CLEAN"
+    assert empty["state_generation"] == 0
+    assert empty["v2_recovery_pending"] is False
+    assert_no_authority(empty)
+    assert sorted(p.name for p in folder.iterdir()) == before
+    apply(fixture_root, snapshot())
+    saved = (folder / V2_STATE).read_bytes()
+    done = v2_recovery_preview(fixture_root)
+    assert done["status"] == "CLEAN"
+    assert done["state_generation"] == 1
+    assert done["v2_recovery_pending"] is False
+    assert done["read_only_under_exclusive_lock"] is True
+    for field in ("authorizes_v2_recovery", "authorizes_v1_migration",
+                  "host_service_recovery_verified"):
+        assert done[field] is False
+    assert_no_authority(done)
+    assert (folder / V2_STATE).read_bytes() == saved
+
+
+@pytest.mark.parametrize("bootstrap", [True, False])
+@pytest.mark.parametrize("phase,status", [
+    ("journal_tmp_durable", "UNPUBLISHED_V2_JOURNAL_ONLY"),
+    ("journal_durable", "INTERRUPTED_BEFORE_V2_REPLACE"),
+    ("stage_durable", "INTERRUPTED_BEFORE_V2_REPLACE"),
+    ("replace_durable", "INTERRUPTED_AFTER_V2_REPLACE"),
+])
+def test_v2_read_only_recovery_preview_crash_windows(
+    fixture_root, bootstrap, phase, status,
+):
+    _, folder, _ = fixture_root
+    previous = None
+    generation = 0
+    if not bootstrap:
+        previous = snapshot()
+        apply(fixture_root, previous)
+        generation = 1
+    candidate = snapshot(
+        count=1, generation=generation + 1, previous=previous,
+    )
+
+    def interrupt(point):
+        if point == phase:
+            raise RuntimeError("synthetic interruption")
+
+    with pytest.raises(RuntimeError, match="synthetic interruption"):
+        apply(fixture_root, candidate, expected=generation, inject=interrupt)
+    names = sorted(p.name for p in folder.iterdir())
+    existing = {
+        p.name: p.read_bytes() for p in folder.iterdir() if p.is_file()
+    }
+    report = v2_recovery_preview(fixture_root)
+    assert report["status"] == status
+    assert report["read_only_under_exclusive_lock"] is True
+    assert report["v2_recovery_pending"] is True
+    assert report["v2_published_journal_present"] is (
+        phase != "journal_tmp_durable"
+    )
+    assert report["rollback_temp_requires_rebuild"] is False
+    assert_no_authority(report)
+    assert report["authorizes_v2_recovery"] is False
+    assert report["host_service_recovery_verified"] is False
+    assert sorted(p.name for p in folder.iterdir()) == names
+    assert {
+        p.name: p.read_bytes() for p in folder.iterdir() if p.is_file()
+    } == existing
+    assert rollback(fixture_root)["state_generation"] == generation
+    assert v2_recovery_preview(fixture_root)["status"] == "CLEAN"
+
+
+def test_v2_read_only_recovery_preview_refuses_state_drift(fixture_root):
+    _, folder, _ = fixture_root
+    initial = snapshot()
+    apply(fixture_root, initial)
+    proposed = snapshot(count=1, generation=2, previous=initial)
+
+    def interrupt(point):
+        if point == "replace_durable":
+            raise RuntimeError("interrupted")
+
+    with pytest.raises(RuntimeError, match="interrupted"):
+        apply(fixture_root, proposed, expected=1, inject=interrupt)
+    divergent = snapshot(count=2, generation=2, previous=initial)
+    raw = json.dumps(
+        divergent, ensure_ascii=True, sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    (folder / V2_STATE).write_bytes(raw)
+    journal = (folder / V2_JOURNAL).read_bytes()
+    with pytest.raises(ProposedV2PersistenceError, match="STATE_DRIFT"):
+        v2_recovery_preview(fixture_root)
+    assert (folder / V2_STATE).read_bytes() == raw
+    assert (folder / V2_JOURNAL).read_bytes() == journal
+
+
+def test_v2_read_only_recovery_preview_refuses_orphan_and_held_lock(
+    fixture_root,
+):
+    fd, folder, uid = fixture_root
+    with _locked(fd, uid):
+        with pytest.raises(ProtectedStateStoreError, match="LOCK_UNAVAILABLE"):
+            v2_recovery_preview(fixture_root)
+    (folder / V2_STAGE).write_bytes(b"foreign-temp")
+    (folder / V2_STAGE).chmod(0o600)
+    with pytest.raises(ProposedV2PersistenceError, match="ORPHAN"):
+        v2_recovery_preview(fixture_root)
+    assert (folder / V2_STAGE).read_bytes() == b"foreign-temp"
+
+
+def test_v2_read_only_recovery_preview_never_mutates_host(
+    fixture_root, monkeypatch,
+):
+    import repocache.server_proposed_state_v2_store as module
+
+    apply(fixture_root, snapshot())
+
+    def forbid(*args, **kwargs):
+        pytest.fail("recovery preview must never mutate files")
+
+    monkeypatch.setattr(module.os, "replace", forbid)
+    monkeypatch.setattr(module.os, "unlink", forbid)
+    monkeypatch.setattr(module.os, "remove", forbid)
+    report = v2_recovery_preview(fixture_root)
+    assert report["status"] == "CLEAN"
+    assert report["authorizes_v2_recovery"] is False
