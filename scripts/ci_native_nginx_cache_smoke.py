@@ -200,6 +200,7 @@ def check_candidate_syntax(root: Path, nginx: str) -> None:
         f"pid {root / 'candidate.pid'};\n"
         f"error_log {root / 'candidate-error.log'};\n"
         "events {}\nhttp {\n"
+        "access_log off;\n"
         f"client_body_temp_path {root / 'client_temp'};\n"
         f"proxy_temp_path {root / 'proxy_temp'};\n"
         f"fastcgi_temp_path {root / 'fastcgi_temp'};\n"
