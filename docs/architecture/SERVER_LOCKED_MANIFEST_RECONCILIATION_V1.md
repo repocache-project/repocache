@@ -350,3 +350,66 @@ reloaded, no real managed include/certificate is replaced, and no
 catalog is published. Native booted systemd/SELinux, authenticated
 activation, actual service rollback and original #31 acceptance
 remain NOT VERIFIED.
+
+### Disposable live NGINX reload and compensation probe (#31)
+
+A new focused test in `tests/test_server_proposed_state_v2_store.py`
+starts an **actual distro-packaged NGINX master and workers** in a disposable
+temporary prefix, using only a Linux Unix-domain listening socket. It stages
+the existing #28 renderer's full APT+DNF candidate along with a private
+health endpoint, checks `nginx -t`, and probes actual HTTP responses through
+the socket. The test then:
+
+1. Stages an invalid directive and confirms `nginx -t` rejects it while the
+   previously running worker still serves the known-good health response.
+   Only the temporary file is restored; the invalid config is never reloaded.
+2. Stages a different syntactically valid health response, reloads that
+   isolated NGINX master, and observes the changed live response.
+3. Simulates a subsequent failed activation gate, restores the *exact* old
+   temporary config bytes, revalidates, reloads, and confirms that the live
+   response returns to the known-good state.
+4. Asserts that fixture v2 state bytes, journal, and stage remain unchanged
+   and terminates the disposable NGINX process even after an assertion error.
+
+This adds an executed **service-process** rollback rehearsal when the
+distro-container workflow passes, beyond the prior syntax-only check.
+It does **not** implement a privileged installer, host transaction journal,
+managed include swap, real systemd reload, SELinux enforcing, catalog
+publication, or power-loss recovery. The temporary process can be rolled
+back even though there is not yet an *approved durable transaction* linking
+the actual include, persisted v2 state, live exposure, and catalog. The five
+original #31 operational criteria still require booted native host evidence.
+
+### v1 → proposed v2 migration and privileged authority: unresolved gates
+
+**No migration is executed or enabled by this PR.** The v1 snapshot stores a
+configuration digest but not independently recoverable canonical config
+bytes, and has no all-time ID/tombstone ledger. An operator-supplied document,
+approval-reference digest, or #95 preview cannot reconstruct missing
+historical authority. With any v1 state/pending files present, the private
+v2 prototype deliberately fails closed; with any v2 files present, the
+v1 reader/writer/recovery also fail closed. This coexistence guard prevents
+unreviewed writes but is not itself an upgrade algorithm.
+
+An eventual reviewed migration would need independently verifiable source
+for the exact canonical v1 configuration and full historical ID reservations;
+a maintainer-approved policy for legacy data without sufficient provenance;
+and a durable journal protocol that explicitly handles crash windows where
+both version filenames may coexist. It must not erase v1 to make v2 import
+appear successful, invent identities or silently reuse retired IDs. Until
+that design is adopted, the only safe output for existing v1 state is
+**migration required / NOT VERIFIED**, not automatic v2 bootstrap.
+
+A privileged entry must independently authenticate the administrator's
+exact operation, generation, canonical config bytes and decision provenance,
+then revalidate the **actual host** OS root, mount namespace, mount topology,
+owned directories and include, ACLs, xattrs and SELinux label/policy under
+the same locked transaction. Root EUID in a container or a stored
+`decision_sha256` is not adequate. The #95 next-generation preview and
+#28 rendered candidate are untrusted planning inputs, not write authority.
+The privileged transaction must keep its lock through native packaged
+full-context `nginx -t`, staged activation, verified live exposure, and
+compensating rollback. Cache, certificates, monitoring history, global
+NGINX configuration and client sources must remain untouched by default.
+If any original criterion lacks native evidence, acceptance remains
+**NOT VERIFIED**, independently of green synthetic CI.
