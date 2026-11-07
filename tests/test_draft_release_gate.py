@@ -274,6 +274,9 @@ def test_reviewed_v050_identity_is_accepted():
 
 def test_v060_uses_transferred_origin_and_legacy_signed_publisher():
     import sign_release
+    # Native presigning CI intentionally runs without installing the app;
+    # use source imports without importing from the global Python environment.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
     from repocache import releases
 
     assert gate.REPO == releases.REPOSITORY == "repocache-project/repocache"
