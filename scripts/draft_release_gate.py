@@ -329,7 +329,7 @@ def authenticate(tag: str, commit: str, run_id: int, attempt: int,
                 and build.get("workflow_sha256") ==
                 sha(file_at_commit(".github/workflows/release.yml", commit, token)),
                 "Signed source workflow or dependency locks differ from Git tag")
-    print("PASS: genuine owner-signed draft, compatibility, provenance and all 8 asset hashes")
+    print("PASS: owner-signed first-install draft, provenance and eight immutable asset hashes")
     return {"schema": 1, "repository": REPO, "tag": tag, "commit": commit,
             "build_run_id": run_id, "build_run_attempt": attempt, "assets": assets}
 
@@ -435,8 +435,8 @@ def guard(report: dict, token: str) -> None:
     jobs = api("/actions/runs/" + str(id_ci) + "/jobs?per_page=100", token)
     seen = {j["name"]: j for j in jobs.get("jobs", [])}
     required = ("Signed draft publisher and asset identity",
-                "Upgrade signed candidate (debian13)",
-                "Upgrade signed candidate (almalinux10)",
+                "Clean install signed candidate (debian13)",
+                "Clean install signed candidate (almalinux10)",
                 "Freeze final candidate acceptance evidence")
     require(len(seen) == jobs.get("total_count") == len(required) and
             all(seen.get(name, {}).get("status") == "completed"

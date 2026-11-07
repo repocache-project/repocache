@@ -53,3 +53,20 @@ def test_final_candidate_acceptance_stays_manual_and_version_reviewed():
     assert 'policy.get("downgrade_from") == []' in verifier
     assert '"/compare/" + commit + "...main"' in verifier
     assert "signed-candidate-acceptance.yml" in signed or "draft_release_gate.py" in signed
+
+
+def test_first_install_signed_candidate_workflow_never_bootstraps_legacy_v04():
+    workflow = (WORKFLOWS / "signed-candidate-acceptance.yml").read_text("utf-8")
+    native = (ROOT / "scripts/ci_signed_candidate_native.py").read_text("utf-8")
+    for required in (
+        "Clean install signed candidate", "candidate-handoff",
+        "draft_release_gate.py", "ci_signed_candidate_native.py",
+    ):
+        assert required in workflow
+    for retired in ("public-baseline", "ci_public_release_native.py",
+                    "--tag v0.4.0"):
+        assert retired not in workflow
+        assert retired not in native
+    assert "install_first_signed_generation" in native
+    assert "prepare_clean_candidate" in native
+    assert "first v0.6" in native

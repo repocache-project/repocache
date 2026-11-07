@@ -75,7 +75,7 @@ jobs:
           retention-days: 3
 
   native:
-    name: Upgrade signed candidate (${{ matrix.platform }})
+    name: Clean install signed candidate (${{ matrix.platform }})
     needs: draft-auth
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
