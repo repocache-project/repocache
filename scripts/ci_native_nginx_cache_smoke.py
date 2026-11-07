@@ -106,7 +106,7 @@ def make_backend(counts: collections.Counter[str], lock: threading.Lock):
 def config(root: Path, port: int, upstream: int, cert: Path, key: Path) -> Path:
     for name in ("cache", "client_temp", "proxy_temp", "fastcgi_temp",
                  "uwsgi_temp", "scgi_temp"):
-        (root / name).mkdir(mode=0o700)
+        (root / name).mkdir(mode=0o700, exist_ok=True)
     conf = root / "nginx.conf"
     # The test-only loopback origin is intentionally NOT accepted by the
     # production pin renderer, which must continue refusing private/loopback.
@@ -192,18 +192,27 @@ def check_candidate_syntax(root: Path, nginx: str) -> None:
         and result["authorizes_catalog_publication"] is False,
         "both real APT/DNF route candidates remain non-authorizing",
     )
+    for name in ("client_temp", "proxy_temp", "fastcgi_temp",
+                 "uwsgi_temp", "scgi_temp"):
+        (root / name).mkdir(mode=0o700, exist_ok=True)
     conf = root / "candidate.conf"
     conf.write_text(
         f"pid {root / 'candidate.pid'};\n"
         f"error_log {root / 'candidate-error.log'};\n"
         "events {}\nhttp {\n"
+        f"client_body_temp_path {root / 'client_temp'};\n"
+        f"proxy_temp_path {root / 'proxy_temp'};\n"
+        f"fastcgi_temp_path {root / 'fastcgi_temp'};\n"
+        f"uwsgi_temp_path {root / 'uwsgi_temp'};\n"
+        f"scgi_temp_path {root / 'scgi_temp'};\n"
         + result["http_upstream_fragment"]
         + "server { listen 127.0.0.1:19991;\n"
         + result["server_location_fragment"]
         + "}\n}\n",
         encoding="utf-8",
     )
-    run(nginx, "-t", "-p", str(root), "-c", str(conf))
+    run(nginx, "-t", "-e", str(root / "candidate-bootstrap.log"),
+        "-p", str(root), "-c", str(conf))
     require(True, "actual stock NGINX -t parses both generated pinned routes")
 
 
@@ -254,10 +263,12 @@ def main() -> None:
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         conf = config(root, front, origin, cert, key)
-        run(nginx, "-t", "-p", str(root), "-c", str(conf))
+        run(nginx, "-t", "-e", str(root / "runtime-bootstrap.log"),
+            "-p", str(root), "-c", str(conf))
         ctx = ssl.create_default_context(cafile=str(cert))
         proc = subprocess.Popen(
-            [nginx, "-p", str(root), "-c", str(conf), "-g", "daemon off;"],
+            [nginx, "-e", str(root / "runtime-bootstrap.log"),
+             "-p", str(root), "-c", str(conf), "-g", "daemon off;"],
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
         )
         try:
