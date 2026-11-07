@@ -259,6 +259,68 @@ def _commit_proposed_v2_under_root(
         return _report("COMMITTED_INERT_V2", frozen["state_generation"])
 
 
+
+def _preview_proposed_v2_recovery_under_root(
+    root_fd: int, *, owner_uid: int,
+) -> dict[str, Any]:
+    """PRIVATE read-only preview of a fixture v2 journal, never recovery.
+
+    No caller-provided snapshot, approval, migration or NGINX command is
+    accepted. The same exclusive file lock as commit/recovery is held for
+    every observation. A valid snapshot/journal establishes neither host
+    privilege nor operator provenance; do not expose this as a host CLI.
+    """
+    with _locked(root_fd, owner_uid) as directory:
+        _legacy_refusal(directory, owner_uid)
+        journal = _read_v2_journal(directory, owner_uid)
+        temp = _read_file(
+            directory, V2_JOURNAL_TMP, owner_uid, MAX_V2_JOURNAL_BYTES,
+        )
+        stage = _read_file(
+            directory, V2_STAGE, owner_uid, MAX_V2_STATE_BYTES,
+        )
+        rollback = _read_file(
+            directory, V2_ROLLBACK, owner_uid, MAX_V2_STATE_BYTES,
+        )
+        state, current = _read_v2(directory, owner_uid)
+        if journal is None:
+            if stage is not None or rollback is not None:
+                _refuse("ORPHAN_STAGE_OR_ROLLBACK")
+            status = ("UNPUBLISHED_V2_JOURNAL_ONLY"
+                      if temp is not None else "CLEAN")
+            rollback_temp_needs_rebuild = False
+        else:
+            if temp is not None:
+                _refuse("CONFLICTING_JOURNAL_TEMP")
+            previous, next_digest, _ = journal
+            if _hash(current) not in (next_digest, _hash(previous)):
+                _refuse("STATE_DRIFT")
+            # An unconsumed stage alongside the replacement state is drift,
+            # even when the pending digest matches. Never infer authority.
+            if stage is not None and current != previous:
+                _refuse("STATE_DRIFT")
+            if rollback is not None and previous is None:
+                _refuse("ROLLBACK_CONFLICT")
+            rollback_temp_needs_rebuild = (
+                rollback is not None and rollback != previous
+            )
+            status = ("INTERRUPTED_BEFORE_V2_REPLACE"
+                      if current == previous else
+                      "INTERRUPTED_AFTER_V2_REPLACE")
+        return {
+            **_report(
+                status, 0 if state is None else state["state_generation"],
+            ),
+            "read_only_under_exclusive_lock": True,
+            "v2_recovery_pending": status != "CLEAN",
+            "v2_published_journal_present": journal is not None,
+            "rollback_temp_requires_rebuild": rollback_temp_needs_rebuild,
+            "host_service_recovery_verified": False,
+            "authorizes_v2_recovery": False,
+            "authorizes_v1_migration": False,
+        }
+
+
 def _recover_proposed_v2_under_root(
     root_fd: int, *, owner_uid: int,
 ) -> dict[str, Any]:
