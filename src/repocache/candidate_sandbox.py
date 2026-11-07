@@ -262,7 +262,8 @@ def _limited_command(argv: list[str]) -> list[str]:
                             for name, value in limits), "--", *argv]
 
 
-def _run_bounded(argv: list[str], *, cwd: Path, timeout: int) -> str:
+def _run_bounded(argv: list[str], *, cwd: Path, timeout: int,
+                 prelimited: bool = False) -> str:
     """Drain stdout/stderr incrementally; kill the launcher group on failure.
 
     An untrusted candidate can print indefinitely. subprocess.run with
@@ -273,6 +274,13 @@ def _run_bounded(argv: list[str], *, cwd: Path, timeout: int) -> str:
     """
     if not isinstance(timeout, int) or not 0 < timeout <= 300:
         raise updater.UpdateError("Invalid candidate execution deadline")
+    if prelimited:
+        from repocache import candidate_cgroup
+        if argv[:5] != [
+                str(candidate_cgroup.SYSTEM_PYTHON), "-I", "-S", "-c",
+                candidate_cgroup._ENTRY_CODE]:
+            raise SandboxError("Untrusted cgroup candidate bootstrap")
+    commandline = argv if prelimited else _limited_command(argv)
     environment = {
         "PATH": "/usr/local/bin:/usr/bin:/bin",
         "HOME": "/var/lib/repocache", "LANG": "C.UTF-8",
@@ -282,7 +290,7 @@ def _run_bounded(argv: list[str], *, cwd: Path, timeout: int) -> str:
     }
     try:
         process = subprocess.Popen(
-            _limited_command(argv), cwd=cwd, env=environment,
+            commandline, cwd=cwd, env=environment,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             start_new_session=True)
@@ -346,3 +354,32 @@ def run_isolated(argv: list[str], *, workspace: Path,
     """Execute ONLY after enforceable namespace construction succeeds."""
     commandline = command(workspace, argv, cwd=cwd)
     return _run_bounded(commandline, cwd=workspace, timeout=timeout)
+
+
+
+def run_cgroup_isolated(argv: list[str], *, workspace: Path,
+                        cwd: Path | None = None, timeout: int = 90) -> str:
+    """Supervise one untrusted command under a fresh, aggregate-limited leaf.
+
+    The active online rehearsal must call this instead of run_isolated.
+    Refuse before executing *anything* when delegated cgroup v2 or the native
+    dedicated staging tmpfs are absent. The legacy namespace-only primitive
+    remains strictly for inert userspace CI probes, not online admission.
+    """
+    from repocache import candidate_cgroup
+
+    # Verify both hard boundaries before running or downloading a candidate.
+    delegation = candidate_cgroup.require_delegation()
+    candidate_cgroup.require_staging_tmpfs(workspace.parent)
+    sandbox_command = command(workspace, argv, cwd=cwd)
+    with candidate_cgroup.candidate_leaf(delegation) as leaf:
+        baseline = candidate_cgroup.resource_events(leaf)
+        entry = candidate_cgroup.entry_argv(
+            delegation, leaf, _limited_command(sandbox_command))
+        result = _run_bounded(entry, cwd=workspace, timeout=timeout,
+                              prelimited=True)
+        after = candidate_cgroup.resource_events(leaf)
+        if any(final > initial for initial, final in zip(baseline, after)):
+            raise updater.UpdateError(
+                "Candidate exceeded mandatory aggregate memory or PID limit")
+        return result
