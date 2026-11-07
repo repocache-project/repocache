@@ -148,3 +148,45 @@ misrepresented as PASS.
 This syntax fixture cannot verify the privileged managed include, complete
 cache zones/HIT, authenticated approval, root ownership, actual reload,
 operational rollback or client catalog, which remain NOT VERIFIED.
+
+
+## Explicit add/update/enable/disable/remove → inert NGINX preview
+
+`preview_repository_lifecycle_nginx_candidate` extends the already merged
+pure #95 operation planner and #28 strict pinned NGINX candidate adapter to
+all five **explicit administrative intents**. It requires the current full
+declarative document and an aligned (still untrusted) #31 inert state-v1
+snapshot at the exact expected generation. An explicit add requires a
+caller-supplied all-time reserved/tombstoned ID snapshot; it is checked but
+**never trusted as a durable ledger**. Auto-generated suggestions still
+belong to the existing `propose_automatic_repository_id` helper and must be
+revalidated and reserved under an independently authenticated writer lock.
+
+The operation produces a validated complete declarative candidate,
+re-verifies that retained IDs have unchanged canonical upstream identities,
+rejects generation exhaustion and renders exactly its desired-active
+repositories through #28's strict IP, Host/SNI, TLS and redirect safeguards.
+An invalid, missing or extra pin set fails the *entire* proposal. It reports
+only *desired* route deltas, fresh approval requirements and IDs requiring
+all-time tombstones when removed. Removal is explicitly **cache-retaining**,
+not a cleanup request. A missing-ID remove is idempotent at the pure plan
+level. It never confuses successful preview with observed active exposure.
+
+The result is NOT an authenticated command or an acceptable #31 state-v1
+candidate: `trusted_id_ledger_verified`, `approval_provenance_verified`,
+`configuration_digest_binding_verified`, `active_exposure_verified`,
+`cache_ownership_verified` and every state/NGINX/catalog/cache authority
+flag remain false. In particular, the currently implemented #31 state-v1
+store cannot persist removal tombstones or the full authoritative install
+document, and cannot accept the synthetic approval hash as permission.
+**No production write, NGINX reload, catalog publication, cache deletion or
+privileged CLI invocation is enabled by this helper.**
+
+The #31 owner must version and review the persistent configuration/ID ledger
+and authenticated, locked journalled write interface before any operational
+connection; #28 must verify real reload/exposure and atomic active-only
+catalog. Fixture tests and temporary nginx -t do not demonstrate original
+#95 operational acceptance. The tests in this increment cover an explicit
+APT add, desired enable/disable, trust-key update, active removal with cache
+retention, stale state, all-time ID reuse refusal, forbidden identity
+reassignment, unsafe DNS pins, and prohibited host effects.

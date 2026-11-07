@@ -17,6 +17,7 @@ from repocache.server_repository_reconcile_v1 import (
     preview_declarative_state_alignment,
     plan_inert_persistence_transition,
     preview_declarative_nginx_candidate,
+    preview_repository_lifecycle_nginx_candidate,
 )
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "docs/examples/server-install-v1.json"
@@ -758,3 +759,181 @@ def test_declarative_lifecycle_candidate_passes_disposable_packaged_nginx_t(tmp_
     assert process.returncode == 0, process.stderr
     assert rendered["authorizes_nginx_activation"] is False
     assert rendered["authorizes_catalog_publication"] is False
+
+
+# Whole-operation previews reuse the existing #95 operation planner, then #28
+# NGINX candidate rendering. No operation grants privileged authority.
+
+
+def _lifecycle_preview(config, operation, *, repo_id=None, proposal=None,
+                       reservations=None, pins=None, state=None):
+    if state is None:
+        state = _inert_state_snapshot(config)
+    if pins is None:
+        pins = {}
+    return preview_repository_lifecycle_nginx_candidate(
+        config, state, current_generation=1, operation=operation,
+        repository_id=repo_id, proposed_repository=proposal,
+        reserved_ids=reservations, candidate_pins_by_repository=pins,
+        ca_bundle_path=_CA,
+    )
+
+
+def test_lifecycle_explicit_add_uses_untrusted_reservations_and_pinned_route():
+    current = document()
+    current["expected_state_generation"] = 1
+    proposal = copy.deepcopy(current["repositories"][0])
+    proposal["id"] = "custom-new-apt"
+    proposal["desired_state"] = "active"
+    proposal["upstream"]["base_url"] = "https://mirror.example.invalid/new-apt/"
+    before = copy.deepcopy(current), copy.deepcopy(proposal)
+    result = _lifecycle_preview(
+        current, "add", proposal=proposal,
+        reservations={"debian-trixie-main", "almalinux-baseos"},
+        pins={"custom-new-apt": copy.deepcopy(_PUBLIC_PINS)},
+    )
+    assert result["status"] == "UNTRUSTED_LIFECYCLE_NGINX_CANDIDATE_ONLY"
+    assert result["changed"] is True
+    assert result["new_repository_ids"] == ["custom-new-apt"]
+    assert result["removed_repository_ids"] == []
+    assert result["desired_new_route_ids"] == ["custom-new-apt"]
+    assert result["proposed_repository_ids"] == ["custom-new-apt"]
+    assert result["fresh_approval_required_ids"] == ["custom-new-apt"]
+    assert result["id_eligibility"] == "CALLER_SNAPSHOT_ONLY"
+    assert result["proposed_state_generation"] == 2
+    assert "proxy_ssl_verify on;" in result["server_location_fragment"]
+    assert result["cache_retention_required_ids"] == []
+    for field in (
+        "trusted_id_ledger_verified", "approval_provenance_verified",
+        "configuration_digest_binding_verified", "active_exposure_verified",
+        "cache_ownership_verified", "authorizes_state_commit",
+        "authorizes_nginx_activation", "authorizes_catalog_publication",
+        "authorizes_cache_cleanup",
+    ):
+        assert result[field] is False
+    assert (current, proposal) == before
+
+
+def test_lifecycle_remove_active_withdraws_desired_route_and_preserves_cache():
+    current = document()
+    current["expected_state_generation"] = 1
+    current["repositories"][0]["desired_state"] = "active"
+    old = copy.deepcopy(current)
+    result = _lifecycle_preview(
+        current, "remove", repo_id="debian-trixie-main",
+    )
+    assert result["changed"] is True
+    assert result["removed_repository_ids"] == ["debian-trixie-main"]
+    assert result["tombstone_required_ids"] == ["debian-trixie-main"]
+    assert result["cache_retention_required_ids"] == ["debian-trixie-main"]
+    assert result["desired_withdraw_route_ids"] == ["debian-trixie-main"]
+    assert result["proposed_repository_ids"] == []
+    assert result["server_location_fragment"] == ""
+    assert result["authorizes_catalog_publication"] is False
+    assert result["authorizes_cache_cleanup"] is False
+    assert current == old
+
+
+def test_lifecycle_enable_disable_update_and_idempotent_remove():
+    current = document()
+    current["expected_state_generation"] = 1
+    enabled = _lifecycle_preview(
+        current, "enable", repo_id="debian-trixie-main",
+        pins={"debian-trixie-main": copy.deepcopy(_PUBLIC_PINS)},
+    )
+    assert enabled["desired_new_route_ids"] == ["debian-trixie-main"]
+    assert enabled["new_repository_ids"] == []
+    active = copy.deepcopy(current)
+    active["repositories"][0]["desired_state"] = "active"
+    disabled = _lifecycle_preview(
+        active, "disable", repo_id="debian-trixie-main",
+    )
+    assert disabled["desired_withdraw_route_ids"] == ["debian-trixie-main"]
+
+    updated = copy.deepcopy(current["repositories"][0])
+    updated["layout"]["release_key_refs"] = [
+        "file:/etc/repocache/keys/rotated.gpg"
+    ]
+    update = _lifecycle_preview(
+        current, "update", repo_id="debian-trixie-main",
+        proposal=updated,
+    )
+    assert update["changed"] is True
+    assert update["desired_new_route_ids"] == []
+    assert update["fresh_approval_required_ids"] == ["debian-trixie-main"]
+
+    noop = _lifecycle_preview(
+        current, "remove", repo_id="not-present",
+    )
+    assert noop["changed"] is False
+    assert noop["proposed_state_generation"] == 1
+    assert noop["tombstone_required_ids"] == []
+    assert noop["fresh_approval_required_ids"] == []
+
+
+def test_lifecycle_add_requires_reservations_and_refuses_tombstone_reuse():
+    current = document()
+    current["expected_state_generation"] = 1
+    new = copy.deepcopy(current["repositories"][0])
+    new["id"] = "previously-removed"
+    new["upstream"]["base_url"] = "https://mirror.example.invalid/new/"
+    for reservations in (None, {"debian-trixie-main", "almalinux-baseos",
+                                "previously-removed"}):
+        with pytest.raises(ReconciliationPlanError, match="unreserved"):
+            _lifecycle_preview(
+                current, "add", proposal=new, reservations=reservations,
+            )
+
+
+def test_lifecycle_update_refuses_identity_reassignment():
+    current = document()
+    current["expected_state_generation"] = 1
+    repo = copy.deepcopy(current["repositories"][0])
+    repo["upstream"]["base_url"] = "https://mirror.example.invalid/reassigned/"
+    with pytest.raises(ReconciliationPlanError, match="identity reassignment"):
+        _lifecycle_preview(
+            current, "update", repo_id="debian-trixie-main", proposal=repo,
+        )
+
+
+def test_lifecycle_rejects_stale_protected_state_before_render():
+    current = document()
+    current["expected_state_generation"] = 1
+    state = _inert_state_snapshot(current)
+    state["state_generation"] = 2
+    with pytest.raises(ReconciliationPlanError, match="stale state"):
+        _lifecycle_preview(
+            current, "disable", repo_id="debian-trixie-main", state=state,
+        )
+
+
+def test_lifecycle_refuses_unsafe_new_route_pin_and_false_catalog():
+    current = document()
+    current["expected_state_generation"] = 1
+    with pytest.raises(ReconciliationPlanError, match="unsafe nginx"):
+        _lifecycle_preview(
+            current, "enable", repo_id="debian-trixie-main",
+            pins={"debian-trixie-main": {_HOST: ["169.254.169.254"]}},
+        )
+
+
+def test_lifecycle_preview_never_writes_or_executes(monkeypatch):
+    import os
+    import socket
+    import subprocess
+    import repocache.server_protected_state_store_v1 as store
+
+    def denied(*args, **kwargs):
+        raise AssertionError("lifecycle preview cannot perform host effects")
+
+    monkeypatch.setattr(os, "replace", denied)
+    monkeypatch.setattr(socket, "getaddrinfo", denied)
+    monkeypatch.setattr(subprocess, "run", denied)
+    monkeypatch.setattr(store, "_commit_under_root", denied)
+    current = document()
+    current["expected_state_generation"] = 1
+    result = _lifecycle_preview(current, "disable", repo_id="debian-trixie-main")
+    assert result["authorizes_state_commit"] is False
+    assert result["authorizes_nginx_activation"] is False
+    assert result["authorizes_catalog_publication"] is False
+    assert result["authorizes_cache_cleanup"] is False

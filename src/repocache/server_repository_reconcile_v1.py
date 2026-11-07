@@ -16,7 +16,8 @@ from repocache.server_install_v1 import (
     MAX_INT, validate_install_document,
 )
 from repocache.server_repository_plan_v1 import (
-    _canonical_identity, _effective_configuration,
+    RepositoryPlanError, _canonical_identity, _effective_configuration,
+    plan_repository_change,
 )
 from repocache.server_protected_state_store_v1 import (
     ProtectedStateStoreError, validate_protected_state,
@@ -348,6 +349,121 @@ def preview_declarative_nginx_candidate(
         "active_exposure_verified": False,
         "configuration_digest_binding_verified": False,
         "reservation_history_verified": False,
+        "authorizes_state_commit": False,
+        "authorizes_nginx_activation": False,
+        "authorizes_catalog_publication": False,
+        "authorizes_cache_cleanup": False,
+    }
+
+
+def preview_repository_lifecycle_nginx_candidate(
+    current_document: dict[str, Any],
+    protected_snapshot: dict[str, Any],
+    *,
+    current_generation: int,
+    operation: str,
+    repository_id: str | None = None,
+    proposed_repository: dict[str, Any] | None = None,
+    reserved_ids: set[str] | frozenset[str] | None = None,
+    candidate_pins_by_repository: dict[str, dict[str, list[str]]],
+    ca_bundle_path: str,
+) -> dict[str, Any]:
+    """Preview add/update/enable/disable/remove via existing #95/#28 planners.
+
+    This is a *non-authorizing* composition of untrusted input snapshots.
+    Unlike partial reconciliation, an explicit remove changes the candidate
+    repository set. Removal never implies cache deletion; a future protected
+    state store must persist an all-time ID tombstone and authoritatively
+    withdraw routes/catalog under its own lock. The caller's reserved-ID
+    snapshot is not a trusted ledger, even when validation succeeds.
+    """
+    current = validate_install_document(current_document, for_apply=True)
+    preview_declarative_state_alignment(
+        current, protected_snapshot, current_generation=current_generation
+    )
+    try:
+        intent = plan_repository_change(
+            current,
+            current_generation=current_generation,
+            operation=operation,
+            repository_id=repository_id,
+            proposed_repository=proposed_repository,
+            reserved_ids=reserved_ids,
+        )
+    except RepositoryPlanError:
+        raise ReconciliationPlanError("lifecycle: invalid or unreserved operation") from None
+
+    candidate = intent["candidate_document"]
+    original = {repo["id"]: repo for repo in current["repositories"]}
+    proposed = {repo["id"]: repo for repo in candidate["repositories"]}
+
+    # The v1 state store cannot safely remap a durable ID to a new identity.
+    for identifier in original.keys() & proposed.keys():
+        if _canonical_identity(original[identifier]) != _canonical_identity(
+            proposed[identifier]
+        ):
+            raise ReconciliationPlanError("lifecycle: identity reassignment unsupported")
+
+    if intent["changed"] and current_generation == MAX_INT:
+        raise ReconciliationPlanError("lifecycle: generation exhausted")
+
+    try:
+        bundle = render_repository_nginx_bundle_candidate(
+            candidate,
+            expected_state_generation=current_generation,
+            candidate_pins_by_repository=candidate_pins_by_repository,
+            ca_bundle_path=ca_bundle_path,
+        )
+    except NginxRepositoryBundleError:
+        raise ReconciliationPlanError("lifecycle: unsafe nginx candidate") from None
+
+    old_active = {
+        repo_id for repo_id, repo in original.items()
+        if repo["desired_state"] == "active"
+    }
+    new_active = {
+        repo_id for repo_id, repo in proposed.items()
+        if repo["desired_state"] == "active"
+    }
+    if bundle["proposed_repository_ids"] != sorted(new_active):
+        raise ReconciliationPlanError("lifecycle: inconsistent nginx candidate")
+
+    removed = sorted(original.keys() - proposed.keys())
+    added = sorted(proposed.keys() - original.keys())
+    affected = [intent["repository_id"]] if intent["changed"] else []
+    return {
+        "schema_version": 1,
+        "status": "UNTRUSTED_LIFECYCLE_NGINX_CANDIDATE_ONLY",
+        "operation": intent["operation"],
+        "repository_id": intent["repository_id"],
+        "changed": intent["changed"],
+        "expected_state_generation": current_generation,
+        "proposed_state_generation": (
+            current_generation + int(intent["changed"])
+        ),
+        "new_repository_ids": added,
+        "removed_repository_ids": removed,
+        "tombstone_required_ids": removed,
+        "cache_retention_required_ids": removed,
+        "fresh_approval_required_ids": affected,
+        "desired_new_route_ids": sorted(new_active - old_active),
+        "desired_withdraw_route_ids": sorted(old_active - new_active),
+        "desired_retained_route_ids": sorted(old_active & new_active),
+        "proposed_repository_ids": bundle["proposed_repository_ids"],
+        "pin_count": bundle["pin_count"],
+        "http_upstream_fragment": bundle["http_upstream_fragment"],
+        "server_location_fragment": bundle["server_location_fragment"],
+        "candidate_document": candidate,
+        "id_eligibility": (
+            "CALLER_SNAPSHOT_ONLY" if operation == "add" else "NOT_APPLICABLE"
+        ),
+        "requires_trusted_locked_recheck": True,
+        "requires_nginx_t_and_activation": True,
+        "trusted_id_ledger_verified": False,
+        "approval_provenance_verified": False,
+        "configuration_digest_binding_verified": False,
+        "active_exposure_verified": False,
+        "cache_ownership_verified": False,
         "authorizes_state_commit": False,
         "authorizes_nginx_activation": False,
         "authorizes_catalog_publication": False,
