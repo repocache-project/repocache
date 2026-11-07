@@ -45,20 +45,25 @@ jobs:
           packaged=/usr/share/apparmor/extra-profiles/bwrap-userns-restrict
           installed=/etc/apparmor.d/bwrap-userns-restrict
           if [[ -e "$installed" || -L "$installed" ]]; then
+            echo 'Using system-installed Ubuntu AppArmor bwrap profile'
             test -f "$installed" && test ! -L "$installed"
             test "$(stat -c %u "$installed")" = 0
             dpkg-query -S "$installed" | grep -Eq '^apparmor(:[^:]+)?:'
           else
+            echo 'Using packaged optional AppArmor bwrap profile'
             test -f "$packaged" && test ! -L "$packaged"
             test "$(stat -c %u "$packaged")" = 0
             dpkg-query -S "$packaged" | grep -Eq '^apparmor-profiles(:[^:]+)?:'
             sudo install -m 0644 "$packaged" "$installed"
           fi
+          echo 'Vendor AppArmor profile provenance/ownership verified'
           # Permit ONLY the vendor-provided profile with an explicit userns
           # allowance. The kernel and AppArmor policy must both stay active.
           grep -Eq '^[[:space:]]*profile[[:space:]]+bwrap[[:space:]]' "$installed"
-          grep -Eq '^[[:space:]]*userns,' "$installed"
+          grep -Eq '^[[:space:]]*(allow[[:space:]]+)?userns([[:space:],]|$)' "$installed"
+          echo 'Vendor bwrap and userns directives verified'
           sudo apparmor_parser -r "$installed"
+          echo 'Vendor bwrap AppArmor profile loaded'
           if [[ -r /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
             test "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = 1
           fi
