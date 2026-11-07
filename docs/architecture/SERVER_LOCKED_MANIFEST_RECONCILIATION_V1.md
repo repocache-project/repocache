@@ -301,3 +301,25 @@ This safety interlock **does not** migrate v1 data, activate v2, change v1
 schema fields, authenticate administrators, adopt foreign paths, or
 introduce a public privileged writer. A versioned migration remains an
 independent acceptance/approval blocker.
+
+
+### Cross-process crash recovery in Debian 13 and AlmaLinux 10 containers
+
+The new path-filtered, read-only `Server Protected State Crash Recovery
+(Distro Containers)` workflow runs the original v1 tests, locked
+manifest inspector tests and proposed v2 fixture tests under native
+userspace/Python packages in Debian 13 and AlmaLinux 10 containers.
+
+In eight cases (first install and update at four durable boundaries),
+a Linux child process exits with `os._exit(73)` immediately after the
+fsynced journal-temp, published journal, state stage, or state rename.
+No Python finally/unlock is executed. A separate second process must
+acquire the released exclusive lock and recover exactly the previous
+state bytes or initial absence, and a new transaction must then work.
+
+This is stronger evidence than same-process exception injection but
+still only isolated Linux fixture/container testing. It does not prove
+a booted native host, systemd/SELinux, a genuine power cut, actual
+NGINX syntax/reload, TLS/cache/metrics retention, foreign live host
+ownership or signed administrator approval. Full #31 operational
+acceptance remains NOT VERIFIED.

@@ -449,3 +449,70 @@ def test_legacy_writer_refuses_dangling_v2_symlink(fixture_root):
         commit_legacy(fd, legacy, expected_generation=0, owner_uid=uid)
     assert link.is_symlink()
     assert not (folder / "state-v1.json").exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires Linux fork")
+@pytest.mark.parametrize(
+    "phase",
+    ["journal_tmp_durable", "journal_durable", "stage_durable", "replace_durable"],
+)
+@pytest.mark.parametrize("upgrade", [False, True])
+def test_real_process_exit_and_recovery_in_second_process(
+    fixture_root, phase, upgrade,
+):
+    """A child exits without Python cleanup after fsync; new PID recovers."""
+    _, folder, _ = fixture_root
+    old = snapshot() if upgrade else None
+    generation = 1 if upgrade else 0
+    old_bytes = None
+    if upgrade:
+        apply(fixture_root, old)
+        old_bytes = (folder / V2_STATE).read_bytes()
+    proposal = snapshot(count=1, generation=generation + 1, previous=old)
+
+    pid = os.fork()
+    if pid == 0:
+        def stop(point):
+            if point == phase:
+                os._exit(73)
+        try:
+            apply(fixture_root, proposal, expected=generation, inject=stop)
+        except BaseException:
+            os._exit(74)
+        os._exit(75)
+
+    waited, status = os.waitpid(pid, 0)
+    assert waited == pid and os.WIFEXITED(status)
+    assert os.WEXITSTATUS(status) == 73
+    pending = V2_JOURNAL_TMP if phase == "journal_tmp_durable" else V2_JOURNAL
+    assert (folder / pending).is_file()
+    with pytest.raises(ProposedV2PersistenceError, match="RECOVERY_REQUIRED"):
+        apply(fixture_root, proposal, expected=generation)
+
+    other = os.fork()
+    if other == 0:
+        try:
+            report = rollback(fixture_root)
+            assert report["state_generation"] == generation
+            assert report["status"] in (
+                "DISCARDED_UNPUBLISHED_V2_JOURNAL", "ROLLED_BACK_INERT_V2",
+            )
+            assert_no_authority(report)
+        except BaseException:
+            os._exit(76)
+        os._exit(0)
+
+    waited, status = os.waitpid(other, 0)
+    assert waited == other and os.WIFEXITED(status)
+    assert os.WEXITSTATUS(status) == 0
+    assert not (folder / V2_JOURNAL).exists()
+    assert not (folder / V2_JOURNAL_TMP).exists()
+    assert not (folder / V2_STAGE).exists()
+    if old_bytes is None:
+        assert not (folder / V2_STATE).exists()
+    else:
+        assert (folder / V2_STATE).read_bytes() == old_bytes
+    assert rollback(fixture_root)["status"] == "CLEAN"
+    assert apply(fixture_root, proposal, expected=generation)["status"] == (
+        "COMMITTED_INERT_V2"
+    )
