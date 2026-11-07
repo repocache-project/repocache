@@ -258,3 +258,35 @@ commands already work. The #31 proposed v2 review-only state contract
 unmerged and non-authorizing; neither that proposal nor this #95 PR
 implements its privileged writer, actual observed-state attestation, or
 catalog publication.
+
+
+## Proposed v2 handoff: complete next-generation install intent only
+
+The two non-authorising #95 NGINX preview functions return
+`next_generation_configuration_preview` only when they detect a real
+declarative change. This is a **complete, validated install-v1 document**
+with `expected_state_generation` incremented from the old
+`current_generation` to the proposed next generation. It is deliberately
+separate from the existing `candidate_document`, which still bears the
+old generation for comparison against the untrusted current state and for
+the #28 candidate renderer. No-op results return `null`, and generation
+exhaustion refuses a changed proposal rather than wrapping.
+
+The proposed/unmerged #31 v2 contract expects canonical full configuration
+bytes whose internal expected generation equals the proposed state
+generation; this additional pure projection avoids accidentally passing
+old-generation declarative input to that contract. It is **not** a
+`state_schema_version=2` snapshot, a canonical serialized payload, an
+authenticated decision or a persistable record. It intentionally omits
+state-v2 reservation history, observed-state evidence, approval reference,
+canonical SHA-256 and filesystem/NGINX ownership. The independently trusted
+#31 owner must rebuild and revalidate the entire transaction under its own
+OS-root-owned lock, including exact v1/v2 migration policy and ID/tombstone
+history, rather than accepting this returned object as authority.
+
+Fixture tests cover explicit enable and remove, an idempotent no-op, partial
+updates that preserve omitted repositories, generation-exhaustion refusal,
+the exact separation between old and new generations, strict install-v1
+revalidation, and false mutation/activation/catalog/cleanup permissions.
+This does not imply that #31's proposed v2 design has been accepted, or
+that persistent v2 interoperation has been executed.

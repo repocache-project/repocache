@@ -73,6 +73,27 @@ def _desired_config_revalidation_ids(
     )
 
 
+def _next_generation_configuration_preview(
+    candidate: dict[str, Any], *, generation: int, changed: bool,
+) -> dict[str, Any] | None:
+    """Return a pure next-generation install-v1 candidate, never a v2 state.
+
+    The existing plan/NGINX candidate uses the *current* generation so it
+    can be validated against the current untrusted state. The proposed #31
+    v2 contract instead needs a complete install document bearing the next
+    generation before its independently authenticated canonical encoding.
+    We neither encode that durable v2 payload here nor compute/authorize
+    its digest, reservation history, approvals or protected-state commit.
+    """
+    if not changed:
+        return None
+    if generation == MAX_INT:
+        raise ReconciliationPlanError("next generation: exhausted")
+    rebased = copy.deepcopy(candidate)
+    rebased["expected_state_generation"] = generation + 1
+    return validate_install_document(rebased, for_apply=True)
+
+
 def plan_declarative_reconciliation(
     current_document: dict[str, Any],
     proposed_document: dict[str, Any],
@@ -360,6 +381,9 @@ def preview_declarative_nginx_candidate(
         "status": "UNTRUSTED_NGINX_CANDIDATE_ONLY",
         "expected_state_generation": current_generation,
         "proposed_state_generation": transition["proposed_state_generation"],
+        "next_generation_configuration_preview": _next_generation_configuration_preview(
+            candidate, generation=current_generation, changed=transition["changed"],
+        ),
         "declarative_change_requested": transition["changed"],
         "fresh_approval_required_ids": transition["fresh_approval_required_ids"],
         "deployment_approval_required": transition["deployment_approval_required"],
@@ -471,6 +495,9 @@ def preview_repository_lifecycle_nginx_candidate(
         "expected_state_generation": current_generation,
         "proposed_state_generation": (
             current_generation + int(intent["changed"])
+        ),
+        "next_generation_configuration_preview": _next_generation_configuration_preview(
+            candidate, generation=current_generation, changed=intent["changed"],
         ),
         "new_repository_ids": added,
         "removed_repository_ids": removed,

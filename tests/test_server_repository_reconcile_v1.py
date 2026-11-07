@@ -1042,3 +1042,115 @@ def test_explicit_disable_or_unrelated_disabled_add_does_not_revalidate_retained
     assert add["desired_retained_route_ids"] == ["debian-trixie-main"]
     assert add["desired_config_revalidation_ids"] == []
     assert add["authorizes_nginx_activation"] is False
+
+
+# Proposed #31 v2 handoff requires a *complete* next-generation install
+# document, not the old-generation untrusted candidate or a write token.
+
+
+def test_explicit_lifecycle_next_generation_document_is_non_authoritative():
+    from repocache.server_install_v1 import validate_install_document
+
+    current = document()
+    current["expected_state_generation"] = 1
+    original = copy.deepcopy(current)
+    result = _lifecycle_preview(
+        current, "enable", repo_id="debian-trixie-main",
+        pins={"debian-trixie-main": copy.deepcopy(_PUBLIC_PINS)},
+    )
+    rebased = result["next_generation_configuration_preview"]
+    assert result["candidate_document"]["expected_state_generation"] == 1
+    assert result["expected_state_generation"] == 1
+    assert result["proposed_state_generation"] == 2
+    assert rebased["expected_state_generation"] == 2
+    assert rebased["repositories"] == result["candidate_document"]["repositories"]
+    assert rebased["deployment"] == result["candidate_document"]["deployment"]
+    assert validate_install_document(rebased, for_apply=True) == rebased
+    assert current == original
+    for k in (
+        "trusted_id_ledger_verified", "approval_provenance_verified",
+        "configuration_digest_binding_verified", "active_exposure_verified",
+        "authorizes_state_commit", "authorizes_nginx_activation",
+        "authorizes_catalog_publication", "authorizes_cache_cleanup",
+    ):
+        assert result[k] is False
+
+
+def test_remove_next_generation_preserves_retained_state_and_not_ledger():
+    current = document()
+    current["expected_state_generation"] = 1
+    current["repositories"][0]["desired_state"] = "active"
+    result = _lifecycle_preview(
+        current, "remove", repo_id="debian-trixie-main",
+    )
+    rebased = result["next_generation_configuration_preview"]
+    assert rebased["expected_state_generation"] == 2
+    assert {row["id"] for row in rebased["repositories"]} == {
+        "almalinux-baseos",
+    }
+    assert result["tombstone_required_ids"] == ["debian-trixie-main"]
+    assert result["cache_retention_required_ids"] == ["debian-trixie-main"]
+    assert "id_reservations" not in rebased
+    assert "approval_reference" not in rebased
+    assert result["trusted_id_ledger_verified"] is False
+    assert result["authorizes_cache_cleanup"] is False
+
+
+def test_explicit_idempotent_remove_does_not_advance_generation():
+    current = document()
+    current["expected_state_generation"] = 1
+    result = _lifecycle_preview(
+        current, "remove", repo_id="absent-identifier",
+    )
+    assert result["changed"] is False
+    assert result["proposed_state_generation"] == 1
+    assert result["next_generation_configuration_preview"] is None
+    assert result["authorizes_state_commit"] is False
+
+
+def test_partial_lifecycle_next_generation_preserves_omitted_repositories():
+    from repocache.server_install_v1 import validate_install_document
+
+    current = document()
+    current["expected_state_generation"] = 1
+    proposed = copy.deepcopy(current)
+    proposed["repositories"] = [copy.deepcopy(current["repositories"][0])]
+    proposed["repositories"][0]["desired_state"] = "active"
+    result = _nginx_preview(
+        current, proposed,
+        pins={"debian-trixie-main": copy.deepcopy(_PUBLIC_PINS)},
+    )
+    candidate = result["next_generation_configuration_preview"]
+    assert result["proposed_state_generation"] == 2
+    assert candidate["expected_state_generation"] == 2
+    assert {row["id"] for row in candidate["repositories"]} == {
+        "almalinux-baseos", "debian-trixie-main",
+    }
+    assert validate_install_document(candidate, for_apply=True) == candidate
+    assert result["trusted_state_provenance_verified"] is False
+    assert result["authorizes_state_commit"] is False
+
+
+def test_partial_noop_has_no_next_generation_configuration():
+    current = document()
+    current["expected_state_generation"] = 1
+    proposed = copy.deepcopy(current)
+    proposed["repositories"] = []
+    result = _nginx_preview(current, proposed, pins={})
+    assert result["declarative_change_requested"] is False
+    assert result["proposed_state_generation"] == 1
+    assert result["next_generation_configuration_preview"] is None
+
+
+def test_explicit_generation_exhaustion_never_returns_commit_candidate():
+    current = document()
+    current["expected_state_generation"] = 2**63 - 1
+    state = _inert_state_snapshot(current, generation=2**63 - 1)
+    with pytest.raises(ReconciliationPlanError, match="generation exhausted"):
+        preview_repository_lifecycle_nginx_candidate(
+            current, state, current_generation=2**63 - 1,
+            operation="enable", repository_id="debian-trixie-main",
+            candidate_pins_by_repository={
+                "debian-trixie-main": copy.deepcopy(_PUBLIC_PINS),
+            }, ca_bundle_path=_CA,
+        )
