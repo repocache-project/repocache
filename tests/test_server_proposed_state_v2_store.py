@@ -28,6 +28,7 @@ from repocache.server_proposed_state_v2_store import (
     _commit_proposed_v2_under_root as commit,
     _recover_proposed_v2_under_root as recover,
     _preview_persisted_v2_nginx_candidate_under_root as render_persisted,
+    _preview_v1_migration_blockers_under_root as preview_v1_migration,
 )
 
 
@@ -836,3 +837,81 @@ def test_nginx_live_rollback_in_sandbox(fixture_root, tmp_path):
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait(timeout=3)
+
+
+def _legacy_state(*, generation=1, digest="a"):
+    return {
+        "state_schema_version": 1,
+        "state_generation": generation,
+        "configuration_sha256": digest * 64,
+        "repositories": [],
+        "ownership_manifest": [],
+    }
+
+
+def test_v1_migration_preflight_never_claims_lossless_conversion(fixture_root):
+    fd, folder, uid = fixture_root
+    commit_legacy(fd, _legacy_state(), owner_uid=uid, expected_generation=0)
+    path = folder / "state-v1.json"
+    raw, inode = path.read_bytes(), path.stat().st_ino
+    before = sorted(p.name for p in folder.iterdir())
+    result = preview_v1_migration(fd, owner_uid=uid)
+    assert result["status"] == "LEGACY_V1_MIGRATION_BLOCKED"
+    assert result["state_generation"] == 1
+    assert result["legacy_repository_count"] == 0
+    assert result["legacy_manifest_entry_count"] == 0
+    assert result["v1_snapshot_read_under_exclusive_lock"] is True
+    assert result["v1_recovery_pending"] is False
+    for key in (
+        "independent_configuration_bytes_verified",
+        "historic_id_reservations_verified",
+        "live_nginx_include_verified",
+        "versioned_migration_protocol_approved",
+        "authorizes_migration",
+    ):
+        assert result[key] is False
+    assert_no_authority(result)
+    assert path.read_bytes() == raw and path.stat().st_ino == inode
+    assert sorted(p.name for p in folder.iterdir()) == before
+    assert not (folder / V2_STATE).exists()
+
+
+def test_v1_migration_preflight_refuses_absence_and_pending_journal(fixture_root):
+    fd, folder, uid = fixture_root
+    with pytest.raises(ProposedV2PersistenceError, match="LEGACY_STATE_ABSENT"):
+        preview_v1_migration(fd, owner_uid=uid)
+    commit_legacy(fd, _legacy_state(), owner_uid=uid, expected_generation=0)
+    previous = (folder / "state-v1.json").read_bytes()
+
+    def stop(phase):
+        if phase == "journal_durable":
+            raise RuntimeError("interrupted v1 write")
+
+    with pytest.raises(RuntimeError, match="interrupted v1 write"):
+        commit_legacy(
+            fd, _legacy_state(generation=2, digest="b"),
+            owner_uid=uid, expected_generation=1, inject_fault=stop,
+        )
+    original_journal = (folder / LEGACY_JOURNAL).read_bytes()
+    with pytest.raises(ProposedV2PersistenceError, match="LEGACY_RECOVERY_REQUIRED"):
+        preview_v1_migration(fd, owner_uid=uid)
+    assert (folder / LEGACY_JOURNAL).read_bytes() == original_journal
+    assert (folder / "state-v1.json").read_bytes() == previous
+    assert recover_legacy(fd, owner_uid=uid)["state_generation"] == 1
+    assert preview_v1_migration(fd, owner_uid=uid)["authorizes_migration"] is False
+
+
+def test_v1_migration_preflight_refuses_v2_coexistence_and_lock_contention(
+    fixture_root,
+):
+    fd, folder, uid = fixture_root
+    commit_legacy(fd, _legacy_state(), owner_uid=uid, expected_generation=0)
+    with _locked(fd, uid):
+        with pytest.raises(ProtectedStateStoreError, match="LOCK_UNAVAILABLE"):
+            preview_v1_migration(fd, owner_uid=uid)
+    v2_link = folder / V2_STATE
+    v2_link.symlink_to(folder / "missing-foreign-state")
+    with pytest.raises(ProtectedStateStoreError, match="V2_COHABITATION_REFUSED"):
+        preview_v1_migration(fd, owner_uid=uid)
+    assert v2_link.is_symlink()
+    assert (folder / "state-v1.json").is_file()
