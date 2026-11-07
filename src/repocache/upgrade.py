@@ -215,10 +215,10 @@ def _verified_dependency_profile(signed: Dict[str, Any],
                                  policy: Dict[str, Any], version: str) -> str:
     """Identify the *already authenticated* release's dependency profile.
 
-    A v0.4.0 updater understands only the schema-1 signed manifest/policy and
-    publisher-bound wheelhouse. v0.5.0 must preserve that envelope so the
-    immutable public v0.4.0 can install the transition release. Future online
-    schemas need separately implemented, accepted download/rollback controls.
+    The first operational v0.6.0 clean-install path accepts only the signed
+    offline wheelhouse schema-1 envelope; it does NOT upgrade public v0.4.0.
+    Future online schemas need separately implemented and independently
+    accepted download, signature and rollback controls.
 
     Only call after signatures.verify() and the signed policy digest check;
     this returned label is never an independent trust anchor.
