@@ -17,9 +17,10 @@ import tempfile
 import time
 from pathlib import Path
 
-# The immutable public v0.4.0 verifier requires this schema-1 publisher
-# identity even when the source-run and asset URLs are under the new org.
-PUBLISHER_REPO = "teixemf/repocache"
+# New first-operational release: no upgrade compatibility with public v0.4.0.
+# Bind the signed schema-1 eight-asset manifest to the canonical repository;
+# historical v0.4.0 bytes and their original signature remain immutable.
+PUBLISHER_REPO = "repocache-project/repocache"
 
 
 def sign(bundle: Path, key: Path, key_id: str, commit: str,

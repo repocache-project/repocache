@@ -25,15 +25,14 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-# New GitHub origin, but legacy schema-1 manifests MUST retain their signed
-# publisher identity so immutable v0.4.0 can authenticate the upgrade.
+# v0.6.0 is the first operational release; bind all new signed source and
+# publisher identities to the canonical organization repository.
 REPO = "repocache-project/repocache"
-PUBLISHER_REPO = "teixemf/repocache"
+PUBLISHER_REPO = REPO
 API = "https://api.github.com/repos/" + REPO
 ROOT = Path(__file__).resolve().parents[1]
 KEY = ROOT / "keys/repocache-2026-10.pem"
 FINGERPRINT = "7bbf4b840f762a610da648869564a5b77669f24191d0c5c7af04c14c043dc0fb"
-PREVIOUS = "v0.4.0"
 SUFFIXES = ("", ".sha256", ".wheelhouse.tar.gz", ".wheelhouse.tar.gz.sha256",
             ".manifest.json", ".manifest.json.sig",
             ".provenance.json", ".provenance.json.sig")
@@ -76,8 +75,9 @@ def sha(data: bytes) -> str:
 
 def normal(tag: str, commit: str, release_id: int, run_id: int, attempt: int):
     # This initial gate is intentionally reviewed for one upgrade baseline:
-    # real public v0.4.0 -> signed v0.6.0 with unchanged schema-1 eight
-    # asset profile. Do not authorize other tags or online/source-only profiles.
+    # First clean-install-only owner-signed v0.6.0, with exactly the approved
+    # offline eight-asset schema-1 profile. Never adopt an older source, an
+    # unreviewed upgrade baseline or online/source-only dependency profile.
     require(tag == "v0.6.0",
             "Unreviewed candidate: prior public release baseline must be updated")
     require(COMMIT.fullmatch(commit) is not None
@@ -312,9 +312,9 @@ def authenticate(tag: str, commit: str, run_id: int, attempt: int,
     require(policy.get("schema") == 1 and policy.get("version") == tag[1:]
             and {"id": "debian", "major": "13"} in policy.get("targets", [])
             and {"id": "almalinux", "major": "10"} in policy.get("targets", [])
-            and isinstance(policy.get("compatible_from"), list)
-            and "0.4.0" in policy["compatible_from"],
-            "Signed candidate does not permit prior real public v0.4.0 upgrade")
+            and policy.get("compatible_from") == []
+            and policy.get("downgrade_from") == [],
+            "First operational candidate must refuse prior-version upgrade or downgrade")
     import tomllib
     require(tomllib.loads(data["pyproject.toml"].decode())["project"]["version"] == tag[1:]
             and ('__version__ = "' + tag[1:] + '"').encode()

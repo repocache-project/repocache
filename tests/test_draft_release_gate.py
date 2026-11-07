@@ -282,8 +282,8 @@ def test_v060_uses_transferred_origin_and_legacy_signed_publisher():
     assert gate.REPO == releases.REPOSITORY == "repocache-project/repocache"
     assert gate.API == "https://api.github.com/repos/" + gate.REPO
     assert gate.PUBLISHER_REPO == sign_release.PUBLISHER_REPO
-    assert gate.PUBLISHER_REPO == "teixemf/repocache"
-    assert gate.PREVIOUS == "v0.4.0"
+    assert gate.PUBLISHER_REPO == "repocache-project/repocache"
+    assert not hasattr(gate, "PREVIOUS")
     gate.normal("v0.6.0", SHA, 42, 99, 1)
     with pytest.raises(gate.Refused, match="Unreviewed candidate"):
         gate.normal("v0.5.0", SHA, 42, 99, 1)
