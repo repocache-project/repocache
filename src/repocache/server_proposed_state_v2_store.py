@@ -23,7 +23,7 @@ from repocache.server_protected_state_store_v1 import (
     ROLLBACK_NAME as LEGACY_ROLLBACK,
     STAGE_NAME as LEGACY_STAGE,
     STATE_NAME as LEGACY_STATE,
-    _canonical, _closed, _hash, _json, _locked, _read_file,
+    _canonical, _closed, _hash, _json, _locked, _read_file, _read_state,
     _unlink_known, _write_exclusive,
 )
 from repocache.server_install_v1 import MAX_INT, parse_install_bytes
@@ -403,3 +403,45 @@ def _preview_persisted_v2_nginx_candidate_under_root(
             "authorizes_catalog_publication": False,
         }
 
+
+
+def _preview_v1_migration_blockers_under_root(
+    root_fd: int, *, owner_uid: int,
+) -> dict[str, Any]:
+    """Read-only v1 fixture diagnosis, NEVER an actual migration/approval.
+
+    V1 lacks canonical configuration bytes and historic tombstones. A v1
+    digest and repository list cannot authenticate or reconstruct these.
+    No proposed v2 data, arbitrary caller document or approval is accepted.
+    """
+    with _locked(root_fd, owner_uid) as directory:
+        # The legacy validated reader refuses any proposed-v2 coexistence,
+        # including an incomplete stage or symlink, under the shared lock.
+        legacy, before = _read_state(directory, owner_uid)
+        if legacy is None:
+            _refuse("LEGACY_STATE_ABSENT")
+        # No reading a snapshot as migratable while prior v1 recovery is
+        # pending, even if the current state bytes remain valid.
+        for name, limit in (
+            (LEGACY_JOURNAL, LEGACY_MAX_JOURNAL),
+            (LEGACY_JOURNAL_TMP, LEGACY_MAX_JOURNAL),
+            (LEGACY_STAGE, LEGACY_MAX_STATE),
+            (LEGACY_ROLLBACK, LEGACY_MAX_STATE),
+        ):
+            if _read_file(directory, name, owner_uid, limit) is not None:
+                _refuse("LEGACY_RECOVERY_REQUIRED")
+        _, after = _read_state(directory, owner_uid)
+        if before != after:
+            _refuse("LEGACY_STATE_CHANGED")
+        return {
+            **_report("LEGACY_V1_MIGRATION_BLOCKED", legacy["state_generation"]),
+            "legacy_repository_count": len(legacy["repositories"]),
+            "legacy_manifest_entry_count": len(legacy["ownership_manifest"]),
+            "v1_snapshot_read_under_exclusive_lock": True,
+            "v1_recovery_pending": False,
+            "independent_configuration_bytes_verified": False,
+            "historic_id_reservations_verified": False,
+            "live_nginx_include_verified": False,
+            "versioned_migration_protocol_approved": False,
+            "authorizes_migration": False,
+        }
