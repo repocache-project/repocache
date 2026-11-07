@@ -677,3 +677,162 @@ def test_persisted_v2_nginx_t_succeeds_without_touching_live_config(
     assert finished.returncode == 0, finished.stderr
     assert (folder / V2_STATE).read_bytes() == before
     assert not (folder / V2_JOURNAL).exists()
+
+
+@pytest.mark.skipif(
+    shutil.which("nginx") is None,
+    reason="disposable distro-packaged nginx unavailable",
+)
+def test_nginx_live_rollback_in_sandbox(fixture_root, tmp_path):
+    """Exercise a REAL isolated NGINX master, not production host activation.
+
+    The v2 state/renderer are read-only input. This demonstrates that invalid
+    syntax leaves the old worker serving, and that a reload of a valid
+    candidate can be compensated by reloading the previous known-good bytes.
+    It does NOT implement the privileged transaction or prove host recovery.
+    """
+    import socket
+    import time
+
+    nginx = shutil.which("nginx")
+    ca = next((
+        p for p in (
+            "/etc/ssl/certs/ca-certificates.crt",
+            "/etc/pki/tls/certs/ca-bundle.crt",
+        ) if Path(p).is_file()
+    ), None)
+    if ca is None:
+        pytest.skip("disposable container CA bundle unavailable")
+    apply(fixture_root, two_layout_active_snapshot())
+    fd, state_dir, uid = fixture_root
+    persisted_before = (state_dir / V2_STATE).read_bytes()
+    candidate = render_persisted(
+        fd, owner_uid=uid, expected_generation=1,
+        candidate_pins_by_repository=pinned_two_layouts(),
+        ca_bundle_path=ca,
+    )
+    assert candidate["authorizes_nginx_activation"] is False
+
+    sock = tmp_path / "nginx.sock"
+    conf = tmp_path / "nginx.conf"
+    master_pid = tmp_path / "nginx.pid"
+    log = tmp_path / "nginx-error.log"
+    assert len(os.fsencode(sock)) < 100  # Linux sockaddr_un path boundary
+
+    def config(body):
+        return (
+            f"pid {master_pid};\n"
+            f"error_log {log} notice;\n"
+            "worker_processes 1;\nevents { worker_connections 32; }\n"
+            "http { access_log off;\n"
+            + candidate["http_upstream_fragment"]
+            + f"server {{ listen unix:{sock};\n"
+            + f'location = /__test_health {{ return 200 "{body}"; }}\n'
+            + candidate["server_location_fragment"]
+            + "}\n}\n"
+        ).encode("utf-8")
+
+    previous = config("known-good")
+    replacement = config("candidate")
+    invalid = previous.replace(
+        b"return 200 \"known-good\";",
+        b"return 200 \"known-good\"; invalid_directive;",
+    )
+    assert invalid != previous
+
+    def stage(raw):
+        # Atomic config replacement here is ONLY in a disposable temp tree.
+        stage_file = tmp_path / "nginx.stage"
+        with stage_file.open("wb") as handle:
+            handle.write(raw)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(stage_file, conf)
+
+    def command(*args):
+        return subprocess.run(
+            [nginx, *args, "-c", str(conf), "-p", str(tmp_path)],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+
+    def response():
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+            conn.settimeout(1)
+            conn.connect(str(sock))
+            conn.sendall(
+                b"GET /__test_health HTTP/1.0\r\n"
+                b"Host: localhost\r\nConnection: close\r\n\r\n"
+            )
+            received = bytearray()
+            while len(received) < 8192:
+                part = conn.recv(8192 - len(received))
+                if not part:
+                    break
+                received.extend(part)
+            return bytes(received)
+
+    def wait_for(expected, process):
+        last = None
+        for _ in range(100):
+            if process.poll() is not None:
+                pytest.fail("isolated NGINX master exited")
+            try:
+                last = response()
+                if (b" 200 " in last.split(b"\r\n", 1)[0]
+                        and last.endswith(expected)):
+                    return
+            except (OSError, TimeoutError):
+                pass
+            time.sleep(0.05)
+        pytest.fail(f"isolated NGINX response did not reach {expected!r}: {last!r}")
+
+    stage(previous)
+    tested = command("-t")
+    assert tested.returncode == 0, tested.stderr
+    process = subprocess.Popen(
+        [nginx, "-c", str(conf), "-p", str(tmp_path), "-g", "daemon off;"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        wait_for(b"known-good", process)
+
+        # Syntax-failure path: never signal the running service; restore the
+        # exact previous bytes and show the old worker remained responsive.
+        stage(invalid)
+        tested = command("-t")
+        assert tested.returncode != 0
+        wait_for(b"known-good", process)
+        stage(previous)
+        assert conf.read_bytes() == previous
+        assert command("-t").returncode == 0
+
+        # Post-reload compensation: verify a new live worker configuration,
+        # simulate failure of a later activation gate, and restore the old
+        # running response by an actual controlled reload in this sandbox.
+        stage(replacement)
+        assert command("-t").returncode == 0
+        reloaded = command("-s", "reload")
+        assert reloaded.returncode == 0, reloaded.stderr
+        wait_for(b"candidate", process)
+        stage(previous)
+        assert conf.read_bytes() == previous
+        assert command("-t").returncode == 0
+        restored = command("-s", "reload")
+        assert restored.returncode == 0, restored.stderr
+        wait_for(b"known-good", process)
+
+        assert (state_dir / V2_STATE).read_bytes() == persisted_before
+        assert not (state_dir / V2_JOURNAL).exists()
+        assert not (state_dir / V2_STAGE).exists()
+    finally:
+        if process.poll() is None:
+            command("-s", "quit")
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.terminate()
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=3)
