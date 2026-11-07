@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import os
 import re
+import secrets
 import stat
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import Iterator
 from pathlib import Path
 
 
@@ -315,3 +318,59 @@ def kill_and_drain_leaf(delegation: Delegation, leaf: Path, *,
         leaf.rmdir()
     except OSError as exc:
         raise CgroupGateError("Cannot remove drained candidate cgroup") from exc
+
+
+def _create_candidate_leaf(parent_fd: int, name: str) -> None:
+    """Use exclusive mkdir relative to an open, no-follow cgroup parent."""
+    os.mkdir(name, mode=0o700, dir_fd=parent_fd)
+
+
+@contextmanager
+def candidate_leaf(delegation: Delegation) -> Iterator[Path]:
+    """Reserve exactly one private, limited leaf and always attempt cleanup.
+
+    This source-only lifecycle primitive does not launch an untrusted process.
+    A real supervisor must retain exclusive ownership of the leaf, use the
+    pre-exec attachment bootstrap and verify group-wide resource/kill events.
+    """
+    if os.geteuid() == 0:
+        raise CgroupGateError("Root cannot manage online candidate cgroups")
+    if (delegation.manager != delegation.service / MANAGER_LEAF
+            or delegation.candidates != delegation.service / CANDIDATE_SUBTREE):
+        raise CgroupGateError("Noncanonical delegated candidate hierarchy")
+    _directory(delegation.candidates, owned=True)
+
+    # A fresh unpredictable name and kernel-atomic mkdir avoid reuse and
+    # cross-candidate collisions. Never take over an existing candidate leaf.
+    name = "candidate-" + secrets.token_hex(16)
+    if not re.fullmatch(r"candidate-[a-f0-9]{32}", name):
+        raise CgroupGateError("Invalid candidate cgroup reservation token")
+
+    try:
+        parent_fd = os.open(
+            delegation.candidates,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as exc:
+        raise CgroupGateError("Cannot open candidate cgroup delegation") from exc
+    try:
+        parent_stat = os.fstat(parent_fd)
+        if (not stat.S_ISDIR(parent_stat.st_mode)
+                or parent_stat.st_uid != os.geteuid()
+                or parent_stat.st_mode & 0o022):
+            raise CgroupGateError("Untrusted open cgroup parent")
+        try:
+            _create_candidate_leaf(parent_fd, name)
+        except OSError as exc:
+            raise CgroupGateError(
+                "Cannot exclusively reserve candidate cgroup leaf") from exc
+    finally:
+        os.close(parent_fd)
+
+    leaf = delegation.candidates / name
+    # Even if resource setup fails, the newly reserved leaf must be killed,
+    # drained and removed. Never adopt or delete an existing collided leaf.
+    try:
+        write_leaf_limits(delegation, leaf)
+        yield leaf
+    finally:
+        kill_and_drain_leaf(delegation, leaf)

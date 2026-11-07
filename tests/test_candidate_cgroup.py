@@ -374,3 +374,145 @@ def test_candidate_cgroup_cleanup_rejects_invalid_timeout_before_kill(
         candidate_cgroup.kill_and_drain_leaf(
             _gate(delegated), leaf, timeout=deadline)
     assert (leaf / "cgroup.kill").read_text() == ""
+
+
+
+def _mock_kernel_leaf_creation(delegated, monkeypatch):
+    """Kernel cgroupfs auto-creates controller files; tmp_path does not."""
+    _, _, _, candidates, _, _ = delegated
+    created = []
+    closed = []
+    actual_create = candidate_cgroup._create_candidate_leaf
+
+    def create(parent_fd, name):
+        actual_create(parent_fd, name)
+        leaf = candidates / name
+        created.append(leaf)
+        (leaf / "cgroup.procs").write_text("")
+        (leaf / "cgroup.events").write_text("populated 0\n")
+        (leaf / "cgroup.kill").write_text("")
+        for control in candidate_cgroup.LEAF_LIMITS:
+            (leaf / control).write_text("max")
+
+    def cleanup(delegation, leaf, *, timeout=5.0):
+        assert delegation.candidates == candidates
+        assert leaf == created[-1]
+        assert (leaf / "cgroup.procs").read_text() == ""
+        closed.append(leaf)
+        for child in leaf.iterdir():
+            child.unlink()
+        leaf.rmdir()
+
+    monkeypatch.setattr(candidate_cgroup, "_create_candidate_leaf", create)
+    monkeypatch.setattr(candidate_cgroup, "kill_and_drain_leaf", cleanup)
+    return created, closed
+
+
+def test_candidate_leaf_reserves_applies_limits_and_cleans_exclusively(
+        delegated, monkeypatch):
+    created, closed = _mock_kernel_leaf_creation(delegated, monkeypatch)
+    gate = _gate(delegated)
+    with candidate_cgroup.candidate_leaf(gate) as leaf:
+        assert leaf == created[0]
+        assert leaf.name.startswith("candidate-")
+        for name, expected in candidate_cgroup.LEAF_LIMITS.items():
+            assert (leaf / name).read_text() == expected
+        assert not closed
+    assert closed == created
+    assert not leaf.exists()
+    assert gate.candidates.exists()
+
+
+def test_candidate_leaf_cleanup_on_body_exception(delegated, monkeypatch):
+    created, closed = _mock_kernel_leaf_creation(delegated, monkeypatch)
+    with pytest.raises(RuntimeError, match="candidate failed"):
+        with candidate_cgroup.candidate_leaf(_gate(delegated)) as leaf:
+            raise RuntimeError("candidate failed")
+    assert closed == created
+    assert not leaf.exists()
+
+
+def test_candidate_leaf_cleanup_on_partial_limit_failure(delegated, monkeypatch):
+    created, closed = _mock_kernel_leaf_creation(delegated, monkeypatch)
+
+    def broken_limits(delegation, leaf):
+        (leaf / "memory.max").unlink()
+        raise candidate_cgroup.CgroupGateError("Cannot impose limits")
+
+    monkeypatch.setattr(candidate_cgroup, "write_leaf_limits", broken_limits)
+    with pytest.raises(candidate_cgroup.CgroupGateError, match="Cannot impose"):
+        with candidate_cgroup.candidate_leaf(_gate(delegated)):
+            pytest.fail("Must not enter body after failed limits")
+    assert closed == created
+    assert not created[0].exists()
+
+
+def test_candidate_leaf_collision_never_takes_over_or_kills_existing(
+        delegated, monkeypatch):
+    _, _, _, candidates, _, _ = delegated
+    monkeypatch.setattr(candidate_cgroup.secrets, "token_hex",
+                        lambda n: "a" * 32)
+    original = candidates / ("candidate-" + "a" * 32)
+    original.mkdir()
+    sentinel = original / "not-ours"
+    sentinel.write_text("must be preserved")
+    monkeypatch.setattr(candidate_cgroup, "kill_and_drain_leaf",
+                        lambda *a, **kw: pytest.fail("Collision must not kill"))
+    with pytest.raises(candidate_cgroup.CgroupGateError,
+                       match="exclusively reserve"):
+        with candidate_cgroup.candidate_leaf(_gate(delegated)):
+            pytest.fail("Collision must not be adopted")
+    assert sentinel.read_text() == "must be preserved"
+
+
+def test_candidate_leaf_bad_token_refuses_without_mkdir(delegated, monkeypatch):
+    monkeypatch.setattr(candidate_cgroup.secrets, "token_hex",
+                        lambda n: "../../wrong")
+    monkeypatch.setattr(candidate_cgroup, "_create_candidate_leaf",
+                        lambda *a: pytest.fail("Invalid token must not mkdir"))
+    with pytest.raises(candidate_cgroup.CgroupGateError, match="reservation token"):
+        with candidate_cgroup.candidate_leaf(_gate(delegated)):
+            pytest.fail("Invalid token cannot acquire leaf")
+
+
+def test_candidate_leaf_refuses_changed_parent_and_forged_delegation(
+        delegated, monkeypatch):
+    gate = _gate(delegated)
+    _, service, _, candidates, _, _ = delegated
+    bad = candidate_cgroup.Delegation(
+        service=service, manager=gate.manager,
+        candidates=service / "unreviewed-cgroups")
+    with pytest.raises(candidate_cgroup.CgroupGateError,
+                       match="Noncanonical"):
+        with candidate_cgroup.candidate_leaf(bad):
+            pytest.fail("Noncanonical delegation cannot be used")
+    swapped = service / "swapped-candidates"
+    candidates.rename(swapped)
+    candidates.symlink_to(swapped, target_is_directory=True)
+    with pytest.raises(candidate_cgroup.CgroupGateError,
+                       match="delegation path"):
+        with candidate_cgroup.candidate_leaf(gate):
+            pytest.fail("Symlinked cgroup parent cannot be used")
+
+
+def test_candidate_leaf_drain_failure_remains_blocking(delegated, monkeypatch):
+    created, closed = _mock_kernel_leaf_creation(delegated, monkeypatch)
+
+    def failed_cleanup(*args, **kwargs):
+        raise candidate_cgroup.CgroupGateError("Candidate remains populated")
+
+    monkeypatch.setattr(candidate_cgroup, "kill_and_drain_leaf", failed_cleanup)
+    with pytest.raises(candidate_cgroup.CgroupGateError,
+                       match="remains populated"):
+        with candidate_cgroup.candidate_leaf(_gate(delegated)):
+            pass
+    assert created[0].exists()
+    assert not closed
+
+
+def test_candidate_leaf_never_runs_as_root(delegated, monkeypatch):
+    gate = _gate(delegated)
+    monkeypatch.setattr(candidate_cgroup.os, "geteuid", lambda: 0)
+    with pytest.raises(candidate_cgroup.CgroupGateError, match="Root"):
+        with candidate_cgroup.candidate_leaf(gate):
+            pytest.fail("Root cannot create an untrusted candidate leaf")
