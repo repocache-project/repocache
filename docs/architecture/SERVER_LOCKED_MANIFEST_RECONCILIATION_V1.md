@@ -225,3 +225,62 @@ reload rollback and interrupted recovery) remain **NOT VERIFIED**.
 Original #95 and #28 operational acceptance remains NOT VERIFIED. The
 proposed bridge is testable coordination work, not adoption of a new
 protected-state format or approval of a native writer.
+
+
+## Proposed v2 fixture-only durability and rollback rehearsal
+
+**Status: PROTOTYPE / UNADOPTED / NOT A HOST WRITER.** The separate
+`server_proposed_state_v2_store.py` contains only private
+`_commit_proposed_v2_under_root` and `_recover_proposed_v2_under_root`
+functions intended for disposable Linux-FD fixtures. They are **not** in the
+CLI, application startup, a privileged service, a production installer, or
+a signed-release path. Their caller-supplied FD/UID does **not** establish
+host-root or administrator authorization.
+
+The private v2 prototype uses the *existing preprovisioned v1 state lock*,
+still requiring the existing owner/mode/pinned-ancestry checks. No new lock
+is provisioned. All v2 files are distinct fixed names under the same
+protected fixture directory: `state-v2.json`, `.state-v2.pending-tmp`,
+`.state-v2.pending`, `.state-v2.stage` and `.state-v2.rollback`. The v2
+snapshot ceiling is **4 MiB**, including a complete <=1 MiB validated
+canonical configuration payload encoded as Base64 and up to 10,000 retained
+ID reservations. The v2 journal ceiling is **6 MiB**, sufficient for an
+encoded former 4 MiB state plus bounded metadata; hitting either limit
+fails closed. These sizes and filenames are **proposed fixture contracts**,
+not approved operational or migration compatibility promises.
+
+Under the exclusive lock the prototype rejects **any v1 state** with
+`LEGACY_MIGRATION_REQUIRED`, and rejects pending v1 transactions/stages
+with `LEGACY_RECOVERY_REQUIRED`; it never imports, renames, deletes or
+adopts v1 data. It refuses pending, orphaned, symlinked, hardlinked, unsafe,
+noncanonical, malformed or conflicting v2 files. A complete and frozen
+candidate must satisfy the exact proposed v2 generation CAS,
+canonical-config/digest/identity/retired-ID rules against **the actual
+previous fixture bytes**, rather than a caller-provided prior snapshot.
+An effective no-change install with only generation metadata differing
+returns `NO_CHANGE_INERT_V2` without replacing the state inode.
+
+For a changed candidate, the prototype fsyncs and publishes a fixed-name
+previous-state journal before writing and fsyncing a new temporary stage,
+then atomically renames the new state. It never runs `nginx -t`, reload,
+package installation or catalog publishing. Explicit rollback under the
+same lock checks the published journal hashes, rejects unexpected current
+state drift and restores *exact* previous bytes (or initial absence).
+Interrupted journal creation, staged writes, replacements, a failed
+rollback rename and repeated recoveries are exercised with fault injection
+on disposable local directories. The unit tests additionally cover 500
+present repositories, a 10,000-entry reservation history, stale CAS,
+unchanged state, unsafe symlinks, exclusive-lock contention, and refusal
+of any v1-to-v2 migration. This is **not** proof of native power-loss
+durability, fsync guarantees on every target filesystem, actual production
+root ownership, TLS/cache preservation or systemd/SELinux correctness.
+
+**Explicit architecture gate:** Before any real v2 adoption, an approved
+maintainer-reviewed migration/versioning contract must define what to do
+with existing v1 state/manifest/journal and require a trusted host-root
+operator-authentication path, ACL/xattr/mount/SELinux checks, complete
+NGINX syntax/reload/known-good service rollback and active-only atomic
+catalog consistency. The suggested private fixture mechanism may need
+revision after that review. All original #31 operational acceptance
+criteria remain **NOT VERIFIED** and no production use or protected
+operation is authorized.
