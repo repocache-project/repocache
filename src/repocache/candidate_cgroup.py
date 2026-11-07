@@ -374,3 +374,65 @@ def candidate_leaf(delegation: Delegation) -> Iterator[Path]:
         yield leaf
     finally:
         kill_and_drain_leaf(delegation, leaf)
+
+
+# A separate private tmpfs mount is provisioned by the native service. It
+# limits *all* downloads, wheel extraction and venv files in one rehearsal,
+# including writes by the manager that are outside an individual child cgroup.
+STAGING_MAX_BYTES = 4 * 1024 * 1024 * 1024
+STAGING_MIN_FREE_BYTES = 128 * 1024 * 1024
+STAGING_MAX_INODES = 100_000
+
+
+def require_staging_tmpfs(parent: Path, *,
+                          mountinfo: Path = PROC_MOUNTINFO) -> None:
+    """Refuse non-dedicated or oversized writable preparation filesystems.
+
+    This only admits a kernel-enforced, service-mounted private tmpfs. It does
+    not mount or remount anything from the updater. The parent must be the
+    exact mountpoint; an ordinary directory on ext4/xfs is NOT acceptable.
+    """
+    _directory(parent, owned=True)
+    if not parent.is_absolute() or ".." in parent.parts:
+        raise CgroupGateError("Invalid preparation mount location")
+    matches = []
+    for line in _read(mountinfo).splitlines():
+        left, marker, right = line.partition(" - ")
+        fields, fs = left.split(), right.split()
+        if marker and len(fields) >= 6 and fields[4] == str(parent):
+            matches.append((fields, fs))
+    if len(matches) != 1:
+        raise CgroupGateError("Dedicated candidate preparation mount is missing")
+    fields, fs = matches[0]
+    if (len(fs) < 3 or fs[0] != "tmpfs" or "rw" not in fields[5].split(",")
+            or fields[3] != "/"):
+        raise CgroupGateError("Candidate preparation mount is not private tmpfs")
+    try:
+        usage = os.statvfs(parent)
+    except OSError as exc:
+        raise CgroupGateError("Cannot verify candidate staging quota") from exc
+    capacity = usage.f_frsize * usage.f_blocks
+    free = usage.f_frsize * usage.f_bavail
+    if (capacity <= 0 or capacity > STAGING_MAX_BYTES
+            or free < STAGING_MIN_FREE_BYTES
+            or usage.f_files <= 0 or usage.f_files > STAGING_MAX_INODES):
+        raise CgroupGateError("Candidate staging tmpfs quota is unacceptable")
+
+
+def _resource_counter(path: Path, key: str) -> int:
+    matching = [line.split() for line in _read(path).splitlines()
+                if line.split() and line.split()[0] == key]
+    if (len(matching) != 1 or len(matching[0]) != 2
+            or not matching[0][1].isdigit()):
+        raise CgroupGateError("Cannot read mandatory candidate resource counter")
+    return int(matching[0][1])
+
+
+def resource_events(leaf: Path) -> tuple[int, int, int]:
+    """Return OOM, OOM-kill and PIDs-limit events for a candidate leaf."""
+    _directory(leaf, owned=True)
+    return (
+        _resource_counter(leaf / "memory.events", "oom"),
+        _resource_counter(leaf / "memory.events", "oom_kill"),
+        _resource_counter(leaf / "pids.events", "max"),
+    )
