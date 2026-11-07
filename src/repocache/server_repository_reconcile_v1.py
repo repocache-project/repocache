@@ -45,6 +45,34 @@ def _effective_policy(repo: dict[str, Any], global_policy: dict[str, Any]) -> di
     }
 
 
+def _desired_config_revalidation_ids(
+    current: dict[str, Any], candidate: dict[str, Any],
+) -> list[str]:
+    """Known config changes affecting already desired-active route candidates.
+
+    This is only an intent comparison, NOT a list of all routes requiring
+    revalidation. Even an empty result says nothing about changed DNS pins,
+    the live NGINX include, current TLS trust, owner provenance or exposure.
+    Every actual activation must independently verify all routes under the
+    authenticated transaction lock, regardless of this field.
+    """
+    before = {
+        row["id"]: row for row in current["repositories"]
+        if row["desired_state"] == "active"
+    }
+    after = {
+        row["id"]: row for row in candidate["repositories"]
+        if row["desired_state"] == "active"
+    }
+    deployment_changed = current["deployment"] != candidate["deployment"]
+    return sorted(
+        identifier for identifier in before.keys() & after.keys()
+        if deployment_changed
+        or _effective_configuration(before[identifier])
+           != _effective_configuration(after[identifier])
+    )
+
+
 def plan_declarative_reconciliation(
     current_document: dict[str, Any],
     proposed_document: dict[str, Any],
@@ -338,6 +366,9 @@ def preview_declarative_nginx_candidate(
         "desired_new_route_ids": sorted(candidate_active - current_active),
         "desired_withdraw_route_ids": sorted(current_active - candidate_active),
         "desired_retained_route_ids": sorted(current_active & candidate_active),
+        "desired_config_revalidation_ids": _desired_config_revalidation_ids(
+            current, candidate,
+        ),
         "proposed_repository_ids": bundle["proposed_repository_ids"],
         "pin_count": bundle["pin_count"],
         "http_upstream_fragment": bundle["http_upstream_fragment"],
@@ -449,6 +480,9 @@ def preview_repository_lifecycle_nginx_candidate(
         "desired_new_route_ids": sorted(new_active - old_active),
         "desired_withdraw_route_ids": sorted(old_active - new_active),
         "desired_retained_route_ids": sorted(old_active & new_active),
+        "desired_config_revalidation_ids": _desired_config_revalidation_ids(
+            current, candidate,
+        ),
         "proposed_repository_ids": bundle["proposed_repository_ids"],
         "pin_count": bundle["pin_count"],
         "http_upstream_fragment": bundle["http_upstream_fragment"],

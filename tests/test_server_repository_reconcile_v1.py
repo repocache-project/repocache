@@ -937,3 +937,108 @@ def test_lifecycle_preview_never_writes_or_executes(monkeypatch):
     assert result["authorizes_nginx_activation"] is False
     assert result["authorizes_catalog_publication"] is False
     assert result["authorizes_cache_cleanup"] is False
+
+
+# A route that remains desired-active may have changed trust/policy: it is NOT
+# safe to infer that it can remain exposed without renewed native validation.
+
+
+def test_partial_active_trust_change_requires_route_configuration_revalidation():
+    current = document()
+    current["expected_state_generation"] = 1
+    current["repositories"][0]["desired_state"] = "active"
+    proposed = copy.deepcopy(current)
+    proposed["repositories"] = [copy.deepcopy(current["repositories"][0])]
+    proposed["repositories"][0]["layout"]["release_key_refs"] = [
+        "file:/etc/repocache/keys/rotated-archive.gpg"
+    ]
+    out = _nginx_preview(
+        current, proposed,
+        pins={"debian-trixie-main": copy.deepcopy(_PUBLIC_PINS)},
+    )
+    assert out["desired_retained_route_ids"] == ["debian-trixie-main"]
+    assert out["desired_config_revalidation_ids"] == ["debian-trixie-main"]
+    assert out["authorizes_nginx_activation"] is False
+    assert out["authorizes_catalog_publication"] is False
+
+
+def test_omitted_active_route_requires_revalidation_on_global_configuration_change():
+    current = document()
+    current["expected_state_generation"] = 1
+    current["repositories"][0]["desired_state"] = "active"
+    proposed = copy.deepcopy(current)
+    proposed["repositories"] = []
+    proposed["deployment"]["cache_policy"]["global"]["max_size_bytes"] += 1024
+    out = _nginx_preview(
+        current, proposed,
+        pins={"debian-trixie-main": copy.deepcopy(_PUBLIC_PINS)},
+    )
+    assert out["desired_retained_route_ids"] == ["debian-trixie-main"]
+    assert out["desired_config_revalidation_ids"] == ["debian-trixie-main"]
+    assert out["deployment_approval_required"] is True
+    assert out["authorizes_nginx_activation"] is False
+
+
+def test_unchanged_active_route_has_no_detected_config_revalidation_not_proof():
+    current = document()
+    current["expected_state_generation"] = 1
+    current["repositories"][0]["desired_state"] = "active"
+    proposed = copy.deepcopy(current)
+    proposed["repositories"] = []
+    result = _nginx_preview(
+        current, proposed,
+        pins={"debian-trixie-main": copy.deepcopy(_PUBLIC_PINS)},
+    )
+    assert result["desired_retained_route_ids"] == ["debian-trixie-main"]
+    assert result["desired_config_revalidation_ids"] == []
+    # A blank *known config delta* never proves current DNS pins, live
+    # NGINX exposure, TLS validity or administrator authorization.
+    assert result["requires_trusted_locked_recheck"] is True
+    assert result["active_exposure_verified"] is False
+    assert result["authorizes_nginx_activation"] is False
+
+
+def test_explicit_active_repository_trust_update_flags_revalidation():
+    current = document()
+    current["expected_state_generation"] = 1
+    current["repositories"][0]["desired_state"] = "active"
+    updated = copy.deepcopy(current["repositories"][0])
+    updated["layout"]["release_key_refs"] = [
+        "file:/etc/repocache/keys/rotated-archive.gpg"
+    ]
+    result = _lifecycle_preview(
+        current, "update", repo_id="debian-trixie-main", proposal=updated,
+        pins={"debian-trixie-main": copy.deepcopy(_PUBLIC_PINS)},
+    )
+    assert result["changed"] is True
+    assert result["desired_retained_route_ids"] == ["debian-trixie-main"]
+    assert result["desired_config_revalidation_ids"] == ["debian-trixie-main"]
+    assert result["fresh_approval_required_ids"] == ["debian-trixie-main"]
+    assert result["authorizes_catalog_publication"] is False
+
+
+def test_explicit_disable_or_unrelated_disabled_add_does_not_revalidate_retained_route():
+    current = document()
+    current["expected_state_generation"] = 1
+    current["repositories"][0]["desired_state"] = "active"
+    disable = _lifecycle_preview(
+        current, "disable", repo_id="debian-trixie-main",
+    )
+    assert disable["desired_withdraw_route_ids"] == ["debian-trixie-main"]
+    assert disable["desired_config_revalidation_ids"] == []
+
+    new_repo = copy.deepcopy(current["repositories"][0])
+    new_repo["id"] = "additional-disabled"
+    new_repo["desired_state"] = "disabled"
+    new_repo["upstream"]["base_url"] = (
+        "https://mirror.example.invalid/other-archive/"
+    )
+    add = _lifecycle_preview(
+        current, "add", proposal=new_repo,
+        reservations={"debian-trixie-main", "almalinux-baseos"},
+        pins={"debian-trixie-main": copy.deepcopy(_PUBLIC_PINS)},
+    )
+    assert add["changed"] is True
+    assert add["desired_retained_route_ids"] == ["debian-trixie-main"]
+    assert add["desired_config_revalidation_ids"] == []
+    assert add["authorizes_nginx_activation"] is False

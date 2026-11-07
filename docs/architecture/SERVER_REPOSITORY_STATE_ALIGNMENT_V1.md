@@ -190,3 +190,71 @@ catalog. Fixture tests and temporary nginx -t do not demonstrate original
 APT add, desired enable/disable, trust-key update, active removal with cache
 retention, stale state, all-time ID reuse refusal, forbidden identity
 reassignment, unsafe DNS pins, and prohibited host effects.
+
+
+## Known desired-active configuration changes are not activated exposure
+
+The two inert NGINX adapters now report
+`desired_config_revalidation_ids` alongside
+`desired_retained_route_ids`. The latter means an ID was desired-active in
+both declarations, **not** that its route is unchanged, approved, valid or
+live. The new field conservatively identifies a subset of retained
+desired-active IDs whose declared effective repository configuration or
+deployment configuration changed. In particular, trust-key rotation or
+inherited global policy changes require fresh native route validation even
+when a repository was omitted from a partial update.
+
+**An empty list is not clearance:** candidate DNS address changes, TLS trust
+changes on disk, managed NGINX inode drift, SELinux/ACL state, service failures
+and real exposure cannot be determined from two untrusted declarations.
+Regardless of this hint, every eventual privileged activation must revalidate
+all desired routes and protected state under a single authenticated native
+transaction. The fields are diagnostic-only and never authorize NGINX reload
+or discovery publication.
+
+## Proposed operator-facing lifecycle and legacy NGINX migration evidence
+
+The following is a non-executable **operational acceptance specification**,
+not an implemented CLI, a v2 state schema adoption or an approved migration
+tool. An administrator must be able to distinguish:
+
+- **Desired disabled:** retained configuration with no permitted new route or
+  discovery entry; any old exposed route must first be withdrawn and verified
+  absent, with cache data retained.
+- **Desired active, pending validation:** an administrator's requested state,
+  NOT a claim of an operating cache. Candidate fragments, public DNS pins and
+  a successful disposable `nginx -t` alone must not publish discovery.
+- **Verified active (future, not implemented):** status can only be asserted
+  after authenticated approval, owned managed-include validation, a successful
+  native full-context NGINX syntax check, reload, and proof of actually
+  exposed routes. The atomic derived client catalog must reflect only this
+  verified subset.
+- **Failed or recovery-required (future, not implemented):** do not advertise
+  a requested route whose staged change, reload, exposure check or catalog
+  transaction failed. Report blocked recovery with preserved known-good
+  state and verified rollback evidence rather than silently claiming success.
+- **Removed with retained cache:** withdraw route and catalog, persist the
+  ID/identity tombstone and retain cached bytes under normal storage rules.
+  Explicit forced cleanup is a distinct ownership-verified, authorised action;
+  a missing historical ID cannot be silently recycled.
+
+For migration from a previously **operator-managed NGINX frontend**, a
+future administrator procedure must first inventory managed and foreign
+includes, service/TLS ownership, active client catalog and cache files
+without mutation. Fail closed on a foreign/conflicting managed-include path;
+do not auto-adopt it, delete unrelated NGINX content, or overwrite TLS keys.
+Prepare an isolated managed candidate using the normal #31 transaction
+engine, require explicit approved cutover, verify native `nginx -t`, reload,
+real route/cache HIT and signed APT/DNF metadata, and only then publish the
+new atomic catalog. On failure keep or restore previous known-good exposure
+and catalog, preserve retained cache, TLS, logs and metrics, and leave client
+APT/DNF sources unchanged. Test idempotent retry and upgrades on booted
+Debian 13 and AlmaLinux 10 (including SELinux enforcing where relevant).
+
+This section is a measurable future acceptance checklist, not an assertion
+that any of these host-level transitions, persisted states or migration
+commands already work. The #31 proposed v2 review-only state contract
+(`preview_proposed_v2_state_transition`, existing PR #237) remains
+unmerged and non-authorizing; neither that proposal nor this #95 PR
+implements its privileged writer, actual observed-state attestation, or
+catalog publication.
