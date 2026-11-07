@@ -48,7 +48,7 @@ def test_final_candidate_acceptance_stays_manual_and_version_reviewed():
     verifier = (ROOT / "scripts/draft_release_gate.py").read_text("utf-8")
     assert "workflow_dispatch:" in signed
     assert "refs/heads/main" in signed
-    assert 'require(tag == "v0.5.0"' in verifier
+    assert 'require(tag == "v0.6.0"' in verifier
     assert '"0.4.0" in policy["compatible_from"]' in verifier
     assert '"/compare/" + commit + "...main"' in verifier
     assert "signed-candidate-acceptance.yml" in signed or "draft_release_gate.py" in signed

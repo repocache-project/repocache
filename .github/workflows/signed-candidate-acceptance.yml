@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Exact owner-approved signed draft tag (e.g. v0.5.0)
+        description: Exact owner-approved signed draft tag (e.g. v0.6.0)
         type: string
         required: true
       commit:

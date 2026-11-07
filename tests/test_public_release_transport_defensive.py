@@ -14,8 +14,8 @@ import pytest
 
 from repocache import releases, upgrade
 
-API = "https://api.github.com/repos/teixemf/repocache/releases/assets/123"
-METADATA = "https://api.github.com/repos/teixemf/repocache/releases"
+API = "https://api.github.com/repos/repocache-project/repocache/releases/assets/123"
+METADATA = "https://api.github.com/repos/repocache-project/repocache/releases"
 CDN = "https://release-assets.githubusercontent.com/fixture?sig=synthetic-expiring-value"
 
 
@@ -76,7 +76,7 @@ def test_anonymous_official_asset_redirect_uses_one_approved_cdn_hop(monkeypatch
     "https://release-assets.githubusercontent.com.invalid/resource",
     "https://release-assets.githubusercontent.com:9443/resource",
     "https://member:pass@release-assets.githubusercontent.com/resource",
-    "https://api.github.com/repos/teixemf/repocache/releases/assets/123",
+    "https://api.github.com/repos/repocache-project/repocache/releases/assets/123",
     "//release-assets.githubusercontent.com/resource",
     "https://release-assets.githubusercontent.com/resource#fragment",
 ])
@@ -96,12 +96,13 @@ def test_cdn_redirect_chain_is_rejected_before_next_hop(monkeypatch):
 
 
 @pytest.mark.parametrize("invalid", [
-    "https://api.github.com:8443/repos/teixemf/repocache/releases/assets/123",
-    "https://api.github.com/repos/teixemf/repocache/releases/assets/1234extra",
-    "https://api.github.com/repos/teixemf/repocache/releases/assets/0",
+    "https://api.github.com:8443/repos/repocache-project/repocache/releases/assets/123",
+    "https://api.github.com/repos/repocache-project/repocache/releases/assets/1234extra",
+    "https://api.github.com/repos/repocache-project/repocache/releases/assets/0",
+    "https://api.github.com/repos/teixemf/repocache/releases/assets/123",
     "https://objects.githubusercontent.com:444/fixture",
     "https://objects.githubusercontent.com/fixture#x",
-    "http://api.github.com/repos/teixemf/repocache/releases/assets/123",
+    "http://api.github.com/repos/repocache-project/repocache/releases/assets/123",
 ])
 def test_unsafe_direct_asset_origin_rejected_without_http(monkeypatch, invalid):
     fixture = opener(monkeypatch, upgrade, [])

@@ -12,12 +12,28 @@
 > public baseline and compatibility evidence. See
 > [generic release lifecycle](RELEASE_LIFECYCLE.md).
 
-This initial implementation is strictly for an **actual v0.5.0 candidate
-upgraded from published v0.4.0**. The workflow framework can be adapted for
-later releases, but the verifier deliberately refuses v0.5.1, v0.6.0 and other
-unreviewed tags until a separate reviewed PR changes the pinned prior-public
-baseline, approved version choice, compatibility requirements and native tests.
-A passing v0.5.0 test is NOT evidence of v0.6.0 compatibility.
+**Proposed v0.6.0 adaptation (issue #76, security review required):** The
+next public candidate is specifically v0.6.0, upgrading directly from the
+*immutable public* v0.4.0. The reviewed schema-1 signed eight-asset offline
+wheelhouse remains the sole default profile. The version gate must reject
+v0.5.0, v0.6.1 and unreviewed online/source-only profiles; a synthetic
+test does not authenticate an owner-signed candidate.
+
+The repository transfer does **not** rewrite v0.4.0 signed bytes.
+For schema-1 compatibility with the immutable v0.4.0 updater, the signed
+manifest `repository` field remains `teixemf/repocache`. Current GitHub API,
+release downloads, owner unsigned build and *new candidate signed provenance*
+must independently bind `repocache-project/repocache`. The historical
+v0.4.0 public acceptance harness must continue verifying the old signed
+manifest and provenance fields while fetching only the transferred canonical
+GitHub URLs. Neither the new repository name nor green CI grants authority
+to use the owner signing key, tag, stage or publish.
+
+This adaptation becomes effective only after a separate security review and
+accepted protected integration/promotion. All v0.5.0 command examples below
+remain historical. The actual final v0.6.0 source version, tag, official
+Node24 artifact, independent readback, private signature and two-native-OS
+acceptance remain **NOT VERIFIED** until executed.
 
 This is a controlled **prepublication operator runbook**, not authorization to
 tag, sign, merge, publish, bypass GitHub rulesets or change production systems.

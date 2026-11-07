@@ -11,7 +11,7 @@ def item(v, *, draft=False, prerelease=False, assets=True):
     tag = "v" + v
     name = "repocache-" + tag + ".tar.gz"
     return {"tag_name": tag, "draft": draft, "prerelease": prerelease,
-            "html_url": "https://github.com/teixemf/repocache/releases/tag/" + tag,
+            "html_url": "https://github.com/repocache-project/repocache/releases/tag/" + tag,
             "assets": ([{"id": 7, "name": name, "size": 200},
                         {"id": 8, "name": name + ".sha256", "size": 98},
                         {"id": 9, "name": name + ".manifest.json", "size": 900},
@@ -48,7 +48,7 @@ def test_reject_redirect_without_forwarding_authorization():
     assert handler.redirect_request(None, None, 302, "redirect", None,
                                     "https://attacker.invalid") is None
     with pytest.raises(releases.DiscoveryError):
-        releases._request("https://evil.example/repos/teixemf/repocache/releases", token="never")
+        releases._request("https://evil.example/repos/repocache-project/repocache/releases", token="never")
 
 
 @pytest.mark.parametrize("bad", [
@@ -86,7 +86,7 @@ def test_public_first_does_not_send_existing_token(monkeypatch, tmp_path):
     p = tmp_path / "token"
     p.write_text("ghp_not_sent")
     p.chmod(0o600)
-    assert releases._request_public_first("https://api.github.com/repos/teixemf/repocache/releases", p)
+    assert releases._request_public_first("https://api.github.com/repos/repocache-project/repocache/releases", p)
     assert calls == [None]
 
 
@@ -101,7 +101,7 @@ def test_private_404_must_not_retry_with_an_old_token(monkeypatch, tmp_path):
     old_token.chmod(0o600)
     with pytest.raises(releases.DiscoveryError, match="not found"):
         releases._request_public_first(
-            "https://api.github.com/repos/teixemf/repocache/releases", old_token)
+            "https://api.github.com/repos/repocache-project/repocache/releases", old_token)
     assert calls == [None]
 
 

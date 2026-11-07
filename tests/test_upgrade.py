@@ -164,7 +164,7 @@ def test_public_release_assets_refuse_legacy_credentials_before_network(monkeypa
     monkeypatch.setattr(upgrade.urllib.request, "build_opener", lambda *args: UnexpectedNetwork())
     with pytest.raises(upgrade.UpgradeError, match="credentials"):
         upgrade._request_bytes(
-            "https://api.github.com/repos/teixemf/repocache/releases/assets/123",
+            "https://api.github.com/repos/repocache-project/repocache/releases/assets/123",
             100, token="synthetic-old-private-token")
     assert not requests
 
@@ -270,7 +270,7 @@ def test_bad_or_expired_asset_token_does_not_retry_untrusted_hosts(monkeypatch, 
     with pytest.raises(releases.DiscoveryError):
         upgrade._download_asset({"id": 7, "size": 100}, credential, 200)
     assert len(seen) == 1
-    assert all("api.github.com/repos/teixemf/repocache/releases/assets/" in u
+    assert all("api.github.com/repos/repocache-project/repocache/releases/assets/" in u
                for u, _ in seen)
 
 
