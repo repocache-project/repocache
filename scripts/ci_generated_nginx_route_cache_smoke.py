@@ -268,6 +268,40 @@ def main() -> None:
                             client_tls)[1] == FIXTURES["/apt/accel"][1],
                 "generated pin route denies 3xx/unmanaged paths/internal redirects",
             )
+            # A candidate with invalid NGINX syntax must not replace the
+            # running test-only generation or destroy cache availability.
+            original_conf = config.read_bytes()
+            damaged = original_conf.replace(
+                b"proxy_ssl_verify on;",
+                b"proxy_ssl_verify unsupported-value;", 1,
+            )
+            require(damaged != original_conf, "negative mutation is effective")
+            config.write_bytes(damaged)
+            rejected = subprocess.run(
+                [nginx, "-t", "-e", str(root / "invalid-candidate.log"),
+                 "-p", str(root), "-c", str(config)],
+                text=True, capture_output=True, timeout=10, check=False,
+            )
+            require(
+                rejected.returncode != 0,
+                "stock nginx -t refuses malformed staged TLS/cache candidate",
+            )
+            # Explicitly recheck the already-cached object while the
+            # malformed candidate is on disk. No reload was attempted.
+            stable = request(
+                base + "debian-trixie-main/dists/trixie/InRelease",
+                client_tls,
+            )
+            require(
+                stable[:3] == (
+                    200, FIXTURES["/apt/dists/trixie/InRelease"][1], "HIT",
+                ) and process.poll() is None,
+                "rejected candidate leaves actual running service/cache usable",
+            )
+            config.write_bytes(original_conf)
+            run(nginx, "-t", "-e", str(root / "restored-candidate.log"),
+                "-p", str(root), "-c", str(config))
+            require(True, "verified good config restored in disposable fixture")
         finally:
             process.terminate()
             try:
