@@ -60,4 +60,5 @@ jobs:
             --mount "type=bind,source=${{ github.workspace }},target=/repo,readonly" \
             -e PYTHONPATH=/repo/src -e REPOCACHE_DISPOSABLE_NGINX_SMOKE=1 \
             "repocache-native-cache:${{ matrix.platform }}" \
-            /usr/bin/python3 /repo/scripts/ci_native_nginx_cache_smoke.py
+            /bin/sh -eu -c 'python3 /repo/scripts/ci_native_nginx_cache_smoke.py && \
+              python3 /repo/scripts/ci_generated_nginx_route_cache_smoke.py'
