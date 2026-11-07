@@ -13,6 +13,7 @@ import os
 from typing import Any, Callable
 
 from repocache.server_locked_manifest_reconcile_v1 import (
+    _DIRECTORY_FLAGS, _verify_current_root_fd,
     _validate_proposed_v2_snapshot, preview_proposed_v2_state_transition,
 )
 from repocache.server_protected_state_store_v1 import (
@@ -447,3 +448,36 @@ def _preview_v1_migration_blockers_under_root(
             "versioned_migration_protocol_approved": False,
             "authorizes_migration": False,
         }
+
+
+def inspect_current_namespace_v1_migration_blockers() -> dict[str, Any]:
+    """Diagnose v1 migration blockers under the current namespace root only.
+
+    This is a read-only diagnostic, not a migration, trusted host-root proof,
+    administrator authentication or native NGINX transaction. A root UID in a
+    container does not prove access to the real host. No caller may provide a
+    substitute root descriptor, path, UID, state or configuration document.
+    """
+    if os.geteuid() != 0:
+        _refuse("CURRENT_NAMESPACE_ROOT_PRIVILEGE_REQUIRED")
+    try:
+        root_fd = os.open("/", _DIRECTORY_FLAGS)
+    except OSError:
+        _refuse("CURRENT_NAMESPACE_ROOT_OPEN_REFUSED")
+    try:
+        _verify_current_root_fd(root_fd)
+        report = _preview_v1_migration_blockers_under_root(
+            root_fd, owner_uid=0,
+        )
+        _verify_current_root_fd(root_fd)
+        return {
+            **report,
+            "current_namespace_root_path_verified": True,
+            "trusted_host_root_verified": False,
+            "operator_authorization_verified": False,
+            "authorizes_migration": False,
+            "authorizes_nginx_reload": False,
+            "authorizes_catalog_publication": False,
+        }
+    finally:
+        os.close(root_fd)
