@@ -392,7 +392,10 @@ def _mock_kernel_leaf_creation(delegated, monkeypatch):
         (leaf / "cgroup.events").write_text("populated 0\n")
         (leaf / "cgroup.kill").write_text("")
         for control in candidate_cgroup.LEAF_LIMITS:
-            (leaf / control).write_text("max")
+            # Ordinary test files retain trailing bytes on writes without
+            # O_TRUNC; kernel cgroupfs files do not. Start empty to mirror
+            # the replacement semantics of cgroup controller writes.
+            (leaf / control).write_text("")
 
     def cleanup(delegation, leaf, *, timeout=5.0):
         assert delegation.candidates == candidates
