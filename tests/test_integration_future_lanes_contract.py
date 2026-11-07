@@ -66,15 +66,15 @@ def _branches(text):
 
 
 def _required(name, text):
-    events = {"push", "pull_request"}
+    events = {"push", "pull_request", "merge_group"}
     if name != "tests.yml":
         events.add("workflow_dispatch")
     assert _events(text) == events
     assert _branches(text) == BRANCHES
-    for event in ("push", "pull_request"):
+    for event in ("push", "pull_request", "merge_group"):
         block = _event_block(text, event)
         assert "paths:" not in block and "paths-ignore:" not in block
-    assert "permissions:\n  contents: read\n\njobs:" in text
+    assert "permissions:\n  contents: read\n\nconcurrency:\n" in text
     assert "persist-credentials: false" in text
     required_jobs = text.split("  dependency-native-validation:", 1)[0] if name == "tests.yml" else text
     assert not re.search(r"(?m)^    if:|^    continue-on-error:", required_jobs)
@@ -84,7 +84,7 @@ def _required(name, text):
 
 
 @pytest.mark.parametrize("name", MANDATORY)
-def test_nine_required_contexts_unfiltered_on_pr_and_future_push(name):
+def test_nine_required_contexts_unfiltered_on_pr_future_push_and_merge_group(name):
     _required(name, (WORKFLOWS / name).read_text("utf-8"))
 
 
@@ -117,6 +117,8 @@ def test_upstream_wheels_remains_path_filtered_and_supplemental():
 
 @pytest.mark.parametrize(("name", "before", "after"), [
     ("tests.yml", "  pull_request:\n", "  pull_request_target:\n"),
+    ("tests.yml", "  merge_group:\n", ""),
+    ("upgrade-distros.yml", "  merge_group:\n", ""),
     ("tests.yml", "    name: Unit tests (Python ", "    name: Unit suite (Python "),
     ("tests.yml", "python-version: ['3.12', '3.13']", "python-version: ['3.12']"),
     ("tests.yml", "branches: [main,", "branches: [feature/*, main,"),

@@ -110,3 +110,31 @@ reference are not by themselves authenticated configuration or operator
 authorization. Do not connect this fixture-only preview to a real
 privileged writer or NGINX apply until versioned state/config/approval and
 activation ownership are jointly reviewed with #95 and #28.
+
+
+## Current-namespace root-anchored read-only recovery diagnosis — #31
+
+`inspect_current_namespace_locked_recovery()` is a narrow read-only
+diagnostic entry point, extending the existing root-anchored manifest
+inspection pattern without adding a recovery command, privileged writer or
+NGINX service control. It accepts no caller-supplied root FD, UID or path.
+It requires effective UID 0 before opening any host path, opens only the
+current process mount namespace's literal `/` with the existing no-follow
+directory flags, checks that root identity before and after the protected
+journal inspection, and always closes its root descriptor on return/error.
+
+The existing private `_preview_recovery_under_root` independently acquires
+the state lock and rejects untrusted/malformed journal and state inputs.
+The public wrapper reports a `current_namespace_root_path_verified` boolean
+only for the observed root of this mount namespace, not for the host root.
+A transient report is not a lease or approval for any later mutation.
+
+Tests cover early nonroot refusal with no host path open, actual opened
+root identity checked twice, no recovery or mutation authorization, fake
+caller-controlled root substitution refusal, and descriptor cleanup on a
+synthetic error. These tests do not validate genuine root-managed files,
+host mount topology, ACL/xattr/SELinux enforcing, operator provenance or
+actual recovery of a native NGINX installation. There is still no CLI
+registration, writable recovery helper, staging, `nginx -t`, reload or
+catalog writer. The five original #31 operational acceptance criteria
+remain NOT VERIFIED; no application or service activation is authorized.

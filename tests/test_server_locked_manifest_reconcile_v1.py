@@ -675,3 +675,101 @@ def test_recovery_preview_rejects_invalid_fixture_root_without_fs_access(
     ):
         _preview_recovery_under_root(bad, owner_uid=uid)
     assert sorted(p.name for p in directory.iterdir()) == [LOCK_NAME]
+
+
+
+def test_public_recovery_preview_rejects_nonroot_before_open(monkeypatch):
+    import repocache.server_locked_manifest_reconcile_v1 as module
+    monkeypatch.setattr(module.os, "geteuid", lambda: 1001)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("unprivileged caller accessed host path")
+
+    monkeypatch.setattr(module.os, "open", forbidden)
+    with pytest.raises(
+        LockedManifestInspectionError, match="ROOT_PRIVILEGE_REQUIRED"
+    ):
+        module.inspect_current_namespace_locked_recovery()
+
+
+def test_public_recovery_preview_pins_current_root_before_and_after(
+    monkeypatch,
+):
+    import repocache.server_locked_manifest_reconcile_v1 as module
+    monkeypatch.setattr(module.os, "geteuid", lambda: 0)
+    root_checks = []
+    observed_fd = []
+    original_verify = module._verify_current_root_fd
+
+    def verified(fd):
+        original_verify(fd)
+        root_checks.append(os.fstat(fd).st_ino)
+
+    def inspect(fd, *, owner_uid):
+        assert owner_uid == 0
+        assert os.fstat(fd).st_ino == os.stat("/").st_ino
+        observed_fd.append(fd)
+        return {
+            "status": "LOCKED_READ_ONLY_RECOVERY_PREVIEW",
+            "recovery_action": "CLEAN",
+            "recovery_executed": False,
+            "authorizes_state_mutation": False,
+            "authorizes_nginx_reload": False,
+            "authorizes_catalog_publication": False,
+        }
+
+    monkeypatch.setattr(module, "_verify_current_root_fd", verified)
+    monkeypatch.setattr(module, "_preview_recovery_under_root", inspect)
+    result = module.inspect_current_namespace_locked_recovery()
+    assert len(root_checks) == 2
+    assert len(observed_fd) == 1
+    assert result["current_namespace_root_path_verified"] is True
+    assert result["recovery_action"] == "CLEAN"
+    assert result["recovery_executed"] is False
+    assert result["authorizes_state_mutation"] is False
+    assert result["authorizes_nginx_reload"] is False
+    assert result["authorizes_catalog_publication"] is False
+    with pytest.raises(OSError):
+        os.fstat(observed_fd[0])
+
+
+def test_public_recovery_preview_rejects_substituted_fixture_root(
+    layout, monkeypatch,
+):
+    import repocache.server_locked_manifest_reconcile_v1 as module
+    fixture_fd, _, _, _ = layout
+    actual_open = os.open
+    monkeypatch.setattr(module.os, "geteuid", lambda: 0)
+
+    def replaced(path, flags, *args, **kwargs):
+        if path == "/":
+            return os.dup(fixture_fd)
+        return actual_open(path, flags, *args, **kwargs)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("recovery preview must not inspect substitute")
+
+    monkeypatch.setattr(module.os, "open", replaced)
+    monkeypatch.setattr(module, "_preview_recovery_under_root", forbidden)
+    with pytest.raises(LockedManifestInspectionError, match="ROOT_(CHANGED|UNVERIFIED)"):
+        module.inspect_current_namespace_locked_recovery()
+
+
+def test_public_recovery_preview_closes_root_after_refusal(monkeypatch):
+    import repocache.server_locked_manifest_reconcile_v1 as module
+    monkeypatch.setattr(module.os, "geteuid", lambda: 0)
+    visited = []
+
+    def refused(fd, *, owner_uid):
+        assert owner_uid == 0
+        visited.append(fd)
+        raise LockedManifestInspectionError("SYNTHETIC_RECOVERY_REFUSAL")
+
+    monkeypatch.setattr(module, "_preview_recovery_under_root", refused)
+    with pytest.raises(
+        LockedManifestInspectionError, match="SYNTHETIC_RECOVERY_REFUSAL"
+    ):
+        module.inspect_current_namespace_locked_recovery()
+    assert len(visited) == 1
+    with pytest.raises(OSError):
+        os.fstat(visited[0])

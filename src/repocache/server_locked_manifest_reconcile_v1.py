@@ -288,6 +288,30 @@ def inspect_current_namespace_locked_manifest(
         os.close(root_fd)
 
 
+
+def inspect_current_namespace_locked_recovery() -> dict[str, Any]:
+    """Read-only protected-state recovery diagnosis at the current '/'.
+
+    No caller-supplied path, descriptor, owner or recovery command is
+    accepted. Root UID and current-namespace '/' do not establish trusted
+    host-root authority, operator approval or permission to mutate files.
+    """
+    if os.geteuid() != 0:
+        _deny("CURRENT_NAMESPACE_ROOT_PRIVILEGE_REQUIRED")
+    try:
+        root_fd = os.open("/", _DIRECTORY_FLAGS)
+    except OSError:
+        _deny("CURRENT_NAMESPACE_ROOT_OPEN_REFUSED")
+    try:
+        _verify_current_root_fd(root_fd)
+        result = _preview_recovery_under_root(root_fd, owner_uid=0)
+        _verify_current_root_fd(root_fd)
+        # A momentary, namespace-local path observation is not an
+        # authorization that survives the release of the state lock.
+        return {**result, "current_namespace_root_path_verified": True}
+    finally:
+        os.close(root_fd)
+
 def preview_current_namespace_locked_candidate(
     *, expected_generation: int, candidate_bytes: bytes
 ) -> dict[str, Any]:
