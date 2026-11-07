@@ -74,7 +74,7 @@ PYTHON="/usr/bin/python3"
 
 # All filesystem-writing tools must exist before the first managed write.
 # Fail closed on an incompletely provisioned OS rather than installing partly.
-for required in /usr/bin/install /usr/bin/mv /usr/bin/chmod /usr/bin/grep; do
+for required in /usr/bin/install /usr/bin/mv /usr/bin/chmod /usr/bin/grep /usr/bin/mktemp /usr/bin/rm; do
   [[ -x "$required" ]] || {
     echo "Missing client installer prerequisite: $required" >&2
     exit 1
@@ -90,6 +90,23 @@ if [[ -f "$LAUNCHER" ]] && ! grep -q '^# REPOCACHE-CLIENT MANAGED$' "$LAUNCHER";
   echo "Executable at this path is not managed by REPOCACHE: $LAUNCHER" >&2
   exit 1
 fi
+
+# BEGIN MANAGED_PATH_PREFLIGHT
+# Refuse symlinked managed directories and unsafe destination file types
+# before the first filesystem write. Never adopt a redirected third-party path.
+for directory in "$TARGET_DIR" "$CONFIG_DIR"; do
+  if [[ -L "$directory" || ( -e "$directory" && ! -d "$directory" ) ]]; then
+    echo "Unsafe client managed directory: $directory" >&2
+    exit 1
+  fi
+done
+for path in "$TARGET_DIR/repocache_client.py" "$CONFIG_DIR/config.json"; do
+  if [[ -L "$path" || ( -e "$path" && ! -f "$path" ) ]]; then
+    echo "Unsafe client managed file: $path" >&2
+    exit 1
+  fi
+done
+# END MANAGED_PATH_PREFLIGHT
 
 install -d -m 0755 "$TARGET_DIR"
 install -d -m 0755 "$CONFIG_DIR"
@@ -110,13 +127,18 @@ finally:
     if os.path.exists(temp):
         os.unlink(temp)
 PY
-cat > "$LAUNCHER.tmp" <<'SH'
+# Stage the launcher under a unique O_EXCL-created filename rather than
+# following a predictable .tmp symlink. Clean up on interrupted installs.
+LAUNCHER_TEMP="$(/usr/bin/mktemp "${LAUNCHER}.XXXXXXXX")"
+trap 'if [[ -n "${LAUNCHER_TEMP:-}" ]]; then /usr/bin/rm -f -- "$LAUNCHER_TEMP"; fi' EXIT
+cat > "$LAUNCHER_TEMP" <<'SH'
 #!/bin/sh
 # REPOCACHE-CLIENT MANAGED
 exec /usr/bin/python3 /opt/repocache-client/repocache_client.py "$@"
 SH
-chmod 0755 "$LAUNCHER.tmp"
-mv -f "$LAUNCHER.tmp" "$LAUNCHER"
+chmod 0755 "$LAUNCHER_TEMP"
+mv -f -- "$LAUNCHER_TEMP" "$LAUNCHER"
+LAUNCHER_TEMP=""
 echo "REPOCACHE Client installed (managed, no daemon)."
 echo "Try: repocache-client repos list"
 echo "Then:    repocache-client check"
