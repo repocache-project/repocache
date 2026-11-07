@@ -16,6 +16,7 @@ from repocache.server_protected_state_store_v1 import (
     LOCK_NAME,
     ProtectedStateStoreError,
     _commit_under_root as commit_legacy,
+    _recover_under_root as recover_legacy,
     _locked,
 )
 from repocache.server_proposed_state_v2_store import (
@@ -383,3 +384,68 @@ def test_v2_invalid_candidate_causes_no_disk_effect(fixture_root):
     with pytest.raises(ProposedV2PersistenceError, match="SNAPSHOT_INVALID"):
         apply(fixture_root, bad)
     assert sorted(p.name for p in folder.iterdir()) == before
+
+
+
+def test_legacy_writer_and_reader_refuse_existing_v2_state(fixture_root):
+    from repocache.server_locked_manifest_reconcile_v1 import (
+        _inspect_locked_under_root,
+    )
+    fd, folder, uid = fixture_root
+    proposed = snapshot()
+    apply(fixture_root, proposed)
+    v2_bytes = (folder / V2_STATE).read_bytes()
+    legacy = {
+        "state_schema_version": 1, "state_generation": 1,
+        "configuration_sha256": "a" * 64,
+        "repositories": [], "ownership_manifest": [],
+    }
+    with pytest.raises(ProtectedStateStoreError, match="V2_COHABITATION_REFUSED"):
+        commit_legacy(fd, legacy, expected_generation=0, owner_uid=uid)
+    with pytest.raises(ProtectedStateStoreError, match="V2_COHABITATION_REFUSED"):
+        recover_legacy(fd, owner_uid=uid)
+    with pytest.raises(ProtectedStateStoreError, match="V2_COHABITATION_REFUSED"):
+        _inspect_locked_under_root(
+            fd, owner_uid=uid, expected_generation=0,
+        )
+    assert not (folder / "state-v1.json").exists()
+    assert (folder / V2_STATE).read_bytes() == v2_bytes
+
+
+def test_legacy_writer_refuses_interrupted_v2_journal(fixture_root):
+    fd, folder, uid = fixture_root
+    legacy = {
+        "state_schema_version": 1, "state_generation": 1,
+        "configuration_sha256": "a" * 64,
+        "repositories": [], "ownership_manifest": [],
+    }
+
+    def crash(phase):
+        if phase == "journal_durable":
+            raise RuntimeError("crash")
+
+    with pytest.raises(RuntimeError):
+        apply(fixture_root, snapshot(), inject=crash)
+    pending = (folder / V2_JOURNAL).read_bytes()
+    with pytest.raises(ProtectedStateStoreError, match="V2_COHABITATION_REFUSED"):
+        commit_legacy(fd, legacy, expected_generation=0, owner_uid=uid)
+    with pytest.raises(ProtectedStateStoreError, match="V2_COHABITATION_REFUSED"):
+        recover_legacy(fd, owner_uid=uid)
+    assert (folder / V2_JOURNAL).read_bytes() == pending
+    assert not (folder / "state-v1.json").exists()
+    assert rollback(fixture_root)["status"] == "ROLLED_BACK_INERT_V2"
+
+
+def test_legacy_writer_refuses_dangling_v2_symlink(fixture_root):
+    fd, folder, uid = fixture_root
+    link = folder / V2_STATE
+    link.symlink_to(folder / "missing-target")
+    legacy = {
+        "state_schema_version": 1, "state_generation": 1,
+        "configuration_sha256": "a" * 64,
+        "repositories": [], "ownership_manifest": [],
+    }
+    with pytest.raises(ProtectedStateStoreError, match="V2_COHABITATION_REFUSED"):
+        commit_legacy(fd, legacy, expected_generation=0, owner_uid=uid)
+    assert link.is_symlink()
+    assert not (folder / "state-v1.json").exists()

@@ -284,3 +284,20 @@ catalog consistency. The suggested private fixture mechanism may need
 revision after that review. All original #31 operational acceptance
 criteria remain **NOT VERIFIED** and no production use or protected
 operation is authorized.
+
+
+### Reciprocal v1/v2 coexistence refusal
+
+The original v1 store now explicitly refuses **any** of the five fixed v2
+snapshot/journal/stage/rollback names under its existing owner-pinned state
+lock before accepting a v1 read, commit or recovery. It checks names
+without following symlinks and also refuses dangling foreign v2 symlinks.
+This closes the inverse conflict in which a v1 fixture writer could
+otherwise initialise a new v1 state next to an already present v2 fixture
+snapshot, or recover a v1 journal while v2 is interrupted. The proposed
+v2 prototype reciprocally refuses any v1 current or pending state.
+
+This safety interlock **does not** migrate v1 data, activate v2, change v1
+schema fields, authenticate administrators, adopt foreign paths, or
+introduce a public privileged writer. A versioned migration remains an
+independent acceptance/approval blocker.
