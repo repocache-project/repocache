@@ -223,7 +223,7 @@ def test_cache_zone_is_per_repository_and_sensitive_requests_bypass():
     upstream = candidate["http_upstream_fragment"]
     location = candidate["server_location_fragment"]
     assert "proxy_cache_path /var/cache/nginx/repocache-managed/debian-trixie-main " in upstream
-    assert "keys_zone=repocache_cache_debian_trixie_main:16m" in upstream
+    assert "keys_zone=repocache_cache_debian_trixie_main:1m" in upstream
     assert "inactive=604800s max_size=10737418240" in upstream
     assert "proxy_cache repocache_cache_debian_trixie_main;" in location
     assert "proxy_cache_valid 200 60s;" in location

@@ -29,3 +29,24 @@ transfer through a managed route, native package transaction, booted
 systemd and enforcing SELinux, external service/TLS, cache ownership and
 capacity, staged reload/rollback and host preservation. No privileged
 production operations, GitHub releases or publication are performed.
+
+## Proposed native cache-zone candidate rendering
+
+The #28 renderer now emits one independent stock proxy_cache_path and
+cache key zone for every desired-active repository. Paths derive from the
+strict requested cache_root and validated repository ID. The conservative
+keys_zone is 1 MiB per repository. The global inactive_seconds and
+max_size_bytes values are inherited unless each respective per-repository
+override is present. Read-only candidates use 60s HTTP 200 GET/HEAD
+cache validity while respecting upstream Cache-Control, with concurrent
+fill locking and Authorization/Cookie request cache bypass + no-store.
+
+**Security:** even nginx -t can create cache directories when parsing a
+candidate. The test uses only non-root disposable, temporary fixture paths.
+A real privileged apply MUST separately verify every cache ancestor,
+symlinks/mount/ACL/xattr/SELinux, native capabilities and total zone memory;
+it must validate/reload under #31 with rollback, and derive catalog routes
+only from successfully active state under #95/#28. This renderer does not
+provision ownership, activate NGINX, publish catalog data or guarantee
+stock NGINX cache-manager or disk-pressure behavior. The 1 MiB zone
+is a conservative initial bound and is NOT evidence of live key capacity.

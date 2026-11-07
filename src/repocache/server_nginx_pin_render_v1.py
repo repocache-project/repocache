@@ -99,7 +99,7 @@ def render_pinned_upstream_fragments(
     cache_zone = "repocache_cache_" + repository_id.replace("-", "_")
     upstream = [
         f"proxy_cache_path {cache_directory} levels=1:2 "
-        f"keys_zone={cache_zone}:16m inactive={inactive_seconds}s "
+        f"keys_zone={cache_zone}:1m inactive={inactive_seconds}s "
         f"max_size={max_size_bytes} use_temp_path=off;",
         f"upstream {group} {{",
     ]
