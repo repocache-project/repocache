@@ -1,7 +1,7 @@
 """Deterministic, non-activating NGINX pin *fragments* for issue #28.
 
-The upstream block belongs in the managed http{} context and the two
-location blocks belong in its dedicated server{} context. These fragments
+The upstream blocks and candidate cache-zone declarations belong in the
+managed http{} context; the locations belong in its dedicated server{}. These fragments
 are NOT a complete server configuration and MUST NOT be installed or
 advertised until the protected transaction, native capability and
 ownership gates have passed. No hostname-based runtime resolution.
@@ -83,7 +83,26 @@ def render_pinned_upstream_fragments(
     host_header = hostname if port == 443 else f"{hostname}:{port}"
     reject_name = f"@repocache_redirect_denied_{repository_id.replace('-', '_')}"
     # No variables, interpolation or URL-supplied NGINX syntax are accepted.
-    upstream = [f"upstream {group} {{"]
+    # Strictly validated requested per-repository policy. This is NOT
+    # proof of filesystem ownership, NGINX runtime support or activation.
+    global_cache = doc["deployment"]["cache_policy"]["global"]
+    overrides = repo.get("cache_overrides", {})
+    inactive_seconds = overrides.get(
+        "inactive_seconds", global_cache["inactive_seconds"]
+    )
+    max_size_bytes = overrides.get(
+        "max_size_bytes", global_cache["max_size_bytes"]
+    )
+    cache_directory = (
+        doc["deployment"]["paths"]["cache_root"] + "/" + repository_id
+    )
+    cache_zone = "repocache_cache_" + repository_id.replace("-", "_")
+    upstream = [
+        f"proxy_cache_path {cache_directory} levels=1:2 "
+        f"keys_zone={cache_zone}:16m inactive={inactive_seconds}s "
+        f"max_size={max_size_bytes} use_temp_path=off;",
+        f"upstream {group} {{",
+    ]
     for ip in addresses:
         numeric = f"[{ip}]" if ip.version == 6 else str(ip)
         upstream.append(f"    server {numeric}:{port};")
@@ -92,6 +111,14 @@ def render_pinned_upstream_fragments(
     location = [
         f"location ^~ {route} {{",
         "    limit_except GET HEAD { deny all; }",
+        f"    proxy_cache {cache_zone};",
+        "    proxy_cache_methods GET HEAD;",
+        "    proxy_cache_lock on;",
+        "    proxy_buffering on;",
+        "    proxy_cache_valid 200 60s;",
+        '    proxy_cache_key "$scheme|$proxy_host|$request_uri";',
+        "    proxy_cache_bypass $http_authorization $http_cookie;",
+        "    proxy_no_cache $http_authorization $http_cookie;",
         f"    proxy_pass https://{group}{upstream_url.path};",
         f"    proxy_set_header Host {host_header};",
         f"    proxy_ssl_name {hostname};",
