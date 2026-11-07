@@ -95,5 +95,6 @@ jobs:
             tests/test_server_protected_state_store_v1.py \
             tests/test_server_locked_manifest_reconcile_v1.py \
             tests/test_server_proposed_state_v2_store.py
-          # Linux fixture evidence only, not booted native systemd/SELinux,
-          # real NGINX service recovery, or privileged host installation.
+          # Linux fixture plus isolated running NGINX process evidence only:
+          # NOT booted native systemd/SELinux, production service recovery,
+          # authenticated privileged host installation or accepted v1 migration.
