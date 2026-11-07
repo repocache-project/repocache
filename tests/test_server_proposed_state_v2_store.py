@@ -945,3 +945,106 @@ def test_v1_migration_preflight_prioritizes_interrupted_bootstrap(
     recover_legacy(fd, owner_uid=uid)
     with pytest.raises(ProposedV2PersistenceError, match="LEGACY_STATE_ABSENT"):
         preview_v1_migration(fd, owner_uid=uid)
+
+
+def test_current_namespace_v1_migration_refuses_nonroot_before_open(monkeypatch):
+    import repocache.server_proposed_state_v2_store as module
+
+    monkeypatch.setattr(module.os, "geteuid", lambda: 1000)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("unprivileged diagnostic opened a host path")
+
+    monkeypatch.setattr(module.os, "open", forbidden)
+    with pytest.raises(
+        ProposedV2PersistenceError,
+        match="CURRENT_NAMESPACE_ROOT_PRIVILEGE_REQUIRED",
+    ):
+        module.inspect_current_namespace_v1_migration_blockers()
+
+
+def test_current_namespace_v1_migration_diagnoses_only_pinned_root(monkeypatch):
+    import repocache.server_proposed_state_v2_store as module
+
+    monkeypatch.setattr(module.os, "geteuid", lambda: 0)
+    steps = []
+
+    def verify(fd):
+        assert os.fstat(fd).st_ino == os.stat("/").st_ino
+        steps.append("pinned")
+
+    def preview(fd, *, owner_uid):
+        assert owner_uid == 0
+        assert os.fstat(fd).st_ino == os.stat("/").st_ino
+        steps.append("preview")
+        return {
+            "status": "LEGACY_V1_MIGRATION_BLOCKED",
+            "state_generation": 1,
+            "authorizes_migration": False,
+        }
+
+    monkeypatch.setattr(module, "_verify_current_root_fd", verify)
+    monkeypatch.setattr(module, "_preview_v1_migration_blockers_under_root", preview)
+    report = module.inspect_current_namespace_v1_migration_blockers()
+    assert steps == ["pinned", "preview", "pinned"]
+    assert report["status"] == "LEGACY_V1_MIGRATION_BLOCKED"
+    assert report["current_namespace_root_path_verified"] is True
+    for field in (
+        "trusted_host_root_verified", "operator_authorization_verified",
+        "authorizes_migration", "authorizes_nginx_reload",
+        "authorizes_catalog_publication",
+    ):
+        assert report[field] is False
+
+
+def test_current_namespace_v1_migration_refuses_substituted_root(
+    fixture_root, monkeypatch,
+):
+    import repocache.server_proposed_state_v2_store as module
+    from repocache.server_locked_manifest_reconcile_v1 import (
+        LockedManifestInspectionError,
+    )
+
+    fd, _, _ = fixture_root
+    original_open = os.open
+    opened = []
+    monkeypatch.setattr(module.os, "geteuid", lambda: 0)
+
+    def substitute(path, flags, *args, **kwargs):
+        if path == "/":
+            clone = os.dup(fd)
+            opened.append(clone)
+            return clone
+        return original_open(path, flags, *args, **kwargs)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("substitute root reached v1 migration diagnosis")
+
+    monkeypatch.setattr(module.os, "open", substitute)
+    monkeypatch.setattr(module, "_preview_v1_migration_blockers_under_root", forbidden)
+    with pytest.raises(
+        LockedManifestInspectionError, match="CURRENT_NAMESPACE_ROOT_",
+    ):
+        module.inspect_current_namespace_v1_migration_blockers()
+    assert len(opened) == 1
+    with pytest.raises(OSError):
+        os.fstat(opened[0])
+
+
+def test_current_namespace_v1_migration_closes_root_after_refusal(monkeypatch):
+    import repocache.server_proposed_state_v2_store as module
+
+    monkeypatch.setattr(module.os, "geteuid", lambda: 0)
+    visited = []
+
+    def refused(fd, *, owner_uid):
+        assert owner_uid == 0
+        visited.append(fd)
+        raise ProposedV2PersistenceError("PROPOSED_V2_PERSISTENCE_TEST_REFUSAL")
+
+    monkeypatch.setattr(module, "_preview_v1_migration_blockers_under_root", refused)
+    with pytest.raises(ProposedV2PersistenceError, match="TEST_REFUSAL"):
+        module.inspect_current_namespace_v1_migration_blockers()
+    assert len(visited) == 1
+    with pytest.raises(OSError):
+        os.fstat(visited[0])
