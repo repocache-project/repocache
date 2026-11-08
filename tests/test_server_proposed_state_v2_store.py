@@ -1184,3 +1184,27 @@ def test_v2_read_only_recovery_preview_never_mutates_host(
     report = v2_recovery_preview(fixture_root)
     assert report["status"] == "CLEAN"
     assert report["authorizes_v2_recovery"] is False
+
+
+@pytest.mark.parametrize("malformed", [
+    b"foreign-journal-data",
+    b'{"journal_schema_version":2}',
+    b'{"journal_schema_version":2,"previous_sha256":null,'
+    b'"previous_base64":null,"next_sha256":"not-a-digest"}',
+])
+def test_unpublished_v2_journal_refuses_corruption_without_deletion(
+    fixture_root, malformed,
+):
+    fd, folder, uid = fixture_root
+    pending = folder / V2_JOURNAL_TMP
+    pending.write_bytes(malformed)
+    pending.chmod(0o600)
+    for operation in (
+        lambda: preview_v2_recovery(fd, owner_uid=uid),
+        lambda: recover(fd, owner_uid=uid),
+    ):
+        with pytest.raises(ProposedV2PersistenceError, match="JOURNAL_INVALID"):
+            operation()
+        assert pending.read_bytes() == malformed
+        assert not (folder / V2_STATE).exists()
+        assert not (folder / V2_JOURNAL).exists()
