@@ -1251,3 +1251,115 @@ def test_unpublished_v2_journal_refuses_prior_state_drift_without_deletion(
         assert pending.read_bytes() == journal_bytes
         assert (folder / V2_STATE).read_bytes() == state_bytes
         assert not (folder / V2_JOURNAL).exists()
+
+
+@pytest.mark.parametrize("bootstrap", [True, False])
+@pytest.mark.parametrize("tamper", ["unrelated-bytes", "matching-digest-invalid-transition"])
+def test_published_v2_journal_refuses_foreign_or_invalid_stage_without_deletion(
+    fixture_root, bootstrap, tamper,
+):
+    fd, folder, uid = fixture_root
+    previous = None
+    generation = 0
+    if not bootstrap:
+        previous = snapshot()
+        apply(fixture_root, previous)
+        generation = 1
+
+    def interrupt(point):
+        if point == "stage_durable":
+            raise RuntimeError("interrupted after stage")
+
+    with pytest.raises(RuntimeError, match="interrupted after stage"):
+        apply(
+            fixture_root,
+            snapshot(count=1, generation=generation + 1, previous=previous),
+            expected=generation, inject=interrupt,
+        )
+    journal_file = folder / V2_JOURNAL
+    stage_file = folder / V2_STAGE
+    if tamper == "unrelated-bytes":
+        stage_bytes = b"foreign-stage"
+        code = "STAGE_DRIFT"
+    else:
+        # Re-sign the fixture-only journal digest to match an otherwise valid
+        # snapshot with the wrong next generation. Digest equality alone is
+        # not sufficient to authorize deletion of a staged file.
+        invalid_transition = snapshot(
+            count=1, generation=generation + 2, previous=previous,
+        )
+        stage_bytes = json.dumps(
+            invalid_transition, sort_keys=True, ensure_ascii=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        entry = json.loads(journal_file.read_bytes())
+        entry["next_sha256"] = hashlib.sha256(stage_bytes).hexdigest()
+        journal_file.write_bytes(json.dumps(
+            entry, sort_keys=True, ensure_ascii=True,
+            separators=(",", ":"),
+        ).encode("utf-8"))
+        code = "STAGE_INVALID"
+    stage_file.write_bytes(stage_bytes)
+    baseline = {
+        name: (folder / name).read_bytes()
+        for name in (V2_JOURNAL, V2_STAGE)
+    }
+    if previous is not None:
+        baseline[V2_STATE] = (folder / V2_STATE).read_bytes()
+    for operation in (
+        lambda: preview_v2_recovery(fd, owner_uid=uid),
+        lambda: recover(fd, owner_uid=uid),
+    ):
+        with pytest.raises(ProposedV2PersistenceError, match=code):
+            operation()
+        for name, raw in baseline.items():
+            assert (folder / name).read_bytes() == raw
+        if previous is None:
+            assert not (folder / V2_STATE).exists()
+        assert not (folder / V2_ROLLBACK).exists()
+
+
+def test_v2_recovery_refuses_foreign_rollback_bytes_without_deletion(
+    fixture_root, monkeypatch,
+):
+    import repocache.server_proposed_state_v2_store as module
+
+    fd, folder, uid = fixture_root
+    first = snapshot()
+    apply(fixture_root, first)
+
+    def interrupt(point):
+        if point == "replace_durable":
+            raise RuntimeError("interrupted after replace")
+
+    with pytest.raises(RuntimeError, match="interrupted after replace"):
+        apply(
+            fixture_root, snapshot(count=1, generation=2, previous=first),
+            expected=1, inject=interrupt,
+        )
+    original = os.replace
+
+    def fail_rollback(src, dst, *args, **kwargs):
+        if src == V2_ROLLBACK:
+            raise OSError("injected rollback rename failure")
+        return original(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, "replace", fail_rollback)
+    with pytest.raises(ProposedV2PersistenceError, match="ROLLBACK_IO_REFUSED"):
+        recover(fd, owner_uid=uid)
+    monkeypatch.setattr(module.os, "replace", original)
+    rollback_file = folder / V2_ROLLBACK
+    assert rollback_file.exists()
+    rollback_file.write_bytes(b"foreign-rollback")
+    baseline = {
+        name: (folder / name).read_bytes()
+        for name in (V2_JOURNAL, V2_STATE, V2_ROLLBACK)
+    }
+    for operation in (
+        lambda: preview_v2_recovery(fd, owner_uid=uid),
+        lambda: recover(fd, owner_uid=uid),
+    ):
+        with pytest.raises(ProposedV2PersistenceError, match="ROLLBACK_DRIFT"):
+            operation()
+        for name, raw in baseline.items():
+            assert (folder / name).read_bytes() == raw
