@@ -182,3 +182,78 @@ def test_unsupported_unit_does_not_claim_package_or_service_trust(monkeypatch):
 def test_evidence_codes_and_sha256_are_strictly_coherent(code, digest):
     with pytest.raises(ValueError):
         unit.NativeNginxUnitObservation(code, digest)
+
+
+def test_package_created_empty_dropin_is_not_an_effective_systemd_override(
+    tmp_path, monkeypatch,
+):
+    """Isolated fixture: bypass root-UID requirement, but exercise real dirfd syscalls."""
+    directory = tmp_path / "nginx.service.d"
+    directory.mkdir()
+    monkeypatch.setattr(
+        unit, "_metadata",
+        lambda info, *, directory: True if directory else False,
+    )
+    before = unit.os.lstat(directory)
+    assert unit._empty_safe_dropin_directory(str(directory), before)
+    monkeypatch.setattr(unit, "_SHADOW_PATHS", (str(directory),))
+    assert not unit._shadows_present()
+
+    # Any file, including a malicious hidden entry, reverses the refusal.
+    (directory / ".secret-override.conf").write_text(
+        "[Service]\nExecStart=/tmp/evil\n", encoding="utf-8",
+    )
+    assert unit._shadows_present()
+
+
+def test_symlinked_or_nonempty_dropin_never_passes_snapshot(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(
+        unit, "_metadata",
+        lambda info, *, directory: True if directory else False,
+    )
+    directory = tmp_path / "real-service.d"
+    directory.mkdir()
+    (directory / "override.conf").write_text("[Service]\n")
+    before = unit.os.lstat(directory)
+    assert not unit._empty_safe_dropin_directory(str(directory), before)
+    link = tmp_path / "nginx.service.d"
+    link.symlink_to(directory, target_is_directory=True)
+    assert not unit._empty_safe_dropin_directory(
+        str(link), unit.os.lstat(link)
+    )
+
+
+def test_ordinary_unprivileged_dropin_is_not_accepted_as_vendor_owned(tmp_path):
+    directory = tmp_path / "nginx.service.d"
+    directory.mkdir()
+    before = unit.os.lstat(directory)
+    if unit.os.geteuid() != 0:
+        assert not unit._empty_safe_dropin_directory(str(directory), before)
+
+
+def test_postscan_new_entry_never_becomes_approved_empty_snapshot(
+    tmp_path, monkeypatch,
+):
+    directory = tmp_path / "nginx.service.d"
+    directory.mkdir()
+    before = unit.os.lstat(directory)
+    monkeypatch.setattr(
+        unit, "_metadata",
+        lambda info, *, directory: True if directory else False,
+    )
+    real_scandir = unit.os.scandir
+
+    class AlterAfterScan:
+        def __enter__(self):
+            return iter(())
+
+        def __exit__(self, *_args):
+            (directory / "new-dropin.conf").write_text("[Service]\n")
+
+    monkeypatch.setattr(unit.os, "scandir", lambda fd: AlterAfterScan())
+    try:
+        assert not unit._empty_safe_dropin_directory(str(directory), before)
+    finally:
+        monkeypatch.setattr(unit.os, "scandir", real_scandir)
