@@ -1363,3 +1363,55 @@ def test_v2_recovery_refuses_foreign_rollback_bytes_without_deletion(
             operation()
         for name, raw in baseline.items():
             assert (folder / name).read_bytes() == raw
+
+
+@pytest.mark.parametrize("bootstrap", [True, False])
+def test_published_v2_journal_refuses_invalid_replaced_state_transition(
+    fixture_root, bootstrap,
+):
+    fd, folder, uid = fixture_root
+    previous = None
+    generation = 0
+    if not bootstrap:
+        previous = snapshot()
+        apply(fixture_root, previous)
+        generation = 1
+
+    def interrupt(point):
+        if point == "replace_durable":
+            raise RuntimeError("interrupted after replace")
+
+    with pytest.raises(RuntimeError, match="interrupted after replace"):
+        apply(
+            fixture_root,
+            snapshot(count=1, generation=generation + 1, previous=previous),
+            expected=generation, inject=interrupt,
+        )
+    assert not (folder / V2_STAGE).exists()
+    # A valid v2 envelope and matching journal digest are not proof that
+    # replacement bytes are the legitimate next state of this transaction.
+    unrelated = snapshot(
+        count=1, generation=generation + 2, previous=previous,
+    )
+    replacement_bytes = json.dumps(
+        unrelated, sort_keys=True, ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    journal_file = folder / V2_JOURNAL
+    journal = json.loads(journal_file.read_bytes())
+    journal["next_sha256"] = hashlib.sha256(replacement_bytes).hexdigest()
+    journal_bytes = json.dumps(
+        journal, sort_keys=True, ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    (folder / V2_STATE).write_bytes(replacement_bytes)
+    journal_file.write_bytes(journal_bytes)
+    for operation in (
+        lambda: preview_v2_recovery(fd, owner_uid=uid),
+        lambda: recover(fd, owner_uid=uid),
+    ):
+        with pytest.raises(ProposedV2PersistenceError, match="REPLACED_STATE_INVALID"):
+            operation()
+        assert (folder / V2_STATE).read_bytes() == replacement_bytes
+        assert journal_file.read_bytes() == journal_bytes
+        assert not (folder / V2_ROLLBACK).exists()
