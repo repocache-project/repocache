@@ -17,7 +17,8 @@ from repocache.server_install_v1 import (
 )
 from repocache.server_repository_plan_v1 import (
     RepositoryPlanError, _canonical_identity, _effective_configuration,
-    plan_repository_change,
+    _reserved_snapshot, _validated_candidate,
+    plan_repository_change, propose_automatic_repository_id,
 )
 from repocache.server_protected_state_store_v1 import (
     ProtectedStateStoreError, validate_protected_state,
@@ -604,4 +605,58 @@ def preview_repository_lifecycle_nginx_from_untrusted_document(
         "authorizes_nginx_activation": False,
         "authorizes_catalog_publication": False,
         "authorizes_cache_cleanup": False,
+    }
+
+
+def preview_repository_auto_add_nginx_from_untrusted_document(
+    current_document: dict[str, Any],
+    *,
+    current_generation: int,
+    proposed_repository: dict[str, Any],
+    reserved_ids: set[str] | frozenset[str],
+    candidate_pins_by_repository: dict[str, dict[str, list[str]]],
+    ca_bundle_path: str,
+) -> dict[str, Any]:
+    """Plan an ID-free add by reusing #95's canonical auto-ID allocator.
+
+    The reservation set is solely a CALLER-SUPPLIED snapshot. This must
+    never become a privileged allocation/commit interface: a future #31
+    writer must independently read its authoritative, historical all-time
+    ID ledger and exact config generation under an authenticated host lock,
+    select/recheck an ID, and rebuild/validate every downstream candidate.
+    """
+    current = validate_install_document(current_document, for_apply=True)
+    try:
+        # Freeze the bounded proposal once; allocation and subsequent NGINX
+        # planning must use exactly the same validated nested configuration.
+        proposal = _validated_candidate(current, proposed_repository)
+        reservations = _reserved_snapshot(current, reserved_ids)
+        allocation = propose_automatic_repository_id(
+            current, proposal, current_generation=current_generation,
+            reserved_ids=reservations,
+        )
+    except RepositoryPlanError:
+        raise ReconciliationPlanError(
+            "automatic add: invalid candidate or reservation snapshot"
+        ) from None
+
+    if not allocation["existing"] and len(reservations) >= 10000:
+        # The proposed #31 v2 ID history is bounded; never suggest a
+        # transaction whose next durable history cannot fit that contract.
+        raise ReconciliationPlanError("automatic add: reservation capacity exhausted")
+    identified = {**proposal, "id": allocation["repository_id"]}
+    result = preview_repository_lifecycle_nginx_from_untrusted_document(
+        current, current_generation=current_generation, operation="add",
+        proposed_repository=identified, reserved_ids=reservations,
+        candidate_pins_by_repository=candidate_pins_by_repository,
+        ca_bundle_path=ca_bundle_path,
+    )
+    if (result["repository_id"] != allocation["repository_id"]
+            or result["changed"] == allocation["existing"]):
+        raise ReconciliationPlanError("automatic add: inconsistent candidate")
+    return {
+        **result,
+        "automatic_id_requested": True,
+        "automatic_id_existing_repository": allocation["existing"],
+        "automatic_id_provenance": "CALLER_SNAPSHOT_ONLY",
     }

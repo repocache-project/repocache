@@ -20,6 +20,7 @@ from repocache.server_repository_reconcile_v1 import (
     preview_declarative_nginx_from_untrusted_document,
     preview_repository_lifecycle_nginx_candidate,
     preview_repository_lifecycle_nginx_from_untrusted_document,
+    preview_repository_auto_add_nginx_from_untrusted_document,
 )
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "docs/examples/server-install-v1.json"
@@ -1589,3 +1590,194 @@ def test_disposable_nginx_full_lifecycle_candidate_sequence(tmp_path):
     assert no_change["next_generation_configuration_preview"] is None
     assert no_change["proposed_state_generation"] == 5
     assert no_change["authorizes_cache_cleanup"] is False
+
+
+# ID-free adds reuse the pre-existing canonical #95 auto-ID planner and
+# return a preview, never a persisted allocation or authority to mutate.
+
+
+def _untrusted_auto_add(current, proposal, reservations, *, pins=None, generation=1):
+    return preview_repository_auto_add_nginx_from_untrusted_document(
+        current, current_generation=generation,
+        proposed_repository=proposal, reserved_ids=reservations,
+        candidate_pins_by_repository={} if pins is None else pins,
+        ca_bundle_path=_CA,
+    )
+
+
+def _new_auto_apt_proposal(current):
+    proposal = copy.deepcopy(current["repositories"][0])
+    del proposal["id"]
+    proposal["upstream"]["base_url"] = (
+        "https://mirror.example.invalid/automatic-apt/"
+    )
+    return proposal
+
+
+def test_auto_add_compares_frozen_allocation_and_nginx_candidate():
+    from repocache.server_repository_plan_v1 import (
+        propose_automatic_repository_id,
+    )
+
+    current = document()
+    current["expected_state_generation"] = 1
+    proposal = _new_auto_apt_proposal(current)
+    proposal["desired_state"] = "active"
+    reservations = {r["id"] for r in current["repositories"]}
+    before = copy.deepcopy(current), copy.deepcopy(proposal), reservations.copy()
+    predicted = propose_automatic_repository_id(
+        current, proposal, current_generation=1, reserved_ids=reservations,
+    )
+    identifier = predicted["repository_id"]
+    result = _untrusted_auto_add(
+        current, proposal, reservations,
+        pins={identifier: copy.deepcopy(_PUBLIC_PINS)},
+    )
+    assert result["automatic_id_requested"] is True
+    assert result["automatic_id_existing_repository"] is False
+    assert result["automatic_id_provenance"] == "CALLER_SNAPSHOT_ONLY"
+    assert result["id_eligibility"] == "CALLER_SNAPSHOT_ONLY"
+    assert result["repository_id"] == identifier
+    assert result["new_repository_ids"] == [identifier]
+    assert result["desired_new_route_ids"] == [identifier]
+    assert result["proposed_repository_ids"] == [identifier]
+    assert result["pin_count"] == 2
+    assert result["proposed_state_generation"] == 2
+    assert result["next_generation_configuration_preview"]["expected_state_generation"] == 2
+    assert (current, proposal, reservations) == before
+    for flag in ("authorizes_state_commit", "authorizes_nginx_activation",
+                 "authorizes_catalog_publication", "authorizes_cache_cleanup",
+                 "trusted_id_ledger_verified", "approval_provenance_verified",
+                 "active_exposure_verified"):
+        assert result[flag] is False
+
+
+def test_auto_add_same_identity_and_configuration_is_noop():
+    current = document()
+    current["expected_state_generation"] = 1
+    proposed = copy.deepcopy(current["repositories"][0])
+    del proposed["id"]
+    result = _untrusted_auto_add(
+        current, proposed, {r["id"] for r in current["repositories"]},
+    )
+    assert result["repository_id"] == "debian-trixie-main"
+    assert result["automatic_id_existing_repository"] is True
+    assert result["changed"] is False
+    assert result["new_repository_ids"] == []
+    assert result["proposed_state_generation"] == 1
+    assert result["next_generation_configuration_preview"] is None
+    assert result["authorizes_state_commit"] is False
+
+
+def test_auto_add_conflicting_existing_identity_requires_update():
+    current = document()
+    current["expected_state_generation"] = 1
+    proposed = copy.deepcopy(current["repositories"][0])
+    del proposed["id"]
+    proposed["layout"]["release_key_refs"] = [
+        "file:/etc/repocache/keys/rotated.gpg"
+    ]
+    with pytest.raises(ReconciliationPlanError, match="invalid candidate"):
+        _untrusted_auto_add(
+            current, proposed, {r["id"] for r in current["repositories"]},
+        )
+
+
+def test_auto_add_tombstoned_generated_identifier_never_reused():
+    from repocache.server_repository_plan_v1 import (
+        propose_automatic_repository_id,
+    )
+
+    current = document()
+    current["expected_state_generation"] = 1
+    proposed = _new_auto_apt_proposal(current)
+    history = {r["id"] for r in current["repositories"]}
+    original = propose_automatic_repository_id(
+        current, proposed, current_generation=1, reserved_ids=history,
+    )["repository_id"]
+    history.add(original)
+    successor = propose_automatic_repository_id(
+        current, proposed, current_generation=1, reserved_ids=history,
+    )["repository_id"]
+    result = _untrusted_auto_add(current, proposed, history)
+    assert result["repository_id"] == successor
+    assert result["repository_id"] != original
+    assert result["new_repository_ids"] == [successor]
+    assert result["automatic_id_existing_repository"] is False
+    assert result["authorizes_state_commit"] is False
+
+
+def test_auto_add_saturated_history_refuses_new_id_but_allows_noop():
+    current = document()
+    current["expected_state_generation"] = 1
+    reserved = {r["id"] for r in current["repositories"]}
+    reserved.update(f"retired-{i:05d}" for i in range(9998))
+    assert len(reserved) == 10000
+    with pytest.raises(ReconciliationPlanError, match="capacity exhausted"):
+        _untrusted_auto_add(current, _new_auto_apt_proposal(current), reserved)
+    proposed_existing = copy.deepcopy(current["repositories"][0])
+    del proposed_existing["id"]
+    noop = _untrusted_auto_add(current, proposed_existing, reserved)
+    assert noop["automatic_id_existing_repository"] is True
+    assert noop["changed"] is False
+
+
+@pytest.mark.parametrize("bad_history", [
+    None,
+    set(),
+    {"debian-trixie-main"},
+    {"debian-trixie-main", "almalinux-baseos", "INV@LID"},
+])
+def test_auto_add_requires_complete_valid_historical_snapshot(bad_history):
+    current = document()
+    current["expected_state_generation"] = 1
+    with pytest.raises(ReconciliationPlanError, match="invalid candidate"):
+        _untrusted_auto_add(current, _new_auto_apt_proposal(current), bad_history)
+
+
+def test_auto_add_refuses_explicit_id_and_stale_generation():
+    current = document()
+    current["expected_state_generation"] = 1
+    ids = {r["id"] for r in current["repositories"]}
+    explicit = copy.deepcopy(current["repositories"][0])
+    with pytest.raises(ReconciliationPlanError, match="invalid candidate"):
+        _untrusted_auto_add(current, explicit, ids)
+    with pytest.raises(ReconciliationPlanError, match="invalid candidate"):
+        _untrusted_auto_add(current, _new_auto_apt_proposal(current),
+                            ids, generation=2)
+
+
+def test_auto_add_invalid_private_pin_refused_without_partial_result():
+    current = document()
+    current["expected_state_generation"] = 1
+    proposed = _new_auto_apt_proposal(current)
+    proposed["desired_state"] = "active"
+    ids = {r["id"] for r in current["repositories"]}
+    with pytest.raises(ReconciliationPlanError, match="unsafe nginx candidate"):
+        _untrusted_auto_add(current, proposed, ids, pins={
+            "repo-nonexistent": {_HOST: ["127.0.0.1"]},
+        })
+
+
+def test_auto_add_is_pure_without_network_or_file_mutation(monkeypatch):
+    import os
+    import socket
+    import subprocess
+    import repocache.server_protected_state_store_v1 as state_store
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("auto-ID planner accessed host")
+    monkeypatch.setattr(os, "replace", forbidden)
+    monkeypatch.setattr(socket, "getaddrinfo", forbidden)
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    monkeypatch.setattr(state_store, "_commit_under_root", forbidden)
+
+    current = document()
+    current["expected_state_generation"] = 1
+    result = _untrusted_auto_add(
+        current, _new_auto_apt_proposal(current),
+        {r["id"] for r in current["repositories"]},
+    )
+    assert result["changed"] is True
+    assert result["authorizes_state_commit"] is False
+    assert result["authorizes_catalog_publication"] is False

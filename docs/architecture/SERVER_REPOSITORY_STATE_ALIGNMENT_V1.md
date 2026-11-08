@@ -391,3 +391,36 @@ SELinux, live cache ownership, real signed upstream transfer or atomic
 catalog publication is performed. The #28 PR #251 separately owns real
 disposable proxy/cache MISS-HIT tests; this test does not duplicate the
 actual caching or become an operational acceptance substitute.
+
+
+## Pure administrator add with an omitted repository ID
+
+The new `preview_repository_auto_add_nginx_from_untrusted_document`
+connects the existing strict `propose_automatic_repository_id` (#95)
+with the **same** #95 add planner and #28 pinned NGINX renderer. The
+caller provides a complete current install-v1 snapshot, an *ID-free*
+repository object, explicit generation, candidate pins and an all-time
+**caller-supplied** ID reservation snapshot. The proposal is bounded and
+validated before the existing canonical ID derivation; the identified
+candidate is validated again by the original add planner.
+
+A canonical identity already present with *identical effective config*
+produces an unchanged preview and reuses its existing ID; any different
+effective configuration refuses with an instruction to use update. New
+identities receive a collision-resistant ID proposal, skipping IDs
+listed as retired in the untrusted reservation set. A fully saturated
+10,000-entry proposed-v2 history rejects new IDs rather than suggesting a
+non-persistable next state, while a semantically unchanged existing
+repository is still a no-op.
+
+This does NOT allocate persistent IDs, establish whether a candidate
+ID is globally available, persist a tombstone or validate a real privileged
+approval. Returned `automatic_id_provenance=CALLER_SNAPSHOT_ONLY` and
+all existing write/reload/catalog/cache authority flags remain
+non-authorizing. The unmerged #31 owner must independently read and
+recheck *actual* full all-time reservations and canonical config under an
+authenticated OS-owned lock at commit; never trust an auto-ID preview.
+Native systemd/SELinux, real NGINX activation and catalog publication are
+still NOT VERIFIED. Tests exercise new and identical-ID no-op flows,
+configuration conflicts, retired ID avoidance, reservation saturation,
+malformed/stale inputs, incomplete pins and absence of host side effects.
