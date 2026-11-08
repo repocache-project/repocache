@@ -160,6 +160,31 @@ def _read_v2_journal(
     return previous, digest, raw
 
 
+def _verify_recovery_stage(
+    stage: bytes, next_digest: str, previous: bytes | None,
+) -> None:
+    """Refuse foreign or semantically invalid stage bytes before recovery.
+
+    A published journal digest alone does not prove the staged snapshot
+    preserves prior generation and retired-ID reservations.
+    """
+    if _hash(stage) != next_digest:
+        _refuse("STAGE_DRIFT")
+    try:
+        proposed = _json(stage, limit=MAX_V2_STATE_BYTES)
+        old = None if previous is None else _json(
+            previous, limit=MAX_V2_STATE_BYTES,
+        )
+        _validate_proposed_v2_snapshot(proposed)
+        generation = 0 if old is None else old["state_generation"]
+        preview_proposed_v2_state_transition(
+            proposed, expected_generation=generation,
+            previous_snapshot=old,
+        )
+    except (ValueError, TypeError, OverflowError, RecursionError):
+        _refuse("STAGE_INVALID")
+
+
 def _pending(directory: int, uid: int) -> bool:
     if _read_v2_journal(directory, uid) is not None:
         return True
@@ -301,13 +326,15 @@ def _preview_proposed_v2_recovery_under_root(
                 _refuse("STATE_DRIFT")
             # An unconsumed stage alongside the replacement state is drift,
             # even when the pending digest matches. Never infer authority.
-            if stage is not None and current != previous:
-                _refuse("STATE_DRIFT")
+            if stage is not None:
+                if current != previous:
+                    _refuse("STATE_DRIFT")
+                _verify_recovery_stage(stage, next_digest, previous)
             if rollback is not None and previous is None:
                 _refuse("ROLLBACK_CONFLICT")
-            rollback_temp_needs_rebuild = (
-                rollback is not None and rollback != previous
-            )
+            if rollback is not None and rollback != previous:
+                _refuse("ROLLBACK_DRIFT")
+            rollback_temp_needs_rebuild = False
             status = ("INTERRUPTED_BEFORE_V2_REPLACE"
                       if current == previous else
                       "INTERRUPTED_AFTER_V2_REPLACE")
@@ -361,16 +388,16 @@ def _recover_proposed_v2_under_root(
             current = _read_file(directory, V2_STATE, owner_uid, MAX_V2_STATE_BYTES)
             if _hash(current) not in (next_digest, _hash(previous)):
                 _refuse("STATE_DRIFT")
-            if stage is not None and current != previous:
-                _refuse("STATE_DRIFT")
+            if stage is not None:
+                if current != previous:
+                    _refuse("STATE_DRIFT")
+                _verify_recovery_stage(stage, next_digest, previous)
             if rollback is not None and previous is None:
                 _refuse("ROLLBACK_CONFLICT")
+            # A mismatched rollback inode may belong to another writer or
+            # reflect damaged bytes. Never delete it as a repair shortcut.
             if rollback is not None and rollback != previous:
-                _unlink_known(
-                    directory, V2_ROLLBACK, rollback,
-                    owner_uid, MAX_V2_STATE_BYTES,
-                )
-                rollback = None
+                _refuse("ROLLBACK_DRIFT")
             if current != previous:
                 if previous is None:
                     if current is None:
