@@ -475,3 +475,21 @@ compensating rollback. Cache, certificates, monitoring history, global
 NGINX configuration and client sources must remain untouched by default.
 If any original criterion lacks native evidence, acceptance remains
 **NOT VERIFIED**, independently of green synthetic CI.
+
+### Unpublished proposed-v2 journal provenance guard
+
+Before an unpublished `.state-v2.pending-tmp` can be classified as an
+abandoned fixture transaction or discarded by explicit private recovery, its
+bounded journal record must validate **and** its embedded previous-state bytes
+must match the exact currently persisted state under the exclusive lock.
+Malformed temporary journals and mismatched previous-state records fail
+closed without deleting the journal or replacing the state. This applies to
+both an interrupted first bootstrap (previous state absent) and an interrupted
+same-version update. The new tests inject the crash at
+`journal_tmp_durable`, substitute a different valid v2 snapshot and verify
+that both preview and recovery refuse with `STATE_DRIFT`, preserving bytes.
+
+These checks do not authenticate a host administrator, prove host-root
+provenance, or authorize the fixture recovery function for production. The
+native NGINX/systemd/SELinux and original applicable #31 acceptance gates
+remain **NOT VERIFIED** until separately executed on booted target systems.
