@@ -368,3 +368,26 @@ policy updates, full-scope reapproval and preserved omitted identities;
 strict-v1 refusal, v1-output parity, no-op, identity reassignment,
 generation mismatch, unsafe DNS/IP pins and pure no-host-effect behavior.
 Original #95 and #31 native end-to-end acceptance remains NOT VERIFIED.
+
+
+## Full lifecycle packaged NGINX syntax rehearsal (without systemd)
+
+The #95 test `test_disposable_nginx_full_lifecycle_candidate_sequence`
+exercises consecutive **add → enable → disable → remove** plans using the
+same untrusted-document-only lifecycle function and existing #28 pinned
+renderer. The test revalidates each next-generation complete install-v1
+document, passes each generated complete disposable NGINX configuration
+through **packaged `nginx -t`** on both Debian 13 and AlmaLinux 10 CI
+containers, and confirms that removed IDs have a tombstone intent and
+cache-retention requirement. A simulated caller-owned retired-ID set
+rejects re-adding the removed ID. Repeating remove is a no-op without
+generation advancement. Every state/NGINX/catalog/cache authority remains
+false.
+
+State advance between iterations is deliberately **synthetic in-memory
+test input**, NOT a durable commit, approved operator action or evidence of
+an active route. No daemon reload, systemd, privileged helper, native
+SELinux, live cache ownership, real signed upstream transfer or atomic
+catalog publication is performed. The #28 PR #251 separately owns real
+disposable proxy/cache MISS-HIT tests; this test does not duplicate the
+actual caching or become an operational acceptance substitute.

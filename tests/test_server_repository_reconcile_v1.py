@@ -1460,3 +1460,132 @@ def test_partial_untrusted_never_accesses_network_or_host_writes(monkeypatch):
     assert result["authorizes_nginx_activation"] is False
     assert result["authorizes_catalog_publication"] is False
     assert result["requires_trusted_locked_recheck"] is True
+
+
+def test_disposable_nginx_full_lifecycle_candidate_sequence(tmp_path):
+    """Exercise add/enable/disable/remove via actual distro nginx -t only.
+
+    No service is started, no protected state is written and no repo cache is
+    deleted. Each in-memory 'commit' is a synthetic test assumption, never
+    an authenticated/observed state transition or a real catalog publish.
+    """
+    import subprocess
+
+    nginx = shutil.which("nginx")
+    native_ca = next((path for path in (
+        "/etc/ssl/certs/ca-certificates.crt",
+        "/etc/pki/tls/certs/ca-bundle.crt",
+    ) if Path(path).is_file()), None)
+    if nginx is None or native_ca is None:
+        pytest.skip("distro NGINX and CA bundle required")
+
+    document_at_generation = document()
+    document_at_generation["expected_state_generation"] = 1
+    retired_id = "lifecycle-new-apt"
+    proposal = copy.deepcopy(document_at_generation["repositories"][0])
+    proposal["id"] = retired_id
+    proposal["desired_state"] = "active"
+    proposal["upstream"]["base_url"] = (
+        "https://mirror.example.invalid/new-lifecycle/"
+    )
+    reservations = {
+        item["id"] for item in document_at_generation["repositories"]
+    }
+    history = (
+        ("add", None, proposal, {retired_id: copy.deepcopy(_PUBLIC_PINS)}),
+        (
+            "enable", "debian-trixie-main", None,
+            {
+                retired_id: copy.deepcopy(_PUBLIC_PINS),
+                "debian-trixie-main": copy.deepcopy(_PUBLIC_PINS),
+            },
+        ),
+        (
+            "disable", retired_id, None,
+            {"debian-trixie-main": copy.deepcopy(_PUBLIC_PINS)},
+        ),
+        (
+            "remove", retired_id, None,
+            {"debian-trixie-main": copy.deepcopy(_PUBLIC_PINS)},
+        ),
+    )
+    generations = []
+    for step, (operation, repository_id, proposed_repository, pins) in enumerate(
+        history, start=1
+    ):
+        generation = document_at_generation["expected_state_generation"]
+        result = preview_repository_lifecycle_nginx_from_untrusted_document(
+            document_at_generation, current_generation=generation,
+            operation=operation, repository_id=repository_id,
+            proposed_repository=proposed_repository,
+            reserved_ids=reservations if operation == "add" else None,
+            candidate_pins_by_repository=pins,
+            ca_bundle_path=native_ca,
+        )
+        assert result["changed"] is True
+        assert result["expected_state_generation"] == generation
+        assert result["proposed_state_generation"] == generation + 1
+        assert result["proposed_repository_ids"] == sorted(pins)
+        for field in ("authorizes_state_commit", "authorizes_nginx_activation",
+                      "authorizes_catalog_publication", "authorizes_cache_cleanup",
+                      "active_exposure_verified", "trusted_id_ledger_verified"):
+            assert result[field] is False
+        configuration = tmp_path / f"lifecycle-{step}.conf"
+        configuration.write_text(
+            f"pid {tmp_path / 'nginx.pid'};\n"
+            f"error_log {tmp_path / 'error.log'} notice;\n"
+            "events {}\nhttp { access_log off;\n"
+            + result["http_upstream_fragment"]
+            + "server { listen 127.0.0.1:19991;\n"
+            + result["server_location_fragment"]
+            + "}\n}\n",
+            encoding="utf-8",
+        )
+        parsed = subprocess.run(
+            [nginx, "-t", "-c", str(configuration), "-p", str(tmp_path)],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+        assert parsed.returncode == 0, parsed.stderr
+        if operation == "add":
+            assert result["new_repository_ids"] == [retired_id]
+            reservations.add(retired_id)
+        if operation == "disable":
+            assert result["desired_withdraw_route_ids"] == [retired_id]
+            assert result["removed_repository_ids"] == []
+        if operation == "remove":
+            assert result["removed_repository_ids"] == [retired_id]
+            assert result["tombstone_required_ids"] == [retired_id]
+            assert result["cache_retention_required_ids"] == [retired_id]
+            assert result["desired_withdraw_route_ids"] == []
+        document_at_generation = result["next_generation_configuration_preview"]
+        generations.append(document_at_generation["expected_state_generation"])
+    assert generations == [2, 3, 4, 5]
+    assert retired_id not in {
+        item["id"] for item in document_at_generation["repositories"]
+    }
+
+    # The simulated reservation history is explicitly caller-supplied, not
+    # a durable ledger. Even this untrusted snapshot must refuse ID reuse.
+    with pytest.raises(ReconciliationPlanError, match="invalid or unreserved"):
+        preview_repository_lifecycle_nginx_from_untrusted_document(
+            document_at_generation, current_generation=5,
+            operation="add", proposed_repository=proposal,
+            reserved_ids=reservations,
+            candidate_pins_by_repository={
+                retired_id: copy.deepcopy(_PUBLIC_PINS),
+                "debian-trixie-main": copy.deepcopy(_PUBLIC_PINS),
+            },
+            ca_bundle_path=native_ca,
+        )
+    no_change = preview_repository_lifecycle_nginx_from_untrusted_document(
+        document_at_generation, current_generation=5,
+        operation="remove", repository_id=retired_id,
+        candidate_pins_by_repository={
+            "debian-trixie-main": copy.deepcopy(_PUBLIC_PINS),
+        },
+        ca_bundle_path=native_ca,
+    )
+    assert no_change["changed"] is False
+    assert no_change["next_generation_configuration_preview"] is None
+    assert no_change["proposed_state_generation"] == 5
+    assert no_change["authorizes_cache_cleanup"] is False
