@@ -199,6 +199,25 @@ weakened by a passing check. Existing #95 PR #214 remains the owner of
 declarative reconciliation and already-merged #28 owns NGINX candidate
 generation; no duplicate implementation is added here.
 
+### v0.6.0 first-operational-release compatibility boundary
+
+The maintainer explicitly confirmed on 2026-11-07 (issue #31) that v0.6.0
+is the first operational deployment and **does not upgrade public v0.4.0
+or any older server installation**. Automatic v1→v2 migration is therefore
+**NOT APPLICABLE** to this first-deployment acceptance path; it is not a
+reason to weaken provenance checks or delete old bytes. Encountering any
+foreign or legacy v1 protected state, pending transaction or non-owned NGINX
+configuration must fail closed without mutation. The earlier lossless
+migration discussion remains useful future design analysis, not an approved
+migration requirement or permission to overwrite legacy data.
+
+The applicable #31 release gates remain clean native install, idempotent
+same-version reinstall/repair and configuration update, preservation of
+TLS/cache/metrics/logs, executable NGINX syntax/reload rollback, safe
+interruption/retry and foreign-state refusal on booted Debian 13 and
+AlmaLinux 10. All host acceptance remains **NOT VERIFIED**; existing
+fixture/container PASS results cannot satisfy those gates.
+
 ### Required native persistence and activation boundary (NOT IMPLEMENTED)
 
 1. Define and review a new actual persisted v2 format and crash-safe
@@ -219,9 +238,10 @@ generation; no duplicate implementation is added here.
    On partial failure preserve/restage known-good host state, catalog and
    cache, refusing foreign configuration and inconsistent exposure.
 
-Original #31 operational tests (Debian 13 and AlmaLinux 10 real install,
-repeat install, upgrade with TLS/cache/history retention, staging/syntax/
-reload rollback and interrupted recovery) remain **NOT VERIFIED**.
+Applicable #31 operational tests (Debian 13 and AlmaLinux 10 real install,
+same-version repeat install/repair with TLS/cache/history retention,
+staging/syntax/reload rollback and interrupted recovery) remain
+**NOT VERIFIED**. Public pre-v0.6.0 upgrade is **NOT APPLICABLE**.
 Original #95 and #28 operational acceptance remains NOT VERIFIED. The
 proposed bridge is testable coordination work, not adoption of a new
 protected-state format or approval of a native writer.
@@ -442,7 +462,7 @@ criteria. Its regression tests cover unprivileged denial before filesystem
 access, pinned current-root identity, substituted descriptor refusal and
 descriptor cleanup on failure.
 
-### v1 → proposed v2 migration and privileged authority: unresolved gates
+### Legacy-state refusal and privileged authority: unresolved gates
 
 **No migration is executed or enabled by this PR.** The v1 snapshot stores a
 configuration digest but not independently recoverable canonical config
@@ -458,9 +478,10 @@ for the exact canonical v1 configuration and full historical ID reservations;
 a maintainer-approved policy for legacy data without sufficient provenance;
 and a durable journal protocol that explicitly handles crash windows where
 both version filenames may coexist. It must not erase v1 to make v2 import
-appear successful, invent identities or silently reuse retired IDs. Until
-that design is adopted, the only safe output for existing v1 state is
-**migration required / NOT VERIFIED**, not automatic v2 bootstrap.
+appear successful, invent identities or silently reuse retired IDs. Under the approved first-operational-v0.6.0 scope, this future migration
+is **NOT APPLICABLE**. The only safe current behavior when legacy v1 state
+is encountered is **refusal without mutation**, not automatic bootstrap,
+import, cleanup, or upgrade.
 
 A privileged entry must independently authenticate the administrator's
 exact operation, generation, canonical config bytes and decision provenance,
