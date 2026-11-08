@@ -114,7 +114,7 @@ def test_native_unit_dpkg_owner_requires_exact_nginx_package_and_fixed_path(tmp_
         if args[2] == "/lib/systemd/system/nginx.service":
             return SimpleNamespace(
                 returncode=0,
-                stdout="nginx-common: /lib/systemd/system/nginx.service\\n",
+                stdout="nginx-common: /lib/systemd/system/nginx.service\n",
                 stderr="",
             )
         return SimpleNamespace(returncode=1, stdout="", stderr="no owner")
@@ -125,10 +125,10 @@ def test_native_unit_dpkg_owner_requires_exact_nginx_package_and_fixed_path(tmp_
 
 
 @pytest.mark.parametrize("forged", [
-    "other-package: /lib/systemd/system/nginx.service\\n",
-    "nginx-common: /tmp/fake-nginx.service\\n",
-    "nginx-common: /lib/systemd/system/nginx.service extra\\n",
-    "nginx-common: /lib/systemd/system/nginx.service\\nUNTRUSTED",
+    "other-package: /lib/systemd/system/nginx.service\n",
+    "nginx-common: /tmp/fake-nginx.service\n",
+    "nginx-common: /lib/systemd/system/nginx.service extra\n",
+    "nginx-common: /lib/systemd/system/nginx.service\nUNTRUSTED",
 ])
 def test_native_unit_dpkg_untrusted_owners_are_refused(tmp_path, forged):
     from types import SimpleNamespace
@@ -156,7 +156,7 @@ def test_native_unit_rpm_owner_requires_exact_nginx_package(tmp_path, package):
 
 
 @pytest.mark.parametrize("forged", [
-    "nginx-extra", "third-party", "nginx-core\\nother", "",
+    "nginx-extra", "third-party", "nginx-core\nother", "",
 ])
 def test_native_unit_rpm_wrong_owner_is_refused(tmp_path, forged):
     from types import SimpleNamespace
