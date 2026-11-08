@@ -302,6 +302,83 @@ def main() -> None:
             run(nginx, "-t", "-e", str(root / "restored-candidate.log"),
                 "-p", str(root), "-c", str(config))
             require(True, "verified good config restored in disposable fixture")
+
+            # Exercise actual NGINX master reloads and a reversible routing
+            # change while keeping the SAME real TLS listener and cache zone.
+            # This is never an operator/root reload helper or production API.
+            probe = f"https://127.0.0.1:{frontend_port}/__repocache_reload_probe"
+            require(
+                request(probe, client_tls)[0] == 404,
+                "previous running generation does not expose proposed route",
+            )
+            staged = original_conf.replace(
+                b"location = /__repocache_canary { internal; return 200; }",
+                b"location = /__repocache_canary { internal; return 200; }\n"
+                b"location = /__repocache_reload_probe { return 204; }",
+            )
+            require(
+                staged != original_conf,
+                "test-only managed NGINX reload candidate changes one fixed route",
+            )
+            config.write_bytes(staged)
+            run(nginx, "-t", "-e", str(root / "staged-reload.log"),
+                "-p", str(root), "-c", str(config))
+            run(nginx, "-s", "reload", "-e", str(root / "staged-reload.log"),
+                "-p", str(root), "-c", str(config))
+            changed_live = False
+            for _ in range(100):
+                if process.poll() is not None:
+                    raise AssertionError("running NGINX exited during valid reload")
+                if request(probe, client_tls)[0] == 204:
+                    changed_live = True
+                    break
+                time.sleep(0.05)
+            require(
+                changed_live,
+                "real NGINX master accepted staged route after validated reload",
+            )
+            cached_during_reload = request(
+                base + "debian-trixie-main/dists/trixie/InRelease", client_tls,
+            )
+            require(
+                cached_during_reload[:3] == (
+                    200, FIXTURES["/apt/dists/trixie/InRelease"][1], "HIT",
+                ),
+                "TLS/cache remained usable after actual successful reload",
+            )
+
+            # Revert the temporary route with another genuine NGINX reload
+            # and verify the old route set is once again what is exposed.
+            config.write_bytes(original_conf)
+            run(nginx, "-t", "-e", str(root / "rollback-reload.log"),
+                "-p", str(root), "-c", str(config))
+            run(nginx, "-s", "reload", "-e", str(root / "rollback-reload.log"),
+                "-p", str(root), "-c", str(config))
+            rolled_back = False
+            for _ in range(100):
+                if process.poll() is not None:
+                    raise AssertionError("running NGINX exited during rollback")
+                if request(probe, client_tls)[0] == 404:
+                    rolled_back = True
+                    break
+                time.sleep(0.05)
+            require(
+                rolled_back,
+                "real rollback reload restores original route exposure",
+            )
+            stable_after_rollback = request(
+                base + "debian-trixie-main/dists/trixie/InRelease", client_tls,
+            )
+            with lock:
+                origin_requests = counts["/apt/dists/trixie/InRelease"]
+            require(
+                stable_after_rollback[:3] == (
+                    200, FIXTURES["/apt/dists/trixie/InRelease"][1], "HIT",
+                ) and origin_requests == 1
+                and config.read_bytes() == original_conf
+                and process.poll() is None,
+                "rollback restores exact config and existing TLS/cache HIT without refetch",
+            )
         finally:
             process.terminate()
             try:
