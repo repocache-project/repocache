@@ -114,10 +114,11 @@ def _journal_bytes(previous: bytes | None, next_raw: bytes) -> bytes:
     return _canonical(record, limit=MAX_V2_JOURNAL_BYTES)
 
 
-def _read_v2_journal(directory: int, uid: int) -> (
-    tuple[bytes | None, str, bytes] | None
-):
-    raw = _read_file(directory, V2_JOURNAL, uid, MAX_V2_JOURNAL_BYTES)
+def _read_v2_journal(
+    directory: int, uid: int, *, name: str = V2_JOURNAL,
+) -> tuple[bytes | None, str, bytes] | None:
+    """Validate either the published journal or its unpublished temporary file."""
+    raw = _read_file(directory, name, uid, MAX_V2_JOURNAL_BYTES)
     if raw is None:
         return None
     try:
@@ -273,9 +274,10 @@ def _preview_proposed_v2_recovery_under_root(
     with _locked(root_fd, owner_uid) as directory:
         _legacy_refusal(directory, owner_uid)
         journal = _read_v2_journal(directory, owner_uid)
-        temp = _read_file(
-            directory, V2_JOURNAL_TMP, owner_uid, MAX_V2_JOURNAL_BYTES,
+        temp_entry = _read_v2_journal(
+            directory, owner_uid, name=V2_JOURNAL_TMP,
         )
+        temp = None if temp_entry is None else temp_entry[2]
         stage = _read_file(
             directory, V2_STAGE, owner_uid, MAX_V2_STATE_BYTES,
         )
@@ -328,9 +330,10 @@ def _recover_proposed_v2_under_root(
     with _locked(root_fd, owner_uid) as directory:
         _legacy_refusal(directory, owner_uid)
         journal = _read_v2_journal(directory, owner_uid)
-        temp = _read_file(
-            directory, V2_JOURNAL_TMP, owner_uid, MAX_V2_JOURNAL_BYTES
+        temp_entry = _read_v2_journal(
+            directory, owner_uid, name=V2_JOURNAL_TMP,
         )
+        temp = None if temp_entry is None else temp_entry[2]
         stage = _read_file(directory, V2_STAGE, owner_uid, MAX_V2_STATE_BYTES)
         rollback = _read_file(directory, V2_ROLLBACK, owner_uid, MAX_V2_STATE_BYTES)
         if journal is None:
