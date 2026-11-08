@@ -98,3 +98,14 @@ arguments are constrained to known benign values. Unexpected aliases,
 privilege, namespace, dependency or file/mount settings fail closed.
 This is a conservative **syntax-shape observation**, not a replacement for
 systemd's parser or an authorization of an effective loaded unit.
+
+### Debian 13 native unit cross-check
+
+The installed Debian 13 `nginx-common` unit uses the systemd key
+`ConditionFileIsExecutable=/usr/sbin/nginx` (not merely
+`ConditionPathExists`). This exact native executable test is allowlisted
+without accepting a caller-supplied path or general `Condition*`
+directives. The value was independently checked against the Debian
+source distribution's official
+[nginx-common.nginx.service](https://sources.debian.org/src/nginx/1.26.3-3%2Bdeb13u7/debian/nginx-common.nginx.service/).
+Runtime compatibility still requires the exact supported distro CI.

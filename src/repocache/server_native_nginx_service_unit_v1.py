@@ -56,7 +56,8 @@ _RELOADS = frozenset((
 # can change execution even when all reviewed NGINX commands match. An
 # allowlist is safer than listing a handful of known-dangerous directives.
 _UNIT_KEYS = frozenset({
-    "Description", "Documentation", "After", "Wants", "ConditionPathExists",
+    "Description", "Documentation", "After", "Wants",
+    "ConditionPathExists", "ConditionFileIsExecutable",
 })
 _SERVICE_KEYS = frozenset({
     "Type", "PIDFile", "ExecStartPre", "ExecStart", "ExecReload",
@@ -190,6 +191,13 @@ def _unit_layout_supported(raw: bytes) -> bool:
     ):
         return False
     if relevant.get("Unit:ConditionPathExists", []) not in (
+        [], ["/usr/sbin/nginx"],
+    ):
+        return False
+    # Debian 13's official nginx-common unit uses
+    # ConditionFileIsExecutable=/usr/sbin/nginx rather than PathExists;
+    # both are constrained to the native executable, never an input path.
+    if relevant.get("Unit:ConditionFileIsExecutable", []) not in (
         [], ["/usr/sbin/nginx"],
     ):
         return False

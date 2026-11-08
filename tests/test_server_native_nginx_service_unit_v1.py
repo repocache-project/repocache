@@ -11,6 +11,7 @@ from repocache import server_native_nginx_service_unit_v1 as unit
 DEBIAN = b"""[Unit]
 Description=NGINX HTTP server
 After=network.target
+ConditionFileIsExecutable=/usr/sbin/nginx
 [Service]
 Type=forking
 PIDFile=/run/nginx.pid
@@ -96,6 +97,10 @@ def test_duplicate_or_unrecognized_vendor_reload_is_refused():
     DEBIAN.replace(b"ExecReload=/usr/sbin/nginx", b"ExecReload=/tmp/helper", 1),
     DEBIAN.replace(b"Type=forking", b"Type=oneshot"),
     DEBIAN.replace(b"PIDFile=/run/nginx.pid", b"PIDFile=/tmp/nginx.pid"),
+    DEBIAN.replace(
+        b"ConditionFileIsExecutable=/usr/sbin/nginx",
+        b"ConditionFileIsExecutable=/tmp/foreign",
+    ),
     DEBIAN.replace(b"WantedBy=multi-user.target", b"WantedBy=malicious.target"),
     DEBIAN.replace(b"[Install]", b"[Install]\n[Install]"),
     DEBIAN.replace(b"[Service]", b"[Service]\nUser=repocache"),
