@@ -92,3 +92,26 @@ def test_native_readiness_main_outputs_json_and_fails_closed(
     data = json.loads(capsys.readouterr().out)
     assert data["status"] == "BLOCKED"
     assert data["checks"]["supported_os"].startswith("FAIL:")
+
+
+
+def test_actual_runner_invocation_produces_readiness_not_native_acceptance():
+    """Run the actual CLI, not only mocks, in this disposable CI environment."""
+    import os
+    import subprocess
+    import sys
+
+    result = subprocess.run([sys.executable, str(SCRIPT)],
+                            capture_output=True, text=True, timeout=15,
+                            check=False)
+    assert result.returncode in (0, 2), result.stderr[-500:]
+    data = json.loads(result.stdout)
+    assert data["scope"] == "read-only native readiness only"
+    assert data["status"] in {"BLOCKED", "READINESS_ONLY_PASS"}
+    for criterion in ("native_resource_exhaustion", "supervisor_sigkill_recovery",
+                      "selinux_escape_tests", "real_publisher_signed_candidate"):
+        assert data[criterion] == "NOT_VERIFIED"
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        # GitHub's disposable runners are not booted target distro kernels.
+        assert data["status"] == "BLOCKED"
+        assert result.returncode == 2
