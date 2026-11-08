@@ -76,3 +76,32 @@ native signed APT/DNF upstream metadata is valid, that an authenticated
 operator/state generation authorized activation or that a real server was
 installed. Never promote the loopback substitution to production code or
 allow a user-supplied IP through the strict pin validator.
+
+
+## Actual two-phase reload and route rollback (disposable only)
+
+The generated-fragment test now extends the native live NGINX data-plane
+fixture beyond a mere syntax refusal. While the stock NGINX master process
+serves verified-TLS APT/DNF metadata and an existing cached HIT, the test:
+
+1. Checks a fixed candidate-only route is absent in the running generation.
+2. Writes a temporary config derived from the exact tested generated
+   candidate, adds **one fixed test-only route**, executes the real
+   distro-packaged `nginx -t`, then a real `nginx -s reload` against the
+   isolated process and waits for the new route to return HTTP 204.
+3. Verifies the original signed-shape metadata still comes from its cache
+   with HIT after the validated route change.
+4. Writes back the exact original config bytes, validates them with real
+   `nginx -t`, performs a second actual `nginx -s reload`, observes
+   the temporary route disappear (404), and confirms exact on-disk config
+   bytes, live TLS/cache HIT and unchanged upstream request count.
+
+An earlier negative test deliberately damages a TLS validation directive,
+shows real `nginx -t` rejects it, and verifies the previous live NGINX
+configuration continues to serve cached data **without sending a reload**.
+These are **two real non-root reloads and a route rollback inside an
+isolated disposable process**, not a booted systemd host or a rollback of a
+failed privileged reload. They do not establish privileged operator
+authorization, root-owned state/managed include provenance, atomic catalog
+publication, crash durability, SELinux, production TLS trust or service
+manager recovery. Running this test must never touch a host NGINX service.
