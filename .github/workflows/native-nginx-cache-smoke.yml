@@ -4,6 +4,7 @@ on:
     paths:
       - .github/workflows/native-nginx-cache-smoke.yml
       - scripts/ci_native_nginx_cache_smoke.py
+      - scripts/ci_generated_nginx_route_cache_smoke.py
       - src/repocache/server_nginx_repository_bundle_v1.py
       - src/repocache/server_nginx_pin_render_v1.py
       - docs/examples/server-install-v1.json
