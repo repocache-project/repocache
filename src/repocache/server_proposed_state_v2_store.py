@@ -288,6 +288,8 @@ def _preview_proposed_v2_recovery_under_root(
         if journal is None:
             if stage is not None or rollback is not None:
                 _refuse("ORPHAN_STAGE_OR_ROLLBACK")
+            if temp_entry is not None and current != temp_entry[0]:
+                _refuse("STATE_DRIFT")
             status = ("UNPUBLISHED_V2_JOURNAL_ONLY"
                       if temp is not None else "CLEAN")
             rollback_temp_needs_rebuild = False
@@ -339,7 +341,11 @@ def _recover_proposed_v2_under_root(
         if journal is None:
             if stage is not None or rollback is not None:
                 _refuse("ORPHAN_STAGE_OR_ROLLBACK")
-            state, _ = _read_v2(directory, owner_uid)
+            state, current = _read_v2(directory, owner_uid)
+            # A temporary journal is only discardable if it describes the
+            # exact pre-transaction state still present under the lock.
+            if temp_entry is not None and current != temp_entry[0]:
+                _refuse("STATE_DRIFT")
             if temp is not None:
                 _unlink_known(
                     directory, V2_JOURNAL_TMP, temp,
