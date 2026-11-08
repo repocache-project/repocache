@@ -126,6 +126,83 @@ tool.apply_entry_sandbox(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5])
     assert proc.returncode == -signal.SIGKILL, proc.stderr
 
 
+def shared_file_approval_conflict(root):
+    """Distinct approvals never grant independent writes to a shared file.
+
+    Tested in a private sandbox only. A whole file is the transaction unit.
+    """
+    for relative, before in FILES.items():
+        # Unique file per format; the standard fixture already stages entry 0.
+        shared = relative.replace("mixture.", "samefile.", 1)
+        path, first_candidate, first_stage, _ = fixture(root, shared, before)
+        entries = boundaries.boundaries(shared, before)
+        assert len(entries) == 2
+        second = entries[1]
+        second_candidate = candidates.register_entry_candidate_sandbox(
+            root, shared, sha(before), second["sha256"])["id"]
+        approvals.approve_entry_plan_sandbox(
+            root, second_candidate, sha(before), second["sha256"])
+
+        # Both approvals can be recorded for different repository entries.
+        # Only one whole-file stage may be prepared, irrespective of entry ID.
+        assert candidates.inspect_entry_candidate_sandbox(
+            root, second_candidate)["state"] == "intact"
+        try:
+            bridge.stage_entry_change_sandbox(root, second_candidate, URL)
+        except stage.StageError as exc:
+            assert "A pending stage already owns this source" in str(exc)
+        else:
+            raise AssertionError("Conflicting shared-file stage was accepted")
+        assert path.read_bytes() == before
+        assert stage.inspect(root, first_stage)["status"] == "prepared"
+
+        # A separate approval must never borrow the other entry's stage ID.
+        try:
+            wrapper.apply_entry_sandbox(
+                root, second_candidate, first_stage, URL)
+        except approvals.ApprovalRefused as exc:
+            assert "unapproved shared-file changes" in str(exc)
+        else:
+            raise AssertionError("Foreign entry reused another stage")
+        assert path.read_bytes() == before
+
+        # The first approved entry can still be installed, without changing
+        # the second entry's bytes, as the only staged whole-file transaction.
+        assert wrapper.apply_entry_sandbox(
+            root, first_candidate, first_stage, URL)["state"] == "installed"
+        installed = path.read_bytes()
+        assert installed != before
+        assert_siblings(shared, before, installed)
+        status = candidates.inspect_entry_candidate_sandbox(
+            root, second_candidate)
+        assert status["state"] == "file-drift"
+        assert status["entry_intact"] and not status["file_intact"]
+        try:
+            bridge.stage_entry_change_sandbox(root, second_candidate, URL)
+        except approvals.ApprovalRefused:
+            pass
+        else:
+            raise AssertionError("Stale second-entry approval survived commit")
+        assert path.read_bytes() == installed
+
+        # Rollback restores bytes but not the immutable inode/metadata baseline.
+        # An old approval cannot silently rebase and apply the other entry.
+        assert wrapper.rollback_entry_sandbox(
+            root, first_candidate, first_stage, URL)["state"] == "restored"
+        assert path.read_bytes() == before
+        status = candidates.inspect_entry_candidate_sandbox(
+            root, second_candidate)
+        assert status["state"] == "file-drift"
+        assert status["write_eligible"] is False
+        try:
+            bridge.stage_entry_change_sandbox(root, second_candidate, URL)
+        except approvals.ApprovalRefused:
+            pass
+        else:
+            raise AssertionError("Rollback silently renewed stale approval")
+        assert path.read_bytes() == before
+
+
 def independent_transaction_failure_recovery(root):
     """A failure or crash on one source must not roll back another source.
 
@@ -246,6 +323,9 @@ def main():
             assert source.read_bytes() == original
             assert_siblings(relative, original, changed)
 
+        # Distinct entry approvals in one shared file must be serialized.
+        shared_file_approval_conflict(root)
+
         # A failed source cannot roll back another successfully installed source.
         independent_transaction_failure_recovery(root)
 
@@ -303,7 +383,7 @@ def main():
             raise AssertionError("Unsupported source xattrs were overwritten")
         assert path.read_bytes() == before
 
-    print("PASS: mixed-file atomic apply/rollback, independent failure isolation, preserved siblings, drift and SIGKILL recovery")
+    print("PASS: shared-file approval serialization, stale approval refusal, independent recovery and SIGKILL rollback")
 
 
 if __name__ == "__main__":

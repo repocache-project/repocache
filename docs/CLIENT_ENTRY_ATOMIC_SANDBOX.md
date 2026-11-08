@@ -65,3 +65,22 @@ indivisible atomic replacement unit; operations affecting multiple entries
 in that file must be sequenced against a new verified baseline or refused.
 No source writes outside marked /tmp fixtures, installed helper, production
 sync --apply, SELinux enforcing or real APT/DNF failover are enabled.
+
+## Same-file approval and transaction conflict regression
+
+The native Debian 13 and AlmaLinux 10 sandbox smoke also registers two
+distinct, explicitly approved entries in each of an APT .list file, a deb822
+.sources file, and a DNF .repo file. The first entry owns the only protected
+whole-file stage. Attempting to stage the second approved entry is **refused**
+while that stage exists; its approval cannot borrow the first stage identifier.
+A successful commit of the first entry preserves every byte of the second
+entry and invalidates its original full-file baseline. After an explicit
+rollback restores the original bytes, the second approval remains stale
+because the source inode and metadata have changed; it is not automatically
+renewed. Reapproval/replanning requires a separately verified baseline and
+a reviewed ownership/state lifecycle, not an implicit retry.
+
+This is fail-closed evidence for UC-01/UC-07/UC-25/UC-33 within private
+/tmp fixtures, **not** a demonstration of multi-entry independent commit,
+real package-manager fallback, installed helper safety, or source writes
+under /etc. The installed client continues to reject --apply.
