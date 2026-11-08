@@ -160,18 +160,18 @@ def _read_v2_journal(
     return previous, digest, raw
 
 
-def _verify_recovery_stage(
-    stage: bytes, next_digest: str, previous: bytes | None,
+def _verify_recovery_next(
+    raw: bytes, next_digest: str, previous: bytes | None, *, kind: str,
 ) -> None:
-    """Refuse foreign or semantically invalid stage bytes before recovery.
+    """Validate journal-linked bytes and their actual prior-state transition.
 
-    A published journal digest alone does not prove the staged snapshot
-    preserves prior generation and retired-ID reservations.
+    A journal digest is not enough to adopt a staged or replaced fixture
+    state without checking generation and retired-ID continuity.
     """
-    if _hash(stage) != next_digest:
-        _refuse("STAGE_DRIFT")
+    if _hash(raw) != next_digest:
+        _refuse(kind + "_DRIFT")
     try:
-        proposed = _json(stage, limit=MAX_V2_STATE_BYTES)
+        proposed = _json(raw, limit=MAX_V2_STATE_BYTES)
         old = None if previous is None else _json(
             previous, limit=MAX_V2_STATE_BYTES,
         )
@@ -182,7 +182,7 @@ def _verify_recovery_stage(
             previous_snapshot=old,
         )
     except (ValueError, TypeError, OverflowError, RecursionError):
-        _refuse("STAGE_INVALID")
+        _refuse(kind + "_INVALID")
 
 
 def _pending(directory: int, uid: int) -> bool:
@@ -329,7 +329,13 @@ def _preview_proposed_v2_recovery_under_root(
             if stage is not None:
                 if current != previous:
                     _refuse("STATE_DRIFT")
-                _verify_recovery_stage(stage, next_digest, previous)
+                _verify_recovery_next(
+                    stage, next_digest, previous, kind="STAGE",
+                )
+            if current != previous:
+                _verify_recovery_next(
+                    current, next_digest, previous, kind="REPLACED_STATE",
+                )
             if rollback is not None and previous is None:
                 _refuse("ROLLBACK_CONFLICT")
             if rollback is not None and rollback != previous:
@@ -391,7 +397,13 @@ def _recover_proposed_v2_under_root(
             if stage is not None:
                 if current != previous:
                     _refuse("STATE_DRIFT")
-                _verify_recovery_stage(stage, next_digest, previous)
+                _verify_recovery_next(
+                    stage, next_digest, previous, kind="STAGE",
+                )
+            if current != previous:
+                _verify_recovery_next(
+                    current, next_digest, previous, kind="REPLACED_STATE",
+                )
             if rollback is not None and previous is None:
                 _refuse("ROLLBACK_CONFLICT")
             # A mismatched rollback inode may belong to another writer or
