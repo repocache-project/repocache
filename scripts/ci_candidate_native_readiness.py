@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -49,6 +50,21 @@ def _systemd_pid1() -> None:
         raise NativeReadinessError("Cannot verify systemd as PID 1") from exc
     if pid1 != "systemd" or not Path("/run/systemd/system").is_dir():
         raise NativeReadinessError("Native booted systemd is required")
+
+
+
+
+def _not_container() -> None:
+    """PID 1=systemd is insufficient: systemd can also boot in a container."""
+    try:
+        result = subprocess.run(
+            ["/usr/bin/systemd-detect-virt", "--container"],
+            env={"PATH": "/usr/bin:/bin", "LANG": "C"},
+            capture_output=True, text=True, check=False, timeout=5)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise NativeReadinessError("Cannot rule out a container kernel") from exc
+    if result.returncode != 1:
+        raise NativeReadinessError("Native booted host is required, not a container")
 
 
 def _nonroot() -> None:
@@ -102,6 +118,7 @@ def run_probe() -> dict[str, object]:
     host_ready = (
         verify("non_root_service", _nonroot)
         and verify("booted_systemd", _systemd_pid1)
+        and verify("not_container", _not_container)
     )
     if target is None or not host_ready:
         return result

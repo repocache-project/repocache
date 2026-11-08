@@ -194,3 +194,5 @@ kernel/package versions and separate executed lab logs before any PASS claim.
 Do not run resource-exhaustion tests on production hosts or relax the
 mandatory fail-closed native gates. Independent issue-specific security
 review for #112 also remains mandatory.
+
+The readiness probe also invokes the vendor `systemd-detect-virt --container` check and refuses recognized containers even if systemd is PID 1, since Debian/Alma userspace running on another host's kernel cannot satisfy #149 native-host acceptance.

@@ -28,6 +28,8 @@ def test_readiness_accepts_only_complete_prerequisites_and_never_claims_release(
     monkeypatch.setattr(probe, "_nonroot", lambda: called.append("nonroot"))
     monkeypatch.setattr(probe, "_systemd_pid1",
                         lambda: called.append("systemd"))
+    monkeypatch.setattr(probe, "_not_container",
+                        lambda: called.append("not-container"))
     monkeypatch.setattr(probe, "_selinux",
                         lambda target: called.append("selinux:" + target))
     monkeypatch.setattr(candidate_cgroup, "require_delegation",
@@ -39,7 +41,7 @@ def test_readiness_accepts_only_complete_prerequisites_and_never_claims_release(
     result = probe.run_probe()
     assert result["status"] == "READINESS_ONLY_PASS"
     assert called == [
-        "nonroot", "systemd", "selinux:almalinux10",
+        "nonroot", "systemd", "not-container", "selinux:almalinux10",
         "delegation", "staging", "bwrap",
     ]
     for requirement in ("native_resource_exhaustion", "supervisor_sigkill_recovery",
@@ -48,7 +50,7 @@ def test_readiness_accepts_only_complete_prerequisites_and_never_claims_release(
     assert json.loads(json.dumps(result)) == result
 
 
-@pytest.mark.parametrize("failed", ["os", "nonroot", "systemd", "selinux",
+@pytest.mark.parametrize("failed", ["os", "nonroot", "systemd", "container", "selinux",
                                     "delegation", "staging", "bwrap"])
 def test_readiness_refuses_missing_gate_without_fallback(
         probe, monkeypatch, failed):
@@ -65,6 +67,7 @@ def test_readiness_refuses_missing_gate_without_fallback(
     monkeypatch.setattr(probe, "_os_release", check("os"))
     monkeypatch.setattr(probe, "_nonroot", check("nonroot"))
     monkeypatch.setattr(probe, "_systemd_pid1", check("systemd"))
+    monkeypatch.setattr(probe, "_not_container", check("container"))
     monkeypatch.setattr(probe, "_selinux", check("selinux"))
     monkeypatch.setattr(candidate_cgroup, "require_delegation",
                         check("delegation"))
