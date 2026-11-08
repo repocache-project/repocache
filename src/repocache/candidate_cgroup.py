@@ -404,8 +404,18 @@ def require_staging_tmpfs(parent: Path, *,
     if len(matches) != 1:
         raise CgroupGateError("Dedicated candidate preparation mount is missing")
     fields, fs = matches[0]
-    if (len(fs) < 3 or fs[0] != "tmpfs" or "rw" not in fields[5].split(",")
-            or fields[3] != "/"):
+    # The mount must not propagate operations back to host peers. A slave
+    # mount receives host propagation; require truly private/unbindable.
+    propagation = fields[6:]
+    if any(value == "shared" or value == "slave"
+           or value.startswith(("shared:", "master:", "propagate_from:"))
+           for value in propagation):
+        raise CgroupGateError("Candidate preparation mount has shared propagation")
+    mount_options = set(fields[5].split(","))
+    super_options = set(fs[2].split(",")) if len(fs) >= 3 else set()
+    if (len(fs) < 3 or fs[0] != "tmpfs" or fields[3] != "/"
+            or not {"rw", "nosuid", "nodev"}.issubset(mount_options)
+            or "rw" not in super_options):
         raise CgroupGateError("Candidate preparation mount is not private tmpfs")
     try:
         usage = os.statvfs(parent)

@@ -522,14 +522,16 @@ def test_candidate_leaf_never_runs_as_root(delegated, monkeypatch):
 
 
 
-def _quota_mount(tmp_path, monkeypatch, *, fstype="tmpfs", opts="rw",
+def _quota_mount(tmp_path, monkeypatch, *, fstype="tmpfs",
+                 opts="rw,nosuid,nodev", propagation="", superopts="rw",
                  blocks=None, free=None, inodes=50000):
     from types import SimpleNamespace
     parent = tmp_path / "online-preparations"
     parent.mkdir(mode=0o700)
     mountinfo = tmp_path / "mountinfo"
     mountinfo.write_text(
-        f"42 31 0:44 / {parent} {opts},nosuid,nodev - {fstype} tmpfs rw\n")
+        f"42 31 0:44 / {parent} {opts} {propagation} - "
+        f"{fstype} tmpfs {superopts}\n")
     monkeypatch.setattr(candidate_cgroup.os, "geteuid",
                         lambda: parent.stat().st_uid)
     blocks = blocks if blocks is not None else (
@@ -549,12 +551,24 @@ def test_verified_private_tmpfs_has_kernel_enforced_capacity(tmp_path, monkeypat
 @pytest.mark.parametrize("case", [
     "not-mounted", "ext4", "read-only", "oversized",
     "insufficient-free", "too-many-inodes", "symlink",
+    "setuid", "devices", "shared-propagation", "master-propagation",
+    "super-read-only",
 ])
 def test_missing_or_unbounded_staging_quota_refuses(tmp_path, monkeypatch, case):
     if case == "ext4":
         args = {"fstype": "ext4"}
     elif case == "read-only":
-        args = {"opts": "ro"}
+        args = {"opts": "ro,nosuid,nodev"}
+    elif case == "setuid":
+        args = {"opts": "rw,nodev"}
+    elif case == "devices":
+        args = {"opts": "rw,nosuid"}
+    elif case == "shared-propagation":
+        args = {"propagation": "shared:2"}
+    elif case == "master-propagation":
+        args = {"propagation": "master:4"}
+    elif case == "super-read-only":
+        args = {"superopts": "ro"}
     elif case == "oversized":
         args = {"blocks": candidate_cgroup.STAGING_MAX_BYTES // 4096 + 1}
     elif case == "insufficient-free":
