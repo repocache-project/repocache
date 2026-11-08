@@ -15,6 +15,9 @@ import sys
 import tempfile
 
 from repocache.server_install_v1 import validate_os_identity
+from repocache.server_native_nginx_service_unit_v1 import (
+    VENDOR_UNIT, inspect_native_nginx_unit,
+)
 from repocache.server_native_package_trust_v1 import (
     _NATIVE, _apt_commands, _dnf_commands, _run, _trusted_key,
 )
@@ -65,6 +68,38 @@ def _commands(distribution: str, work: Path) -> tuple[list[str], list[str]]:
         opts = [x for x in prefix if x != roots[0]]
         return [*opts, "makecache", "--refresh"], [*opts, "install", "nginx"]
     _deny("CONTAINER_DISTRIBUTION_UNSUPPORTED")
+
+
+def _native_unit_package_owner(distribution: str, work: Path, runner) -> bool:
+    """Check exact vendor unit attribution in the disposable package DB.
+
+    This is NOT cryptographic proof of host package trust: the signed native
+    sources were previously checked. No systemctl operation is performed.
+    """
+    if distribution == "debian":
+        # Debian usrmerge may record either spelling in the dpkg database.
+        for path in (
+            "/usr/lib/systemd/system/nginx.service",
+            "/lib/systemd/system/nginx.service",
+        ):
+            output, error = _run(
+                ["/usr/bin/dpkg-query", "-S", path],
+                work=work, runner=runner,
+            )
+            if error:
+                continue
+            if any(line.strip() in (
+                "nginx-common: " + path, "nginx: " + path,
+            ) for line in output.splitlines()):
+                return True
+        return False
+    if distribution == "almalinux":
+        output, error = _run(
+            ["/usr/bin/rpm", "-qf", "--queryformat=%{NAME}", VENDOR_UNIT],
+            work=work, runner=runner,
+        )
+        return not error and output.strip() in ("nginx", "nginx-core")
+    return False
 
 
 def run_rehearsal(
@@ -119,6 +154,11 @@ def run_rehearsal(
         )
         if failure:
             _deny("CONTAINER_NGINX_CONFIG_VALIDATION_FAILED")
+        service_unit = inspect_native_nginx_unit(distribution)
+        if service_unit.code != "VENDOR_NGINX_UNIT_OBSERVED":
+            _deny("CONTAINER_NATIVE_SYSTEMD_UNIT_UNVERIFIED")
+        if not _native_unit_package_owner(distribution, work, runner):
+            _deny("CONTAINER_NATIVE_SYSTEMD_UNIT_PACKAGE_UNVERIFIED")
     return {
         "schema_version": 1,
         "status": "CONTAINER_NATIVE_NGINX_INSTALLED_SYNTAX_OK",
@@ -126,6 +166,9 @@ def run_rehearsal(
         "authenticated_native_source_used": True,
         "native_transaction_executed_in_disposable_container": True,
         "nginx_syntax_test_passed_in_container": True,
+        "vendor_nginx_systemd_unit_bounded_read_passed": True,
+        "vendor_nginx_systemd_unit_distro_package_owned": True,
+        "vendor_nginx_systemd_unit_sha256": service_unit.digest,
         "native_systemd_tested": False,
         "selinux_enforcing_host_tested": False,
         "service_start_or_reload_explicitly_requested_by_test_driver": False,
