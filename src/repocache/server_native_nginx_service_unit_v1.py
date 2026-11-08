@@ -168,13 +168,16 @@ def _unit_layout_supported(raw: bytes) -> bool:
         "/usr/sbin/nginx -t",
         "/usr/sbin/nginx -t -q -g 'daemon on; master_process on;'",
     )
-    if (not 1 <= len(before) <= 2
-            or len(set(before)) != len(before)
-            or not any(value in valid_preflight for value in before)
-            or any(
-                value not in (*valid_preflight, "/usr/bin/rm -f /run/nginx.pid")
-                for value in before
-            )):
+    nginx_validation = [value for value in before if value in valid_preflight]
+    if len(nginx_validation) != 1:
+        return False
+    if before not in (
+        nginx_validation,
+        ["/usr/bin/rm -f /run/nginx.pid", nginx_validation[0]],
+    ):
+        # The only reviewed optional preflight is deleting the stale vendor
+        # PID before exactly one nginx -t; repeated validation commands,
+        # alternate ordering or arbitrary pre-actions are unsupported.
         return False
     # Debian's packaged stop helper is fixed. An unrecognized stop command
     # is as important as an unexpected start/reload command when a future
