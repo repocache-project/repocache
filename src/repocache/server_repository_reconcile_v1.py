@@ -249,28 +249,18 @@ def preview_declarative_state_alignment(
     }
 
 
-def plan_inert_persistence_transition(
+def _plan_untrusted_partial_transition(
     current_document: dict[str, Any],
     proposed_document: dict[str, Any],
-    protected_snapshot: dict[str, Any],
     *,
     current_generation: int,
 ) -> dict[str, Any]:
-    """Produce a non-committable transition intent for the inert #31 store.
+    """Inert full-document policy/identity projection, without v1 state IO.
 
-    The #31 v1 protected format has no durable install-document payload,
-    tombstone ledger, activation state or authenticated operator approval.
-    Even a matching caller-supplied snapshot MUST NOT grant permission to
-    invoke its private fixture-only writer. The returned intent intentionally
-    omits the approval and configuration digest fields required by that writer.
-
-    Existing canonical identities must stay stable: #31 forbids identity
-    reassignment and removal. A different upstream/layout identity needs a
-    future authenticated migration/reallocation transaction, not overwrite.
+    Shared by the strict v1 wrapper and the v1-independent NGINX planner.
+    The projection cannot be committed, and its identities and approvals
+    are never a substitute for #31's protected v2 ledger or an OS lock.
     """
-    aligned = preview_declarative_state_alignment(
-        current_document, protected_snapshot, current_generation=current_generation
-    )
     if current_generation == MAX_INT:
         raise ReconciliationPlanError("persistence: state generation exhausted")
 
@@ -314,7 +304,7 @@ def plan_inert_persistence_transition(
         "fresh_approval_required_ids": reapproval,
         "deployment_approval_required": deployment_changed,
         "candidate_document": candidate,
-        "state_alignment": aligned["status"],
+        "state_alignment": "NOT_CHECKED",
         "authorizes_state_commit": False,
         "authorizes_nginx_reload": False,
         "authorizes_catalog_publication": False,
@@ -326,33 +316,40 @@ def plan_inert_persistence_transition(
     }
 
 
-def preview_declarative_nginx_candidate(
+
+def plan_inert_persistence_transition(
     current_document: dict[str, Any],
     proposed_document: dict[str, Any],
     protected_snapshot: dict[str, Any],
     *,
     current_generation: int,
+) -> dict[str, Any]:
+    """Retain strict v1 snapshot alignment before returning a pure intent.
+
+    A caller-provided snapshot is not authenticated. This method remains
+    intentionally limited to state-v1's 32 repository records.
+    """
+    aligned = preview_declarative_state_alignment(
+        current_document, protected_snapshot, current_generation=current_generation
+    )
+    return {
+        **_plan_untrusted_partial_transition(
+            current_document, proposed_document,
+            current_generation=current_generation,
+        ),
+        "state_alignment": aligned["status"],
+    }
+
+
+def _render_partial_nginx_transition(
+    current: dict[str, Any],
+    transition: dict[str, Any],
+    *,
+    current_generation: int,
     candidate_pins_by_repository: dict[str, dict[str, list[str]]],
     ca_bundle_path: str,
 ) -> dict[str, Any]:
-    """Compose a #95 lifecycle intent with #28's inert NGINX renderer.
-
-    All input, including a caller-provided protected snapshot and DNS pins,
-    is UNTRUSTED. A desired-active route is not proof of an approved, installed
-    or exposed repository. The output is deliberately not a complete NGINX
-    include, commit request, activated route list, or discovery catalog.
-    A future privileged owner MUST reauthenticate and validate the complete
-    exact generation, approval, DNS, CA, managed ownership and rollback state
-    under its native transaction lock.
-    """
-    # First freeze the untrusted declarative inputs into validated copies.
-    # A caller mutating their dict later cannot silently change the preview.
-    current = validate_install_document(current_document, for_apply=True)
-    proposed = validate_install_document(proposed_document, for_apply=True)
-    transition = plan_inert_persistence_transition(
-        current, proposed, protected_snapshot,
-        current_generation=current_generation,
-    )
+    """Shared non-authorizing #28 renderer for full partial-update intent."""
     candidate = transition["candidate_document"]
     try:
         bundle = render_repository_nginx_bundle_candidate(
@@ -409,6 +406,58 @@ def preview_declarative_nginx_candidate(
         "authorizes_catalog_publication": False,
         "authorizes_cache_cleanup": False,
     }
+
+
+
+def preview_declarative_nginx_candidate(
+    current_document: dict[str, Any],
+    proposed_document: dict[str, Any],
+    protected_snapshot: dict[str, Any],
+    *,
+    current_generation: int,
+    candidate_pins_by_repository: dict[str, dict[str, list[str]]],
+    ca_bundle_path: str,
+) -> dict[str, Any]:
+    """Legacy state-v1-aligned partial update; no protected write authority."""
+    current = validate_install_document(current_document, for_apply=True)
+    proposed = validate_install_document(proposed_document, for_apply=True)
+    transition = plan_inert_persistence_transition(
+        current, proposed, protected_snapshot,
+        current_generation=current_generation,
+    )
+    return _render_partial_nginx_transition(
+        current, transition, current_generation=current_generation,
+        candidate_pins_by_repository=candidate_pins_by_repository,
+        ca_bundle_path=ca_bundle_path,
+    )
+
+
+def preview_declarative_nginx_from_untrusted_document(
+    current_document: dict[str, Any],
+    proposed_document: dict[str, Any],
+    *,
+    current_generation: int,
+    candidate_pins_by_repository: dict[str, dict[str, list[str]]],
+    ca_bundle_path: str,
+) -> dict[str, Any]:
+    """Plan partial updates for up to 500 repos, independent of state v1.
+
+    This accepts only UNTRUSTED full configuration and pin inputs, never
+    verifies the durable all-time ID history, actual source bytes, current
+    generation, operator authorization or NGINX exposure. The eventual
+    trusted #31 host writer MUST independently acquire its own OS-root lock
+    and perform fresh checks against an adopted source of truth.
+    """
+    current = validate_install_document(current_document, for_apply=True)
+    proposed = validate_install_document(proposed_document, for_apply=True)
+    transition = _plan_untrusted_partial_transition(
+        current, proposed, current_generation=current_generation,
+    )
+    return _render_partial_nginx_transition(
+        current, transition, current_generation=current_generation,
+        candidate_pins_by_repository=candidate_pins_by_repository,
+        ca_bundle_path=ca_bundle_path,
+    )
 
 
 def preview_repository_lifecycle_nginx_candidate(

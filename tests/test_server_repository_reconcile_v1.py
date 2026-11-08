@@ -17,6 +17,7 @@ from repocache.server_repository_reconcile_v1 import (
     preview_declarative_state_alignment,
     plan_inert_persistence_transition,
     preview_declarative_nginx_candidate,
+    preview_declarative_nginx_from_untrusted_document,
     preview_repository_lifecycle_nginx_candidate,
     preview_repository_lifecycle_nginx_from_untrusted_document,
 )
@@ -1319,3 +1320,143 @@ def test_pure_document_bootstrap_is_untrusted_and_never_committable():
     assert result["requires_trusted_locked_recheck"] is True
     assert result["authorizes_state_commit"] is False
     assert result["authorizes_nginx_activation"] is False
+
+
+# Partial-document policy updates must not inherit the protected v1 store's
+# 32-record constraint. This is untrusted planning only, NOT a v2 writer.
+
+
+@pytest.mark.parametrize("count", [33, 500])
+def test_partial_nginx_pure_plan_handles_install_capacity_without_v1_state(count):
+    current = _untrusted_document_at_capacity(count)
+    current["repositories"][0]["desired_state"] = "active"
+    before = copy.deepcopy(current)
+    proposed = copy.deepcopy(current)
+    proposed["repositories"] = []
+    proposed["deployment"]["cache_policy"]["global"]["max_size_bytes"] += 1024
+    pins = {"repo-0": {"mirror0.example.invalid": ["8.8.8.8"]}}
+    result = preview_declarative_nginx_from_untrusted_document(
+        current, proposed, current_generation=1,
+        candidate_pins_by_repository=pins, ca_bundle_path=_CA,
+    )
+    assert result["declarative_change_requested"] is True
+    assert result["expected_state_generation"] == 1
+    assert result["proposed_state_generation"] == 2
+    assert result["deployment_approval_required"] is True
+    assert result["fresh_approval_required_ids"] == sorted(
+        row["id"] for row in current["repositories"]
+    )
+    assert result["proposed_repository_ids"] == ["repo-0"]
+    assert result["desired_retained_route_ids"] == ["repo-0"]
+    assert result["desired_config_revalidation_ids"] == ["repo-0"]
+    assert result["next_generation_configuration_preview"]["expected_state_generation"] == 2
+    assert len(result["next_generation_configuration_preview"]["repositories"]) == count
+    assert result["pin_count"] == 1
+    assert result["requires_trusted_locked_recheck"] is True
+    for key in ("authorizes_state_commit", "authorizes_nginx_activation",
+                "authorizes_catalog_publication", "authorizes_cache_cleanup",
+                "active_exposure_verified", "reservation_history_verified"):
+        assert result[key] is False
+    assert current == before
+    with pytest.raises(ReconciliationPlanError, match="invalid state snapshot"):
+        preview_declarative_nginx_candidate(
+            current, proposed, _inert_state_snapshot(current),
+            current_generation=1, candidate_pins_by_repository=pins,
+            ca_bundle_path=_CA,
+        )
+
+
+def test_partial_untrusted_planner_matches_strict_v1_preview():
+    current = document()
+    current["expected_state_generation"] = 1
+    current["repositories"][0]["desired_state"] = "active"
+    proposed = copy.deepcopy(current)
+    proposed["repositories"] = []
+    proposed["deployment"]["cache_policy"]["global"]["max_size_bytes"] += 8192
+    pins = {"debian-trixie-main": copy.deepcopy(_PUBLIC_PINS)}
+    legacy = preview_declarative_nginx_candidate(
+        current, proposed, _inert_state_snapshot(current),
+        current_generation=1, candidate_pins_by_repository=pins,
+        ca_bundle_path=_CA,
+    )
+    future = preview_declarative_nginx_from_untrusted_document(
+        current, proposed, current_generation=1,
+        candidate_pins_by_repository=pins, ca_bundle_path=_CA,
+    )
+    assert legacy == future
+
+
+def test_partial_untrusted_noop_does_not_advance_generation():
+    current = _untrusted_document_at_capacity(33)
+    proposed = copy.deepcopy(current)
+    proposed["repositories"] = []
+    result = preview_declarative_nginx_from_untrusted_document(
+        current, proposed, current_generation=1,
+        candidate_pins_by_repository={}, ca_bundle_path=_CA,
+    )
+    assert result["declarative_change_requested"] is False
+    assert result["proposed_state_generation"] == 1
+    assert result["next_generation_configuration_preview"] is None
+    assert result["fresh_approval_required_ids"] == []
+    assert result["authorizes_catalog_publication"] is False
+
+
+def test_partial_untrusted_identity_reassignment_refuses_without_commit():
+    current = _untrusted_document_at_capacity(33)
+    proposed = copy.deepcopy(current)
+    proposed["repositories"] = [copy.deepcopy(current["repositories"][0])]
+    proposed["repositories"][0]["upstream"]["base_url"] = (
+        "https://completely-new.example.invalid/debian/"
+    )
+    proposed["repositories"][0]["upstream"]["allowed_hosts"] = [
+        "completely-new.example.invalid"
+    ]
+    with pytest.raises(ReconciliationPlanError, match="identity reassignment"):
+        preview_declarative_nginx_from_untrusted_document(
+            current, proposed, current_generation=1,
+            candidate_pins_by_repository={}, ca_bundle_path=_CA,
+        )
+
+
+def test_partial_untrusted_stale_generation_and_unsafe_pin_fail_closed():
+    current = document()
+    current["expected_state_generation"] = 1
+    proposed = copy.deepcopy(current)
+    with pytest.raises(ReconciliationPlanError, match="stale"):
+        preview_declarative_nginx_from_untrusted_document(
+            current, proposed, current_generation=2,
+            candidate_pins_by_repository={}, ca_bundle_path=_CA,
+        )
+    proposed["repositories"][0]["desired_state"] = "active"
+    with pytest.raises(ReconciliationPlanError, match="unsafe candidate"):
+        preview_declarative_nginx_from_untrusted_document(
+            current, proposed, current_generation=1,
+            candidate_pins_by_repository={
+                "debian-trixie-main": {_HOST: ["127.0.0.1"]},
+            }, ca_bundle_path=_CA,
+        )
+
+
+def test_partial_untrusted_never_accesses_network_or_host_writes(monkeypatch):
+    import os
+    import socket
+    import subprocess
+    import repocache.server_protected_state_store_v1 as state_store
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("unexpected host action")
+    monkeypatch.setattr(os, "replace", refuse)
+    monkeypatch.setattr(socket, "getaddrinfo", refuse)
+    monkeypatch.setattr(subprocess, "run", refuse)
+    monkeypatch.setattr(state_store, "_commit_under_root", refuse)
+    current = document()
+    current["expected_state_generation"] = 1
+    proposed = copy.deepcopy(current)
+    proposed["repositories"] = []
+    result = preview_declarative_nginx_from_untrusted_document(
+        current, proposed, current_generation=1,
+        candidate_pins_by_repository={}, ca_bundle_path=_CA,
+    )
+    assert result["authorizes_nginx_activation"] is False
+    assert result["authorizes_catalog_publication"] is False
+    assert result["requires_trusted_locked_recheck"] is True

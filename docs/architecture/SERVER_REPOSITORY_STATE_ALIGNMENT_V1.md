@@ -333,3 +333,38 @@ disabled repositories, unchanged and rotated trust, future generation
 validation, reserved-ID re-use refusal, unsafe pins, synthetic bootstrap
 and absence of host-side effects. These results are pure functional
 compatibility evidence, **not native two-OS operational acceptance**.
+
+
+## Proposed v2 planning compatibility: partial declarative updates
+
+`preview_declarative_nginx_candidate` is retained unchanged as the strict
+**v1 snapshot-aligned** partial-update entry, including its legacy maximum
+32 protected repository records and refusal of drift.
+
+`preview_declarative_nginx_from_untrusted_document` reuses the SAME
+partial-update identity/policy planner and #28 NGINX renderer without taking
+a protected v1 snapshot. Its complete validated install-v1 inputs can
+model up to **500** current repositories, including omitted repositories
+affected by global policy changes; the shared planner forbids silent
+remove, new unreserved IDs or stable identity reassignment. Effective
+trust policy changes and route revalidation hints still require fresh
+verification. The old and new previews return identical results for
+supported v1-compatible inputs; no-op does not advance the configuration
+generation.
+
+Both pure planning entry points always return untrusted candidate fragments,
+not a real catalog or current NGINX exposure. No source authentication,
+persisted state v2 generation CAS, owner/lock verification, operator approval,
+durable all-time ID/tombstone ledger, DNS pin freshness, genuine packaged
+NGINX syntax, active route checks or recovery is provided. The proposed
+#31 v2 store remains *unmerged, unadopted and fixture-only* and must own
+all authoritative checks under its own protected lock before any service
+effects or catalog publication. No data or state migration is performed.
+Even success with 500 repositories in this fixture does not establish a
+booted-host native service result or a committed deployment.
+
+Tests cover 33 and 500 total repositories with active retained-route/global
+policy updates, full-scope reapproval and preserved omitted identities;
+strict-v1 refusal, v1-output parity, no-op, identity reassignment,
+generation mismatch, unsafe DNS/IP pins and pure no-host-effect behavior.
+Original #95 and #31 native end-to-end acceptance remains NOT VERIFIED.
