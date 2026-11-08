@@ -88,9 +88,12 @@ def _native_unit_package_owner(distribution: str, work: Path, runner) -> bool:
             )
             if error:
                 continue
-            if any(line.strip() in (
+            # Multiple lines or mixed package attribution are not an
+            # unambiguous vendor-owner statement; refuse instead of
+            # accepting one safe-looking line from malicious extra output.
+            if output.strip() in (
                 "nginx-common: " + path, "nginx: " + path,
-            ) for line in output.splitlines()):
+            ):
                 return True
         return False
     if distribution == "almalinux":
