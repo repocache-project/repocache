@@ -196,14 +196,54 @@ def _identity(info: os.stat_result) -> tuple[int, ...]:
             info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
+def _empty_safe_dropin_directory(path: str, before: os.stat_result) -> bool:
+    """Accept empty package-created .d directories, never a real override.
+
+    AlmaLinux ships EMPTY systemd nginx.service.d directories in /etc and
+    /usr/lib; rejecting their mere existence breaks an official clean install.
+    Only a root-owned stable directory with *zero* entries is inert. Any
+    contained entry (including hidden or dangling symlinks), unsafe parent,
+    mount boundary, leaf symlink, open failure or race remains a hard block.
+    This is an observation, never ownership or systemctl authorization.
+    """
+    if not _metadata(before, directory=True):
+        return False
+    try:
+        parent = os.lstat(os.path.dirname(path))
+        if (not _metadata(parent, directory=True)
+                or before.st_dev != parent.st_dev):
+            return False
+        fd = os.open(
+            path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+        try:
+            if _identity(os.fstat(fd)) != _identity(before):
+                return False
+            with os.scandir(fd) as entries:
+                if next(entries, None) is not None:
+                    return False
+            return (_identity(os.fstat(fd)) == _identity(before)
+                    and _identity(os.lstat(path)) == _identity(before)
+                    and _identity(os.lstat(os.path.dirname(path)))
+                        == _identity(parent))
+        finally:
+            os.close(fd)
+    except OSError:
+        return False
+
+
 def _shadows_present() -> bool:
     for path in _SHADOW_PATHS:
         try:
-            os.lstat(path)
+            observed = os.lstat(path)
         except FileNotFoundError:
             continue
-        # Permission errors or other unknown snapshots must not be treated
-        # as proof of absence.
+        except OSError:
+            # Unknown snapshots must not masquerade as verified absence.
+            return True
+        if path.endswith(".d") and _empty_safe_dropin_directory(path, observed):
+            continue
         return True
     return False
 
