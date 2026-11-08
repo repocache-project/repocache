@@ -31,6 +31,7 @@ PIDFile=/run/nginx.pid
 ExecStartPre=/usr/bin/rm -f /run/nginx.pid
 ExecStartPre=/usr/sbin/nginx -t
 ExecStart=/usr/sbin/nginx
+ExecReload=/bin/kill -s HUP $MAINPID
 ExecReload=/usr/sbin/nginx -s reload
 KillSignal=SIGQUIT
 [Install]
@@ -83,6 +84,28 @@ def test_native_vendor_unit_layout_supported_but_never_authorizing(
     DEBIAN.replace(b"[Service]", b"[Service]\nExecStart=\n"),
     DEBIAN.replace(b"ExecStart=/usr/sbin/nginx", b"ExecStart=/usr/sbin/nginx \\"),
 ])
+def test_vendor_unit_signal_only_reload_is_never_sufficient():
+    assert not unit._unit_layout_supported(
+        ALMA.replace(b"ExecReload=/usr/sbin/nginx -s reload\n", b"")
+    )
+
+
+def test_duplicate_or_unrecognized_vendor_reload_is_refused():
+    assert not unit._unit_layout_supported(
+        ALMA.replace(
+            b"ExecReload=/usr/sbin/nginx -s reload\n",
+            b"ExecReload=/usr/sbin/nginx -s reload\n"
+            b"ExecReload=/usr/sbin/nginx -s reload\n",
+        )
+    )
+    assert not unit._unit_layout_supported(
+        ALMA.replace(
+            b"ExecReload=/usr/sbin/nginx -s reload",
+            b"ExecReload=/usr/bin/systemctl restart arbitrary.service",
+        )
+    )
+
+
 def test_unexpected_or_ambiguous_systemd_unit_contents_refused(bad):
     assert not unit._unit_layout_supported(bad)
 
