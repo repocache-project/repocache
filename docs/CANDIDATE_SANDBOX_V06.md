@@ -167,3 +167,30 @@ The staging-parent admission gate requires a separate service-provisioned tmpfs 
 ## 2026-11-08 — Native mount admission hardening
 
 Read-only preflight now requires the kernel-reported staging tmpfs mount to be writable with `nosuid,nodev`, writable at the superblock, and without shared or slave propagation. These are *additional* mandatory security checks on top of existing UID/path, bounded capacity and inode limits. Negative fixture tests reject unsafe mount options and shared propagation. This is source-level fail-closed logic, not proof of actual host provisioning or native kernel/mount isolation. The native Debian 13 / AlmaLinux 10 and SELinux-enforcing acceptance in #149 remains NOT VERIFIED.
+
+## 2026-11-08 — Read-only native readiness probe (not security acceptance)
+
+Before any native security exercise on a **disposable** lab machine, run the
+following command as the *non-root* candidate service account with the tested
+source checkout:
+
+    python3 scripts/ci_candidate_native_readiness.py
+
+The script writes machine-readable JSON to standard output and exits with
+status 2 when a required admission check fails. It checks the actual host
+release (Debian 13 or AlmaLinux 10), booted systemd PID 1, effective UID,
+SELinux enforcing on AlmaLinux, proper service-delegated cgroup v2, a
+previously provisioned bounded private tmpfs, and the OS-owned patched
+non-setuid Bubblewrap/prlimit package. It is strictly **read-only**: no
+cgroup creation/kill, candidate execution, filesystem mount, package
+installation, setting changes, downloading, signing or production activation.
+
+A `READINESS_ONLY_PASS` result does **not** certify the mandatory #149
+native acceptance. In particular, actual host-kernel cgroup memory/PID/CPU
+exhaustion and descendant cleanup, SIGKILL of the *supervisor* and restart
+reconciliation, real tmpfs ENOSPC recovery, SELinux escape/AVC checks and
+publisher-signed candidates remain **NOT VERIFIED**. Capture the JSON with
+kernel/package versions and separate executed lab logs before any PASS claim.
+Do not run resource-exhaustion tests on production hosts or relax the
+mandatory fail-closed native gates. Independent issue-specific security
+review for #112 also remains mandatory.
