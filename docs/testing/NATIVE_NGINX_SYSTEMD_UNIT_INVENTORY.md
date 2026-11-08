@@ -16,6 +16,16 @@ drop-in candidates in `/etc/systemd/system`, `/run/systemd/system`
 and the vendor unit drop-in directory refuse this initial-install
 inventory. No arbitrary path/name/command is accepted.
 
+AlmaLinux 10's official NGINX RPM intentionally installs **empty**
+`nginx.service.d` directories in the vendor and administrator unit
+hierarchies. Their existence is not an effective override. We accept only
+empty, fixed-name, stable root-owned directories without symlinks, unsafe
+parents, mount transitions or foreign entries, opened with directory
+descriptors and rechecked after scanning. Any real file (including a hidden
+file), unsafe permissions or changed inode blocks the clean-install
+inventory. This explicitly distinguishes distro-installed empty directory
+placeholders from an active, externally authored systemd drop-in.
+
 The conservative content-shape check requires known distribution-native
 NGINX start, validation-before-start, reload, forking and PIDFile entries,
 plus `WantedBy=multi-user.target`. Unexpected executable paths, duplicate
