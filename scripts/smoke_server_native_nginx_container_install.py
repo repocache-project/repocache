@@ -159,7 +159,9 @@ def run_rehearsal(
             _deny("CONTAINER_NGINX_CONFIG_VALIDATION_FAILED")
         service_unit = inspect_native_nginx_unit(distribution)
         if service_unit.code != "VENDOR_NGINX_UNIT_OBSERVED":
-            _deny("CONTAINER_NATIVE_SYSTEMD_UNIT_UNVERIFIED")
+            # Expose only a strictly enumerated, static, redacted observer code.
+            # This is diagnostic evidence, not the unit contents or a path.
+            _deny("CONTAINER_" + service_unit.code)
         if not _native_unit_package_owner(distribution, work, runner):
             _deny("CONTAINER_NATIVE_SYSTEMD_UNIT_PACKAGE_UNVERIFIED")
     return {
