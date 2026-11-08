@@ -52,7 +52,7 @@ _RELOADS = frozenset((
     "/bin/kill -s HUP $MAINPID",
 ))
 _FORBIDDEN_SERVICE_DIRECTIVES = frozenset({
-    "ExecStartPost", "ExecCondition", "EnvironmentFile",
+    "ExecStartPost", "ExecCondition", "Environment", "EnvironmentFile",
     "RootDirectory", "RootImage", "User", "Group",
     "DynamicUser", "LoadCredential", "LoadCredentialEncrypted",
     "PassEnvironment", "SupplementaryGroups", "ExecSearchPath",
@@ -164,14 +164,26 @@ def _unit_layout_supported(raw: bytes) -> bool:
                 ["/run/nginx.pid"], ["/var/run/nginx.pid"]
             )):
         return False
-    if not any(value.startswith("/usr/sbin/nginx -t") for value in before):
+    valid_preflight = (
+        "/usr/sbin/nginx -t",
+        "/usr/sbin/nginx -t -q -g 'daemon on; master_process on;'",
+    )
+    if (not 1 <= len(before) <= 2
+            or len(set(before)) != len(before)
+            or not any(value in valid_preflight for value in before)
+            or any(
+                value not in (*valid_preflight, "/usr/bin/rm -f /run/nginx.pid")
+                for value in before
+            )):
         return False
-    if not all(
-        value in (
-            "/usr/sbin/nginx -t",
-            "/usr/sbin/nginx -t -q -g 'daemon on; master_process on;'",
-            "/usr/bin/rm -f /run/nginx.pid",
-        ) for value in before
+    # Debian's packaged stop helper is fixed. An unrecognized stop command
+    # is as important as an unexpected start/reload command when a future
+    # authorized root helper contemplates service ownership.
+    stops = relevant.get("Service:ExecStop", [])
+    if stops not in (
+        [],
+        ["-/sbin/start-stop-daemon --quiet --stop --retry QUIT/5 "
+         "--pidfile /run/nginx.pid"],
     ):
         return False
     return relevant.get("Install:WantedBy") == ["multi-user.target"]
