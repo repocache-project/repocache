@@ -47,6 +47,9 @@ _STARTS = frozenset((
 _RELOADS = frozenset((
     "/usr/sbin/nginx -s reload",
     "/usr/sbin/nginx -g 'daemon on; master_process on;' -s reload",
+    # AlmaLinux's distro unit may additionally signal its existing MainPID
+    # before the explicit NGINX reload. A signal-only reload is not enough.
+    "/bin/kill -s HUP $MAINPID",
 ))
 _FORBIDDEN_SERVICE_DIRECTIVES = frozenset({
     "ExecStartPost", "ExecCondition", "EnvironmentFile",
@@ -151,7 +154,10 @@ def _unit_layout_supported(raw: bytes) -> bool:
     reloads = relevant.get("Service:ExecReload", [])
     before = relevant.get("Service:ExecStartPre", [])
     if (len(starts) != 1 or starts[0] not in _STARTS
-            or len(reloads) != 1 or reloads[0] not in _RELOADS
+            or not 1 <= len(reloads) <= 2
+            or len(set(reloads)) != len(reloads)
+            or any(value not in _RELOADS for value in reloads)
+            or not any(value.startswith("/usr/sbin/nginx ") for value in reloads)
             or len(relevant.get("Service:Type", [])) != 1
             or relevant["Service:Type"] != ["forking"]
             or relevant.get("Service:PIDFile") not in (
