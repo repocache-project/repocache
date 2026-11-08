@@ -103,6 +103,9 @@ def test_duplicate_or_unrecognized_vendor_reload_is_refused():
     DEBIAN.replace(b"[Service]", b"[Service]\nExecStartPost=/bin/sh -c id"),
     DEBIAN.replace(b"[Service]", b"[Service]\nExecCondition=/bin/sh -c id"),
     DEBIAN.replace(b"[Service]", b"[Service]\nRootDirectory=/tmp/evil"),
+    DEBIAN.replace(b"[Service]", b"[Service]\nEnvironment=LD_PRELOAD=/tmp/evil.so"),
+    DEBIAN.replace(b"ExecStop=-/sbin/start-stop-daemon", b"ExecStop=/bin/sh -c id"),
+    DEBIAN.replace(b"ExecStartPre=/usr/sbin/nginx -t", b"ExecStartPre=/usr/sbin/nginx -t\nExecStartPre=/usr/sbin/nginx -t"),
     DEBIAN.replace(b"[Service]", b"[Service]\nExecStart=\n"),
     DEBIAN.replace(b"ExecStart=/usr/sbin/nginx", b"ExecStart=/usr/sbin/nginx \\"),
 ])
