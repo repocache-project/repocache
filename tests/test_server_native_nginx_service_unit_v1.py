@@ -115,34 +115,38 @@ def test_unexpected_or_ambiguous_systemd_unit_contents_refused(bad):
 
 
 @pytest.mark.parametrize("injection", [
-    b"[Service]\\nBindPaths=/etc/shadow:/tmp/stolen\\n",
-    b"[Service]\\nReadWritePaths=/root\\n",
-    b"[Service]\\nNoNewPrivileges=false\\n",
-    b"[Service]\\nWorkingDirectory=/tmp/untrusted\\n",
-    b"[Service]\\nImportCredential=secret\\n",
-    b"[Service]\\nProtectSystem=false\\n",
-    b"[Service]\\nCapabilityBoundingSet=CAP_SYS_ADMIN\\n",
-    b"[Unit]\\nRequires=unrelated.service\\n",
-    b"[Unit]\\nBefore=unrelated.service\\n",
-    b"[Unit]\\nWants=unrelated.service\\n",
-    b"[Install]\\nAlias=nginx-shadow.service\\n",
-    b"[Custom]\\nDescription=ignored-extension\\n",
+    b"[Service]\nBindPaths=/etc/shadow:/tmp/stolen\n",
+    b"[Service]\nReadWritePaths=/root\n",
+    b"[Service]\nNoNewPrivileges=false\n",
+    b"[Service]\nWorkingDirectory=/tmp/untrusted\n",
+    b"[Service]\nImportCredential=secret\n",
+    b"[Service]\nProtectSystem=false\n",
+    b"[Service]\nCapabilityBoundingSet=CAP_SYS_ADMIN\n",
+    b"[Unit]\nRequires=unrelated.service\n",
+    b"[Unit]\nBefore=unrelated.service\n",
+    b"[Unit]\nWants=unrelated.service\n",
+    b"[Install]\nAlias=nginx-shadow.service\n",
+    b"[Custom]\nDescription=ignored-extension\n",
 ])
 def test_systemd_extra_privilege_dependency_and_unknown_keys_fail_closed(injection):
-    section = injection.split(b"\\n", 1)[0]
-    assert not unit._unit_layout_supported(
-        DEBIAN.replace(section, injection.rstrip(b"\\n"), 1)
+    section = injection.split(b"\n", 1)[0]
+    mutated = (
+        DEBIAN.replace(section, injection.rstrip(b"\n"), 1)
+        if section in DEBIAN
+        else DEBIAN + injection
     )
+    assert mutated != DEBIAN
+    assert not unit._unit_layout_supported(mutated)
 
 
 @pytest.mark.parametrize("original,substituted", [
     (b"After=network.target", b"After=malicious.service"),
     (b"Description=NGINX HTTP server", b"Description="),
-    (b"Type=forking", b"Type=forking\\nPrivateTmp=false"),
-    (b"Type=forking", b"Type=forking\\nKillSignal=SIGKILL"),
-    (b"Type=forking", b"Type=forking\\nTimeoutStopSec=infinity"),
-    (b"Type=forking", b"Type=forking\\nKillMode=process"),
-    (b"WantedBy=multi-user.target", b"WantedBy=multi-user.target\\nAlias=nginx.service"),
+    (b"Type=forking", b"Type=forking\nPrivateTmp=false"),
+    (b"Type=forking", b"Type=forking\nKillSignal=SIGKILL"),
+    (b"Type=forking", b"Type=forking\nTimeoutStopSec=infinity"),
+    (b"Type=forking", b"Type=forking\nKillMode=process"),
+    (b"WantedBy=multi-user.target", b"WantedBy=multi-user.target\nAlias=nginx.service"),
 ])
 def test_known_directive_values_cannot_change_native_service_side_effects(
     original, substituted,
