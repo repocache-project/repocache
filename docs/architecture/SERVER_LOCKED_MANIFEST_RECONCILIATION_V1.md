@@ -493,3 +493,25 @@ These checks do not authenticate a host administrator, prove host-root
 provenance, or authorize the fixture recovery function for production. The
 native NGINX/systemd/SELinux and original applicable #31 acceptance gates
 remain **NOT VERIFIED** until separately executed on booted target systems.
+
+### Published proposed-v2 journal stage/rollback preservation
+
+When a published private fixture v2 journal is present, recovery now
+validates any staged next-state bytes against the journal's next-state
+digest **and** the pure proposed-v2 generation/identity/retired-reservation
+transition checker. A changed stage or a self-consistent journal/stage pair
+with an invalid next-generation transition fails closed before recovery
+modifies any file. A pre-existing rollback file must contain the *exact*
+validated previous-state bytes; a mismatch is refused and preserved rather
+than deleted and rebuilt. A correctly written rollback file remaining after
+an interrupted rename can still be retried.
+
+Read-only preview and private recovery use the same refusal conditions.
+Tests inject crashes after the fsynced stage and after replacement, mutate
+stage or rollback bytes, and verify refusal and byte-for-byte preservation;
+they also construct a journal digest that matches a structurally valid but
+semantically invalid next-generation snapshot. Those fixtures do not
+establish production filesystem ownership, an authenticated operator,
+actual NGINX service exposure or a recovery authorization token. A damaged
+rollback requires explicit operator investigation instead of silent
+deletion. Booted native acceptance remains NOT VERIFIED.
