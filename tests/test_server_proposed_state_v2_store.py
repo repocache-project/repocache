@@ -1208,3 +1208,46 @@ def test_unpublished_v2_journal_refuses_corruption_without_deletion(
         assert pending.read_bytes() == malformed
         assert not (folder / V2_STATE).exists()
         assert not (folder / V2_JOURNAL).exists()
+
+
+@pytest.mark.parametrize("bootstrap", [True, False])
+def test_unpublished_v2_journal_refuses_prior_state_drift_without_deletion(
+    fixture_root, bootstrap,
+):
+    fd, folder, uid = fixture_root
+    previous = None
+    generation = 0
+    if not bootstrap:
+        previous = snapshot()
+        apply(fixture_root, previous)
+        generation = 1
+
+    def interrupt(point):
+        if point == "journal_tmp_durable":
+            raise RuntimeError("interrupted before journal publication")
+
+    with pytest.raises(RuntimeError, match="interrupted before journal"):
+        apply(
+            fixture_root,
+            snapshot(count=1, generation=generation + 1, previous=previous),
+            expected=generation, inject=interrupt,
+        )
+    pending = folder / V2_JOURNAL_TMP
+    journal_bytes = pending.read_bytes()
+    # Valid but unrelated state must never be accepted as the previous
+    # generation of an unpublished journal, even in a fixture bootstrap.
+    unrelated = snapshot(count=2, generation=generation + 1, previous=previous)
+    state_bytes = json.dumps(
+        unrelated, sort_keys=True, ensure_ascii=True, separators=(",", ":"),
+    ).encode("utf-8")
+    (folder / V2_STATE).write_bytes(state_bytes)
+    (folder / V2_STATE).chmod(0o600)
+    for operation in (
+        lambda: preview_v2_recovery(fd, owner_uid=uid),
+        lambda: recover(fd, owner_uid=uid),
+    ):
+        with pytest.raises(ProposedV2PersistenceError, match="STATE_DRIFT"):
+            operation()
+        assert pending.read_bytes() == journal_bytes
+        assert (folder / V2_STATE).read_bytes() == state_bytes
+        assert not (folder / V2_JOURNAL).exists()
