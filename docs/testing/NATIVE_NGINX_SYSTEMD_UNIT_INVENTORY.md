@@ -83,3 +83,18 @@ conflict preservation and failure recovery), #64 least privilege,
 
 No production host, installation script, release, signing-key, GitHub
 protection or privileged system service configuration is modified.
+
+
+## Fail-closed systemd directive allowlist
+
+The read-only unit-shape parser now rejects **all unknown sections and
+directives**, not only unrecognized `Exec*` commands. These other directives
+can still change an otherwise familiar NGINX service: dependencies can start
+unrelated units, bind mounts or credentials can expose root-owned data, and
+environment/capability settings can alter executable behavior. Only the
+observed distro-compatible `[Unit]`, `[Service]` and `[Install]` fields
+are eligible; dependencies, optional service flags and service executable
+arguments are constrained to known benign values. Unexpected aliases,
+privilege, namespace, dependency or file/mount settings fail closed.
+This is a conservative **syntax-shape observation**, not a replacement for
+systemd's parser or an authorization of an effective loaded unit.

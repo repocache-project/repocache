@@ -51,12 +51,28 @@ _RELOADS = frozenset((
     # before the explicit NGINX reload. A signal-only reload is not enough.
     "/bin/kill -s HUP $MAINPID",
 ))
-_FORBIDDEN_SERVICE_DIRECTIVES = frozenset({
-    "ExecStartPost", "ExecCondition", "Environment", "EnvironmentFile",
-    "RootDirectory", "RootImage", "User", "Group",
-    "DynamicUser", "LoadCredential", "LoadCredentialEncrypted",
-    "PassEnvironment", "SupplementaryGroups", "ExecSearchPath",
+# systemd has many directives with side effects unrelated to ExecStart:
+# mount/namespace credentials, dependencies, capabilities and environment
+# can change execution even when all reviewed NGINX commands match. An
+# allowlist is safer than listing a handful of known-dangerous directives.
+_UNIT_KEYS = frozenset({
+    "Description", "Documentation", "After", "Wants", "ConditionPathExists",
 })
+_SERVICE_KEYS = frozenset({
+    "Type", "PIDFile", "ExecStartPre", "ExecStart", "ExecReload",
+    "ExecStop", "KillSignal", "KillMode", "TimeoutStopSec", "PrivateTmp",
+})
+_INSTALL_KEYS = frozenset({"WantedBy"})
+_KNOWN_UNIT_AFTER = frozenset({
+    "network.target", "network-online.target", "remote-fs.target",
+    "nss-lookup.target",
+})
+_OPTIONAL_SERVICE_VALUES = {
+    "KillSignal": frozenset({"SIGQUIT"}),
+    "KillMode": frozenset({"mixed"}),
+    "TimeoutStopSec": frozenset({"5", "5s"}),
+    "PrivateTmp": frozenset({"true", "yes"}),
+}
 
 
 class NginxServiceUnitInspectionError(ValueError):
@@ -132,6 +148,8 @@ def _unit_layout_supported(raw: bytes) -> bool:
             return False
         if line.startswith("[") and line.endswith("]"):
             section = line[1:-1]
+            if section not in ("Unit", "Service", "Install"):
+                return False
             if section in seen_sections:
                 return False
             seen_sections.add(section)
@@ -139,17 +157,48 @@ def _unit_layout_supported(raw: bytes) -> bool:
         if "=" not in line:
             return False
         name, value = line.split("=", 1)
-        if section == "Service":
-            if name in _FORBIDDEN_SERVICE_DIRECTIVES:
-                return False
-            if name.startswith("Exec") and name not in (
-                "ExecStart", "ExecStartPre", "ExecReload", "ExecStop",
-            ):
-                return False
-        if section in ("Service", "Install"):
-            relevant.setdefault(section + ":" + name, []).append(value.strip())
-    if "Service" not in seen_sections or "Install" not in seen_sections:
+        allowed = {
+            "Unit": _UNIT_KEYS, "Service": _SERVICE_KEYS,
+            "Install": _INSTALL_KEYS,
+        }
+        if section not in allowed or name not in allowed[section]:
+            return False
+        relevant.setdefault(section + ":" + name, []).append(value.strip())
+    if seen_sections != {"Unit", "Service", "Install"}:
         return False
+    # Unknown dependencies could start unrelated units even if ExecStart is
+    # the expected native NGINX binary. Do not accept aliases or other unit
+    # dependencies as inert metadata.
+    descriptions = relevant.get("Unit:Description", [])
+    if (len(descriptions) != 1
+            or not 1 <= len(descriptions[0]) <= 180
+            or not descriptions[0].isprintable()):
+        return False
+    if relevant.get("Unit:Documentation", []) not in (
+        [], ["man:nginx(8)"],
+    ):
+        return False
+    after = relevant.get("Unit:After", [])
+    if (len(after) != 1
+            or not after[0].split()
+            or len(after[0].split()) != len(set(after[0].split()))
+            or any(value not in _KNOWN_UNIT_AFTER
+                   for value in after[0].split())):
+        return False
+    if relevant.get("Unit:Wants", []) not in (
+        [], ["network-online.target"],
+    ):
+        return False
+    if relevant.get("Unit:ConditionPathExists", []) not in (
+        [], ["/usr/sbin/nginx"],
+    ):
+        return False
+    for name, values in _OPTIONAL_SERVICE_VALUES.items():
+        observed = relevant.get("Service:" + name, [])
+        if len(observed) > 1 or any(
+            value not in values for value in observed
+        ):
+            return False
     starts = relevant.get("Service:ExecStart", [])
     reloads = relevant.get("Service:ExecReload", [])
     before = relevant.get("Service:ExecStartPre", [])
