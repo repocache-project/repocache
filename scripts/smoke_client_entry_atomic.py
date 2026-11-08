@@ -131,12 +131,17 @@ def shared_file_approval_conflict(root):
 
     Tested in a private sandbox only. A whole file is the transaction unit.
     """
-    for relative, before in FILES.items():
-        # Unique file per format; the standard fixture already stages entry 0.
+    for relative, baseline in FILES.items():
+        # The common DNF fixture deliberately disables its second section.
+        # Use two structurally eligible test entries without changing that
+        # negative fixture or relaxing production parser/approval rules.
+        before = (baseline.replace(b"enabled=0", b"enabled=1")
+                  if relative.endswith(".repo") else baseline)
         shared = relative.replace("mixture.", "samefile.", 1)
         path, first_candidate, first_stage, _ = fixture(root, shared, before)
         entries = boundaries.boundaries(shared, before)
         assert len(entries) == 2
+        assert all(entry["structure_subset_pass"] for entry in entries)
         second = entries[1]
         second_candidate = candidates.register_entry_candidate_sandbox(
             root, shared, sha(before), second["sha256"])["id"]
