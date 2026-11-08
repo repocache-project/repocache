@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -35,10 +36,14 @@ def _os_release() -> str:
                 fields[key] = value.strip().strip('"')
     except OSError as exc:
         raise NativeReadinessError("Cannot inspect OS release") from exc
-    distro, version = fields.get("ID"), fields.get("VERSION_ID")
-    if (distro, version) == ("debian", "13"):
+    return _target_from_os_release(fields.get("ID"), fields.get("VERSION_ID"))
+
+
+def _target_from_os_release(distro: str | None, version: str | None) -> str:
+    if distro == "debian" and version == "13":
         return "debian13"
-    if (distro, version) == ("almalinux", "10"):
+    # AlmaLinux reports point-release VERSION_ID values, e.g. "10.1".
+    if distro == "almalinux" and version and re.fullmatch(r"10(?:[.][0-9]+)*", version):
         return "almalinux10"
     raise NativeReadinessError("Host is not booted Debian 13 or AlmaLinux 10")
 

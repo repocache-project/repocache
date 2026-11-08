@@ -115,3 +115,26 @@ def test_actual_runner_invocation_produces_readiness_not_native_acceptance():
         # GitHub's disposable runners are not booted target distro kernels.
         assert data["status"] == "BLOCKED"
         assert result.returncode == 2
+
+
+
+@pytest.mark.parametrize("distro,version,target", [
+    ("debian", "13", "debian13"),
+    ("almalinux", "10", "almalinux10"),
+    ("almalinux", "10.0", "almalinux10"),
+    ("almalinux", "10.1", "almalinux10"),
+])
+def test_native_probe_accepts_supported_distro_point_releases(
+        probe, distro, version, target):
+    assert probe._target_from_os_release(distro, version) == target
+
+
+@pytest.mark.parametrize("distro,version", [
+    ("ubuntu", "26.04"), ("almalinux", "9.7"),
+    ("almalinux", "10pre"), ("almalinux", "10.x"),
+    ("debian", "12"), ("debian", "14"),
+])
+def test_native_probe_denies_unsupported_distro_versions(
+        probe, distro, version):
+    with pytest.raises(probe.NativeReadinessError):
+        probe._target_from_os_release(distro, version)
