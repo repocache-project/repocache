@@ -13,41 +13,11 @@ A draft/unmerged policy is not an effective rule. The current default-branch
 workflows and effective GitHub rulesets are the operational authority.
 
 
-## One-time adoption across already protected branches
+## Adopted routing and session continuity (verified 2026-11-09)
 
-The current dependency stack is PR #230 (accepted-`main` reconciliation)
--> PR #183 (version-independent CI) -> PR #231 (this lifecycle).
-Its planned destination is `integration/v0.6.0`. Completing that stack
-**only on `integration/v0.6.0` is not a repository-wide activation**:
-`main` would still publish the former instructions and other existing
-branches, notably `integration/v0.7.0`, would still contain their former
-push-trigger patterns. GitHub Actions evaluates a `push` against the
-workflow configuration present on the pushed ref. The generic patterns
-in another branch cannot supply missing checks.
+The one-time bootstrap sequence (PRs #230, #183 and #231) is **historical migration context**, not an ongoing pause condition. Protected `main` was verified at `63fae6adada334492081c598a3045f238f40a7c6` (PR #245); `integration/v0.6.0` at `d53782ed01e1f85686f10279fd3c7eea6d7f6720`; and `integration/v0.7.0` at `8c43d6b1fefd101f46ffb8a199ceff2c82f7c957`. Both active integration lanes received the required `merge_group` triggers through PRs #242/#243. Successful `merge_group` runs on 2026-11-07 do not prove native-host, publisher signing, negative queue tests or release acceptance.
 
-Before declaring the generic process ADOPTED for all sessions, a
-**separately reviewed and expressly maintainer-authorized one-time
-governance/CI bootstrap into protected `main`** must be agreed and
-executed. The bootstrap should carry only the independently accepted
-version-independent CI and operating instructions, not unrelated
-v0.6.0 functional changes or unfinished release-candidate code. Such
-a bootstrap would be an explicit migration exception to the usual
-rule restricting direct `main` PRs to hotfixes and final promotions:
-this document does not authorize the exception or its merge.
-
-After the bootstrap is actually accepted on `main`, reconcile the
-reviewed CI/documentation changes into each **existing** active
-integration lane, including `integration/v0.6.0` and
-`integration/v0.7.0`, with individually checked PRs. Do not overwrite,
-force-update, bulk retarget or automatically copy features between
-versions. Verify the nine required live `push` contexts on each
-protected exact HEAD after synchronization; a PR-only green result,
-or a new branch that merely exists, is insufficient. Document the
-adopted default-branch SHA and each validated integration-branch SHA.
-Until those checks pass, adoption is **NOT VERIFIED** and other AI
-sessions should remain paused or explicitly constrained to the
-historically effective workflow.
-
+Check current target heads, rulesets and CI when resuming. If one lane's required checks or acceptance are missing, block **that integration**, not independent approved work. Future release routing remains constrained by the maintainer-selected version, actual protected branch rules and original acceptance.
 
 ## Branches and allowed changes
 
@@ -153,13 +123,6 @@ and `release/v0.4.0`, are retained for audit without repurposing them.
   `docs/SIGNED_CANDIDATE_ACCEPTANCE.md`,
   `docs/DEVELOPMENT_WORKFLOW.md` and original issue criteria.
 
-## Before allowing parallel AI sessions to resume
+## Resuming parallel AI sessions
 
-Verify that the branch-routing/runbook and version-independent CI changes
-are actually integrated and protected; prove live `push` checks on both
-`integration/v0.6.0` and `integration/v0.7.0`; inspect `main`'s
-effective rulesets, required checks, signed-candidate branch constraints
-and accepted exact SHA. The session handoff must identify which portions
-are **ADOPTED**, which remain **DRAFT/NOT VERIFIED**, and the precise
-authorized base for every active issue. Do not treat this file alone
-as successful enforcement.
+Resume at the last verified approved task, refresh only changed GitHub source/target SHAs, relevant requirements and checks, and avoid repeating the historical bootstrap. Keep issue-, PR-, native-host- and release-level gates separate. A missing requirement blocks its affected operation, not unrelated authorized work.

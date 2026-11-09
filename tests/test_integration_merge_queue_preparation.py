@@ -40,6 +40,7 @@ def test_queue_preparation_does_not_enable_release_automation():
     proposal = (ROOT / "docs/INTEGRATION_MERGE_QUEUE_PROPOSAL.md").read_text(
         encoding="utf-8"
     )
-    assert "NOT ACTIVE" in proposal
+    assert "active" in proposal
+    assert "ruleset #26753319" in proposal
     assert "NOT VERIFIED" in proposal
     assert "integration/v*" in proposal
