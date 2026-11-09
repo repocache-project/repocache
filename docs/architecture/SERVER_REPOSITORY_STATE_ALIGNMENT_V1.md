@@ -446,3 +446,23 @@ transaction lock. The planner cannot commit, allocate IDs, activate
 NGINX, publish a catalog or delete retained cache. Tests cover the
 last permitted slot, capacity exhaustion, an existing no-op at full
 capacity, and refusal before rendering with no side effects.
+
+
+## Disposable cache path isolation for #28's proposed cache-zone renderer
+
+The two #95 packaged-`nginx -t` fixtures now override the validated
+install-v1 `deployment.paths.cache_root` with per-test `tmp_path` data.
+They precreate only the candidate's desired-active per-repository cache
+directories under that isolated root. This anticipates the separate
+unmerged #28 [PR #251](https://github.com/repocache-project/repocache/pull/251)
+adding `proxy_cache_path` / per-repository zones to the existing shared
+renderer. The lifecycle test also keeps a synthetic test-owned cache
+sentinel byte after an in-memory remove; this verifies the pure preview
+does not accidentally perform cleanup, not real retained-cache ownership
+or native storage-pressure behavior.
+
+No real host cache path, TLS key, systemd service, NGINX reload or catalog
+is mutated. This compatibility fixture does **not** import, duplicate or
+adopt #251's unmerged changes. Once #28's independently accepted renderer
+is integrated, run the same tests on the resulting actual branch; current
+CI only certifies the renderer at the tested source SHA.

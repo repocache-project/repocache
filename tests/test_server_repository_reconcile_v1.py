@@ -733,6 +733,9 @@ def test_declarative_lifecycle_candidate_passes_disposable_packaged_nginx_t(tmp_
         pytest.skip("packaged CA bundle unavailable")
     current = document()
     current["expected_state_generation"] = 1
+    # Disposable cache roots must not point to a real host path. This also
+    # prepares the test for #28's proposed per-repository cache zones.
+    current["deployment"]["paths"]["cache_root"] = str(tmp_path / "managed-cache")
     proposed = copy.deepcopy(current)
     for repo in proposed["repositories"]:
         repo["desired_state"] = "active"
@@ -741,6 +744,11 @@ def test_declarative_lifecycle_candidate_passes_disposable_packaged_nginx_t(tmp_
         for repo in proposed["repositories"]
     }
     rendered = _nginx_preview(current, proposed, pins=pins, ca=native_ca)
+    for repo in proposed["repositories"]:
+        if repo["desired_state"] == "active":
+            (tmp_path / "managed-cache" / repo["id"]).mkdir(
+                parents=True, mode=0o700, exist_ok=True,
+            )
     assert rendered["proposed_repository_ids"] == [
         "almalinux-baseos", "debian-trixie-main",
     ]
@@ -1482,6 +1490,9 @@ def test_disposable_nginx_full_lifecycle_candidate_sequence(tmp_path):
 
     document_at_generation = document()
     document_at_generation["expected_state_generation"] = 1
+    document_at_generation["deployment"]["paths"]["cache_root"] = str(
+        tmp_path / "managed-cache"
+    )
     retired_id = "lifecycle-new-apt"
     proposal = copy.deepcopy(document_at_generation["repositories"][0])
     proposal["id"] = retired_id
@@ -1531,6 +1542,13 @@ def test_disposable_nginx_full_lifecycle_candidate_sequence(tmp_path):
                       "authorizes_catalog_publication", "authorizes_cache_cleanup",
                       "active_exposure_verified", "trusted_id_ledger_verified"):
             assert result[field] is False
+        # NGINX -t on the #28 cache-zone candidate requires disposable
+        # owned directories. No real host cache root is ever touched here.
+        for repo in result["next_generation_configuration_preview"]["repositories"]:
+            if repo["desired_state"] == "active":
+                (tmp_path / "managed-cache" / repo["id"]).mkdir(
+                    parents=True, mode=0o700, exist_ok=True,
+                )
         configuration = tmp_path / f"lifecycle-{step}.conf"
         configuration.write_text(
             f"pid {tmp_path / 'nginx.pid'};\n"
@@ -1550,6 +1568,10 @@ def test_disposable_nginx_full_lifecycle_candidate_sequence(tmp_path):
         if operation == "add":
             assert result["new_repository_ids"] == [retired_id]
             reservations.add(retired_id)
+            # Synthetic cache sentinel: the pure planning path must never
+            # delete this unrelated test-owned byte, even after removal.
+            retained = tmp_path / "managed-cache" / retired_id / "sentinel.bin"
+            retained.write_bytes(b"fixture-retained-cache")
         if operation == "disable":
             assert result["desired_withdraw_route_ids"] == [retired_id]
             assert result["removed_repository_ids"] == []
@@ -1564,6 +1586,7 @@ def test_disposable_nginx_full_lifecycle_candidate_sequence(tmp_path):
     assert retired_id not in {
         item["id"] for item in document_at_generation["repositories"]
     }
+    assert retained.read_bytes() == b"fixture-retained-cache"
 
     # The simulated reservation history is explicitly caller-supplied, not
     # a durable ledger. Even this untrusted snapshot must refuse ID reuse.
