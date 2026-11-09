@@ -536,3 +536,35 @@ establish production filesystem ownership, an authenticated operator,
 actual NGINX service exposure or a recovery authorization token. A damaged
 rollback requires explicit operator investigation instead of silent
 deletion. Booted native acceptance remains NOT VERIFIED.
+
+
+### Disposable end-to-end lifecycle → v2 journal → live NGINX rehearsal
+
+The #31-specific \`test_v2_lifecycle_nginx_live_sandbox\` connects the
+*already merged* #95 explicit repository-change planner, the existing
+private proposed-v2 Linux-FD fixture journal, the persisted-v2 locked
+#28 NGINX renderer, and a **real but isolated, non-systemd NGINX master**
+on a test-owned Unix socket. It tests a disabled add, enable, interrupted
+disable/recovery/retry, normal disable and remove. It uses the same
+canonical configuration bytes and historical reservations checked by the
+fixture store, verifies generation CAS, durable retired-ID records,
+stale/reused-ID refusal, active-route fragment inclusion/withdrawal,
+packaged \`nginx -t\`, actual sandbox worker reload and response, and
+test-owned retained cache bytes. Failure is injected at
+\`stage_durable\`: the read-only renderer refuses a pending journal,
+the existing NGINX worker stays live, explicit private recovery
+preserves exact known-good state, and the intended operation can be
+retried without double-applying the generation.
+
+**Limit of this evidence:** state commits and process reloads are two
+separate, manually sequenced *test* actions, not one trusted atomic
+production transaction. This test **does not** authenticate the operator,
+run privileged Linux production services, establish host-root/mount
+ancestry/SELinux ownership, expose a real external cache route, validate
+signed APT/DNF payload integrity, publish an active-only catalog or
+prove power-loss recovery. The health endpoint proves only the local
+isolated NGINX worker's response. The proposed v2 format is still
+unadopted. Actual host service+state/catalog atomicity remains
+NOT VERIFIED pending the reviewed #31/#27/#28/#95 integration design,
+root authorization and booted-host tests. The companion #28 PR #251
+separately exercises real disposable HTTP cache HIT with TLS.

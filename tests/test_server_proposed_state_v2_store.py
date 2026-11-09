@@ -12,7 +12,9 @@ from pathlib import Path
 
 import pytest
 
-from repocache.server_repository_plan_v1 import _canonical_identity
+from repocache.server_repository_plan_v1 import (
+    RepositoryPlanError, _canonical_identity, plan_repository_change,
+)
 from repocache.server_protected_state_store_v1 import (
     JOURNAL_NAME as LEGACY_JOURNAL,
     JOURNAL_TMP_NAME as LEGACY_JOURNAL_TMP,
@@ -1415,3 +1417,251 @@ def test_published_v2_journal_refuses_invalid_replaced_state_transition(
         assert (folder / V2_STATE).read_bytes() == replacement_bytes
         assert journal_file.read_bytes() == journal_bytes
         assert not (folder / V2_ROLLBACK).exists()
+
+
+@pytest.mark.skipif(
+    shutil.which("nginx") is None,
+    reason="disposable distro-packaged nginx unavailable",
+)
+def test_v2_lifecycle_nginx_live_sandbox(fixture_root, tmp_path):
+    """Link merged #95 planner, #31 fixture v2 journal and actual disposable NGINX.
+
+    A real isolated daemon is reloaded, but staging/commits are intentionally
+    separate, unauthenticated TEST actions. No live host state, systemd,
+    catalog or privileged transaction is touched or certified.
+    """
+    import socket
+    import time
+
+    nginx = shutil.which("nginx")
+    ca = next((name for name in (
+        "/etc/ssl/certs/ca-certificates.crt",
+        "/etc/pki/tls/certs/ca-bundle.crt",
+    ) if Path(name).is_file()), None)
+    if ca is None:
+        pytest.skip("disposable distro CA unavailable")
+    fd, folder, uid = fixture_root
+    repo_id = "integration-apt"
+    origin = "fixture-new.example.invalid"
+    cache_root = tmp_path / "managed-cache"
+    cache_root.mkdir(mode=0o700)
+    current = document(count=1)
+    current["repositories"][0]["desired_state"] = "disabled"
+    current["deployment"]["paths"]["cache_root"] = str(cache_root)
+    previous = snapshot(generation=1, doc=current)
+    assert apply(fixture_root, previous)["state_generation"] == 1
+    historical = {"repo-0"}
+
+    sock = tmp_path / "s"
+    assert len(os.fsencode(sock)) < 100
+    conf = tmp_path / "nginx.conf"
+    pid = tmp_path / "nginx.pid"
+    log = tmp_path / "nginx-error.log"
+
+    def render(generation, pins):
+        candidate = render_persisted(
+            fd, owner_uid=uid, expected_generation=generation,
+            candidate_pins_by_repository=pins, ca_bundle_path=ca,
+        )
+        assert candidate["persisted_config_bytes_and_digest_consistent"]
+        assert candidate["exclusive_state_lock_held_during_preview"]
+        for key in (
+            "operator_authorization_verified",
+            "nginx_syntax_verified",
+            "active_exposure_verified",
+            "authorizes_nginx_activation",
+            "authorizes_catalog_publication",
+        ):
+            assert candidate[key] is False
+        return candidate
+
+    def config(candidate, label):
+        # The health endpoint proves ONLY a sandbox NGINX worker reload.
+        # Real package/cache paths in the candidate remain unreachable.
+        for identifier in candidate["proposed_repository_ids"]:
+            (cache_root / identifier).mkdir(mode=0o700, exist_ok=True)
+        return (
+            f"pid {pid};\nerror_log {log} notice;\n"
+            "worker_processes 1;\nevents { worker_connections 64; }\n"
+            "http { access_log off;\n"
+            + candidate["http_upstream_fragment"]
+            + f"server {{ listen unix:{sock};\n"
+            + f'location = /__fixture_health {{ return 200 "{label}"; }}\n'
+            + candidate["server_location_fragment"]
+            + "}\n}\n"
+        ).encode("utf-8")
+
+    def stage(raw):
+        destination = tmp_path / "nginx.next"
+        with destination.open("wb") as handle:
+            handle.write(raw)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(destination, conf)
+
+    def command(*args):
+        return subprocess.run(
+            [nginx, *args, "-c", str(conf), "-p", str(tmp_path)],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+
+    def health():
+        with socket.socket(socket.AF_UNIX) as client:
+            client.settimeout(1)
+            client.connect(str(sock))
+            client.sendall(
+                b"GET /__fixture_health HTTP/1.0\r\n"
+                b"Host: localhost\r\nConnection: close\r\n\r\n"
+            )
+            answer = bytearray()
+            while len(answer) < 8192:
+                part = client.recv(8192 - len(answer))
+                if not part:
+                    break
+                answer.extend(part)
+            return bytes(answer)
+
+    def assert_live(label, process):
+        for _ in range(100):
+            assert process.poll() is None, "isolated NGINX master exited"
+            try:
+                answer = health()
+                if (b" 200 " in answer.split(b"\r\n", 1)[0]
+                        and answer.endswith(label.encode("ascii"))):
+                    return
+            except (OSError, TimeoutError):
+                pass
+            time.sleep(0.05)
+        pytest.fail(f"isolated NGINX never served {label!r}")
+
+    initial = render(1, {})
+    assert initial["proposed_repository_ids"] == []
+    initial_raw = config(initial, "generation-1")
+    stage(initial_raw)
+    assert command("-t").returncode == 0
+    master = subprocess.Popen(
+        [nginx, "-c", str(conf), "-p", str(tmp_path), "-g", "daemon off;"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        assert_live("generation-1", master)
+
+        def transition(operation, generation, *, proposal=None, reservations=None):
+            nonlocal current, previous
+            planned = plan_repository_change(
+                current, current_generation=generation,
+                operation=operation,
+                repository_id=None if operation == "add" else repo_id,
+                proposed_repository=proposal,
+                reserved_ids=reservations,
+            )
+            assert planned["changed"] is True
+            proposed_doc = planned["candidate_document"]
+            succeeding = snapshot(
+                generation=generation + 1, doc=proposed_doc,
+                previous=previous,
+            )
+            return proposed_doc, succeeding
+
+        def activate(candidate, generation, pins):
+            output = render(generation, pins)
+            assert output["proposed_repository_ids"] == sorted(pins)
+            staged = config(output, f"generation-{generation}")
+            stage(staged)
+            checked = command("-t")
+            assert checked.returncode == 0, checked.stderr
+            reloaded = command("-s", "reload")
+            assert reloaded.returncode == 0, reloaded.stderr
+            assert_live(f"generation-{generation}", master)
+            return output
+
+        # First added as disabled: no NGINX route is exposed even in the
+        # disposable generated candidate.
+        new_repo = copy.deepcopy(current["repositories"][0])
+        new_repo.update({"id": repo_id, "desired_state": "disabled"})
+        new_repo["upstream"]["base_url"] = (
+            "https://fixture-new.example.invalid/debian/"
+        )
+        new_repo["upstream"]["allowed_hosts"] = [origin]
+        current_next, state_next = transition(
+            "add", 1, proposal=new_repo, reservations=historical,
+        )
+        assert apply(fixture_root, state_next, expected=1)["state_generation"] == 2
+        previous, current = state_next, current_next
+        # Keep the simulated historical ledger separate from persisted
+        # reservations; only the fixture store validates the latter.
+        historical.add(repo_id)
+        added = activate(state_next, 2, {})
+        assert added["server_location_fragment"] == ""
+
+        # Enable with the merged #95 planner; persist the exact validated
+        # generation, then syntax-check and live-reload a new route.
+        current_next, state_next = transition("enable", 2)
+        assert apply(fixture_root, state_next, expected=2)["state_generation"] == 3
+        previous, current = state_next, current_next
+        pins = {repo_id: {origin: ["8.8.8.8"]}}
+        enabled = activate(state_next, 3, pins)
+        assert f"/__repocache/repos/{repo_id}/" in enabled["server_location_fragment"]
+        sentinel = cache_root / repo_id / "retained.bin"
+        sentinel.write_bytes(b"owned-test-cache-sentinel")
+        known_good = conf.read_bytes()
+        durable = (folder / V2_STATE).read_bytes()
+
+        # Kill at durable journal stage while preparing disable; renderer
+        # must refuse pending recovery, while the old live worker keeps
+        # serving. The explicit private fixture recovery restores exact bytes.
+        current_next, state_next = transition("disable", 3)
+        def crash(point):
+            if point == "stage_durable":
+                raise RuntimeError("injected interruption")
+        with pytest.raises(RuntimeError, match="injected interruption"):
+            apply(fixture_root, state_next, expected=3, inject=crash)
+        with pytest.raises(ProposedV2PersistenceError, match="RECOVERY_REQUIRED"):
+            render(3, pins)
+        assert conf.read_bytes() == known_good
+        assert_live("generation-3", master)
+        assert rollback(fixture_root)["state_generation"] == 3
+        assert (folder / V2_STATE).read_bytes() == durable
+        assert not (folder / V2_JOURNAL).exists()
+        assert not (folder / V2_STAGE).exists()
+
+        # Retry the same intended generation after explicit recovery.
+        assert apply(fixture_root, state_next, expected=3)["state_generation"] == 4
+        previous, current = state_next, current_next
+        disabled = activate(state_next, 4, {})
+        assert disabled["server_location_fragment"] == ""
+        assert sentinel.read_bytes() == b"owned-test-cache-sentinel"
+
+        current_next, state_next = transition("remove", 4)
+        assert apply(fixture_root, state_next, expected=4)["state_generation"] == 5
+        previous, current = state_next, current_next
+        removed = activate(state_next, 5, {})
+        assert removed["server_location_fragment"] == ""
+        assert sentinel.read_bytes() == b"owned-test-cache-sentinel"
+        saved = json.loads((folder / V2_STATE).read_bytes())
+        assert any(
+            item["id"] == repo_id and item["status"] == "retired"
+            for item in saved["id_reservations"]
+        )
+        assert not any(
+            item["id"] == repo_id for item in saved["repository_records"]
+        )
+        with pytest.raises(RepositoryPlanError, match="historically reserved"):
+            plan_repository_change(
+                current, current_generation=5, operation="add",
+                proposed_repository=new_repo, reserved_ids=historical,
+            )
+        assert rollback(fixture_root)["status"] == "CLEAN"
+        assert master.poll() is None
+    finally:
+        if master.poll() is None:
+            command("-s", "quit")
+            try:
+                master.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                master.terminate()
+                try:
+                    master.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    master.kill()
+                    master.wait(timeout=3)
