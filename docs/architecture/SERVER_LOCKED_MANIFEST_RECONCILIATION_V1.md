@@ -604,3 +604,24 @@ This is a prerequisite for a future *single, authenticated native
 transaction*, not evidence that state commit, NGINX activation and
 atomic active-only discovery already form such a transaction.
 Booted systemd/SELinux acceptance stays NOT VERIFIED.
+
+
+### Lifecycle fixture: explicit validation before every durable revision
+
+The end-to-end sandbox lifecycle regression now uses
+\`_preview_proposed_v2_nginx_before_commit_under_root\` on *each*
+candidate, validates the derived candidate via distro-packaged
+\`nginx -t\` in a **separate disposable temporary config**, checks that
+neither the stored v2 predecessor nor the currently served NGINX
+configuration changed, and only then invokes the private fixture
+commit. After commit it compares the locked persisted renderer's
+complete upstream/location fragments and pin count to the precommit
+result before explicitly reloading the isolated NGINX worker.
+
+An injected interruption during disable requires explicit recovery;
+the recovered predecessor is checked and **the old precommit result is
+discarded and regenerated** before retrying. This deliberately tests
+the ordering required by the future host transaction without adding
+an installer, privileged service, authorization token, actual atomic
+catalog, or production commit/reload control. It is not a substitute
+for genuine booted systemd/SELinux, owner approval or live cache HIT.

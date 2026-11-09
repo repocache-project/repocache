@@ -1563,9 +1563,41 @@ def test_v2_lifecycle_nginx_live_sandbox(fixture_root, tmp_path):
             )
             return proposed_doc, succeeding
 
-        def activate(generation, pins):
+        def before_commit(state, generation, pins):
+            # Stage and syntax-check a *separate* disposable NGINX file
+            # before the v2 fixture commits; never touch the active conf.
+            predecessor = (folder / V2_STATE).read_bytes()
+            live_before = conf.read_bytes()
+            preview = precommit(
+                fixture_root, state, expected=generation - 1,
+                pins=pins, ca=ca,
+            )
+            assert preview["would_change_v2_state"] is True
+            assert preview["proposed_state_generation"] == generation
+            assert preview["proposed_repository_ids"] == sorted(pins)
+            assert preview["authorizes_state_commit"] is False
+            assert preview["authorizes_nginx_reload"] is False
+            assert preview["authorizes_catalog_publication"] is False
+            scratch = tmp_path / f"nginx-precommit-{generation}.conf"
+            scratch.write_bytes(config(preview, f"generation-{generation}"))
+            syntax = subprocess.run(
+                [nginx, "-t", "-c", str(scratch), "-p", str(tmp_path)],
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+            assert syntax.returncode == 0, syntax.stderr
+            assert (folder / V2_STATE).read_bytes() == predecessor
+            assert conf.read_bytes() == live_before
+            assert not (folder / V2_JOURNAL).exists()
+            return preview
+
+        def activate(generation, pins, preview):
             output = render(generation, pins)
             assert output["proposed_repository_ids"] == sorted(pins)
+            # The precommit and actual persisted-generation renderer MUST
+            # derive identical fragments, rather than use stale pins.
+            for key in ("http_upstream_fragment", "server_location_fragment",
+                        "proposed_repository_ids", "pin_count"):
+                assert output[key] == preview[key]
             staged = config(output, f"generation-{generation}")
             stage(staged)
             checked = command("-t")
@@ -1586,6 +1618,7 @@ def test_v2_lifecycle_nginx_live_sandbox(fixture_root, tmp_path):
         current_next, state_next = transition(
             "add", 1, proposal=new_repo, reservations=historical,
         )
+        preadded = before_commit(state_next, 2, {})
         assert apply(fixture_root, state_next, expected=1)["state_generation"] == 2
         previous, current = state_next, copy.deepcopy(current_next)
         # The #95 pure planner leaves candidates at the expected OLD CAS
@@ -1594,19 +1627,20 @@ def test_v2_lifecycle_nginx_live_sandbox(fixture_root, tmp_path):
         # Keep the simulated historical ledger separate from persisted
         # reservations; only the fixture store validates the latter.
         historical.add(repo_id)
-        added = activate(2, {})
+        added = activate(2, {}, preadded)
         assert added["server_location_fragment"] == ""
 
         # Enable with the merged #95 planner; persist the exact validated
         # generation, then syntax-check and live-reload a new route.
         current_next, state_next = transition("enable", 2)
+        pins = {repo_id: {origin: ["8.8.8.8"]}}
+        preenabled = before_commit(state_next, 3, pins)
         assert apply(fixture_root, state_next, expected=2)["state_generation"] == 3
         previous, current = state_next, copy.deepcopy(current_next)
         # The #95 pure planner leaves candidates at the expected OLD CAS
         # generation; only the fixture's committed next revision is rebased.
         current["expected_state_generation"] = 3
-        pins = {repo_id: {origin: ["8.8.8.8"]}}
-        enabled = activate(3, pins)
+        enabled = activate(3, pins, preenabled)
         assert f"/__repocache/repos/{repo_id}/" in enabled["server_location_fragment"]
         sentinel = cache_root / repo_id / "retained.bin"
         sentinel.write_bytes(b"owned-test-cache-sentinel")
@@ -1617,6 +1651,7 @@ def test_v2_lifecycle_nginx_live_sandbox(fixture_root, tmp_path):
         # must refuse pending recovery, while the old live worker keeps
         # serving. The explicit private fixture recovery restores exact bytes.
         current_next, state_next = transition("disable", 3)
+        predisabled = before_commit(state_next, 4, {})
         def crash(point):
             if point == "stage_durable":
                 raise RuntimeError("injected interruption")
@@ -1631,23 +1666,26 @@ def test_v2_lifecycle_nginx_live_sandbox(fixture_root, tmp_path):
         assert not (folder / V2_JOURNAL).exists()
         assert not (folder / V2_STAGE).exists()
 
-        # Retry the same intended generation after explicit recovery.
+        # Explicit recovery invalidates any prior precommit observation.
+        # Rebuild it and rerun syntax before retrying the same CAS revision.
+        predisabled = before_commit(state_next, 4, {})
         assert apply(fixture_root, state_next, expected=3)["state_generation"] == 4
         previous, current = state_next, copy.deepcopy(current_next)
         # The #95 pure planner leaves candidates at the expected OLD CAS
         # generation; only the fixture's committed next revision is rebased.
         current["expected_state_generation"] = 4
-        disabled = activate(4, {})
+        disabled = activate(4, {}, predisabled)
         assert disabled["server_location_fragment"] == ""
         assert sentinel.read_bytes() == b"owned-test-cache-sentinel"
 
         current_next, state_next = transition("remove", 4)
+        preremoved = before_commit(state_next, 5, {})
         assert apply(fixture_root, state_next, expected=4)["state_generation"] == 5
         previous, current = state_next, copy.deepcopy(current_next)
         # The #95 pure planner leaves candidates at the expected OLD CAS
         # generation; only the fixture's committed next revision is rebased.
         current["expected_state_generation"] = 5
-        removed = activate(5, {})
+        removed = activate(5, {}, preremoved)
         assert removed["server_location_fragment"] == ""
         assert sentinel.read_bytes() == b"owned-test-cache-sentinel"
         saved = json.loads((folder / V2_STATE).read_bytes())
