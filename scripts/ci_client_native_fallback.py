@@ -24,6 +24,22 @@ import threading
 from pathlib import Path
 
 
+class _GracefulTLSServer(http.server.ThreadingHTTPServer):
+    """Send TLS close_notify: Debian APT rejects abrupt TLS EOF on metadata."""
+
+    def shutdown_request(self, request):
+        if isinstance(request, ssl.SSLSocket):
+            try:
+                request.settimeout(3)
+                plain = request.unwrap()
+                plain.close()
+            except (OSError, TimeoutError):
+                # The peer may have disconnected before TLS shutdown.
+                request.close()
+        else:
+            super().shutdown_request(request)
+
+
 class HTTPBackend:
     def __init__(self, files: Path, *, certificate: Path | None = None,
                  key: Path | None = None):
@@ -50,7 +66,7 @@ class HTTPBackend:
             def log_message(handler, _format, *args):
                 pass
 
-        self.server = http.server.ThreadingHTTPServer(
+        self.server = _GracefulTLSServer(
             ("127.0.0.1", 0),
             lambda *args, **kwargs: Handler(*args, directory=str(files), **kwargs),
         )
