@@ -568,3 +568,39 @@ unadopted. Actual host service+state/catalog atomicity remains
 NOT VERIFIED pending the reviewed #31/#27/#28/#95 integration design,
 root authorization and booted-host tests. The companion #28 PR #251
 separately exercises real disposable HTTP cache HIT with TLS.
+
+
+### Proposed-v2 precommit NGINX candidate under the existing fixture lock
+
+\`_preview_proposed_v2_nginx_before_commit_under_root\` closes an
+important *source-level* ordering gap: the older read-only
+\`_preview_persisted_v2_nginx_candidate_under_root\` can only render
+**after** a v2 state has been durably committed. The new fixture-only
+preflight accepts a bounded proposed-v2 snapshot, explicit prior generation
+and complete pinned DNS answers, freezes untrusted inputs **before** the
+exclusive protected-state lock, refuses legacy state, pending journals,
+stale generations, non-monotonic/historically conflicting reservations and
+unsafe/extra/missing IP pins, and renders an uncommitted next-generation
+NGINX candidate from the *same* canonical proposed configuration bytes
+that the private writer would persist.
+
+For an idempotent v2 no-op, the renderer instead uses the **actually
+persisted previous generation**, mirroring the private writer's no-op
+behavior. It rechecks the protected predecessor bytes before returning,
+including detecting an out-of-band writer ignoring the advisory flock.
+Nothing is created, staged, committed, reloaded or published. The caller
+must not treat the report as a lease: its lock has already been released.
+\`authorizes_state_commit\`, NGINX, catalog and cleanup flags are all
+false; synthetic approval references and proposed-v2 data never become
+trusted operator provenance.
+
+Debian 13 and AlmaLinux 10 disposable-package CI exercises the
+precommit candidate with \`nginx -t\`; other regressions verify
+bootstrap, parity with postcommit pinned output, final generation/no-op,
+invalid and private pins, stale/absent predecessor, old v1 coexistence,
+lock contention, interrupted journal recovery, and detection of a
+non-cooperating file writer without performing any recovery or mutation.
+This is a prerequisite for a future *single, authenticated native
+transaction*, not evidence that state commit, NGINX activation and
+atomic active-only discovery already form such a transaction.
+Booted systemd/SELinux acceptance stays NOT VERIFIED.

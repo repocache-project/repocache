@@ -31,6 +31,7 @@ from repocache.server_proposed_state_v2_store import (
     _commit_proposed_v2_under_root as commit,
     _recover_proposed_v2_under_root as recover,
     _preview_persisted_v2_nginx_candidate_under_root as render_persisted,
+    _preview_proposed_v2_nginx_before_commit_under_root as precommit_nginx,
     _preview_v1_migration_blockers_under_root as preview_v1_migration,
     _preview_proposed_v2_recovery_under_root as preview_v2_recovery,
 )
@@ -1676,3 +1677,225 @@ def test_v2_lifecycle_nginx_live_sandbox(fixture_root, tmp_path):
                 except subprocess.TimeoutExpired:
                     master.kill()
                     master.wait(timeout=3)
+
+
+def precommit(layout, candidate, *, expected, pins=None, ca=None):
+    fd, _, uid = layout
+    return precommit_nginx(
+        fd, candidate, owner_uid=uid,
+        expected_generation=expected,
+        candidate_pins_by_repository={} if pins is None else pins,
+        ca_bundle_path=(
+            "/etc/ssl/certs/ca-certificates.crt" if ca is None else ca
+        ),
+    )
+
+
+def test_v2_precommit_bootstrap_renders_without_creating_state(fixture_root):
+    _, folder, _ = fixture_root
+    new = snapshot(count=1)
+    before = sorted(folder.iterdir())
+    candidate = precommit(fixture_root, new, expected=0)
+    assert candidate["status"] == "LOCKED_FIXTURE_V2_PRECOMMIT_NGINX_CANDIDATE_ONLY"
+    assert candidate["expected_state_generation"] == 0
+    assert candidate["proposed_state_generation"] == 1
+    assert candidate["would_change_v2_state"] is True
+    assert candidate["v2_canonical_transition_validated"] is True
+    assert candidate["persisted_predecessor_rechecked_under_lock"] is True
+    assert candidate["proposed_repository_ids"] == []
+    for field in (
+        "trusted_host_root_verified", "operator_authorization_verified",
+        "live_include_manifest_verified", "nginx_syntax_verified",
+        "active_exposure_verified", "authorizes_state_commit",
+        "authorizes_nginx_activation", "authorizes_nginx_reload",
+        "authorizes_catalog_publication", "authorizes_cache_cleanup",
+    ):
+        assert candidate[field] is False
+    assert sorted(folder.iterdir()) == before
+    assert not (folder / V2_STATE).exists()
+    assert apply(fixture_root, new)["state_generation"] == 1
+    persisted = persisted_render(fixture_root, generation=1, pins={})
+    for fragment in ("http_upstream_fragment", "server_location_fragment",
+                     "proposed_repository_ids", "pin_count"):
+        assert candidate[fragment] == persisted[fragment]
+
+
+def test_v2_precommit_active_route_parity_and_idempotent_generation(fixture_root):
+    _, folder, _ = fixture_root
+    current = snapshot(count=1)
+    apply(fixture_root, current)
+    next_doc = document(count=1)
+    next_doc["repositories"][0]["desired_state"] = "active"
+    next_state = snapshot(generation=2, previous=current, doc=next_doc)
+    pins = {"repo-0": {"mirror0.example.invalid": ["8.8.8.8"]}}
+    original = (folder / V2_STATE).read_bytes()
+    inode = (folder / V2_STATE).stat().st_ino
+    rendered = precommit(fixture_root, next_state, expected=1, pins=pins)
+    assert rendered["proposed_state_generation"] == 2
+    assert rendered["proposed_repository_ids"] == ["repo-0"]
+    assert "proxy_ssl_verify on;" in rendered["server_location_fragment"]
+    assert rendered["authorizes_nginx_reload"] is False
+    assert (folder / V2_STATE).read_bytes() == original
+    assert (folder / V2_STATE).stat().st_ino == inode
+    assert not (folder / V2_JOURNAL).exists()
+    assert apply(fixture_root, next_state, expected=1)["state_generation"] == 2
+    persisted = persisted_render(fixture_root, generation=2, pins=pins)
+    for fragment in ("http_upstream_fragment", "server_location_fragment",
+                     "proposed_repository_ids", "pin_count"):
+        assert rendered[fragment] == persisted[fragment]
+    unchanged_next = snapshot(generation=3, previous=next_state, doc=next_doc)
+    noop = precommit(fixture_root, unchanged_next, expected=2, pins=pins)
+    assert noop["would_change_v2_state"] is False
+    assert noop["expected_state_generation"] == 2
+    assert noop["proposed_state_generation"] == 2
+    assert noop["server_location_fragment"] == persisted["server_location_fragment"]
+    before_noop = (folder / V2_STATE).read_bytes()
+    assert apply(fixture_root, unchanged_next, expected=2)["status"] == "NO_CHANGE_INERT_V2"
+    assert (folder / V2_STATE).read_bytes() == before_noop
+
+
+@pytest.mark.parametrize("case", ["stale", "absent", "wrong-pins", "unsafe-ip",
+                                  "invalid-transition", "legacy-state"])
+def test_v2_precommit_negative_inputs_have_no_disk_side_effects(fixture_root, case):
+    _, folder, uid = fixture_root
+    old = snapshot(count=1)
+    if case != "absent" and case != "legacy-state":
+        apply(fixture_root, old)
+    future = snapshot(count=1, generation=2, previous=old)
+    bad_pins = {}
+    expected = 1
+    if case == "stale":
+        expected = 0
+    if case == "absent":
+        expected = 1
+    if case == "wrong-pins":
+        future_doc = document(count=1)
+        future_doc["repositories"][0]["desired_state"] = "active"
+        future = snapshot(generation=2, previous=old, doc=future_doc)
+        bad_pins = {}
+    if case == "unsafe-ip":
+        future_doc = document(count=1)
+        future_doc["repositories"][0]["desired_state"] = "active"
+        future = snapshot(generation=2, previous=old, doc=future_doc)
+        bad_pins = {"repo-0": {"mirror0.example.invalid": ["127.0.0.1"]}}
+    if case == "invalid-transition":
+        future = copy.deepcopy(future)
+        future["id_reservations"] = []
+    if case == "legacy-state":
+        legacy = {
+            "state_schema_version": 1, "state_generation": 1,
+            "configuration_sha256": "a" * 64,
+            "repositories": [], "ownership_manifest": [],
+        }
+        commit_legacy(fixture_root[0], legacy, owner_uid=uid, expected_generation=0)
+    before = {p.name: (p.read_bytes(), p.stat().st_ino)
+              for p in folder.iterdir() if p.is_file()}
+    matches = {
+        "stale": "STALE_GENERATION",
+        "absent": "STALE_GENERATION",
+        "wrong-pins": "NGINX_CANDIDATE_REFUSED",
+        "unsafe-ip": "NGINX_CANDIDATE_REFUSED",
+        "invalid-transition": "SNAPSHOT_INVALID",
+        "legacy-state": "LEGACY_MIGRATION_REQUIRED",
+    }
+    with pytest.raises((ProposedV2PersistenceError, ProtectedStateStoreError),
+                       match=matches[case]):
+        precommit(fixture_root, future, expected=expected, pins=bad_pins)
+    assert {p.name: (p.read_bytes(), p.stat().st_ino)
+            for p in folder.iterdir() if p.is_file()} == before
+
+
+def test_v2_precommit_pending_recovery_and_lock_contention_refused(fixture_root):
+    fd, folder, uid = fixture_root
+    current = snapshot(count=1)
+    apply(fixture_root, current)
+    future = snapshot(count=1, generation=2, previous=current)
+    with _locked(fd, uid):
+        with pytest.raises(ProtectedStateStoreError, match="LOCK_UNAVAILABLE"):
+            precommit(fixture_root, future, expected=1)
+    def crash(point):
+        if point == "journal_durable":
+            raise RuntimeError("synthetic crash")
+    with pytest.raises(RuntimeError, match="synthetic crash"):
+        apply(fixture_root, future, expected=1, inject=crash)
+    pending = (folder / V2_JOURNAL).read_bytes()
+    with pytest.raises(ProposedV2PersistenceError, match="RECOVERY_REQUIRED"):
+        precommit(fixture_root, future, expected=1)
+    assert (folder / V2_JOURNAL).read_bytes() == pending
+    assert rollback(fixture_root)["state_generation"] == 1
+    assert precommit(fixture_root, future, expected=1)["would_change_v2_state"] is False
+
+
+def test_v2_precommit_refuses_out_of_band_state_change_while_locked(
+    fixture_root, monkeypatch,
+):
+    import repocache.server_proposed_state_v2_store as module
+    _, folder, _ = fixture_root
+    old = snapshot(count=1)
+    apply(fixture_root, old)
+    future = snapshot(count=1, generation=2, previous=old)
+    unrelated = snapshot(count=2, generation=1)
+    raw_unrelated = json.dumps(
+        unrelated, sort_keys=True, ensure_ascii=True, separators=(",", ":"),
+    ).encode("utf-8")
+    original_render = module.render_repository_nginx_bundle_candidate
+    def altered_state(*args, **kwargs):
+        # Synthetic non-cooperating root writer; bypass flock intentionally.
+        path = folder / V2_STATE
+        with path.open("wb") as stream:
+            stream.write(raw_unrelated)
+            stream.flush()
+            os.fsync(stream.fileno())
+        return original_render(*args, **kwargs)
+    monkeypatch.setattr(module, "render_repository_nginx_bundle_candidate",
+                        altered_state)
+    with pytest.raises(ProposedV2PersistenceError,
+                       match="STATE_CHANGED_DURING_PREVIEW"):
+        precommit(fixture_root, future, expected=1)
+    assert (folder / V2_STATE).read_bytes() == raw_unrelated
+    assert not (folder / V2_JOURNAL).exists()
+
+
+@pytest.mark.skipif(
+    shutil.which("nginx") is None,
+    reason="distro packaged nginx unavailable",
+)
+def test_v2_precommit_disposable_packaged_nginx_t(fixture_root, tmp_path):
+    nginx = shutil.which("nginx")
+    ca = next((p for p in (
+        "/etc/ssl/certs/ca-certificates.crt",
+        "/etc/pki/tls/certs/ca-bundle.crt",
+    ) if Path(p).is_file()), None)
+    if ca is None:
+        pytest.skip("distro CA bundle unavailable")
+    config = document(count=1)
+    cache_root = tmp_path / "managed-cache"
+    config["deployment"]["paths"]["cache_root"] = str(cache_root)
+    config["repositories"][0]["desired_state"] = "active"
+    state = snapshot(generation=1, doc=config)
+    candidate = precommit(
+        fixture_root, state, expected=0,
+        pins={"repo-0": {"mirror0.example.invalid": ["8.8.8.8"]}},
+        ca=ca,
+    )
+    assert candidate["nginx_syntax_verified"] is False
+    (cache_root / "repo-0").mkdir(parents=True, mode=0o700)
+    conf = tmp_path / "nginx.conf"
+    conf.write_text(
+        f"pid {tmp_path / 'nginx.pid'};\n"
+        f"error_log {tmp_path / 'nginx-error.log'} notice;\n"
+        "events {}\nhttp { access_log off;\n"
+        + candidate["http_upstream_fragment"]
+        + "server { listen 127.0.0.1:19991;\n"
+        + candidate["server_location_fragment"]
+        + "}\n}\n",
+        encoding="utf-8",
+    )
+    observed = subprocess.run(
+        [nginx, "-t", "-c", str(conf), "-p", str(tmp_path)],
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    assert observed.returncode == 0, observed.stderr
+    assert not (fixture_root[1] / V2_STATE).exists()
+    assert candidate["authorizes_state_commit"] is False
+    assert candidate["authorizes_nginx_activation"] is False

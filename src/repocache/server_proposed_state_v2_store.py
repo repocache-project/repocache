@@ -453,6 +453,91 @@ def _recover_proposed_v2_under_root(
         )
 
 
+def _preview_proposed_v2_nginx_before_commit_under_root(
+    root_fd: int, proposed_snapshot: dict[str, Any], *, owner_uid: int,
+    expected_generation: int,
+    candidate_pins_by_repository: Any,
+    ca_bundle_path: str,
+) -> dict[str, Any]:
+    """PRIVATE read-only v2 transition + NGINX preflight before fixture commit.
+
+    A read-only preflight does not hold a lock after returning and MUST NOT
+    be mistaken for an authorization lease. Any future native transaction
+    has to recheck the actual state/IDs, approved source bytes, pins and
+    NGINX under an independently authenticated host-root lock.
+    """
+    if (type(expected_generation) is not int
+            or not 0 <= expected_generation < MAX_INT):
+        _refuse("EXPECTED_GENERATION_INVALID")
+    # Freeze all caller-controlled structures before acquiring the lock.
+    frozen, _ = _freeze(proposed_snapshot)
+    try:
+        pin_raw = _canonical(candidate_pins_by_repository, limit=1024 * 1024)
+        pins = _json(pin_raw, limit=1024 * 1024)
+    except (ValueError, TypeError, OverflowError, RecursionError):
+        _refuse("PINS_INVALID")
+    with _locked(root_fd, owner_uid) as directory:
+        _legacy_refusal(directory, owner_uid)
+        if _pending(directory, owner_uid):
+            _refuse("RECOVERY_REQUIRED")
+        existing, before = _read_v2(directory, owner_uid)
+        generation = 0 if existing is None else existing["state_generation"]
+        if generation != expected_generation:
+            _refuse("STALE_GENERATION")
+        try:
+            preview_proposed_v2_state_transition(
+                frozen, expected_generation=generation,
+                previous_snapshot=existing,
+            )
+        except (ValueError, TypeError, OverflowError, RecursionError):
+            _refuse("TRANSITION_INVALID")
+        # Mirror the *existing* private writer's idempotent comparison.
+        # A no-op must render the actually persisted generation, never a
+        # speculative generation that would not be committed.
+        no_change = existing is not None and _no_change(existing, frozen)
+        render_state = existing if no_change else frozen
+        render_generation = generation if no_change else generation + 1
+        try:
+            document = parse_install_bytes(
+                base64.b64decode(render_state["configuration_base64"]),
+                for_apply=True,
+            )
+            candidate = render_repository_nginx_bundle_candidate(
+                document,
+                expected_state_generation=render_generation,
+                candidate_pins_by_repository=pins,
+                ca_bundle_path=ca_bundle_path,
+            )
+        except (NginxRepositoryBundleError, ValueError, TypeError,
+                OverflowError, RecursionError):
+            _refuse("NGINX_CANDIDATE_REFUSED")
+        # An out-of-band root actor may ignore flock. Refuse a changed
+        # authoritative v2 file before releasing even this read-only report.
+        _, after = _read_v2(directory, owner_uid)
+        if before != after:
+            _refuse("STATE_CHANGED_DURING_PREVIEW")
+        return {
+            **candidate,
+            "status": "LOCKED_FIXTURE_V2_PRECOMMIT_NGINX_CANDIDATE_ONLY",
+            "expected_state_generation": generation,
+            "proposed_state_generation": render_generation,
+            "would_change_v2_state": not no_change,
+            "v2_canonical_transition_validated": True,
+            "persisted_predecessor_rechecked_under_lock": True,
+            "fixture_only": True,
+            "trusted_host_root_verified": False,
+            "operator_authorization_verified": False,
+            "live_include_manifest_verified": False,
+            "nginx_syntax_verified": False,
+            "active_exposure_verified": False,
+            "authorizes_state_commit": False,
+            "authorizes_nginx_activation": False,
+            "authorizes_nginx_reload": False,
+            "authorizes_catalog_publication": False,
+            "authorizes_cache_cleanup": False,
+        }
+
+
 def _preview_persisted_v2_nginx_candidate_under_root(
     root_fd: int, *, owner_uid: int,
     expected_generation: int,
