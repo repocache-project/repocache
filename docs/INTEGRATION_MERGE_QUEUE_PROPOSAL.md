@@ -68,7 +68,7 @@ For any future lane, obtain separate ruleset-change approval only after its own 
 GitHub Merge Queue **does not inspect the original issue acceptance
 ledger** and does not guarantee that an actor has been explicitly authorized
 to integrate a particular PR. Therefore admission remains a deliberate
-maintainer-controlled action:
+operator-controlled, evidence-gated action under the applicable authorization:
 
 1. A session reviews the *actual current* PR HEAD, target branch and base,
    full diff, all original applicable issue/PR criteria and dependencies,

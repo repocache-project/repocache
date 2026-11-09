@@ -37,6 +37,6 @@ For each focused PR, retain a concise record of:
 1. Repository/PR, primary issue or milestone, exact HEAD and protected base, affected paths and accepted scope.
 2. Applicable criterion-by-criterion PASS / FAIL / NOT VERIFIED results and specific source, test, CI, host or manual evidence; separate unverified wider issue/release/production criteria.
 3. Actual GitHub check contexts, origins, outstanding reviews or discussions, mergeability and residual risk.
-4. The explicit maintainer merge decision, operation outcome and any post-merge verification, or a clear statement that merge permission has not been granted.
+4. The specific owner approval or qualifying standing conditional integration delegation with exact-SHA PASS evidence; operation outcome and post-merge verification, or a clear statement that merge permission has not been granted.
 
 **Historical context:** [#176](https://github.com/repocache-project/repocache/issues/176), merged [#178](https://github.com/repocache-project/repocache/pull/178) and [#210](https://github.com/repocache-project/repocache/pull/210) originally governed review provenance. The global prerequisite is superseded; original acceptance evidence, issue-specific reviews and protected-operation limits remain binding.

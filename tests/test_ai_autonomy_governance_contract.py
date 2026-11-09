@@ -37,6 +37,7 @@ def test_adopted_delegation_and_protected_boundaries_agree():
     assert "every original applicable acceptance criterion PASS" in policy
     assert "main" in policy and "release/*" in policy
     assert "distinct explicit maintainer permission" in policy
+    assert "The explicit maintainer merge decision" not in policy
     template = read(".github/pull_request_template.md")
     assert "Standing conditional authorization is not active" not in template
 
@@ -46,6 +47,7 @@ def test_live_queue_configuration_is_not_implicit_pilot_authorization():
     assert "ruleset #26753319" in queue
     assert "active" in queue and "NOT VERIFIED" in queue
     assert "separately authorized" in queue
+    assert "maintainer-controlled action" not in queue
     lifecycle = read("docs/RELEASE_LIFECYCLE.md")
     assert "historical migration" in lifecycle
     assert "## Before allowing parallel AI sessions to resume" not in lifecycle
