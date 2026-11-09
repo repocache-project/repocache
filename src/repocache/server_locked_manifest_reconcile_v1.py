@@ -252,7 +252,17 @@ def _preview_recovery_under_root(
 # Proposed v2 persistence BRIDGE. This is NOT an adopted on-disk schema,
 # writer, migration tool or trusted authorization interface.
 _V2_DIGEST = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
-_V2_MAX_RESERVATIONS = 10000  # Same fail-closed bound as #95's pure planner.
+# Maintainer-approved INITIAL v0.6.0 on-disk state schema, for clean server
+# installations only (2026-11-09; #31). These limits are part of the adopted
+# format, not merely suggested fixture defaults. None authenticates callers,
+# authorizes host writes, or grants NGINX/service activation.
+INITIAL_V2_STATE_SCHEMA_VERSION = 2
+INITIAL_V2_MAX_PRESENT_REPOSITORIES = 500
+INITIAL_V2_MAX_ALL_TIME_IDS = 10000
+INITIAL_V2_CLEAN_INSTALL_ONLY = True
+
+# Internal historical alias retained for test/report compatibility.
+_V2_MAX_RESERVATIONS = INITIAL_V2_MAX_ALL_TIME_IDS
 
 
 def _v2_refuse(code: str) -> None:
@@ -269,10 +279,11 @@ def _v2_closed(value: Any, keys: set[str]) -> None:
 
 
 def _validate_proposed_v2_snapshot(value: Any) -> dict[str, Any]:
-    """Validate an untrusted, self-contained snapshot without I/O or authority.
+    """Validate adopted v0.6.0 clean-install state-v2 shape without I/O.
 
-    This is a *proposed contract*, not a new format understood by #222's v1
-    file reader, writer or journal. Do not persist it with v1 primitives.
+    The maintainer approved the initial on-disk *schema*, not this fixture's
+    authority to persist it on a real server. #222's v1 reader, writer and
+    journal remain strictly incompatible. Never persist v2 through v1 APIs.
     """
     _v2_closed(value, {
         "state_schema_version", "state_generation", "configuration_base64",
@@ -281,7 +292,7 @@ def _validate_proposed_v2_snapshot(value: Any) -> dict[str, Any]:
     })
     generation = value["state_generation"]
     if (type(value["state_schema_version"]) is not int
-            or value["state_schema_version"] != 2
+            or value["state_schema_version"] != INITIAL_V2_STATE_SCHEMA_VERSION
             or type(generation) is not int
             or not 1 <= generation <= MAX_INT):
         _v2_refuse("GENERATION_INVALID")
@@ -316,7 +327,8 @@ def _validate_proposed_v2_snapshot(value: Any) -> dict[str, Any]:
         _v2_refuse("REPOSITORY_ID_REQUIRED")
     records = value["repository_records"]
     reservations = value["id_reservations"]
-    if (type(records) is not list or len(records) > 500
+    if (type(records) is not list
+            or len(records) > INITIAL_V2_MAX_PRESENT_REPOSITORIES
             or type(reservations) is not list
             or len(reservations) > _V2_MAX_RESERVATIONS):
         _v2_refuse("CAPACITY_INVALID")
@@ -425,6 +437,8 @@ def preview_proposed_v2_state_transition(
             _v2_refuse("REMOVAL_TOMBSTONE_MISSING")
     return {
         "schema_version": 2,
+        # Keep the pre-approval wire/status label for existing consumers;
+        # the approved *schema* does not make this pure check authoritative.
         "status": "PROPOSED_UNTRUSTED_V2_CONTRACT_ONLY",
         "expected_generation": expected_generation,
         "proposed_generation": new["generation"],

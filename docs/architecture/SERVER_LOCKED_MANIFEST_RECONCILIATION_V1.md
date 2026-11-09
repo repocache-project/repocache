@@ -1,5 +1,65 @@
 # Locked protected-manifest versus live NGINX include observation v1
 
+## Adopted initial persistent-state contract for v0.6.0 (maintainer decision: 2026-11-09)
+
+**Status: ARCHITECTURE APPROVED, IMPLEMENTATION/INTEGRATION STILL DRAFT.**
+The maintainer explicitly approved adopting the *existing* state-v2 schema
+for the first operational v0.6.0 server in the trusted project conversation.
+The scope and provenance are recorded in
+[#31's dated decision](https://github.com/repocache-project/repocache/issues/31#issuecomment-6752360136).
+This adoption supersedes historical "unadopted / proposed format" planning
+language **for the schema only**; earlier dated notes describing source status
+at the time remain as an audit trail. It is NOT a grant of root, migration,
+systemd, NGINX or release/publishing authority, and it does not make the
+existing private v2 fixture APIs production entry points.
+
+**Initial contract (clean v0.6.0 installation only):**
+
+- Closed \`state_schema_version: 2\`, first durable generation **1** after an
+  independently authorized generation-0 bootstrap. The seven top-level
+  fields are \`state_schema_version\`, \`state_generation\`,
+  \`configuration_base64\`, \`configuration_sha256\`,
+  \`repository_records\`, \`id_reservations\`, \`approval_reference\`.
+- \`configuration_base64\` is the **strict canonical complete install-v1
+  document bytes**, with exact SHA-256. The install document generation
+  must equal the state generation. An approval reference binds the exact
+  configuration digest and the expected preceding generation, but neither
+  the source string nor decision hash **proves operator approval**.
+- **At most 500 present** repositories, each with an immutable canonical
+  identity digest and desired state. Stored observed state remains
+  **not-activated** until a separately verified publication/exposure
+  protocol exists; desired-active does not mean published or approved.
+- **At most 10,000 all-time ID reservations**. Every present repository
+  has exactly one matching allocated record; removed IDs remain retired
+  forever, cannot change identity, be resurrected, silently disappear or
+  be allocated to someone else. On history saturation, refuse new
+  allocations without pruning old history.
+- Strict generation CAS, idempotent unchanged-operation behavior and
+  owner-pinned Linux path/FD, exclusive flock, bounded journal, stage,
+  fsync and recoverable previous bytes. No implicit conversion of old
+  v1 state or other foreign data. Detection of any legacy v1 state,
+  journal/stage or ambiguous v1/v2 coexistence **refuses without
+  mutation**; no v0.4.0→v0.6.0 upgrade is supported. Safe same-version
+  reinstallation/repair/recovery remains a separate mandatory gate.
+- The fixture implementation's existing names \`proposed\` and its
+  historical \`PROPOSED_UNTRUSTED_V2_CONTRACT_ONLY\` report label are kept
+  temporarily for API/test compatibility. **They do not downgrade schema
+  approval or upgrade fixture privilege.** No production installer,
+  helper, CLI or service is allowed to call private \`_under_root\` writers
+  without a separately vetted, authenticated current-host-root
+  transaction and corresponding native evidence.
+
+Security/operational blockers are unchanged: verified host namespace,
+mount topology, ownership, ACL/xattr/SELinux, actual operator rights, a
+single held lock through NGINX managed include staging/full-context
+\`nginx -t\`, controlled reload/known-good compensation and atomic,
+active-only client catalog publication, signed APT/DNF correctness and
+owner-VM booted Debian 13/AlmaLinux 10 tests. Container passes do not
+qualify as native systemd or SELinux acceptance. Protected integration
+is still subject to every original criterion and required checks.
+
+---
+
 **Tracking:** primary issue #31 / milestone v0.6.0; related #18, #25, #27, #28 and #95. **Dependency fulfilled:** [PR #222](https://github.com/repocache-project/repocache/pull/222) was independently authorized and merged into protected `main` as `955360fb7686f632d7d0090994008e10159f23b3`, providing the protected state schema and recovery implementation. Under the adopted release workflow, this PR targets the protected `integration/v0.6.0` branch (baseline `a1739a42cf5baac78bb3f8beb2bd02ee362447e9`), which already contains the #222 storage core. PR #224 subsequently merged into integration/v0.6.0 as ac13ba3847420560685c2156681fb2379af73d36 on 2026-11-03; the previous OPEN status was historical. Synthetic tests do not verify production installation.
 
 ## Fixed-purpose read-only contract

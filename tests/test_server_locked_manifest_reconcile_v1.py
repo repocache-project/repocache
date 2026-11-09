@@ -16,6 +16,10 @@ from repocache.server_locked_manifest_reconcile_v1 import (
     _match_manifest,
     _candidate_action,
     preview_proposed_v2_state_transition,
+    INITIAL_V2_STATE_SCHEMA_VERSION,
+    INITIAL_V2_MAX_PRESENT_REPOSITORIES,
+    INITIAL_V2_MAX_ALL_TIME_IDS,
+    INITIAL_V2_CLEAN_INSTALL_ONLY,
     _preview_recovery_under_root,
     preview_current_namespace_locked_candidate,
 )
@@ -992,3 +996,52 @@ def test_proposed_v2_does_not_touch_host_or_mutate_caller(monkeypatch):
     monkeypatch.setattr(os, "replace", forbidden)
     assert v2_preview(original)["authorizes_write"] is False
     assert original == before
+
+
+def test_adopted_initial_v2_schema_is_explicit_and_does_not_enable_host_authority():
+    """Pin the 2026-11-09 maintainer contract without granting a writer."""
+    assert INITIAL_V2_STATE_SCHEMA_VERSION == 2
+    assert INITIAL_V2_MAX_PRESENT_REPOSITORIES == 500
+    assert INITIAL_V2_MAX_ALL_TIME_IDS == 10000
+    assert INITIAL_V2_CLEAN_INSTALL_ONLY is True
+
+    initial = proposed_v2_state(v2_install_document(2), generation=1)
+    assert initial["state_schema_version"] == INITIAL_V2_STATE_SCHEMA_VERSION
+    result = v2_preview(initial, expected=0)
+    assert result["proposed_generation"] == 1
+    assert result["configuration_digest_matches_canonical_payload"] is True
+    assert result["requires_locked_root_revalidation"] is True
+    for field in ("operator_authorization_verified",
+                  "protected_snapshot_provenance_verified",
+                  "reservation_history_authoritative",
+                  "observed_nginx_exposure_verified",
+                  "native_transaction_verified",
+                  "authorizes_write", "authorizes_nginx_reload",
+                  "authorizes_catalog_publication",
+                  "authorizes_cache_cleanup"):
+        assert result[field] is False
+
+
+def test_adopted_v2_clean_bootstrap_refuses_nonzero_generation_without_predecessor():
+    first = proposed_v2_state(v2_install_document(1), generation=1)
+    assert v2_preview(first, expected=0)["proposed_generation"] == 1
+    # First-server bootstrap is generation 0 -> 1 ONLY. Same-version
+    # repair needs independently recovered, trusted previous state.
+    upgraded = proposed_v2_state(v2_install_document(1), generation=2)
+    with pytest.raises(LockedManifestInspectionError, match="PREVIOUS_STATE_REQUIRED"):
+        v2_preview(upgraded, expected=1, previous=None)
+
+
+def test_adopted_v2_retirement_requires_persistent_history_across_generations():
+    start = proposed_v2_state(v2_install_document(2), generation=1)
+    reduced = proposed_v2_state(v2_install_document(1), generation=2, prior=start)
+    assert v2_preview(reduced, expected=1, previous=start)["removed_repository_count"] == 1
+    assert len(reduced["id_reservations"]) == 2
+    retired_id = next(row["id"] for row in reduced["id_reservations"]
+                      if row["status"] == "retired")
+    repeated = proposed_v2_state(v2_install_document(1), generation=3, prior=reduced)
+    assert v2_preview(repeated, expected=2, previous=reduced)["reserved_id_count"] == 2
+    assert retired_id not in {row["id"] for row in repeated["repository_records"]}
+    assert {row["id"] for row in repeated["id_reservations"]} == {
+        row["id"] for row in reduced["id_reservations"]
+    }
