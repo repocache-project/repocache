@@ -1809,7 +1809,8 @@ def test_v2_precommit_pending_recovery_and_lock_contention_refused(fixture_root)
     fd, folder, uid = fixture_root
     current = snapshot(count=1)
     apply(fixture_root, current)
-    future = snapshot(count=1, generation=2, previous=current)
+    # A genuine new repository avoids the store's correct idempotent no-op.
+    future = snapshot(count=2, generation=2, previous=current)
     with _locked(fd, uid):
         with pytest.raises(ProtectedStateStoreError, match="LOCK_UNAVAILABLE"):
             precommit(fixture_root, future, expected=1)
@@ -1823,7 +1824,7 @@ def test_v2_precommit_pending_recovery_and_lock_contention_refused(fixture_root)
         precommit(fixture_root, future, expected=1)
     assert (folder / V2_JOURNAL).read_bytes() == pending
     assert rollback(fixture_root)["state_generation"] == 1
-    assert precommit(fixture_root, future, expected=1)["would_change_v2_state"] is False
+    assert precommit(fixture_root, future, expected=1)["would_change_v2_state"] is True
 
 
 def test_v2_precommit_refuses_out_of_band_state_change_while_locked(
