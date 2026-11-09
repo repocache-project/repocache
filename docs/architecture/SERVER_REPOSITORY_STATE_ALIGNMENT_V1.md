@@ -424,3 +424,25 @@ Native systemd/SELinux, real NGINX activation and catalog publication are
 still NOT VERIFIED. Tests exercise new and identical-ID no-op flows,
 configuration conflicts, retired ID avoidance, reservation saturation,
 malformed/stale inputs, incomplete pins and absence of host side effects.
+
+
+## Historical ID capacity guard for explicit and automatic adds
+
+The pure explicit-ID add preview now uses a **single frozen, bounded
+caller-provided reservation snapshot** for the lifecycle plan and its
+capacity check, matching the existing automatic-ID add preview. A new
+reservation at exactly 10,000 already-reserved IDs fails closed before
+attempting NGINX rendering; the 9,999-entry final slot remains available
+as a *candidate*. An idempotent add for an unchanged already-present ID
+remains a no-op even at 10,000 records. Both add paths thereby avoid
+emitting an obviously non-persistable next-state intent against the
+currently proposed #31 v2 history bound.
+
+The 10,000-history constraint is **proposal compatibility**, not an
+adopted persistent format or proof that the caller's ledger is complete.
+It must be re-evaluated against any eventual approved #31 schema and
+its independently authenticated all-time records under the protected
+transaction lock. The planner cannot commit, allocate IDs, activate
+NGINX, publish a catalog or delete retained cache. Tests cover the
+last permitted slot, capacity exhaustion, an existing no-op at full
+capacity, and refusal before rendering with no side effects.

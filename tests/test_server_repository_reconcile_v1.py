@@ -1781,3 +1781,82 @@ def test_auto_add_is_pure_without_network_or_file_mutation(monkeypatch):
     assert result["changed"] is True
     assert result["authorizes_state_commit"] is False
     assert result["authorizes_catalog_publication"] is False
+
+
+def _complete_reserved_id_history(current, count):
+    """Supply a bounded synthetic all-time ID set, never a trusted ledger."""
+    ids = {repo["id"] for repo in current["repositories"]}
+    ids.update(f"retired-{index:05d}" for index in range(count - len(ids)))
+    assert len(ids) == count
+    return ids
+
+
+def test_explicit_add_refuses_full_historical_id_capacity_without_nginx():
+    current = document()
+    current["expected_state_generation"] = 1
+    proposed = copy.deepcopy(current["repositories"][0])
+    proposed["id"] = "new-explicit-id"
+    proposed["upstream"]["base_url"] = "https://mirror.example.invalid/new-explicit/"
+    proposed["desired_state"] = "disabled"
+    reservations = _complete_reserved_id_history(current, 10000)
+    before = copy.deepcopy(current), copy.deepcopy(proposed), reservations.copy()
+    with pytest.raises(ReconciliationPlanError, match="reservation history exhausted"):
+        preview_repository_lifecycle_nginx_from_untrusted_document(
+            current, current_generation=1, operation="add",
+            proposed_repository=proposed, reserved_ids=reservations,
+            candidate_pins_by_repository={}, ca_bundle_path=_CA,
+        )
+    assert (current, proposed, reservations) == before
+
+
+def test_explicit_add_accepts_final_historical_slot_but_no_more():
+    current = document()
+    current["expected_state_generation"] = 1
+    proposed = copy.deepcopy(current["repositories"][0])
+    proposed["id"] = "final-explicit-id"
+    proposed["upstream"]["base_url"] = "https://mirror.example.invalid/last-slot/"
+    result = preview_repository_lifecycle_nginx_from_untrusted_document(
+        current, current_generation=1, operation="add",
+        proposed_repository=proposed,
+        reserved_ids=_complete_reserved_id_history(current, 9999),
+        candidate_pins_by_repository={}, ca_bundle_path=_CA,
+    )
+    assert result["changed"] is True
+    assert result["new_repository_ids"] == ["final-explicit-id"]
+    assert result["proposed_state_generation"] == 2
+    assert result["authorizes_state_commit"] is False
+
+
+def test_explicit_add_idempotent_existing_allowed_with_full_history():
+    current = document()
+    current["expected_state_generation"] = 1
+    result = preview_repository_lifecycle_nginx_from_untrusted_document(
+        current, current_generation=1, operation="add",
+        proposed_repository=copy.deepcopy(current["repositories"][0]),
+        reserved_ids=_complete_reserved_id_history(current, 10000),
+        candidate_pins_by_repository={}, ca_bundle_path=_CA,
+    )
+    assert result["changed"] is False
+    assert result["repository_id"] == "debian-trixie-main"
+    assert result["new_repository_ids"] == []
+    assert result["next_generation_configuration_preview"] is None
+    assert result["authorizes_state_commit"] is False
+
+
+def test_explicit_add_saturated_history_rejects_before_nginx_renderer(monkeypatch):
+    import repocache.server_repository_reconcile_v1 as module
+    current = document()
+    current["expected_state_generation"] = 1
+    proposed = copy.deepcopy(current["repositories"][0])
+    proposed["id"] = "overflow-explicit-id"
+    proposed["upstream"]["base_url"] = "https://mirror.example.invalid/overflow/"
+    def forbidden(*args, **kwargs):
+        raise AssertionError("render called for an impossible allocation")
+    monkeypatch.setattr(module, "render_repository_nginx_bundle_candidate", forbidden)
+    with pytest.raises(ReconciliationPlanError, match="reservation history exhausted"):
+        preview_repository_lifecycle_nginx_from_untrusted_document(
+            current, current_generation=1, operation="add",
+            proposed_repository=proposed,
+            reserved_ids=_complete_reserved_id_history(current, 10000),
+            candidate_pins_by_repository={}, ca_bundle_path=_CA,
+        )

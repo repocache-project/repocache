@@ -513,16 +513,30 @@ def preview_repository_lifecycle_nginx_from_untrusted_document(
     """
     current = validate_install_document(current_document, for_apply=True)
     try:
+        # One bounded immutable reservation view is used for both the
+        # operation plan and the capacity decision. Never inspect a live
+        # caller-owned mutable set again after the planner has run.
+        reservations = (
+            _reserved_snapshot(current, reserved_ids)
+            if operation == "add" else reserved_ids
+        )
         intent = plan_repository_change(
             current,
             current_generation=current_generation,
             operation=operation,
             repository_id=repository_id,
             proposed_repository=proposed_repository,
-            reserved_ids=reserved_ids,
+            reserved_ids=reservations,
         )
     except RepositoryPlanError:
         raise ReconciliationPlanError("lifecycle: invalid or unreserved operation") from None
+
+    # The shared ID snapshot is bounded at 10,000 historic entries. Never
+    # report a new add as a viable proposed transition when that next ID
+    # would exceed the same bound. A no-op add of an existing ID is safe to
+    # preview even with a completely full caller-supplied history.
+    if operation == "add" and intent["changed"] and len(reservations) >= 10000:
+        raise ReconciliationPlanError("lifecycle: reservation history exhausted")
 
     candidate = intent["candidate_document"]
     original = {repo["id"]: repo for repo in current["repositories"]}
