@@ -1,10 +1,6 @@
-# Native integration Merge Queue (PROPOSED — NOT ACTIVE)
+# Native integration Merge Queue — observed configuration and operating limits
 
-Status: **proposal; NOT ACTIVE; queue pilot NOT VERIFIED**. This procedure does
-not approve a PR, replace the existing acceptance contract or modify GitHub
-protections. The goal is to serialize integrations using GitHub's **native**
-Merge Queue and existing GitHub Actions. No additional application, service,
-runner, secret or privately hosted infrastructure is required.
+**Observed 2026-11-09:** live ruleset [#26753319](https://github.com/repocache-project/repocache/rules/26753319) is **active** for the exact `integration/v0.6.0` and `integration/v0.7.0` branches, alongside the existing strict integration protections. Three `merge_group` workflow runs on 2026-11-07 completed successfully (runs #42365689658, #42365689650 and #42365689685 on `8c43d6b1fefd101f46ffb8a199ceff2c82f7c957`). Negative-path rejection, full queue admission provenance and any separately required pilot acceptance remain **NOT VERIFIED** without further specific evidence. This observed configuration is not permission to change a ruleset, admit an unaccepted PR or claim release readiness.
 
 ## Supported lanes and current evidence (2026-11-04)
 
@@ -23,7 +19,7 @@ Both protected-branch HEADs had all **nine required check contexts**
 - v0.7.0: Tests #41803238611, Offline wheelchain #41803238612,
   upgrade rehearsal #41803238541.
 
-The actual `merge_group` event remains **NOT VERIFIED** until a live pilot.
+Successful `merge_group` execution is now observed; failing-check rejection, admission provenance and any other unexecuted pilot criteria remain **NOT VERIFIED**.
 The live integration wildcard protection ruleset #25793496 remains ACTIVE,
 covering `integration/*` and `integration/**/*`, with nine required GitHub
 Actions contexts, strict checks, PR-only updates and no force/deletion bypass.
@@ -61,32 +57,13 @@ Sources:
 - https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue
 - https://github.blog/changelog/2024-02-27-repository-rules-configure-merge-queue-rule-public-beta/
 
-## Maintainer-only GitHub setup (NOT APPLIED)
+## Active queue configuration and separately authorized changes
 
-In repository `Settings > Rules > Rulesets`, create a repository-level
-branch ruleset specifically for these two *exact* targets. Keep it
-**Disabled** until a separately authorized controlled pilot is ready.
+The current active exact-branch queue ruleset #26753319 uses **squash**, single-entry build/merge limits, `ALLGREEN` grouping, a 60-minute check timeout and no bypass actors. The separate wildcard ruleset #25793496 remains active with nine strict required contexts and PR-only protection. Do **not** create, disable, retarget, modify or weaken either live ruleset without distinct maintainer authorization.
 
-Configuration for the pilot:
-- Rule: **Require merge queue**.
-- Build concurrency: **1**.
-- Minimum / maximum PRs per merge: **1 / 1**.
-- Only merge non-failing queue entries: **enabled**.
-- Merge method: **squash**, consistent with the already used protected
-  integration merges; recheck permitted effective methods.
-- Timeout: **60 minutes initially**, then tune from observed worst-case CI.
-- Do **not** enable bypass actors or automatic enqueueing; do not add a
-  different, weaker set of required statuses. Preserve the original
-  wildcard ruleset with all nine strict required checks.
-- Do not activate a second merge-queue rule on the same branch.
-  Confirm cumulative ruleset behavior in a small live pilot before
-  broad deployment.
+For any future lane, obtain separate ruleset-change approval only after its own `merge_group` triggers, required checks, target identity and acceptance gates are verified. Do not treat `integration/v*` as an eligible queue wildcard. Preserve the existing strict integration protection.
 
-GitHub's administrative UI is required for ruleset edits when the
-available GitHub connector does not have repository administration access.
-No queue activation has been attempted by this proposal.
-
-## Operator-controlled admission (conditional delegation proposed; NOT ACTIVE until adopted)
+## Operator-controlled admission (conditional delegation adopted in PR #245)
 
 GitHub Merge Queue **does not inspect the original issue acceptance
 ledger** and does not guarantee that an actor has been explicitly authorized
@@ -100,16 +77,8 @@ maintainer-controlled action:
 2. Report PASS / FAIL / NOT VERIFIED with inspectable evidence. Any
    applicable FAIL or mandatory NOT VERIFIED blocks admission. Mark the PR
    ready for review only if applicable acceptance is satisfied.
-3. Until the governance amendment is merged on protected `main`, obtain
-   **separate explicit maintainer permission** for the PR and evaluated
-   HEAD to enter the queue. After adoption, routine accepted-scope PRs
-   targeting an exact `integration/vMAJOR.MINOR.PATCH` lane may use the
-   maintainer's **standing conditional authorization** *only* after a
-   responsible operator actively verifies every original criterion as
-   PASS, all applicable CI as success, exact head/base identities and
-   absence of architecture, security, scope or unresolved review risk.
-   Exceptional cases require specific permission. Any changed PR head
-   or base invalidates prior evidence; re-evaluate before clicking.
+3. PR #245 merged into protected `main` on 2026-11-04. A responsible operator may use **standing conditional authorization** only for an ordinary already-approved-scope PR targeting exactly `integration/vMAJOR.MINOR.PATCH` with all original applicable criteria PASS, all strict required and other applicable CI checks successful for the correct revision, confirmed head/base and no exceptional security, architecture, compatibility, dependency, review or scope risk. Record exact-SHA evidence before admission. Do not request redundant permission for qualifying work; obtain specific permission for exceptions. Recheck when head/base changes.
+
 4. The authorized operator chooses **Add to merge queue** in GitHub.
    **Never enable auto-enqueue based solely on green CI.** A GitHub
    collaborator's technical ability to enqueue is *not* maintainer
@@ -131,38 +100,8 @@ activation. If technical enforcement of maintainer-only admission becomes
 mandatory, revisit a separate trusted gate then; do not claim the current
 native-only setup provides it.
 
-## Controlled live pilot and rollback (NOT VERIFIED)
+## Remaining verification, future pilot and rollback
 
-After separate maintainer authorization to activate the exact-branch rule
-and to integrate the designated disposable PR/HEAD:
+The ruleset is **active** and successful `merge_group` runs have been observed, but a completed success event alone does not prove failure rejection, full provenance, unobserved security tests or a complete separately approved pilot. These remain **NOT VERIFIED** until source-bound logs and exact-SHA evidence are inspected. Do not rerun a pilot solely because historical guidance labels the queue “NOT ACTIVE”.
 
-1. Snapshot the five existing rulesets and exact nine required contexts.
-   Confirm the rule targets only `integration/v0.6.0` and
-   `integration/v0.7.0`, and has no bypass actors.
-2. Enable the dedicated queue ruleset. Verify that normal PRs still
-   require the existing nine GitHub Actions checks, approvals and
-   discussion resolution applicable under the effective protections.
-3. Enqueue one small, independently accepted pilot PR, with explicit
-   maintainer authorization for **that exact HEAD**. Check the
-   `merge_group` event, all nine successful job contexts from the
-   expected GitHub Actions App on the synthesized SHA, the queue result,
-   final branch SHA and protected-branch post-merge CI.
-4. Verify a failing-check path **without merging an unaccepted PR** and
-   confirm failed/timeout groups are not integrated; test stale-base
-   revalidation where feasible. Do not intentionally compromise or
-   force-update protected branches.
-5. If checks do not execute, required contexts are missing, unrelated
-   branches are targeted, protections change or queue acceptance cannot
-   be verified, **disable the new queue ruleset immediately**, leave the
-   existing wildcard protection intact and record FAIL / NOT VERIFIED.
-6. If the GitHub UI rejects wildcard or cumulative ruleset behavior, keep
-   only exact targets or create separate exact-branch rulesets. Never
-   weaken the existing nine contexts to make a pilot pass.
-
-**Authority boundary:** this proposal grants no authority to merge itself or
-activate a queue rule. The future standing integration-merge delegation is
-conditional on the governance amendment being separately reviewed and
-merged on protected `main` and applies only to fully accepted routine
-`integration/vMAJOR.MINOR.PATCH` PRs. The initial pilot and activation,
-exceptional merges, bypass, release tagging/signing/publishing, deployment
-and destructive changes remain separately authorized.
+For any separately authorized new pilot or ruleset adjustment, first snapshot **all six observed rulesets**, verify the existing nine mandatory contexts and exact target branches, validate eligible PR acceptance, merge-group and post-merge push checks and a safe rejection/timeout path without merging an unaccepted PR. If a safety gate fails, stop the affected queue operation, preserve existing strict protections, record FAIL/NOT VERIFIED and obtain specific authority for any live ruleset change or rollback. Signing, releases, production and destructive changes remain independently protected.

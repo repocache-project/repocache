@@ -20,13 +20,13 @@ def test_lifecycle_is_generic_and_respects_main_linear_history():
     assert "Do not reuse production" in doc
 
 
-def test_adoption_requires_main_bootstrap_and_both_active_lane_pushes():
+def test_adopted_routing_does_not_block_parallel_sessions():
     doc = (ROOT / "docs/RELEASE_LIFECYCLE.md").read_text("utf-8")
     for token in (
-        "PR #230", "PR #183", "PR #231", "one-time",
+        "PRs #230, #183 and #231", "historical migration",
         "protected `main`", "integration/v0.6.0",
-        "integration/v0.7.0", "nine required live `push` contexts",
-        "NOT VERIFIED", "not authorize the exception",
+        "integration/v0.7.0", "NOT VERIFIED",
+        "independent approved work",
     ):
         assert token in doc
 
