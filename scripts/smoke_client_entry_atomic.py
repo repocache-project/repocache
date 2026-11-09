@@ -70,7 +70,7 @@ def fixture(root, relative, body):
     chosen = boundaries.boundaries(relative, body)[0]
     ident = candidates.register_entry_candidate_sandbox(
         root, relative, sha(body), chosen["sha256"])["id"]
-    approvals.approve_entry_plan_sandbox(root, ident, sha(body), chosen["sha256"])
+    approvals.approve_entry_plan_sandbox(root, ident, sha(body), chosen["sha256"], URL)
     stage_info = bridge.stage_entry_change_sandbox(root, ident, URL)
     return path, ident, stage_info["stage_id"], chosen
 
@@ -146,7 +146,7 @@ def shared_file_approval_conflict(root):
         second_candidate = candidates.register_entry_candidate_sandbox(
             root, shared, sha(before), second["sha256"])["id"]
         approvals.approve_entry_plan_sandbox(
-            root, second_candidate, sha(before), second["sha256"])
+            root, second_candidate, sha(before), second["sha256"], URL)
 
         # Both approvals can be recorded for different repository entries.
         # Only one whole-file stage may be prepared, irrespective of entry ID.

@@ -2,7 +2,7 @@
 
 **Status:** maintainer-approved design, **not** a claim of implementation or platform validation.  
 **Decision record:** UC-01 through UC-44, recorded during client planning on 2026-10-22/23.  
-**Open decision:** UC-45 (server-published route changes); do not treat any option as approved.  
+**Adopted decision (2026-11-09):** UC-45 requires fresh explicit administrator approval for server-published cache route changes; never adopt a changed route automatically.  
 **Targets:** Debian 13 (APT) and AlmaLinux 10 (DNF) only.  
 **CLI reference:** [CLI Architecture v1.0](CLI_ARCHITECTURE.md).  
 **Tracking:** [#24](https://github.com/teixemf/repocache/issues/24), [#21](https://github.com/teixemf/repocache/issues/21), [#22](https://github.com/teixemf/repocache/issues/22).
@@ -100,7 +100,7 @@ This is a single, reviewable source of functional requirements, not a replacemen
 
 ## Unresolved decisions and coordination
 
-- **UC-45 is not approved:** behavior when an otherwise valid current catalog changes the cache route. Neither automatic nor manual-only policy may be claimed until decided. Existing `--apply` is never a blanket authorization for new trust boundaries.
+- **UC-45 adopted on 2026-11-09:** every changed server-published cache route requires fresh explicit administrator approval bound to that precise validated HTTPS destination and new source/catalog/trust/fallback baseline. Existing `--apply` or earlier approval does not authorize it. The sandbox route-binding implementation is not an installed source writer.
 - **UC-01 vs UC-22:** initial setup may configure safe known repositories only with explicit installer/administrative authorization and proven fallback. Ordinary `repos sync` remains a dry-run. Bootstrap behavior requires a separate documented acceptance contract; no surprise installation-time writes.
 - **UC-08 vs UC-32:** a verified server-side removal requires operator action, while a missing catalog cannot establish removal; never silently switch to a changed server or trust key.
 - **UC-11/UC-25/UC-30/UC-33:** two retained backups and per-repository recovery must be made consistent with file-level transactions. If a shared-file edit cannot be recovered without disturbing external changes, refuse automation.

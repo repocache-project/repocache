@@ -109,7 +109,8 @@ def test_non_root_cannot_create_explicit_approval(root, monkeypatch, path, data)
     with pytest.raises(approval.ApprovalRefused, match="Root"):
         approval.approve_entry_plan_sandbox(
             root, ident, digest(data),
-            boundaries.boundaries(path, data)[0]["sha256"])
+            boundaries.boundaries(path, data)[0]["sha256"],
+            "https://cache.invalid/repo/")
     assert (root / path).read_bytes() == data
     assert not (root / "var/lib/repocache-client/entry-approvals-lab").exists()
 
@@ -132,9 +133,11 @@ def test_rootless_fixture_cannot_grant_source_write_capability(root):
 def test_approval_schema_never_accepts_production_authority():
     ident = "a" * 32
     doc = {
-        "schema": 1, "candidate_id": ident,
+        "schema": 2, "candidate_id": ident,
         "source_file_sha256": "b" * 64,
         "source_entry_sha256": "c" * 64,
+        "route_sha256": "d" * 64,
+        "route_approval_policy": "explicit-exact-route-v1",
         "decision": "approve-entry-plan", "approver_euid": 0,
         "scope": "sandbox-only", "production_write_eligible": False,
     }
@@ -146,6 +149,9 @@ def test_approval_schema_never_accepts_production_authority():
         ("scope", "production"),
         ("production_write_eligible", True),
         ("decision", "commit"),
+        ("route_sha256", "invalid"),
+        ("route_approval_policy", "implicit"),
+        ("schema", 1),
     ):
         wrong = dict(doc, **{key: value})
         with pytest.raises(approval.ApprovalRefused):
@@ -185,9 +191,11 @@ def test_forged_sandbox_approval_cannot_be_consumed_as_non_root(
         pass
     directory = root / "var/lib/repocache-client" / approval.APPROVAL_DIR
     record = {
-        "schema": 1, "candidate_id": ident,
+        "schema": 2, "candidate_id": ident,
         "source_file_sha256": digest(APT_DATA),
         "source_entry_sha256": boundaries.boundaries(APT, APT_DATA)[0]["sha256"],
+        "route_sha256": digest(b"https://cache.invalid/repo/"),
+        "route_approval_policy": "explicit-exact-route-v1",
         "decision": "approve-entry-plan", "approver_euid": 0,
         "scope": "sandbox-only", "production_write_eligible": False,
     }
@@ -199,3 +207,53 @@ def test_forged_sandbox_approval_cannot_be_consumed_as_non_root(
         approval.preview_entry_change_sandbox(
             root, ident, "https://cache.invalid/repo/")
     assert (root / APT).read_bytes() == APT_DATA
+
+
+@pytest.mark.parametrize("path,data", CASES)
+def test_explicit_root_approval_binds_one_exact_route_and_blocks_uc45_drift(
+        root, path, data):
+    if os.geteuid() != 0:
+        pytest.skip("Real root is required for positive sandbox approval")
+    ident = register(root, path, data)
+    entry = boundaries.boundaries(path, data)[0]
+    url = "https://cache.invalid/repo/"
+    decision = approval.approve_entry_plan_sandbox(
+        root, ident, digest(data), entry["sha256"], url)
+    assert decision["production_write_eligible"] is False
+    record = approval._read_approval(root, ident)
+    assert record["schema"] == 2
+    assert record["route_sha256"] == digest(url.encode("ascii"))
+    assert "cache.invalid" not in str(record)
+    assert approval.preview_entry_change_sandbox(root, ident, url)["state"] == "planned"
+    baseline = (root / path).read_bytes()
+
+    for changed_url in (
+        "https://cache.invalid/other/",
+        "https://cache.invalid:8443/repo/",
+        "https://different-cache.invalid/repo/",
+    ):
+        with pytest.raises(approval.ApprovalRefused, match="route differs"):
+            approval.preview_entry_change_sandbox(root, ident, changed_url)
+        assert (root / path).read_bytes() == baseline
+
+    with pytest.raises(approval.ApprovalRefused, match="already has explicit approval"):
+        approval.approve_entry_plan_sandbox(
+            root, ident, digest(data), entry["sha256"],
+            "https://different-cache.invalid/repo/")
+    assert approval._read_approval(root, ident)["route_sha256"] == digest(
+        url.encode("ascii"))
+    assert (root / path).read_bytes() == baseline
+
+
+@pytest.mark.parametrize("url", (
+    "https://user:secret@cache.invalid/repo",
+    "http://cache.invalid/repo",
+    "https://cache.invalid/repo?token=secret",
+))
+def test_unsafe_route_is_refused_before_creating_approval(root, url):
+    ident = register(root, APT, APT_DATA)
+    entry = boundaries.boundaries(APT, APT_DATA)[0]
+    with pytest.raises(approval.ApprovalRefused):
+        approval.approve_entry_plan_sandbox(
+            root, ident, digest(APT_DATA), entry["sha256"], url)
+    assert not (root / "var/lib/repocache-client/entry-approvals-lab").exists()

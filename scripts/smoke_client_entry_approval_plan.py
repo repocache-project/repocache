@@ -73,20 +73,28 @@ os.setuid(65534)
 sys.path.insert(0, sys.argv[1])
 import entry_approval_plan_sandbox as ap
 try:
-    ap.approve_entry_plan_sandbox(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5])
+    ap.approve_entry_plan_sandbox(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6])
 except ap.ApprovalRefused:
     raise SystemExit(0)
 raise SystemExit(3)
 """
             denied = subprocess.run([
                 sys.executable, "-c", worker, str(CLIENT), str(root),
-                ident, sha(before), first["sha256"],
+                ident, sha(before), first["sha256"], "https://cache.invalid/repo/",
             ], check=False, capture_output=True, text=True, timeout=15)
             assert denied.returncode == 0, denied.stderr
             approved = plan.approve_entry_plan_sandbox(
-                root, ident, sha(before), first["sha256"])
+                root, ident, sha(before), first["sha256"],
+                "https://cache.invalid/repo/")
             assert approved["decision"] == "approve-entry-plan"
             assert not approved["production_write_eligible"]
+            try:
+                plan.preview_entry_change_sandbox(
+                    root, ident, "https://cache.invalid/changed/")
+            except plan.ApprovalRefused as exc:
+                assert "route differs" in str(exc)
+            else:
+                raise AssertionError("Changed route reused old approval")
             report = plan.preview_entry_change_sandbox(
                 root, ident, "https://cache.invalid/repo/")
             assert report["state"] == "planned"
