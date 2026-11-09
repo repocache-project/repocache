@@ -86,6 +86,10 @@ def test_check_preserves_configuration_even_with_catalog(monkeypatch, host, caps
     assert client.run(["--json", "check"], root=host) == 0
     data = json.loads(capsys.readouterr().out)
     assert data["ok"] is True
+    fallback = next(check for check in data["checks"] if check["name"] == "fallback")
+    assert fallback["ok"] is False
+    assert fallback["required"] is False
+    assert "NOT VERIFIED" in fallback["detail"]
     assert {str(p): p.read_bytes() for p in host.rglob("*") if p.is_file()} == before
 
 
@@ -166,3 +170,56 @@ def test_explicit_empty_server_does_not_fall_back_to_config(host, capsys):
 def test_server_rejects_ambiguous_or_noncanonical_origin(origin):
     with pytest.raises(client.ClientError):
         client._server(origin)
+
+
+def test_check_does_not_claim_mixed_urls_prove_native_fallback(
+        monkeypatch, host, capsys):
+    mirrors = host / "etc/apt/mirrors"
+    mirrors.mkdir()
+    (mirrors / "two.txt").write_text(
+        "https://cache.example.org/debian/\n"
+        "https://deb.debian.org/debian/\n")
+    (host / "etc/apt/sources.list").write_text(
+        "deb mirror+file:/etc/apt/mirrors/two.txt trixie main\n")
+    monkeypatch.setattr(client, "_connectivity", lambda _: [
+        {"name": "dns", "ok": True, "detail": "ok"},
+        {"name": "https", "ok": True, "detail": "ok"},
+    ])
+    monkeypatch.setattr(client, "_catalog", lambda _: {
+        "schema": 1, "repositories": [
+            {"upstream": "https://deb.debian.org/debian/",
+             "cache": "https://cache.example.org/debian/"},
+        ],
+    })
+    before = {str(p): p.read_bytes() for p in host.rglob("*") if p.is_file()}
+    assert client.run(["--json", "check"], root=host) == 0
+    response = json.loads(capsys.readouterr().out)
+    assert any(r["route"] == "mixed" for r in response["repositories"])
+    fallback = next(x for x in response["checks"] if x["name"] == "fallback")
+    assert fallback["ok"] is False
+    assert fallback["required"] is False
+    assert "NOT VERIFIED" in fallback["detail"]
+    assert response["ok"] is True  # advisory evidence is not a fatal check
+    assert {str(p): p.read_bytes() for p in host.rglob("*") if p.is_file()} == before
+
+
+def test_check_fallback_is_not_applicable_with_direct_only_sources(
+        monkeypatch, host, capsys):
+    (host / "etc/yum.repos.d/cache.repo").write_text(
+        "[cache]\nbaseurl=https://cache.example.org/linux/\nenabled=0\n")
+    monkeypatch.setattr(client, "_connectivity", lambda _: [
+        {"name": "dns", "ok": True, "detail": "ok"},
+        {"name": "https", "ok": True, "detail": "ok"},
+    ])
+    monkeypatch.setattr(client, "_catalog", lambda _: {
+        "schema": 1, "repositories": [],
+    })
+    before = {str(p): p.read_bytes() for p in host.rglob("*") if p.is_file()}
+    assert client.run(["--json", "check"], root=host) == 0
+    response = json.loads(capsys.readouterr().out)
+    fallback = next(x for x in response["checks"] if x["name"] == "fallback")
+    assert fallback["ok"] is True
+    assert fallback["required"] is False
+    assert "Not applicable" in fallback["detail"]
+    assert {str(p): p.read_bytes() for p in host.rglob("*") if p.is_file()} == before
+

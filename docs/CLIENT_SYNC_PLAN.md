@@ -46,3 +46,19 @@ The current implementation intentionally does **not**:
 - Coordinate CLI changes with [#107](https://github.com/teixemf/repocache/issues/107) and authenticated submissions with [#22](https://github.com/teixemf/repocache/issues/22)/draft PR #46.
 
 The catalog cache origin is compared against the configured server using HTTPS scheme, host and effective port, rather than just the hostname. A different port or plaintext HTTP is not an equivalent REPOCACHE server.
+
+
+## Read-only diagnostic fallback honesty
+
+The optional fallback check in repocache-client check is a diagnostic, not
+an apply gate. A configured mixture of cache and upstream URLs never marks
+native fallback as verified. It now reports NOT VERIFIED (nonfatal) whenever
+any enabled local source uses a REPOCACHE route, regardless of whether that
+source also contains a direct upstream URI. If all enabled sources remain
+direct, fallback is reported as not applicable rather than failed. The check
+does not contact a package manager, change any repository source, or claim
+that a sandbox TLS metadata probe validates real signed package downloads.
+
+This fixes the prior misleading success status for a merely mixed URL
+configuration, while preserving non-interactive check exit behavior and
+the fail-closed refusal of sync --apply.

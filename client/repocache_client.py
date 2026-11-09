@@ -423,6 +423,25 @@ def _sync_plan(repos: list[dict], catalog: dict) -> dict:
             "dry_run": True, "planned_changes": 0}
 
 
+def _fallback_check(repos: list[dict]) -> dict:
+    """Do not confuse a mixed URL configuration with native failover proof.
+
+    Native APT/DNF fallback requires exact-format, authenticated on-host
+    evidence, never mere source inspection or a synthetic metadata probe.
+    """
+    cached = [repo for repo in repos if repo.get("enabled", True)
+              and repo.get("route") != "direct"]
+    return {
+        "name": "fallback", "ok": not cached, "required": False,
+        "detail": (
+            "Not applicable: no enabled REPOCACHE-routed sources"
+            if not cached else
+            "NOT VERIFIED: configured cache/upstream URLs do not prove "
+            "native APT/DNF failover or authenticated package fallback"
+        ),
+    }
+
+
 def _connectivity(server: str) -> list[dict]:
     p = urlsplit(server)
     host, port = p.hostname or "", p.port or 443
@@ -682,10 +701,7 @@ def run(argv: list[str] | None = None, root: Path = Path("/")) -> int:
                                    else "not supported by catalog")
                 if repo["compatibility"] == "invalid":
                     repo["support"] = "invalid repository URL"
-            cached = [r for r in repos if r["enabled"] and r["route"] != "direct"]
-            ok_fallback = sum(r["route"] == "mixed" for r in cached)
-            checks.append({"name": "fallback", "ok": bool(cached) and ok_fallback == len(cached),
-                           "required": False, "detail": "Configured fallback check"})
+            checks.append(_fallback_check(repos))
             bad = any(r["enabled"] and r["compatibility"] == "invalid" for r in repos)
             code = 1 if not all(c["ok"] for c in checks if c.get("required", True)) else 3 if bad else 0
             result = {"ok": code == 0, "os": distro, "server": server,
