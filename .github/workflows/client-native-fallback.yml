@@ -27,8 +27,9 @@ jobs:
             --mount "type=bind,source=$PWD,target=/workspace,readonly" \
             --workdir /workspace debian:trixie-slim \
             sh -ec 'apt-get update -qq && \
-                    apt-get install -y --no-install-recommends python3 gnupg >/dev/null && \
-                    python3 scripts/ci_client_native_fallback.py apt'
+                    apt-get install -y --no-install-recommends python3 gnupg openssl >/dev/null && \
+                    python3 scripts/ci_client_native_fallback.py apt && \
+                    python3 scripts/ci_client_native_fallback.py apt --tls'
 
   almalinux10-dnf-metadata:
     name: DNF metadata preference/fallback (almalinux:10)
@@ -45,5 +46,6 @@ jobs:
           docker run --rm --network bridge \
             --mount "type=bind,source=$PWD,target=/workspace,readonly" \
             --workdir /workspace almalinux:10 \
-            sh -ec 'dnf install -y python3 createrepo_c >/dev/null && \
-                    python3 scripts/ci_client_native_fallback.py dnf'
+            sh -ec 'dnf install -y python3 createrepo_c openssl >/dev/null && \
+                    python3 scripts/ci_client_native_fallback.py dnf && \
+                    python3 scripts/ci_client_native_fallback.py dnf --tls'

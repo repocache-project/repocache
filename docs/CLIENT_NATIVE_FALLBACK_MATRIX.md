@@ -76,3 +76,26 @@ If any native metadata probe fails, the result is a **FAIL** of this exact
 tested combination; do not silently downgrade it to a warning or fall back
 to an unsigned repository. Keep `repos sync --apply` disabled under the
 UC-16 fallback gate until the supported combinations have passed real tests.
+
+
+## Added HTTPS loopback metadata verification (exact-source CI)
+
+The same two native container jobs also run the identical preference, outage,
+recovery and complete-outage scenarios over private HTTPS loopback endpoints,
+rather than treating HTTP-only probes as sufficient. The isolated workflow
+generates a short-lived self-signed TLS identity with an IP subjectAltName
+for 127.0.0.1, pins its certificate through APT Acquire::https::CaInfo or
+DNF sslcacert, and explicitly keeps TLS peer/hostname verification enabled
+alongside the existing package-signature settings.
+
+A fifth HTTPS-only wrong-CA scenario pins a different, untrusted test
+certificate for the client while the servers remain healthy. The package
+manager must reject the metadata request without issuing HTTP requests to
+either backend. A failure or an unintended TLS downgrade fails CI.
+
+These tests exercise **TLS certificate trust and loopback metadata routing**
+only: generated self-signed certificates are never publisher or production
+trust anchors; they do not establish real CA chains, DNS, real public HTTPS
+origins, package downloads, label preservation, or host APT/DNF configuration
+safety. DNF repo metadata signing and actual signed RPM transactions remain
+NOT VERIFIED; a metadata-probe PASS must not enable --apply.
