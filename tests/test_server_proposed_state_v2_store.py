@@ -1938,3 +1938,30 @@ def test_v2_precommit_disposable_packaged_nginx_t(fixture_root, tmp_path):
     assert not (fixture_root[1] / V2_STATE).exists()
     assert candidate["authorizes_state_commit"] is False
     assert candidate["authorizes_nginx_activation"] is False
+
+
+def test_adopted_v2_initial_history_overflow_refused_before_disk_write(fixture_root):
+    """A 10001st historic ID can never be silently pruned at first boot."""
+    _, folder, _ = fixture_root
+    from repocache.server_locked_manifest_reconcile_v1 import (
+        INITIAL_V2_MAX_ALL_TIME_IDS,
+    )
+    next_state = snapshot(2)
+    for n in range(2, INITIAL_V2_MAX_ALL_TIME_IDS + 1):
+        next_state["id_reservations"].append({
+            "id": f"retired-{n}",
+            "canonical_identity_sha256": hashlib.sha256(
+                f"historical-{n}".encode("ascii")
+            ).hexdigest(),
+            "status": "retired",
+        })
+    assert len(next_state["id_reservations"]) == INITIAL_V2_MAX_ALL_TIME_IDS + 1
+    before = {p.name: (p.read_bytes(), p.stat().st_ino)
+              for p in folder.iterdir() if p.is_file()}
+    with pytest.raises(ProposedV2PersistenceError, match="SNAPSHOT_INVALID"):
+        apply(fixture_root, next_state)
+    assert {p.name: (p.read_bytes(), p.stat().st_ino)
+            for p in folder.iterdir() if p.is_file()} == before
+    assert not (folder / V2_STATE).exists()
+    assert not (folder / V2_JOURNAL).exists()
+    assert not (folder / V2_STAGE).exists()
