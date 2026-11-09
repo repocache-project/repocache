@@ -1547,7 +1547,6 @@ def test_v2_lifecycle_nginx_live_sandbox(fixture_root, tmp_path):
         assert_live("generation-1", master)
 
         def transition(operation, generation, *, proposal=None, reservations=None):
-            nonlocal current, previous
             planned = plan_repository_change(
                 current, current_generation=generation,
                 operation=operation,
@@ -1563,7 +1562,7 @@ def test_v2_lifecycle_nginx_live_sandbox(fixture_root, tmp_path):
             )
             return proposed_doc, succeeding
 
-        def activate(candidate, generation, pins):
+        def activate(generation, pins):
             output = render(generation, pins)
             assert output["proposed_repository_ids"] == sorted(pins)
             staged = config(output, f"generation-{generation}")
@@ -1587,20 +1586,26 @@ def test_v2_lifecycle_nginx_live_sandbox(fixture_root, tmp_path):
             "add", 1, proposal=new_repo, reservations=historical,
         )
         assert apply(fixture_root, state_next, expected=1)["state_generation"] == 2
-        previous, current = state_next, current_next
+        previous, current = state_next, copy.deepcopy(current_next)
+        # The #95 pure planner leaves candidates at the expected OLD CAS
+        # generation; only the fixture's committed next revision is rebased.
+        current["expected_state_generation"] = 2
         # Keep the simulated historical ledger separate from persisted
         # reservations; only the fixture store validates the latter.
         historical.add(repo_id)
-        added = activate(state_next, 2, {})
+        added = activate(2, {})
         assert added["server_location_fragment"] == ""
 
         # Enable with the merged #95 planner; persist the exact validated
         # generation, then syntax-check and live-reload a new route.
         current_next, state_next = transition("enable", 2)
         assert apply(fixture_root, state_next, expected=2)["state_generation"] == 3
-        previous, current = state_next, current_next
+        previous, current = state_next, copy.deepcopy(current_next)
+        # The #95 pure planner leaves candidates at the expected OLD CAS
+        # generation; only the fixture's committed next revision is rebased.
+        current["expected_state_generation"] = 3
         pins = {repo_id: {origin: ["8.8.8.8"]}}
-        enabled = activate(state_next, 3, pins)
+        enabled = activate(3, pins)
         assert f"/__repocache/repos/{repo_id}/" in enabled["server_location_fragment"]
         sentinel = cache_root / repo_id / "retained.bin"
         sentinel.write_bytes(b"owned-test-cache-sentinel")
@@ -1627,15 +1632,21 @@ def test_v2_lifecycle_nginx_live_sandbox(fixture_root, tmp_path):
 
         # Retry the same intended generation after explicit recovery.
         assert apply(fixture_root, state_next, expected=3)["state_generation"] == 4
-        previous, current = state_next, current_next
-        disabled = activate(state_next, 4, {})
+        previous, current = state_next, copy.deepcopy(current_next)
+        # The #95 pure planner leaves candidates at the expected OLD CAS
+        # generation; only the fixture's committed next revision is rebased.
+        current["expected_state_generation"] = 4
+        disabled = activate(4, {})
         assert disabled["server_location_fragment"] == ""
         assert sentinel.read_bytes() == b"owned-test-cache-sentinel"
 
         current_next, state_next = transition("remove", 4)
         assert apply(fixture_root, state_next, expected=4)["state_generation"] == 5
-        previous, current = state_next, current_next
-        removed = activate(state_next, 5, {})
+        previous, current = state_next, copy.deepcopy(current_next)
+        # The #95 pure planner leaves candidates at the expected OLD CAS
+        # generation; only the fixture's committed next revision is rebased.
+        current["expected_state_generation"] = 5
+        removed = activate(5, {})
         assert removed["server_location_fragment"] == ""
         assert sentinel.read_bytes() == b"owned-test-cache-sentinel"
         saved = json.loads((folder / V2_STATE).read_bytes())
