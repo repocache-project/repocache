@@ -56,7 +56,8 @@ def test_status_is_rootless_and_not_installed(capsys, monkeypatch, args):
     assert doc["installed"] is False
     assert doc["source_writes_supported"] is False
     assert doc["semantic_repository_validation_supported"] is False
-    assert doc["capabilities"] == ["status", "inspect-source"]
+    assert doc["capabilities"] == ["status", "inspect-source",
+                                    "verify-route-approval"]
     assert "commit" not in doc["capabilities"]
 
 
@@ -104,6 +105,7 @@ def test_bad_source_path_is_redacted_and_fails(capsys, host, source):
 
 @pytest.mark.parametrize("args", (
     ["--json", "commit", "--source", SOURCE],
+    ["--json", "verify-route-approval", "--candidate", "bad"],
     ["--json", "recover"],
     ["--json", "restore"],
     ["--json", "validate", "--source", SOURCE],
@@ -184,3 +186,64 @@ def test_installer_and_approved_client_cli_do_not_reference_preview():
     assert "source_helper_preview" not in (CLIENT / "install.sh").read_text()
     assert "Applying changes is disabled until reviewed" in (
         CLIENT / "repocache_client.py").read_text()
+
+
+def test_route_verification_is_never_available_for_native_root(
+        capsys, monkeypatch):
+    monkeypatch.setattr(helper.os, "geteuid", lambda: 0)
+    code, result = invoke(capsys, [
+        "--json", "verify-route-approval",
+        "--candidate", "a" * 32, "--route-sha256", "b" * 64,
+    ])
+    assert code == 3
+    assert result["error"]["code"] == "NOT_INSTALLED"
+
+
+def test_route_verification_refuses_rootless_before_reading_registry(
+        capsys, monkeypatch, host):
+    monkeypatch.setattr(helper.os, "geteuid", lambda: 65534)
+    monkeypatch.setattr(helper.approval, "_candidate", lambda *x: pytest.fail(
+        "Rootless helper must not access protected approval records"))
+    code, result = invoke(capsys, [
+        "--json", "verify-route-approval",
+        "--candidate", "a" * 32, "--route-sha256", "b" * 64,
+    ], root=host)
+    assert code == 3 and result["error"]["code"] == "ROOT_REQUIRED"
+
+
+def test_root_approved_exact_route_can_be_verified_without_disclosure(
+        capsys, host):
+    if os.geteuid() != 0:
+        pytest.skip("Real root required to issue and check private approval")
+    import entry_candidate_sandbox as entry
+    import source_entry_boundaries as bounds
+    import entry_approval_plan_sandbox as approvals
+
+    selected = bounds.boundaries(SOURCE, CONTENTS)[0]
+    ident = entry.register_entry_candidate_sandbox(
+        host, SOURCE, hashlib.sha256(CONTENTS).hexdigest(),
+        selected["sha256"])["id"]
+    route = b"https://cache.invalid/repo/"
+    approvals.approve_entry_plan_sandbox(
+        host, ident, hashlib.sha256(CONTENTS).hexdigest(),
+        selected["sha256"], route.decode("ascii"))
+    args = ["--json", "verify-route-approval",
+            "--candidate", ident,
+            "--route-sha256", hashlib.sha256(route).hexdigest()]
+    before = (host / SOURCE).read_bytes()
+    code, result = invoke(capsys, args, root=host)
+    assert code == 0 and result["ok"]
+    assert result["route_approval"] == "exact-route-matched"
+    assert result["approval_scope"] == "sandbox-only"
+    assert not result["write_eligible"] and not result["installed"]
+    assert "cache.invalid" not in json.dumps(result)
+    assert SOURCE not in json.dumps(result)
+    assert (host / SOURCE).read_bytes() == before
+
+    args[-1] = hashlib.sha256(b"https://other.invalid/repo/").hexdigest()
+    code, result = invoke(capsys, args, root=host)
+    assert code == 3 and result["error"]["code"] == "ROUTE_APPROVAL_REFUSED"
+    args[-1] = hashlib.sha256(route).hexdigest()
+    (host / SOURCE).write_bytes(CONTENTS + b"# independent administrator edit\n")
+    code, result = invoke(capsys, args, root=host)
+    assert code == 3 and result["error"]["code"] == "ROUTE_APPROVAL_REFUSED"

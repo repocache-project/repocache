@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Sequence
 
 import source_preflight as pre
+import entry_approval_plan_sandbox as approval
+import managed_registry_sandbox as registry
 
 
 class _UsageError(Exception):
@@ -44,6 +46,13 @@ def _parser() -> _Parser:
     inspect.add_argument("--source", required=True, metavar="RELATIVE_PATH",
                          help="Allowlisted relative APT/DNF source path")
     inspect.add_argument("--json", action="store_true", dest="local_json")
+    verify = actions.add_parser(
+        "verify-route-approval",
+        help="Check exact approved route digest in protected sandbox state",
+    )
+    verify.add_argument("--candidate", required=True, metavar="ID")
+    verify.add_argument("--route-sha256", required=True, metavar="SHA256")
+    verify.add_argument("--json", action="store_true", dest="local_json")
     return parser
 
 
@@ -79,6 +88,8 @@ def _emit(document: dict, json_output: bool) -> None:
                           document["error"]["message"]))
     elif document["operation"] == "status":
         print("Read-only helper prototype; no installed privileges or write operations.")
+    elif document["operation"] == "verify-route-approval":
+        print("Exact route approved in private sandbox; native writes disabled.")
     else:
         print("Filesystem preflight passed; repository trust and apply are NOT verified.")
 
@@ -103,10 +114,57 @@ def main(argv: Sequence[str] | None = None, *,
     if args.action == "status":
         _emit(_success(
             "status",
-            capabilities=["status", "inspect-source"],
+            capabilities=["status", "inspect-source", "verify-route-approval"],
             installed=False,
             source_writes_supported=False,
             semantic_repository_validation_supported=False,
+        ), json_output)
+        return 0
+
+
+    if args.action == "verify-route-approval":
+        operation = "verify-route-approval"
+        # No production approval can derive from lab-only protected JSON.
+        if _test_root is None:
+            _emit(_failure("NOT_INSTALLED",
+                           "No native route approval helper is installed",
+                           operation), json_output)
+            return 3
+        if os.geteuid() != 0:
+            _emit(_failure("ROOT_REQUIRED",
+                           "Protected route approval requires root",
+                           operation), json_output)
+            return 3
+        if (not registry.HEX_ID.fullmatch(args.candidate)
+                or not registry.DIGEST.fullmatch(args.route_sha256)):
+            _emit(_failure("INVALID_ARGUMENTS", "Invalid helper arguments",
+                           operation), json_output)
+            return 2
+        try:
+            root = Path(_test_root)
+            candidate = approval._candidate(root, args.candidate)
+            decision = approval._read_approval(root, args.candidate)
+            if (decision["source_file_sha256"] != candidate["file_sha256"]
+                    or decision["source_entry_sha256"] != candidate["entry_sha256"]
+                    or decision["route_sha256"] != args.route_sha256):
+                raise approval.ApprovalRefused("Route approval is not applicable")
+            approval._snapshot(root, candidate)
+        except (approval.ApprovalRefused, registry.RegistryRefused,
+                pre.PreflightError, OSError, ValueError):
+            _emit(_failure("ROUTE_APPROVAL_REFUSED",
+                           "Protected route approval or source baseline refused",
+                           operation), json_output)
+            return 3
+        _emit(_success(
+            operation,
+            route_approval="exact-route-matched",
+            source_baseline_verified=True,
+            source_contents_returned=False,
+            approved_route_returned=False,
+            approval_scope="sandbox-only",
+            native_trust_verified=False,
+            native_fallback_verified=False,
+            installed=False,
         ), json_output)
         return 0
 

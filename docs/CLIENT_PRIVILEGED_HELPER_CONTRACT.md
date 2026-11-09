@@ -72,3 +72,20 @@ per candidate and cannot be silently reused or replaced. The production
 route reapproval protocol, helper installation, privilege handoff and actual
 native source writer are NOT IMPLEMENTED / NOT VERIFIED. Installed
 repocache-client repos sync --apply remains disabled.
+
+## Safe incremental fixed-operation helper implementation
+
+The existing non-installed read-only source_helper_preview module now
+supports a fixed verify-route-approval operation for the private,
+root-owned candidate and route approval sandbox registry. It accepts only
+a strict candidate identifier and SHA-256 digest of an exact approved
+HTTPS route; no raw route, arbitrary path or shell command is accepted.
+It verifies root authorization, protected approval and candidate identity,
+and the whole source baseline without disclosing route or source bytes.
+
+Native production invocation is refused (NOT_INSTALLED). Non-root fixture
+invocation is rejected before reading any protected approval (ROOT_REQUIRED).
+Unknown, mismatched, tampered or stale approvals are refused, without any
+source mutation. The module is NOT installed as a privileged helper.
+The installed client still refuses repos sync --apply and no commit,
+restore or recovery operation is exposed.
