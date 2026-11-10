@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Isolated, executable APT/DNF HTTP metadata failover probe (#24).
+"""Isolated APT/DNF signed-metadata, HTTPS and package-fallback CI (#24).
 
-This experiment runs ONLY in disposable Debian 13/AlmaLinux 10 containers.
-It does not configure a production REPOCACHE host, disable repository signing
-or prove package download, installation, real TLS or power-loss behavior.
-
-Exit nonzero if native metadata preference/fallback/recovery fails. Record
-manager version and local HTTP request counts for reproducible evidence.
+Runs ONLY in disposable Debian 13 / AlmaLinux 10 containers. The APT
+variant fetches an actual synthetic .deb and verifies package hashes via
+an ephemeral signed Release; the DNF variant checks signed repomd.xml with
+a separate ephemeral GPG key and refuses tampered signatures. Neither
+installs packages nor uses publisher keys or modifies host repository sources.
+No real origin trust, production SELinux or power-loss claim is made.
 """
 from __future__ import annotations
 

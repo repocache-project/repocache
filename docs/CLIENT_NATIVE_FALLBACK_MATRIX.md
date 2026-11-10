@@ -2,7 +2,7 @@
 
 **Status:** executable CI experiment, not production acceptance and not a
 complete failover proof.  
-**Tracking:** [#24](https://github.com/teixemf/repocache/issues/24),
+**Tracking:** [#24](https://github.com/repocache-project/repocache/issues/24),
 UC-02/UC-16/UC-34/UC-35.  
 **Targets:** Debian 13 `debian:trixie-slim` and AlmaLinux 10
 `almalinux:10`.  
@@ -26,8 +26,9 @@ guarantee for each failure mode or each repository configuration. See
 ## Test fixtures and trust boundaries
 
 The workflow prepares dependencies inside **disposable containers**, then
-starts two loopback HTTP endpoints hosting the same intentionally synthetic
-repository. One endpoint acts as REPOCACHE, the other as the upstream.
+starts two loopback HTTP or HTTPS endpoints hosting the same intentionally
+synthetic repository. One endpoint acts as REPOCACHE, the other as upstream.
+HTTPS tests pin a disposable loopback certificate and verify the hostname.
 The tests operate on private source files, metadata caches and trust files in
 a temporary directory. They do **not** mutate host APT/DNF repository sources.
 
@@ -35,12 +36,16 @@ a temporary directory. They do **not** mutate host APT/DNF repository sources.
   dedicated `Signed-By` keyring verifies metadata without weakening the
   system's repository-signature configuration or globally installing trust.
 - For DNF, `createrepo_c` generates metadata for an empty repository.
-  `gpgcheck=1` remains set. The test does not install any RPM and metadata
-  signatures are not tested, so **DNF package/metadata authentication is
-  NOT VERIFIED** by this experiment.
-- Both probes use **HTTP loopback only**. They therefore do not test
-  external HTTPS certificate validation, private CAs, DNS failure,
-  redirects, metadata tampering, package download or interrupted writes.
+  `gpgcheck=1` remains set. The added `--signed-dnf` HTTPS variant
+  signs `repomd.xml` using a new ephemeral GPG key and requires
+  `repo_gpgcheck=1`, including a tampered-signature rejection. **No
+  actual RPM payload, publisher signing key or RPM installation is tested.**
+- Both probes cover **HTTP and verified HTTPS loopback** with pinned
+  ephemeral test certificates, including refusal of a wrong CA. They
+  do **not** test production CA chains, real DNS, redirection, package
+  installation or interrupted host writes. APT additionally tests a
+  downloaded synthetic .deb and rejected package tampering, while DNF
+  tests only metadata authentication and rejection.
 - Each operation uses a fresh metadata cache and records per-backend
   request counts; a successful exit without requests to the expected backend
   is *not* sufficient to pass.
@@ -60,10 +65,13 @@ No scenario removes package signatures or claims source rewrite capability.
 
 **NOT VERIFIED** until separate targeted tests PASS:
 
-- Production-like **HTTPS** with certificate errors, timeouts, 404, 5xx,
-  DNS failure, redirects and CA/private-CA paths, without weakening TLS.
-- Signed Debian metadata and authentic signed RPM package downloads
-  through both cache and upstream, including mismatch and tampering failure.
+- **Real-origin** HTTPS with production CA chains, DNS failure, redirects,
+  timeout, 404 and 5xx edge cases, despite isolated bad-CA/503 tests
+  already passing. Never disable TLS verification.
+- Authentic publisher-signed Debian and RPM package downloads and
+  installation trust through real cache and upstream. The synthetic
+  signed-APT .deb download and signed-DNF metadata checks are partial
+  PASS evidence, not real publisher or installed-package acceptance.
 - Real package-manager behavior with authentic Debian 13 and AlmaLinux 10
   repository formats, `mirrorlist`, `metalink`, multiple suites, components,
   architectures, and mixed external distributions.
@@ -93,12 +101,12 @@ certificate for the client while the servers remain healthy. The package
 manager must reject the metadata request without issuing HTTP requests to
 either backend. A failure or an unintended TLS downgrade fails CI.
 
-These tests exercise **TLS certificate trust and loopback metadata routing**
-only: generated self-signed certificates are never publisher or production
-trust anchors; they do not establish real CA chains, DNS, real public HTTPS
-origins, package downloads, label preservation, or host APT/DNF configuration
-safety. DNF repo metadata signing and actual signed RPM transactions remain
-NOT VERIFIED; a metadata-probe PASS must not enable --apply.
+These tests exercise **isolated TLS certificate trust and loopback routing**.
+Generated self-signed certificates are never publisher or production trust
+anchors. The newer synthetic signed-DNF metadata test and APT .deb transfer
+test add separate partial evidence, but not real CA chains, DNS, public
+HTTPS origins, publisher-signed packages, label preservation or host
+APT/DNF configuration safety. A PASS must not enable --apply.
 
 ## Signed DNF metadata refusal in disposable containers
 
