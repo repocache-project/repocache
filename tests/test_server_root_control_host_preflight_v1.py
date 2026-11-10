@@ -114,14 +114,16 @@ def test_kernel_namespace_identity_mismatch_is_detected(monkeypatch,kind):
         return SimpleNamespace(
             st_mode=stat.S_IFREG | 0o444, st_dev=1, st_ino=identity,
         )
-    monkeypatch.setattr(gate.os, "stat", fake_stat)
+    monkeypatch.setattr(gate, "os", SimpleNamespace(stat=fake_stat))
     with pytest.raises(NativeHostPreflightError,
                        match="NAMESPACE_DIFFERENT"):
         gate._same_namespace(kind)
 
 
 def test_invalid_namespace_kind_refused_before_syscalls(monkeypatch):
-    monkeypatch.setattr(gate.os,"stat",lambda _:pytest.fail("no stat"))
+    monkeypatch.setattr(gate,"os",SimpleNamespace(
+        stat=lambda _:pytest.fail("no stat"),
+    ))
     with pytest.raises(NativeHostPreflightError,
                        match="NAMESPACE_KIND_REFUSED"):
         gate._same_namespace("../net")
@@ -131,23 +133,33 @@ def test_unsafe_proc_data_is_redacted_and_size_limited(monkeypatch):
     class ProcFd:
         descriptor = 8
 
-    monkeypatch.setattr(gate.os, "open", lambda *_a, **_kw: 8)
-    monkeypatch.setattr(gate.os, "fstat",lambda _fd: SimpleNamespace(
-        st_mode=stat.S_IFREG|0o444, st_uid=0,
+    # Replace only the module's os reference. Patching global os.fstat
+    # would break pytest capture/context manager internals during the test.
+    monkeypatch.setattr(gate, "os", SimpleNamespace(
+        O_RDONLY=os.O_RDONLY, O_NOFOLLOW=os.O_NOFOLLOW,
+        O_NONBLOCK=os.O_NONBLOCK, O_CLOEXEC=getattr(os, "O_CLOEXEC", 0),
+        open=lambda *_a, **_kw: 8,
+        fstat=lambda _fd: SimpleNamespace(
+            st_mode=stat.S_IFREG | 0o444, st_uid=0,
+        ),
+        read=lambda *_a: b"SECRET" * 100,
+        close=lambda _fd: None,
     ))
-    monkeypatch.setattr(gate.os, "read",lambda *_a:b"SECRET" * 100)
-    monkeypatch.setattr(gate.os, "close",lambda _fd:None)
     with pytest.raises(NativeHostPreflightError,match="PROC_INVALID") as exc:
         gate._read_proc("/proc/1/comm")
     assert "SECRET" not in str(exc.value)
 
 
 def test_proc_file_symlink_and_untrusted_uid_refusal(monkeypatch):
-    monkeypatch.setattr(gate.os, "open",lambda *_a,**_kw:9)
-    monkeypatch.setattr(gate.os, "fstat",lambda fd: SimpleNamespace(
-        st_mode=stat.S_IFLNK|0o777, st_uid=1000,
+    monkeypatch.setattr(gate, "os", SimpleNamespace(
+        O_RDONLY=os.O_RDONLY, O_NOFOLLOW=os.O_NOFOLLOW,
+        O_NONBLOCK=os.O_NONBLOCK, O_CLOEXEC=getattr(os, "O_CLOEXEC", 0),
+        open=lambda *_a, **_kw: 9,
+        fstat=lambda _fd: SimpleNamespace(
+            st_mode=stat.S_IFLNK | 0o777, st_uid=1000,
+        ),
+        close=lambda _fd: None,
     ))
-    monkeypatch.setattr(gate.os, "close",lambda _fd:None)
     with pytest.raises(NativeHostPreflightError,match="PROC_UNTRUSTED"):
         gate._read_proc("/proc/self/uid_map")
 
