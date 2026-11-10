@@ -773,3 +773,13 @@ A future production transaction must use a separately reviewed, fixed-path
 root-owned host entrypoint with real administrative authentication and
 complete native recovery/NGINX/catalog acceptance; this guard does not
 implement such an entrypoint or prove host-root provenance.
+
+### Strict fixture syntax-check callback result
+
+A successful validation callback must return **exactly `None`**. Any
+other result (including `False`, `True`, a numeric subprocess status or a
+dictionary) and all ordinary exceptions are treated as a fixed redacted
+`NGINX_FIXTURE_VALIDATION_REFUSED` failure **before** creating a state
+journal. This prevents a caller accidentally discarding a failed subprocess
+result. The callback remains test-only and cannot be supplied to production
+root/systemd/Polkit code; no success result is an activation permission.
