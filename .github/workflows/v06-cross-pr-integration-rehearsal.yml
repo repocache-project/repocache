@@ -36,11 +36,9 @@ jobs:
       PR64_SHA: ab891e38c86abf240181eba2765b2105399e0693
       PR95_SHA: fa721e8dc730a95494f0675b7efa23f545c45e0f
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          fetch-depth: 0
-          ref: ${{ github.event.pull_request.head.sha }}
+      # Install git before checkout: the stock distro container images
+      # lack git, so checkout would otherwise fall back to an archive with
+      # no .git and invalidate the read-only exact-SHA merge rehearsal.
       - name: Install native distro test dependencies in disposable container
         shell: bash
         run: |
@@ -54,6 +52,11 @@ jobs:
           fi
           python3 --version
           nginx -v
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
       - name: Locally combine exact reviewed PR refs without any remote push
         shell: bash
         run: |
