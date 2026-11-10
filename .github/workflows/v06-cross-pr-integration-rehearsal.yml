@@ -1,0 +1,89 @@
+name: v0.6.0 Cross-PR Integration Rehearsal (Read Only)
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/v06-cross-pr-integration-rehearsal.yml'
+      - 'src/repocache/server_proposed_state_v2_store.py'
+      - 'src/repocache/server_fixture_multi_resource_wal_v1.py'
+      - 'tests/test_server_proposed_state_v2_store.py'
+      - 'docs/architecture/SERVER_LOCKED_MANIFEST_RECONCILIATION_V1.md'
+
+permissions:
+  contents: read
+
+jobs:
+  ephemeral-combined:
+    name: Exact-sha ephemeral combined prerequisites (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: debian13
+            image: debian:trixie-slim
+          - platform: almalinux10
+            image: almalinux:10
+    container:
+      image: ${{ matrix.image }}
+    env:
+      PYTHONPATH: src
+      PYTHONDONTWRITEBYTECODE: '1'
+      BASE_SHA: d53782ed01e1f85686f10279fd3c7eea6d7f6720
+      PR27_SHA: cb5523c5482a3a27b115a31835b8982da935da0c
+      PR28_SHA: b23cc642cbb62eb0874c6f774f8caf4bbd25952d
+      PR64_SHA: ab891e38c86abf240181eba2765b2105399e0693
+      PR95_SHA: fa721e8dc730a95494f0675b7efa23f545c45e0f
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Install native distro test dependencies in disposable container
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [ '${{ matrix.platform }}' = 'debian13' ]; then
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq
+            apt-get install -y -qq --no-install-recommends               git python3 python3-pytest nginx openssl ca-certificates
+          else
+            dnf -y -q --enablerepo=crb install               git python3 python3-pytest nginx openssl ca-certificates
+          fi
+          python3 --version
+          nginx -v
+      - name: Locally combine exact reviewed PR refs without any remote push
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse refs/heads/integration/v0.6.0 2>/dev/null ||             git rev-parse refs/remotes/origin/integration/v0.6.0)" = "$BASE_SHA" ||             { echo "Integration base changed; refusing stale synthetic merge"; exit 1; }
+          # These are read-only fetches of already open, separate, approved-
+          # scope PR branches. Any changed HEAD invalidates this rehearsal.
+          git fetch --no-tags origin             +refs/heads/feat/27-native-nginx-service-unit-inventory-v1:refs/remotes/origin/pr27             +refs/heads/test/28-disposable-stock-nginx-real-cache-smoke:refs/remotes/origin/pr28             +refs/heads/feat/64-fixed-credentialed-native-control-v1:refs/remotes/origin/pr64             +refs/heads/feat/v0.6.0-declarative-reconciliation-95:refs/remotes/origin/pr95
+          for item in 27 28 64 95; do
+            expected_var="PR${item}_SHA"
+            expected="${!expected_var}"
+            observed="$(git rev-parse "refs/remotes/origin/pr${item}")"
+            test "$observed" = "$expected" ||               { echo "Dependency PR #${item} moved; rerun with pinned current HEAD"; exit 1; }
+            git merge-base --is-ancestor "$BASE_SHA" "$observed"
+          done
+          git merge-base --is-ancestor "$BASE_SHA" HEAD
+          git config user.email "read-only-rehearsal@repocache.invalid"
+          git config user.name "REPOCACHE disposable CI"
+          git switch -c local-v06-rehearsal
+          for item in 27 28 64 95; do
+            git merge --no-ff --no-edit "refs/remotes/origin/pr${item}"
+          done
+          git diff --check "$BASE_SHA"..HEAD
+          test -z "$(git status --porcelain)"
+          echo "PASS: exact-SHA local merge of #237 #252 #251 #254 #214"
+          echo "NOT VERIFIED: protected integration merge, host-root, systemd, SELinux, release"
+      - name: Run combined state, NGINX, catalog, systemd and lifecycle tests
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 -B -m pytest -q -rs             tests/test_server_proposed_state_v2_store.py             tests/test_server_locked_manifest_reconcile_v1.py             tests/test_server_root_control_protocol_v1.py             tests/test_server_root_control_host_preflight_v1.py             tests/test_server_root_control_worker_v1.py             tests/test_server_native_nginx_service_unit_v1.py             tests/test_server_native_nginx_effective_unit_v1.py             tests/test_server_nginx_pin_render_v1.py             tests/test_server_nginx_repository_bundle_v1.py             tests/test_server_derived_catalog_candidate_v1.py             tests/test_server_derived_catalog_client_contract_v1.py             tests/test_server_repository_reconcile_v1.py
+          # Never modify protected branches, merge on GitHub, install a root
+          # worker, start systemd, approve a catalog or publish a release.
