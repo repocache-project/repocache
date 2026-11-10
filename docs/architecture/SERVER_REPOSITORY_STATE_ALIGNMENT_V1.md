@@ -2,6 +2,15 @@
 
 **Primary issue:** #95 (v0.6.0) · **Related:** #18, #28, #29, #31, #97, #107.
 
+**Adopted-schema status (2026-11-09):** the maintainer approved the initial
+clean-install **state-v2** format in [#31's recorded decision](https://github.com/repocache-project/repocache/issues/31#issuecomment-6752360136):
+version 2, at most 500 present records and 10,000 all-time reserved IDs,
+canonical full install-v1 configuration bytes/digest and permanent tombstones.
+The existing #31 PR #237 remains **unmerged and fixture-only**. No trusted
+administrator, host-root writer, reload, activation or migration was approved.
+This decision supersedes historical references below to the v2 *schema*
+as unadopted; it does not confer authority on any #95 preview output.
+
 This PR-only proposal defines a **non-authoritative read-only compatibility
 check** between validated install-v1 repository entries and the *inert* protected
 state-v1 records from #31. It is not an adopted protected-state extension,
@@ -253,7 +262,7 @@ Debian 13 and AlmaLinux 10 (including SELinux enforcing where relevant).
 
 This section is a measurable future acceptance checklist, not an assertion
 that any of these host-level transitions, persisted states or migration
-commands already work. The #31 proposed v2 review-only state contract
+commands already work. The #31 approved-format but fixture-only v2 state contract
 (`preview_proposed_v2_state_transition`, existing PR #237) remains
 unmerged and non-authorizing; neither that proposal nor this #95 PR
 implements its privileged writer, actual observed-state attestation, or
@@ -272,7 +281,7 @@ old generation for comparison against the untrusted current state and for
 the #28 candidate renderer. No-op results return `null`, and generation
 exhaustion refuses a changed proposal rather than wrapping.
 
-The proposed/unmerged #31 v2 contract expects canonical full configuration
+The approved-schema/unmerged #31 v2 contract expects canonical full configuration
 bytes whose internal expected generation equals the proposed state
 generation; this additional pure projection avoids accidentally passing
 old-generation declarative input to that contract. It is **not** a
@@ -288,8 +297,8 @@ Fixture tests cover explicit enable and remove, an idempotent no-op, partial
 updates that preserve omitted repositories, generation-exhaustion refusal,
 the exact separation between old and new generations, strict install-v1
 revalidation, and false mutation/activation/catalog/cleanup permissions.
-This does not imply that #31's proposed v2 design has been accepted, or
-that persistent v2 interoperation has been executed.
+The v2 schema has been approved separately, but this projection is not a
+trusted v2 writer and does not prove operational v2 interoperation.
 
 
 ## v1-independent pure lifecycle planner for proposed #31 v2 integration
@@ -305,7 +314,7 @@ caller-provided state-v1 snapshot argument. It consumes only a complete,
 strictly validated install-v1 document, an expected generation, operation
 intent and candidate DNS pins. This removes the **pure-planning** dependency
 on the obsolete 32-record limit: the existing install-v1 validator can
-handle up to 500 repositories, consistent with the **proposed/unmerged**
+handle up to 500 repositories, consistent with the **approved-schema/unmerged-implementation**
 #31 v2 target. It reuses the existing #95 explicit add/update/enable/
 disable/remove rules, #28 pinned HTTPS renderer, current-generation vs
 next-generation candidate separation, immutable ID checks, desired-state
@@ -356,8 +365,8 @@ Both pure planning entry points always return untrusted candidate fragments,
 not a real catalog or current NGINX exposure. No source authentication,
 persisted state v2 generation CAS, owner/lock verification, operator approval,
 durable all-time ID/tombstone ledger, DNS pin freshness, genuine packaged
-NGINX syntax, active route checks or recovery is provided. The proposed
-#31 v2 store remains *unmerged, unadopted and fixture-only* and must own
+NGINX syntax, active route checks or recovery is provided. The adopted-format
+#31 v2 store remains *unmerged and fixture-only* and must own
 all authoritative checks under its own protected lock before any service
 effects or catalog publication. No data or state migration is performed.
 Even success with 500 repositories in this fixture does not establish a
@@ -436,12 +445,12 @@ attempting NGINX rendering; the 9,999-entry final slot remains available
 as a *candidate*. An idempotent add for an unchanged already-present ID
 remains a no-op even at 10,000 records. Both add paths thereby avoid
 emitting an obviously non-persistable next-state intent against the
-currently proposed #31 v2 history bound.
+maintainer-approved initial #31 v2 history bound.
 
-The 10,000-history constraint is **proposal compatibility**, not an
-adopted persistent format or proof that the caller's ledger is complete.
-It must be re-evaluated against any eventual approved #31 schema and
-its independently authenticated all-time records under the protected
+The 10,000-history constraint is **approved-schema compatibility**, not
+proof that the caller's ledger is complete or that the private fixture
+writer is authorized for a host. It must be rechecked against actual
+independently authenticated all-time records under the protected
 transaction lock. The planner cannot commit, allocate IDs, activate
 NGINX, publish a catalog or delete retained cache. Tests cover the
 last permitted slot, capacity exhaustion, an existing no-op at full
