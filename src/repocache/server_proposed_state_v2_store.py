@@ -216,6 +216,78 @@ def _no_change(old: dict[str, Any], new: dict[str, Any]) -> bool:
     return a == b
 
 
+def _commit_locked_proposed_v2(
+    directory: int, frozen: dict[str, Any], raw: bytes, *,
+    owner_uid: int, expected_generation: int,
+    inject_fault: Callable[[str], None] | None = None,
+    require_previous_bytes: bool = False,
+    previous_bytes: bytes | None = None,
+) -> dict[str, Any]:
+    """Private fixture transaction body; caller must hold the pinned FD lock.
+
+    A prospective future host-root writer must independently authenticate
+    caller/ownership and service/catalog effects. This helper does neither.
+    """
+    _legacy_refusal(directory, owner_uid)
+    if _pending(directory, owner_uid):
+        _refuse("RECOVERY_REQUIRED")
+    existing, old_raw = _read_v2(directory, owner_uid)
+    if require_previous_bytes and old_raw != previous_bytes:
+        _refuse("STATE_CHANGED_DURING_PREFLIGHT")
+    generation = 0 if existing is None else existing["state_generation"]
+    if generation != expected_generation:
+        _refuse("STALE_GENERATION")
+    # The pure transition checker never grants authorization.
+    preview_proposed_v2_state_transition(
+        frozen, expected_generation=generation,
+        previous_snapshot=existing,
+    )
+    if existing is not None and _no_change(existing, frozen):
+        return _report("NO_CHANGE_INERT_V2", generation)
+    journal = _journal_bytes(old_raw, raw)
+    _write_exclusive(
+        directory, V2_JOURNAL_TMP, journal,
+        owner_uid, MAX_V2_JOURNAL_BYTES,
+    )
+    if inject_fault is not None:
+        inject_fault("journal_tmp_durable")
+    if _read_file(directory, V2_JOURNAL, owner_uid, MAX_V2_JOURNAL_BYTES) is not None:
+        _refuse("JOURNAL_CONFLICT")
+    try:
+        os.replace(
+            V2_JOURNAL_TMP, V2_JOURNAL,
+            src_dir_fd=directory, dst_dir_fd=directory,
+        )
+        os.fsync(directory)
+    except OSError:
+        _refuse("JOURNAL_IO_REFUSED")
+    if inject_fault is not None:
+        inject_fault("journal_durable")
+    _write_exclusive(directory, V2_STAGE, raw, owner_uid, MAX_V2_STATE_BYTES)
+    if inject_fault is not None:
+        inject_fault("stage_durable")
+    _, observed_old = _read_v2(directory, owner_uid)
+    if observed_old != old_raw:
+        _refuse("CONCURRENT_DRIFT")
+    try:
+        os.replace(
+            V2_STAGE, V2_STATE,
+            src_dir_fd=directory, dst_dir_fd=directory,
+        )
+        os.fsync(directory)
+    except OSError:
+        _refuse("COMMIT_IO_REFUSED")
+    if inject_fault is not None:
+        inject_fault("replace_durable")
+    if _read_file(directory, V2_JOURNAL, owner_uid, MAX_V2_JOURNAL_BYTES) != journal:
+        _refuse("JOURNAL_CHANGED")
+    _unlink_known(
+        directory, V2_JOURNAL, journal,
+        owner_uid, MAX_V2_JOURNAL_BYTES,
+    )
+    return _report("COMMITTED_INERT_V2", frozen["state_generation"])
+
+
 def _commit_proposed_v2_under_root(
     root_fd: int, candidate: dict[str, Any], *, owner_uid: int,
     expected_generation: int,
@@ -227,62 +299,10 @@ def _commit_proposed_v2_under_root(
         _refuse("EXPECTED_GENERATION_INVALID")
     frozen, raw = _freeze(candidate)
     with _locked(root_fd, owner_uid) as directory:
-        _legacy_refusal(directory, owner_uid)
-        if _pending(directory, owner_uid):
-            _refuse("RECOVERY_REQUIRED")
-        existing, old_raw = _read_v2(directory, owner_uid)
-        generation = 0 if existing is None else existing["state_generation"]
-        if generation != expected_generation:
-            _refuse("STALE_GENERATION")
-        # The pure transition checker never grants authorization.
-        preview_proposed_v2_state_transition(
-            frozen, expected_generation=generation,
-            previous_snapshot=existing,
+        return _commit_locked_proposed_v2(
+            directory, frozen, raw, owner_uid=owner_uid,
+            expected_generation=expected_generation, inject_fault=inject_fault,
         )
-        if existing is not None and _no_change(existing, frozen):
-            return _report("NO_CHANGE_INERT_V2", generation)
-        journal = _journal_bytes(old_raw, raw)
-        _write_exclusive(
-            directory, V2_JOURNAL_TMP, journal,
-            owner_uid, MAX_V2_JOURNAL_BYTES,
-        )
-        if inject_fault is not None:
-            inject_fault("journal_tmp_durable")
-        if _read_file(directory, V2_JOURNAL, owner_uid, MAX_V2_JOURNAL_BYTES) is not None:
-            _refuse("JOURNAL_CONFLICT")
-        try:
-            os.replace(
-                V2_JOURNAL_TMP, V2_JOURNAL,
-                src_dir_fd=directory, dst_dir_fd=directory,
-            )
-            os.fsync(directory)
-        except OSError:
-            _refuse("JOURNAL_IO_REFUSED")
-        if inject_fault is not None:
-            inject_fault("journal_durable")
-        _write_exclusive(directory, V2_STAGE, raw, owner_uid, MAX_V2_STATE_BYTES)
-        if inject_fault is not None:
-            inject_fault("stage_durable")
-        _, observed_old = _read_v2(directory, owner_uid)
-        if observed_old != old_raw:
-            _refuse("CONCURRENT_DRIFT")
-        try:
-            os.replace(
-                V2_STAGE, V2_STATE,
-                src_dir_fd=directory, dst_dir_fd=directory,
-            )
-            os.fsync(directory)
-        except OSError:
-            _refuse("COMMIT_IO_REFUSED")
-        if inject_fault is not None:
-            inject_fault("replace_durable")
-        if _read_file(directory, V2_JOURNAL, owner_uid, MAX_V2_JOURNAL_BYTES) != journal:
-            _refuse("JOURNAL_CHANGED")
-        _unlink_known(
-            directory, V2_JOURNAL, journal,
-            owner_uid, MAX_V2_JOURNAL_BYTES,
-        )
-        return _report("COMMITTED_INERT_V2", frozen["state_generation"])
 
 
 
