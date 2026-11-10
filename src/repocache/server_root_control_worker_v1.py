@@ -116,7 +116,9 @@ def serve_one_fixed_request() -> dict[str, Any]:
         with conn:
             selected = authorize_fixed_root_request(conn)
             # One connection, one bounded message. No action is dispatched.
-            return {
+            # Return the refusal on the authenticated seqpacket channel;
+            # stdout belongs to the service journal, not the operator.
+            result = {
                 "schema_version": 1,
                 "status": "ROOT_TRANSACTION_NOT_IMPLEMENTED",
                 "requested_operation": selected["operation"],
@@ -125,6 +127,17 @@ def serve_one_fixed_request() -> dict[str, Any]:
                 "authorizes_catalog_publication": False,
                 "operator_action_executed": False,
             }
+            response = (json.dumps(
+                result, sort_keys=True, separators=(",", ":"),
+            ) + "\\n").encode("ascii")
+            try:
+                conn.settimeout(3.0)
+                written = conn.send(response)
+                if written != len(response):
+                    _deny("ROOT_CONTROL_RESPONSE_INCOMPLETE")
+            except (OSError, TimeoutError):
+                _deny("ROOT_CONTROL_RESPONSE_UNAVAILABLE")
+            return result
 
 
 def main() -> int:
