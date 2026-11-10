@@ -11,6 +11,7 @@ on:
       - 'src/repocache/server_root_control_native_syntax_v1.py'
       - 'src/repocache/server_root_control_full_context_v1.py'
       - 'src/repocache/server_root_control_pre_reload_v1.py'
+      - 'src/repocache/server_root_control_fixed_candidate_v1.py'
       - 'src/repocache/server_root_control_pinned_tls_pair_v1.py'
       - 'tests/test_server_root_control_protocol_v1.py'
       - 'tests/test_server_root_control_host_preflight_v1.py'
@@ -19,6 +20,7 @@ on:
       - 'tests/test_server_root_control_native_syntax_v1.py'
       - 'tests/test_server_root_control_full_context_v1.py'
       - 'tests/test_server_root_control_pre_reload_v1.py'
+      - 'tests/test_server_root_control_fixed_candidate_v1.py'
       - 'tests/test_server_root_control_pinned_tls_pair_v1.py'
       - 'scripts/smoke_server_fixed_nginx_syntax.py'
       - 'tests/test_server_root_control_units_v1.py'
@@ -36,6 +38,7 @@ on:
       - 'src/repocache/server_root_control_native_syntax_v1.py'
       - 'src/repocache/server_root_control_full_context_v1.py'
       - 'src/repocache/server_root_control_pre_reload_v1.py'
+      - 'src/repocache/server_root_control_fixed_candidate_v1.py'
       - 'src/repocache/server_root_control_pinned_tls_pair_v1.py'
       - 'tests/test_server_root_control_protocol_v1.py'
       - 'tests/test_server_root_control_host_preflight_v1.py'
@@ -94,6 +97,7 @@ jobs:
             tests/test_server_root_control_native_syntax_v1.py \
             tests/test_server_root_control_full_context_v1.py \
             tests/test_server_root_control_pre_reload_v1.py \
+            tests/test_server_root_control_fixed_candidate_v1.py \
             tests/test_server_root_control_pinned_tls_pair_v1.py
           # Distro native NGINX installed only in this disposable CI image.
           REPOCACHE_NATIVE_TEST_CONTAINER=CONFIRMED_DISPOSABLE_DOCKER_ONLY \

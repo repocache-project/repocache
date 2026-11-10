@@ -396,3 +396,42 @@ exposure verification and durable rollback before active-only publication.
 The two-distro GitHub Actions tests here use mocked service observations and
 never invoke native systemd or reload. Booted native VM acceptance is
 **NOT VERIFIED**.
+
+
+## Fixed root-owned administrator proposal candidate (not installed)
+
+The next source-only prerequisite adds
+`server_root_control_fixed_candidate_v1.py`. The default proposal is
+**exactly** `/var/lib/repocache/server/.admin-candidate-v2.json`, a
+root:root 0600 regular file in root-owned, non-group-writable directories,
+without symlinks or hard links. There is no caller-supplied path, unit,
+command, environment, token or writable socket request body. The candidate
+is a canonical ASCII JSON envelope with strictly closed keys:
+
+- `request_schema_version=1`
+- `expected_generation` (0 for first installation; subsequent exact CAS)
+- `expected_state_sha256` (null only for bootstrap)
+- `next_state_base64` (canonical complete state-v2 snapshot bytes)
+- `next_state_sha256` (SHA-256 of the exact decoded bytes)
+
+The read-only intake uses a fixed descriptor-relative root-owned path walk,
+exclusively opened regular-file descriptors and before/after inode metadata,
+bounded double reads, strict canonical/duplicate-key parsing, version and
+generation linkage. It returns only hashes, generation and size; it does NOT
+return private state data to the socket caller. The full approved #31 v2
+state/ID/approval validation is intentionally **not duplicated** here and
+remains mandatory inside a future root transaction under the retained lock.
+A proposal digest or root-owned file is **not** authentication or approval.
+A privileged administrator must independently stage the exact candidate,
+and an authorized, kernel-credentialed operator must explicitly request the
+fixed apply operation. The approved signer/installer, effective systemd unit,
+SELinux/ACL/mount ancestry, pending journal, native NGINX routes/TLS, exposure
+and atomic derived catalog must independently pass before any actual change.
+
+This module is not installed, invoked by the worker or suitable for real-host
+activation. The fixed candidate does not grant write, reload or publication
+authority; even a positive read becomes stale as soon as it returns. Unit
+tests in both disposable distro containers exercise bounded parsing,
+unsafe symlinks/hardlinks/modes, closed keys, generation/digest drift and
+non-root denial. Original native host/SELinux and real operational gates
+remain **NOT VERIFIED**.
