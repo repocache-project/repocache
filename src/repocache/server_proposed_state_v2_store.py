@@ -501,6 +501,8 @@ def _preview_proposed_v2_recovery_under_root(
     """
     with _locked(root_fd, owner_uid) as directory:
         _legacy_refusal(directory, owner_uid)
+        if _multi_resource_pending(directory, owner_uid):
+            _refuse("MULTI_RESOURCE_RECOVERY_REQUIRED")
         journal = _read_v2_journal(directory, owner_uid)
         temp_entry = _read_v2_journal(
             directory, owner_uid, name=V2_JOURNAL_TMP,
