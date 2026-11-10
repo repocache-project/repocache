@@ -3378,3 +3378,95 @@ def test_multi_resource_recovery_refuses_forged_next_hash_for_invalid_v2(
         multi._recover_fixture_multi_resource_under_root(fd, owner_uid=uid)
     assert {n: (folder / n).read_bytes() for n in multi.ORDER} == old
     assert journal.is_file()
+
+
+@pytest.mark.parametrize("resource", [
+    "state", "include", "catalog", "manifest",
+])
+def test_multi_resource_clean_status_never_hides_foreign_owned_drift(
+    fixture_root, resource,
+):
+    multi = _multi_resource_fixture()
+    fd, folder, uid = fixture_root
+    initial = _multi_snapshot(1, active=True)
+    multi._commit_fixture_multi_resource_under_root(
+        fd, initial, owner_uid=uid, expected_generation=0,
+        include_bytes=b"# verified prior NGINX\n",
+        catalog_bytes=_catalog_fixture(["repo-0"]),
+    )
+    chosen = {"state": V2_STATE, "include": multi.INCLUDE,
+              "catalog": multi.CATALOG,
+              "manifest": multi.MANIFEST}[resource]
+    path = folder / chosen
+    changed = path.read_bytes() + b"# foreign change"
+    path.write_bytes(changed)
+    with pytest.raises(multi.FixtureMultiResourceError,
+                       match="OWNER_MANIFEST_MISSING_OR_DRIFT"):
+        multi._recover_fixture_multi_resource_under_root(
+            fd, owner_uid=uid,
+        )
+    assert path.read_bytes() == changed
+    assert not (folder / multi.JOURNAL).exists()
+
+
+def test_multi_resource_committed_owner_blocks_all_state_only_operations(
+    fixture_root,
+):
+    multi = _multi_resource_fixture()
+    fd, folder, uid = fixture_root
+    previous = _multi_snapshot(1, active=True)
+    multi._commit_fixture_multi_resource_under_root(
+        fd, previous, owner_uid=uid, expected_generation=0,
+        include_bytes=b"# managed NGINX gen 1\n",
+        catalog_bytes=_catalog_fixture(["repo-0"]),
+    )
+    assert multi._recover_fixture_multi_resource_under_root(
+        fd, owner_uid=uid,
+    )["status"] == "CLEAN_INERT_FIXTURE"
+    before = {n: (folder / n).read_bytes() for n in multi.ORDER}
+    next_snapshot = _multi_snapshot(
+        2, generation=2, previous=previous, active=True,
+    )
+    with pytest.raises(ProposedV2PersistenceError,
+                       match="RECOVERY_REQUIRED"):
+        apply(fixture_root, next_snapshot)
+    with pytest.raises(ProposedV2PersistenceError,
+                       match="MULTI_RESOURCE_RECOVERY_REQUIRED"):
+        rollback(fixture_root)
+    with pytest.raises(ProposedV2PersistenceError,
+                       match="MULTI_RESOURCE_RECOVERY_REQUIRED"):
+        preview_v2_recovery(fd, owner_uid=uid)
+    assert {n: (folder / n).read_bytes() for n in multi.ORDER} == before
+    assert not (folder / multi.JOURNAL).exists()
+    # The true multi-resource writer may still perform the next generation:
+    # the cross-resource owner marker is not a pending WAL.
+    written = multi._commit_fixture_multi_resource_under_root(
+        fd, next_snapshot, owner_uid=uid, expected_generation=1,
+        include_bytes=b"# managed NGINX gen 2\n",
+        catalog_bytes=_catalog_fixture(["repo-0", "repo-1"]),
+    )
+    assert written["status"] == "COMMITTED_INERT_FIXTURE_MULTI_RESOURCE"
+    assert json.loads((folder / V2_STATE).read_bytes()) == next_snapshot
+    assert json.loads((folder / multi.CATALOG).read_bytes())["active_ids"] == [
+        "repo-0", "repo-1",
+    ]
+    assert not (folder / multi.JOURNAL).exists()
+
+
+def test_multi_resource_clean_preview_refuses_legacy_state_without_manifest(
+    fixture_root,
+):
+    multi = _multi_resource_fixture()
+    fd, folder, uid = fixture_root
+    assert multi._recover_fixture_multi_resource_under_root(
+        fd, owner_uid=uid,
+    )["status"] == "CLEAN_INERT_FIXTURE"
+    legacy = _multi_snapshot(1)
+    apply(fixture_root, legacy)
+    prior = (folder / V2_STATE).read_bytes()
+    with pytest.raises(multi.FixtureMultiResourceError,
+                       match="OWNER_MANIFEST_MISSING_OR_DRIFT"):
+        multi._recover_fixture_multi_resource_under_root(
+            fd, owner_uid=uid,
+        )
+    assert (folder / V2_STATE).read_bytes() == prior
