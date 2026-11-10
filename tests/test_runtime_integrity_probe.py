@@ -218,3 +218,37 @@ def test_nofollow_open_refuses_concurrent_symlink_replacement(
         verify(root, inventory)
     assert replaced
     assert (outside / "module.py").read_bytes() == b"untrusted-but-never-read"
+
+
+@pytest.mark.parametrize("change_runtime", [False, True])
+def test_authenticated_inventory_expectations_are_pinned_during_scan(
+        prepared, monkeypatch, change_runtime):
+    """Caller mutation cannot retarget an in-progress expected-hash lookup.
+
+    This checks snapshot consistency, NOT expected-inventory authentication.
+    """
+    root, inventory = prepared
+    module = root / "lib/module.py"
+    mutated = b"value = 'untrusted replacement'\n"
+    original_read = os.read
+    changed = False
+
+    def mutate_after_first_chunk(fd, count):
+        nonlocal changed
+        chunk = original_read(fd, count)
+        if chunk and not changed:
+            changed = True
+            if change_runtime:
+                module.write_bytes(mutated)
+            inventory["lib/module.py"] = ExpectedRegularFile(
+                hashlib.sha256(mutated).hexdigest(), 0o644)
+        return chunk
+
+    monkeypatch.setattr(os, "read", mutate_after_first_chunk)
+    if change_runtime:
+        with pytest.raises(IntegrityMismatch):
+            verify(root, inventory)
+    else:
+        assert verify(root, inventory).files == 2
+    assert changed
+    assert inventory["lib/module.py"].sha256 == hashlib.sha256(mutated).hexdigest()

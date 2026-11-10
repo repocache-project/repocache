@@ -108,7 +108,18 @@ def verify_regular_tree(
             or type(max_total_bytes) is not int
             or not 1 <= max_total_bytes <= 1 << 36):
         raise IntegrityMismatch("Invalid inspection bounds")
-    directories = _expected_paths(expected, max_entries)
+    if not isinstance(expected, Mapping):
+        raise IntegrityMismatch("Invalid expected inventory")
+    try:
+        # The external mapping is assumed to have been authenticated by the
+        # trusted caller, but may still be mutable. Pin its entries before any
+        # runtime I/O; never mix multiple revisions of the expectation set.
+        if len(expected) > max_entries:
+            raise IntegrityMismatch("Unbounded expected inventory")
+        expected_snapshot = dict(expected)
+    except (RuntimeError, ValueError, TypeError) as exc:
+        raise IntegrityMismatch("Cannot snapshot expected inventory") from exc
+    directories = _expected_paths(expected_snapshot, max_entries)
     try:
         root = os.fstat(root_fd)
         _checked_directory(root, owner_uid, root.st_dev)
@@ -161,7 +172,7 @@ def verify_regular_tree(
                     finally:
                         os.close(child_fd)
                 elif stat.S_ISREG(before.st_mode):
-                    item = expected.get(rel)
+                    item = expected_snapshot.get(rel)
                     if (item is None or before.st_uid != owner_uid
                             or before.st_dev != root.st_dev
                             or before.st_nlink != 1
@@ -204,7 +215,7 @@ def verify_regular_tree(
                 raise IntegrityMismatch("Runtime directory changed during measurement")
 
         walk(root_fd, "", 0)
-        if observed != set(expected) or visited_directories != directories:
+        if observed != set(expected_snapshot) or visited_directories != directories:
             raise IntegrityMismatch("Runtime inventory is incomplete")
         if _identity(os.fstat(root_fd)) != _identity(root):
             raise IntegrityMismatch("Runtime root changed during measurement")
