@@ -47,6 +47,13 @@ def render_pinned_upstream_fragments(
         # whitespace still permit configuration injection if not rejected.
         if re.fullmatch(r"/[A-Za-z0-9_./+-]+", ca_bundle_path, re.ASCII) is None:
             raise PinnedNginxError("CA reference: unsafe syntax")
+        # install-v1 accepts canonical filesystem paths that may still contain
+        # NGINX directive delimiters, variables or whitespace. cache_root is
+        # inserted unquoted into proxy_cache_path, so check the exact token
+        # syntax independently before rendering any candidate bytes.
+        cache_root = doc["deployment"]["paths"]["cache_root"]
+        if re.fullmatch(r"/[A-Za-z0-9_./+-]+", cache_root, re.ASCII) is None:
+            raise PinnedNginxError("cache root: unsafe NGINX token")
         inspect_upstream_address_snapshot(
             doc, repository_id=repository_id,
             answers_by_host=candidate_pins_by_host,
