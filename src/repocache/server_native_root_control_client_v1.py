@@ -120,7 +120,7 @@ def request_native_fixed_v2(operation: str) -> dict[str, Any]:
             # Filesystem fsync, NGINX syntax/reload, DNS and verified TLS
             # may exceed the peer-authentication three-second deadline.
             # A lost reply remains an UNKNOWN outcome, never auto-retried.
-            conn.settimeout(120.0)
+            conn.settimeout(180.0)
             payload, _unused, flags, _addr = conn.recvmsg(
                 _RESPONSE_LIMIT + 1,
             )
