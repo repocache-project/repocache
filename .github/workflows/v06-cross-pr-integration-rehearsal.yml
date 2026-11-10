@@ -36,7 +36,7 @@ jobs:
       BASE_SHA: d53782ed01e1f85686f10279fd3c7eea6d7f6720
       PR27_SHA: 0d85b45fe663f3bc5cb7d4a2eb066f1369ce22db
       PR28_SHA: b23cc642cbb62eb0874c6f774f8caf4bbd25952d
-      PR64_SHA: 8d1927497233d92d64e047bde93633f640d45244
+      PR64_SHA: 84e7ed2d8f6c8df24dcb4ca887a5c8843736608c
       PR95_SHA: fa721e8dc730a95494f0675b7efa23f545c45e0f
     steps:
       # Install git before checkout: the stock distro container images
@@ -108,7 +108,7 @@ jobs:
           test ! -e /var/cache/nginx/repocache-managed
           test ! -L /var/cache/nginx/repocache-managed
           install -d -m 0700 /var/cache/nginx/repocache-managed
-          python3 -B -m pytest -q -rs             tests/test_server_proposed_state_v2_store.py             tests/test_server_locked_manifest_reconcile_v1.py             tests/test_server_root_control_protocol_v1.py             tests/test_server_root_control_host_preflight_v1.py             tests/test_server_root_control_worker_v1.py             tests/test_server_root_control_client_v1.py             tests/test_server_native_nginx_service_unit_v1.py             tests/test_server_native_nginx_effective_unit_v1.py             tests/test_server_nginx_pin_render_v1.py             tests/test_server_nginx_repository_bundle_v1.py             tests/test_server_derived_catalog_candidate_v1.py             tests/test_server_derived_catalog_client_contract_v1.py             tests/test_server_repository_reconcile_v1.py
+          python3 -B -m pytest -q -rs             tests/test_server_proposed_state_v2_store.py             tests/test_server_locked_manifest_reconcile_v1.py             tests/test_server_root_control_protocol_v1.py             tests/test_server_root_control_host_preflight_v1.py             tests/test_server_root_control_worker_v1.py             tests/test_server_root_control_client_v1.py             tests/test_server_root_control_native_syntax_v1.py             tests/test_server_native_nginx_service_unit_v1.py             tests/test_server_native_nginx_effective_unit_v1.py             tests/test_server_nginx_pin_render_v1.py             tests/test_server_nginx_repository_bundle_v1.py             tests/test_server_derived_catalog_candidate_v1.py             tests/test_server_derived_catalog_client_contract_v1.py             tests/test_server_repository_reconcile_v1.py
           python3 -B scripts/ci_v06_cross_pr_lifecycle_contract.py
           python3 -B scripts/ci_v06_cross_pr_multi_wal_contract.py
           # The exact #27 PR now proves the running packaged NGINX binary

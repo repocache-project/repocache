@@ -1104,3 +1104,17 @@ NGINX -T** and the derived client-catalog candidate comparison *inside*
 this same-lock prepublication callback. This guards against reusing the
 initial candidate preview as an implicit commit lease. It still does not
 prove the NGINX service running on a booted host or that routes are exposed.
+
+
+## Combined #64 fixed NGINX syntax gate, 2026-11-10
+
+The five-PR read-only integration rehearsal now pins the existing #64
+root-control PR's separate fixed-command syntax-only prerequisite. In both
+throwaway distro containers it runs the genuine packaged
+`/usr/sbin/nginx -t -c /etc/nginx/nginx.conf` and a deliberately invalid
+config test, then restores the original container config bytes. The combined
+pytest selection includes #64's denied-authorization, fixed-argv and drift
+tests alongside #31's staged multi-resource fixture WAL. This does not
+connect a real root socket worker to these operations: a valid kernel peer
+still receives `ROOT_TRANSACTION_NOT_IMPLEMENTED`. Syntax-only output
+cannot grant NGINX service reload, resource publication or root writes.
