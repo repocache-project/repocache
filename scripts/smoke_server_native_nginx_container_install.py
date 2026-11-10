@@ -171,7 +171,7 @@ def run_rehearsal(
         # effective-PID1 gate in this Docker userspace (PID1 is not systemd).
         # We only run the non-mutating, fixed-argument systemctl show check;
         # no service start/reload is performed.
-        if Path("/run/systemd/system").exists():
+        if Path("/proc/1/comm").read_text(encoding="ascii").strip() == "systemd":
             _deny("CONTAINER_UNEXPECTED_SYSTEMD_PID1")
         try:
             inspect_effective_native_nginx_unit(distribution)
