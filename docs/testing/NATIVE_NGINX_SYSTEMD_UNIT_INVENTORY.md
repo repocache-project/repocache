@@ -11,10 +11,22 @@ fixed stock distribution vendor file
 `/usr/lib/systemd/system/nginx.service` (Debian 13 and AlmaLinux 10).
 The on-disk file is opened with O_NOFOLLOW, a bounded length, regular
 file/root-owned/non-world-writable/link-count checks and before/after inode,
-mtime, ctime, parent metadata and name comparison. Fixed shadow unit and
-drop-in candidates in `/etc/systemd/system`, `/run/systemd/system`
-and the vendor unit drop-in directory refuse this initial-install
-inventory. No arbitrary path/name/command is accepted.
+mtime, ctime, parent metadata and name comparison. Fixed shadow units
+and drop-in candidates across the standard systemd system-unit search path
+refuse this initial-install inventory: D-Bus `system.control`, transient
+units, generators (including early/late), administrator `/etc` and
+`/usr/local/lib` units, attached directories, runtime `/run` units,
+and the vendor directory. Both `nginx.service.d` and type-wide `service.d`
+overrides are checked. A full vendor file snapshot can otherwise appear
+safe while PID 1 loads a higher-priority, independently managed unit.
+No arbitrary path/name/command is accepted.
+
+This static path inventory is conservative but **not authoritative** for
+a running host: compile-time paths, manager environment, aliases, unit
+load state and effective merged drop-ins must be checked separately
+against booted systemd before service ownership or a privileged reload.
+See [systemd.unit unit load paths](https://www.freedesktop.org/software/systemd/man/latest/systemd.unit).
+No new installation or service authority is granted.
 
 AlmaLinux 10's official NGINX RPM intentionally installs **empty**
 `nginx.service.d` directories in the vendor and administrator unit
