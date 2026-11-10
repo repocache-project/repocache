@@ -6,6 +6,8 @@ on:
       - scripts/ci_native_nginx_cache_smoke.py
       - scripts/ci_generated_nginx_route_cache_smoke.py
       - src/repocache/server_nginx_repository_bundle_v1.py
+      - src/repocache/server_derived_catalog_candidate_v1.py
+      - tests/test_server_derived_catalog_candidate_v1.py
       - src/repocache/server_nginx_pin_render_v1.py
       - docs/examples/server-install-v1.json
       - docs/testing/NATIVE_NGINX_CACHE_SMOKE.md
