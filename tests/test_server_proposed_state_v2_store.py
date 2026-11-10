@@ -1968,13 +1968,14 @@ def test_adopted_v2_initial_history_overflow_refused_before_disk_write(fixture_r
     assert not (folder / V2_STAGE).exists()
 
 
-def locked_preflight_commit(layout, candidate, *, expected, pins=None, inject=None):
+def locked_preflight_commit(layout, candidate, *, expected, pins=None, inject=None,
+                            validate=None):
     fd, _, uid = layout
     return commit_preflighted(
         fd, candidate, owner_uid=uid, expected_generation=expected,
         candidate_pins_by_repository={} if pins is None else pins,
         ca_bundle_path="/etc/ssl/certs/ca-certificates.crt",
-        inject_fault=inject,
+        inject_fault=inject, validate_nginx_candidate=validate,
     )
 
 
@@ -2129,3 +2130,100 @@ def test_v2_same_lock_preflight_commit_crash_requires_explicit_recovery(
     assert done["state_commit_status"] == "COMMITTED_INERT_V2"
 
 
+
+
+def test_v2_same_lock_fixture_validation_runs_before_journal_and_is_detached(
+    fixture_root,
+):
+    fd, folder, uid = fixture_root
+    proposed = snapshot(count=1)
+    observed = []
+
+    def validate(candidate):
+        # A separate attempt to take the same lock must fail while the
+        # validation callback is running. No state or journal exists yet.
+        with pytest.raises(ProtectedStateStoreError, match="LOCK_UNAVAILABLE"):
+            with _locked(fd, uid):
+                pytest.fail("the shared state lock was not held")
+        assert not (folder / V2_STATE).exists()
+        assert not (folder / V2_JOURNAL).exists()
+        assert not (folder / V2_JOURNAL_TMP).exists()
+        assert candidate["proposed_repository_ids"] == []
+        candidate["proposed_repository_ids"].append("forged")
+        observed.append(True)
+
+    result = locked_preflight_commit(
+        fixture_root, proposed, expected=0, validate=validate,
+    )
+    assert observed == [True]
+    assert result["fixture_validation_callback_executed"] is True
+    assert result["proposed_repository_ids"] == []
+    assert result["nginx_syntax_verified"] is False
+    assert result["authorizes_nginx_reload"] is False
+    assert result["authorizes_catalog_publication"] is False
+    assert (folder / V2_STATE).exists()
+    assert not (folder / V2_JOURNAL).exists()
+
+
+@pytest.mark.parametrize("exception", [RuntimeError, ValueError, OSError])
+def test_v2_same_lock_fixture_validation_failure_keeps_state_unmodified(
+    fixture_root, exception,
+):
+    _, folder, _ = fixture_root
+    previous = snapshot(count=1)
+    apply(fixture_root, previous)
+    next_state = snapshot(count=2, generation=2, previous=previous)
+    before = {p.name: (p.read_bytes(), p.stat().st_ino)
+              for p in folder.iterdir() if p.is_file()}
+
+    def reject(_candidate):
+        assert not (folder / V2_JOURNAL).exists()
+        assert not (folder / V2_STAGE).exists()
+        raise exception("test-only unsanitized secret: must not escape")
+
+    with pytest.raises(ProposedV2PersistenceError,
+                       match="NGINX_FIXTURE_VALIDATION_REFUSED") as exc:
+        locked_preflight_commit(
+            fixture_root, next_state, expected=1, validate=reject,
+        )
+    assert "secret" not in str(exc.value)
+    assert {p.name: (p.read_bytes(), p.stat().st_ino)
+            for p in folder.iterdir() if p.is_file()} == before
+
+
+def test_v2_same_lock_validation_catches_out_of_band_state_edit(fixture_root):
+    _, folder, _ = fixture_root
+    prior = snapshot(count=1)
+    apply(fixture_root, prior)
+    proposed = snapshot(count=2, generation=2, previous=prior)
+    foreign = snapshot(count=2)
+    raw = json.dumps(foreign, sort_keys=True, ensure_ascii=True,
+                     separators=(",", ":")).encode("utf-8")
+
+    def mutate(_candidate):
+        # A malicious same-UID writer ignored flock, after rendering.
+        with (folder / V2_STATE).open("wb") as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+
+    with pytest.raises(ProposedV2PersistenceError,
+                       match="STATE_CHANGED_DURING_PREFLIGHT"):
+        locked_preflight_commit(
+            fixture_root, proposed, expected=1, validate=mutate,
+        )
+    assert (folder / V2_STATE).read_bytes() == raw
+    assert not (folder / V2_JOURNAL).exists()
+
+
+def test_v2_same_lock_non_callable_validator_refused_without_mutation(
+    fixture_root,
+):
+    _, folder, _ = fixture_root
+    before = {p.name: p.read_bytes() for p in folder.iterdir()}
+    with pytest.raises(ProposedV2PersistenceError,
+                       match="NGINX_VALIDATOR_INVALID"):
+        locked_preflight_commit(
+            fixture_root, snapshot(count=1), expected=0, validate="nginx -t",
+        )
+    assert {p.name: p.read_bytes() for p in folder.iterdir()} == before
