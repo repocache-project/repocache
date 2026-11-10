@@ -86,9 +86,13 @@ def test_actual_linux_kernel_peer_credentials_read_without_claims():
 
 
 def test_stream_socket_cannot_pass_even_when_connection_is_local():
-    with socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM) as (a, b):
+    a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
         with pytest.raises(FixedRootControlError, match="SOCKET_TYPE_INVALID"):
             _peer_credentials(a)
+    finally:
+        a.close()
+        b.close()
 
 
 @pytest.mark.parametrize("raw", [
@@ -104,7 +108,10 @@ def test_unapproved_messages_are_rejected_before_effects(monkeypatch, raw):
                             lambda _: (1001, 3000, ()))
         monkeypatch.setattr(protocol, "_trusted_local_ids",
                             lambda: (3000, 900))
-        b.send(raw)
+        if raw:
+            b.send(raw)
+        else:
+            b.shutdown(socket.SHUT_WR)
         with pytest.raises(FixedRootControlError,
                            match="FIXED_OPERATION_REFUSED|TRUNCATED"):
             authorize_fixed_root_request(a)
