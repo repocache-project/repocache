@@ -914,7 +914,11 @@ writes/rollback until **specific** multi-resource fixture recovery occurs.
 Recovery obtains the *same* pinned FD lock. It validates journal format,
 exact old-byte digests, prior protected fixture ownership manifest, and
 checks that **each** current file has either the exact old or known next
-digest. A non-cooperating/foreign writer, symlink substitution, unowned
+digest. When the state has reached its proposed next bytes, the recovery
+independently validates the **complete v2 transition** (canonical schema,
+generation and retired-ID continuity) before restoring any file. A forged
+new-state digest cannot bless invalid v2 bytes. A non-cooperating/foreign
+writer, symlink substitution, unowned
 bootstrap artifact, malformed digest, ambiguous journal or unknown temporary
 stage is refused without deleting an unexpected file. Recovery invalidates
 the owner manifest first, restores the old catalog and shadow NGINX and v2
