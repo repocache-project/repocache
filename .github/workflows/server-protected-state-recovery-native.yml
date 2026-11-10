@@ -14,7 +14,7 @@ on:
       - 'src/repocache/server_protected_state_store_v1.py'
       - 'src/repocache/server_locked_manifest_reconcile_v1.py'
       - 'src/repocache/server_protected_state_inspect_v1.py'
-      - 'tests/test_server_proposed_state_v2_store.py tests/test_server_root_control_v2_candidate_binding_v1.py'
+      - 'tests/test_server_proposed_state_v2_store.py'
       - 'tests/test_server_protected_state_store_v1.py'
       - 'tests/test_server_locked_manifest_reconcile_v1.py'
       - 'docs/architecture/SERVER_LOCKED_MANIFEST_RECONCILIATION_V1.md'
@@ -104,7 +104,8 @@ jobs:
           python3 -B -m pytest -q -rs \
             tests/test_server_protected_state_store_v1.py \
             tests/test_server_locked_manifest_reconcile_v1.py \
-            tests/test_server_proposed_state_v2_store.py
+            tests/test_server_proposed_state_v2_store.py \
+            tests/test_server_root_control_v2_candidate_binding_v1.py
           # Linux fixture plus isolated running NGINX process evidence only:
           # NOT booted native systemd/SELinux, production service recovery,
           # authenticated privileged host installation or accepted v1 migration.
