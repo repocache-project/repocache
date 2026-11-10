@@ -8,10 +8,13 @@ on:
       - 'src/repocache/server_root_control_host_preflight_v1.py'
       - 'src/repocache/server_root_control_worker_v1.py'
       - 'src/repocache/server_root_control_client_v1.py'
+      - 'src/repocache/server_root_control_native_syntax_v1.py'
       - 'tests/test_server_root_control_protocol_v1.py'
       - 'tests/test_server_root_control_host_preflight_v1.py'
       - 'tests/test_server_root_control_worker_v1.py'
       - 'tests/test_server_root_control_client_v1.py'
+      - 'tests/test_server_root_control_native_syntax_v1.py'
+      - 'scripts/smoke_server_fixed_nginx_syntax.py'
       - 'tests/test_server_root_control_units_v1.py'
       - 'docs/examples/systemd/repocache-control.socket'
       - 'docs/examples/systemd/repocache-control.service'
@@ -24,6 +27,7 @@ on:
       - 'src/repocache/server_root_control_host_preflight_v1.py'
       - 'src/repocache/server_root_control_worker_v1.py'
       - 'src/repocache/server_root_control_client_v1.py'
+      - 'src/repocache/server_root_control_native_syntax_v1.py'
       - 'tests/test_server_root_control_protocol_v1.py'
       - 'tests/test_server_root_control_host_preflight_v1.py'
       - 'tests/test_server_root_control_worker_v1.py'
@@ -61,9 +65,9 @@ jobs:
           if [ '${{ matrix.platform }}' = 'debian13' ]; then
             export DEBIAN_FRONTEND=noninteractive
             apt-get update -qq
-            apt-get install -y -qq --no-install-recommends python3 python3-pytest
+            apt-get install -y -qq --no-install-recommends python3 python3-pytest nginx
           else
-            dnf -y -q --enablerepo=crb install python3 python3-pytest
+            dnf -y -q --enablerepo=crb install python3 python3-pytest nginx
           fi
       - name: Run kernel peer and denied-operation tests without service activation
         shell: bash
@@ -77,6 +81,10 @@ jobs:
             tests/test_server_root_control_worker_v1.py \
             tests/test_server_root_control_client_v1.py \
             tests/test_server_root_control_units_v1.py \
-            tests/test_server_root_control_host_preflight_v1.py
+            tests/test_server_root_control_host_preflight_v1.py \
+            tests/test_server_root_control_native_syntax_v1.py
+          # Distro native NGINX installed only in this disposable CI image.
+          REPOCACHE_NATIVE_TEST_CONTAINER=CONFIRMED_DISPOSABLE_DOCKER_ONLY \
+            python3 -B scripts/smoke_server_fixed_nginx_syntax.py
           # No privileged broker, systemd service, NGINX process, real reload
           # or host authorization is installed or executed here.

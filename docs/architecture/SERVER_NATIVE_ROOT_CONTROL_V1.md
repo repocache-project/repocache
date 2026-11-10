@@ -258,3 +258,41 @@ client parsers from interpreting an ostensibly identical denial differently
 when the root transaction is later implemented. Every permitted response
 still explicitly reports NOT_IMPLEMENTED and all authority flags false.
 This parser does not authenticate installed code or authorize any write.
+
+
+## Fixed default NGINX syntax invocation (no service action)
+
+The uninstalled private module `server_root_control_native_syntax_v1.py`
+adds a concrete low-level prerequisite for a future privileged transaction.
+It invokes only distro-native `/usr/sbin/nginx -t -c /etc/nginx/nginx.conf`
+with `shell=False`, no caller arguments, a fixed sanitized environment,
+`cwd=/`, closed inherited descriptors and a 10-second deadline.
+Both executable and top-level configuration must be regular root-owned
+files behind non-group-writable root-owned ancestors, without leaf symlinks
+or hard links. Their metadata is rechecked after running NGINX; detected
+replacements fail closed. Standard input, output and error are `/dev/null`;
+fatal NGINX private diagnostics cannot appear in returned reports.
+
+An `nginx -t` syntax check may itself read existing config/TLS secrets and
+touch NGINX log files; it is **not** guaranteed mutation-free on a real host.
+It checks the *currently installed default* configuration, **not** an owned
+REPOCACHE staged candidate. Includes, service provenance, SELinux and real
+exposure remain separately unverified. An exit status zero is a narrow
+observation, never a commit lease. All authority flags remain false.
+The systemd socket worker still returns `ROOT_TRANSACTION_NOT_IMPLEMENTED`;
+the new syntax module is **not imported/invoked by the dispatcher**.
+
+The existing two-distro root-control native CI now installs authenticated
+distro-native NGINX only in disposable Debian 13 and AlmaLinux 10
+containers, tests the fixed executable, malformed default syntax rejection
+and restores the original container config bytes. Unit tests enforce argv,
+no shell/env inheritance, deadline, unsafe path/root refusal, inode-drift
+checks and zero delegated authority.
+
+A future broker must separately verify signed installed REPOCACHE code,
+independent administrator authorization, native NGINX package/unit
+provenance, staged owned full-context candidate, mount/ACL/xattr/SELinux
+integrity, locked durable #31 state/NGINX/catalog WAL, known-good rollback,
+and actual active service exposure before any controlled reload/catalog.
+No host installation, socket activation, grant, service reload or actual
+catalog publication was performed by this change.
