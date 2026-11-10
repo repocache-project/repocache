@@ -295,13 +295,27 @@ def _verify_owned(old: dict[str, bytes | None]) -> None:
         _validate_proposed_v2_snapshot(snapshot)
         catalog = _json(old[_CATALOG], limit=_LIMIT[_CATALOG])
         if (type(catalog) is not dict or set(catalog)
-                != {"schema", "repositories"} or catalog["schema"] != 1
+                != {"schema", "repositories"}
+                or type(catalog["schema"]) is not int
+                or catalog["schema"] != 1
                 or type(catalog["repositories"]) is not list):
             _deny("CATALOG_DRIFT")
-        if len(catalog["repositories"]) != sum(
-            row["desired_state"] == "active"
-            for row in snapshot["repository_records"]
-        ):
+        document = parse_install_bytes(
+            base64.b64decode(snapshot["configuration_base64"], validate=True),
+            for_apply=True,
+        )
+        listen = document["deployment"]["listen"]
+        origin = "https://" + listen["hostname"] + (
+            "" if listen["https_port"] == 443
+            else ":" + str(listen["https_port"])
+        )
+        expected = sorted((
+            {"upstream": repo["upstream"]["base_url"],
+             "cache": origin + "/__repocache/repos/" + repo["id"] + "/"}
+            for repo in document["repositories"]
+            if repo["desired_state"] == "active"
+        ), key=lambda row: (row["upstream"], row["cache"]))
+        if catalog["repositories"] != expected:
             _deny("CATALOG_DRIFT")
     except NativeV2TransactionError:
         raise
