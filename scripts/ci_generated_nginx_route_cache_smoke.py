@@ -25,6 +25,9 @@ from ci_native_nginx_cache_smoke import (
 from repocache.server_nginx_repository_bundle_v1 import (
     render_repository_nginx_bundle_candidate,
 )
+from repocache.server_derived_catalog_candidate_v1 import (
+    preview_derived_catalog_from_nginx_dump,
+)
 
 
 def trusted_fixture_origin(counts, lock):
@@ -177,6 +180,49 @@ def main() -> None:
         run(nginx, "-t", "-e", str(root / "bootstrap.log"),
             "-c", str(config), "-p", str(root))
         require(True, "stock nginx -t accepts actual project cache/HTTPS fragment")
+
+        # Derive a client-schema-1 CANDIDATE from an actual stock nginx -T
+        # parse of the *exact* generated public-pin fragments. This is a
+        # separate throwaway file: the live smoke NGINX still requires its
+        # deliberately mapped localhost origin and its extra HIT header.
+        expected_pins = {
+            repo["id"]: {HOST: ["8.8.8.8"]}
+            for repo in document["repositories"]
+        }
+        preview_config = root / "nginx-catalog-candidate.conf"
+        native_candidate_bytes = config.read_text(encoding="utf-8")
+        native_candidate_bytes = native_candidate_bytes.replace(
+            f"server 127.0.0.1:{origin_port};", "server 8.8.8.8:443;",
+        ).replace(
+            "    add_header X-RepoCache-Smoke $upstream_cache_status always;\n",
+            "",
+        )
+        require(
+            fragment["http_upstream_fragment"] in native_candidate_bytes
+            and fragment["server_location_fragment"] in native_candidate_bytes,
+            "exact generated reference fragments restored in temporary -T file",
+        )
+        preview_config.write_text(native_candidate_bytes, encoding="utf-8")
+        real_dump = subprocess.run(
+            [nginx, "-T", "-e", str(root / "catalog-preview.log"),
+             "-c", str(preview_config), "-p", str(root)],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+        require(real_dump.returncode == 0,
+                "stock nginx -T validates exact generated candidate")
+        observed_candidate = preview_derived_catalog_from_nginx_dump(
+            document, candidate_pins_by_repository=expected_pins,
+            ca_bundle_path=str(origin_cert),
+            nginx_dump_text=real_dump.stdout,
+            nginx_t_exit_code=real_dump.returncode,
+        )
+        require(
+            observed_candidate["candidate_catalog"]["schema"] == 1
+            and len(observed_candidate["candidate_catalog"]["repositories"]) == 2
+            and observed_candidate["authorizes_catalog_publication"] is False
+            and observed_candidate["actual_active_exposure_verified"] is False,
+            "nginx -T dump only produces a non-publishable active-only candidate",
+        )
 
         counts: collections.Counter[str] = collections.Counter()
         lock = threading.Lock()
