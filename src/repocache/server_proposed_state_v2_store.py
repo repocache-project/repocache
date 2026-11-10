@@ -394,7 +394,11 @@ def _commit_preflighted_proposed_v2_under_root(
                     _canonical(candidate, limit=1024 * 1024),
                     limit=1024 * 1024,
                 )
-                validate_nginx_candidate(detached)
+                # Contract: successful fixture validation returns exactly
+                # None; an accidental bool/CompletedProcess result must not
+                # silently turn a failed nginx -t into an accepted commit.
+                if validate_nginx_candidate(detached) is not None:
+                    _refuse("NGINX_FIXTURE_VALIDATION_REFUSED")
             except Exception:
                 _refuse("NGINX_FIXTURE_VALIDATION_REFUSED")
         # Re-check state *after* validation: even a test callback may race a
