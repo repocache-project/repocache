@@ -306,6 +306,91 @@ def _commit_proposed_v2_under_root(
 
 
 
+def _commit_preflighted_proposed_v2_under_root(
+    root_fd: int, proposed_snapshot: dict[str, Any], *, owner_uid: int,
+    expected_generation: int,
+    candidate_pins_by_repository: Any,
+    ca_bundle_path: str,
+    inject_fault: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    """PRIVATE fixture: render candidate and commit v2 under one FD lock.
+
+    This intentionally does not run nginx -t, authenticate an administrator,
+    stage any live include, reload nginx or publish a catalog. The atomic
+    boundary is solely the *fixture state* preflight and journal writer.
+    It MUST NOT be wired to the host CLI or installed as a privileged helper.
+    """
+    if (type(expected_generation) is not int
+            or not 0 <= expected_generation < MAX_INT):
+        _refuse("EXPECTED_GENERATION_INVALID")
+    frozen, raw = _freeze(proposed_snapshot)
+    try:
+        pin_raw = _canonical(candidate_pins_by_repository, limit=1024 * 1024)
+        pins = _json(pin_raw, limit=1024 * 1024)
+    except (ValueError, TypeError, OverflowError, RecursionError):
+        _refuse("PINS_INVALID")
+    with _locked(root_fd, owner_uid) as directory:
+        _legacy_refusal(directory, owner_uid)
+        if _pending(directory, owner_uid):
+            _refuse("RECOVERY_REQUIRED")
+        existing, before = _read_v2(directory, owner_uid)
+        generation = 0 if existing is None else existing["state_generation"]
+        if generation != expected_generation:
+            _refuse("STALE_GENERATION")
+        try:
+            preview_proposed_v2_state_transition(
+                frozen, expected_generation=generation,
+                previous_snapshot=existing,
+            )
+        except (ValueError, TypeError, OverflowError, RecursionError):
+            _refuse("TRANSITION_INVALID")
+        no_change = existing is not None and _no_change(existing, frozen)
+        render_state = existing if no_change else frozen
+        render_generation = generation if no_change else generation + 1
+        try:
+            document = parse_install_bytes(
+                base64.b64decode(render_state["configuration_base64"]),
+                for_apply=True,
+            )
+            candidate = render_repository_nginx_bundle_candidate(
+                document, expected_state_generation=render_generation,
+                candidate_pins_by_repository=pins,
+                ca_bundle_path=ca_bundle_path,
+            )
+        except (NginxRepositoryBundleError, ValueError, TypeError,
+                OverflowError, RecursionError):
+            _refuse("NGINX_CANDIDATE_REFUSED")
+        # Detect a non-cooperating writer that ignored flock after preflight.
+        _, after = _read_v2(directory, owner_uid)
+        if before != after:
+            _refuse("STATE_CHANGED_DURING_PREFLIGHT")
+        written = _commit_locked_proposed_v2(
+            directory, frozen, raw, owner_uid=owner_uid,
+            expected_generation=generation, inject_fault=inject_fault,
+            require_previous_bytes=True, previous_bytes=before,
+        )
+        # Return a candidate, NEVER an observed active mapping or permission.
+        return {
+            **candidate,
+            "status": "LOCKED_FIXTURE_V2_STATE_ONLY_COMMIT_NGINX_NOT_ACTIVATED",
+            "state_commit_status": written["status"],
+            "state_generation": written["state_generation"],
+            "expected_previous_generation": generation,
+            "candidate_generation": render_generation,
+            "state_preflight_and_commit_share_exclusive_lock": True,
+            "fixture_only": True,
+            "operator_authorization_verified": False,
+            "trusted_host_root_verified": False,
+            "nginx_syntax_verified": False,
+            "active_exposure_verified": False,
+            "authorizes_state_commit": False,
+            "authorizes_nginx_activation": False,
+            "authorizes_nginx_reload": False,
+            "authorizes_catalog_publication": False,
+            "authorizes_cache_cleanup": False,
+        }
+
+
 def _preview_proposed_v2_recovery_under_root(
     root_fd: int, *, owner_uid: int,
 ) -> dict[str, Any]:
