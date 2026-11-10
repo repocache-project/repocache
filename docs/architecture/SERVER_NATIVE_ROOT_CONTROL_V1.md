@@ -219,3 +219,29 @@ failure-to-send refusals. This is protocol usability for an **inert
 security prerequisite**, not a completed CLI, installed worker or
 production NGINX authorization. Booted native systemd and enforcing
 AlmaLinux 10 SELinux remain NOT VERIFIED.
+
+
+## Non-installed fixed client: authenticated refusal is not a successful action
+
+The optional private \`server_root_control_client_v1.py\` is an exact two-operation
+Linux AF_UNIX \`SOCK_SEQPACKET\` test consumer, NOT a \`repocache\` CLI command.
+The caller may select only the Python enum-like exact operation names
+\`APPLY_V2\` and \`RECOVER_V2\`; the implementation fixes both their wire
+messages and the control pathname. A 3-second deadline protects connect,
+send and receive. The path's necessary root-owned, non-group-writable
+metadata is checked before connect; after connect, the Linux kernel's
+\`SO_PEERCRED\` must identify a root peer. The client accepts just ONE
+bounded newline-terminated JSON response whose closed keys, version,
+operation identity and **all-false** operation/authority flags match the
+inert worker. Any \`success\`, authorization flag, extra field, truncated
+reply, invalid peer, malformed payload or foreign socket fails closed with
+a static diagnostic code, never an ambiguous successful apply.
+
+The client never confers operator group membership or authorization. Neither
+root UID from \`SO_PEERCRED\` nor a fixed path can prove that the peer is
+the signed installed REPOCACHE binary or the host PID1 namespace. The client
+does not run an external executable or read protected state. Both the
+client and server are uninstalled prototypes and **no real request can
+succeed**; \`ROOT_TRANSACTION_NOT_IMPLEMENTED\` remains a denial.
+Separate kernel/socket tests run in disposable Debian 13 and AlmaLinux 10
+containers, without installing systemd units or modifying real NGINX.
