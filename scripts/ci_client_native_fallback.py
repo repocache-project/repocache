@@ -241,7 +241,7 @@ def dnf_command(base: Path, primary: HTTPBackend,
         "name=REPOCACHE Native Metadata Probe\n"
         "enabled=1\n"
         "gpgcheck=1\n"
-        ("repo_gpgcheck=1\n" if metadata_key else "repo_gpgcheck=0\n")
+        + ("repo_gpgcheck=1\n" if metadata_key else "repo_gpgcheck=0\n")
         + ("gpgkey=file://%s\n" % metadata_key if metadata_key else "")
         + "skip_if_unavailable=0\n"
         "fastestmirror=0\n"
