@@ -192,3 +192,68 @@ def test_actual_root_owned_socket_rejects_leaf_symlink_substitution(
             RootControlWorkerError, match="ROOT_CONTROL_SOCKET_OWNERSHIP_REFUSED",
         ):
             worker._validate_listener(server)
+
+
+def test_systemd_worker_blocks_preflight_failure_before_peer_processing(
+    monkeypatch,
+):
+    """Even a correctly formed accepted FD may never bypass native gate."""
+    from repocache.server_root_control_host_preflight_v1 import (
+        NativeHostPreflightError,
+    )
+    with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as listener:
+        listener.bind("\0repocache-native-context-refusal")
+        listener.listen(1)
+        original_dup = os.dup
+        monkeypatch.setenv("LISTEN_PID", str(os.getpid()))
+        monkeypatch.setenv("LISTEN_FDS", "1")
+        monkeypatch.setattr(worker, "_root_worker", lambda: None)
+        monkeypatch.setattr(
+            worker.os, "dup",
+            lambda fd: original_dup(listener.fileno()) if fd == 3
+                       else pytest.fail("only systemd FD 3 is permitted"),
+        )
+        events = []
+
+        def accepted_socket(_server):
+            events.append("listener-checked")
+
+        def refuse_host():
+            events.append("host-refused")
+            raise NativeHostPreflightError("NATIVE_HOST_SYSTEMD_PID1_REQUIRED")
+
+        monkeypatch.setattr(worker, "_validate_listener", accepted_socket)
+        monkeypatch.setattr(
+            worker, "require_native_host_preconditions", refuse_host,
+        )
+        with pytest.raises(
+            NativeHostPreflightError, match="SYSTEMD_PID1_REQUIRED",
+        ):
+            worker._systemd_listener()
+        assert events == ["listener-checked", "host-refused"]
+
+
+def test_systemd_worker_does_not_treat_preflight_as_approval(monkeypatch):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as listener:
+        listener.bind("\0repocache-native-preflight-is-not-authority")
+        listener.listen(1)
+        original_dup = os.dup
+        monkeypatch.setenv("LISTEN_PID", str(os.getpid()))
+        monkeypatch.setenv("LISTEN_FDS", "1")
+        monkeypatch.setattr(worker, "_root_worker", lambda: None)
+        monkeypatch.setattr(
+            worker.os, "dup", lambda fd: original_dup(listener.fileno()),
+        )
+        monkeypatch.setattr(worker, "_validate_listener", lambda _: None)
+        monkeypatch.setattr(
+            worker, "require_native_host_preconditions",
+            lambda: {"host_root_provenance_verified": False},
+        )
+        with worker._systemd_listener() as accepted:
+            assert accepted.type & 0xF == socket.SOCK_SEQPACKET
+        # Passing the native prerequisite still gives no authority to call
+        # NGINX or write protected state: the worker remains inert.
+        monkeypatch.setattr(worker.sys,"argv",["server-control-worker"])
+        monkeypatch.setattr(worker,"serve_one_fixed_request",
+            lambda: {"status":"ROOT_TRANSACTION_NOT_IMPLEMENTED"})
+        assert worker.main() == 2
