@@ -32,8 +32,12 @@ Only two **single-frame** exact operation requests exist:
 Packets are bounded to 32 bytes, with timeout and kernel truncation checks.
 The returned operation code is a **classification only**: all state-write,
 NGINX-reload and catalog-publication authority flags remain false. There is
-no callable production dispatcher, no socket-listening daemon or installed
-helper, no service enablement, no mutable root-owned file, no arbitrary
+no production dispatcher or installed helper. A separate **non-installed,
+always-denying** socket-activated worker skeleton now checks systemd's single
+FD 3 handoff, fixed `/run/repocache/server-control.sock` listener identity,
+root-owned runtime directory and socket mode/ownership, and rejects all
+applies/recoveries with a nonzero exit. No systemd unit or socket is supplied,
+installed, enabled or activated. There is no mutable root-owned file, no arbitrary
 unit/config/executable/input path, no caller-supplied env, no trust in
 `--yes`, request hashes, approval references, client submissions or state
 snapshots. The code does not spawn, run or mutate anything.
@@ -83,10 +87,15 @@ are installed by this PR.
 ## Tests and acceptance
 
 The `server-root-control-protocol-native.yml` workflow executes unit and
-negative socket tests on disposable Debian 13 and AlmaLinux 10 userspaces.
+negative socket/worker tests on disposable Debian 13 and AlmaLinux 10 userspaces.
 It covers the actual Linux peercred read, incorrect socket type, exact
 command whitelist, truncation, service account refusal, missing local policy,
-unprivileged worker denial and pure group/identity decisions.
+unprivileged worker denial and pure group/identity decisions. It additionally
+checks abstract/wrong-type listeners, permissive/symlink/foreign socket
+metadata, missing systemd activation FD and rejection of all root worker
+operations. The worker deliberately returns a nonzero status even for a
+successfully authenticated request: a refused operation must never be
+mistaken for a completed administrative change.
 
 Test files merely present is **NOT VERIFIED** until inspected exact-HEAD
 pytest logs. An `authorize_fixed_root_request` success is **not** an executed
