@@ -270,8 +270,8 @@ def test_systemd_worker_does_not_treat_preflight_as_approval(monkeypatch):
 
 def test_authenticated_seqpacket_receives_fixed_non_success_reply(monkeypatch):
     """Actual kernel SOCK_SEQPACKET peer reads a single denial packet."""
-    with socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET) as pair:
-        client, accepted = pair
+    client, accepted = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    with client, accepted:
         class Server:
             def __enter__(self):
                 return self
@@ -349,8 +349,8 @@ def test_worker_refuses_if_authenticated_denial_cannot_be_delivered(
 def test_worker_unauthorized_peer_never_receives_an_acknowledgment(monkeypatch):
     """Do not reply until strict peer UID/GID/operation authorization passes."""
     from repocache.server_root_control_protocol_v1 import FixedRootControlError
-    with socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET) as pair:
-        client, accepted = pair
+    client, accepted = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    with client, accepted:
         class Server:
             def __enter__(self):
                 return self
