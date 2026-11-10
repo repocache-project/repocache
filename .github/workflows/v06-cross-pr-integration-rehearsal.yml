@@ -9,6 +9,7 @@ on:
       - 'tests/test_server_proposed_state_v2_store.py'
       - 'scripts/ci_v06_cross_pr_lifecycle_contract.py'
       - 'scripts/ci_v06_cross_pr_multi_wal_contract.py'
+      - 'scripts/ci_native_nginx_process_inode_smoke.py'
       - 'docs/architecture/SERVER_LOCKED_MANIFEST_RECONCILIATION_V1.md'
 
 permissions:
@@ -33,7 +34,7 @@ jobs:
       PYTHONPATH: src
       PYTHONDONTWRITEBYTECODE: '1'
       BASE_SHA: d53782ed01e1f85686f10279fd3c7eea6d7f6720
-      PR27_SHA: cb5523c5482a3a27b115a31835b8982da935da0c
+      PR27_SHA: ffea83d305c4aa51ee9553d548e1e5712edd95f0
       PR28_SHA: b23cc642cbb62eb0874c6f774f8caf4bbd25952d
       PR64_SHA: 5cd474f89863a8d874dd948bc67d56d4b33e623b
       PR95_SHA: fa721e8dc730a95494f0675b7efa23f545c45e0f
@@ -110,5 +111,10 @@ jobs:
           python3 -B -m pytest -q -rs             tests/test_server_proposed_state_v2_store.py             tests/test_server_locked_manifest_reconcile_v1.py             tests/test_server_root_control_protocol_v1.py             tests/test_server_root_control_host_preflight_v1.py             tests/test_server_root_control_worker_v1.py             tests/test_server_root_control_client_v1.py             tests/test_server_native_nginx_service_unit_v1.py             tests/test_server_native_nginx_effective_unit_v1.py             tests/test_server_nginx_pin_render_v1.py             tests/test_server_nginx_repository_bundle_v1.py             tests/test_server_derived_catalog_candidate_v1.py             tests/test_server_derived_catalog_client_contract_v1.py             tests/test_server_repository_reconcile_v1.py
           python3 -B scripts/ci_v06_cross_pr_lifecycle_contract.py
           python3 -B scripts/ci_v06_cross_pr_multi_wal_contract.py
+          # The exact #27 PR now proves the running packaged NGINX binary
+          # inode in a listener-free child of THIS disposable container.
+          # It cannot claim systemd, SELinux or host-root acceptance.
+          REPOCACHE_NATIVE_TEST_CONTAINER=CONFIRMED_DISPOSABLE_DOCKER_ONLY \
+            python3 -B scripts/ci_native_nginx_process_inode_smoke.py
           # Never modify protected branches, merge on GitHub, install a root
           # worker, start systemd, approve a catalog or publish a release.

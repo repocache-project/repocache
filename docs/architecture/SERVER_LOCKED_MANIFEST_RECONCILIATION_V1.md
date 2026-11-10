@@ -1059,3 +1059,17 @@ package marker or claims native package rollback.** Real APT/DNF side
 effects, installed systemd service identity and actual SELinux policy
 remain independently NOT VERIFIED. This is a fail-closed prerequisite,
 not production NGINX installation or an installer API.
+
+
+## Exact #27 native NGINX master cross-PR rehearsal
+
+The exact-five-PR disposable merge workflow now additionally executes the
+#252 root-owned packaged NGINX master /proc identity smoke after the
+#31/#95/#28 state, lifecycle and active-only candidate tests. The process
+uses an isolated temporary configuration with no listening port, and is
+terminated/reaped by the CI driver. The new #252 source verifies the kernel
+executable inode matches the installed /usr/sbin/nginx inode before reporting
+a **read-only necessary condition**. The combined workflow pins PR #252's
+exact head, refusing changed dependency refs. This is never a production
+transaction, unit reload, activated catalog, host-root attestation or
+booted systemd/SELinux test; issue #31 AC1-AC5 remain NOT VERIFIED.
