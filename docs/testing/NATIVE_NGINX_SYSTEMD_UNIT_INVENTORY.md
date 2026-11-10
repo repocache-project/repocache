@@ -17,8 +17,15 @@ refuse this initial-install inventory: D-Bus `system.control`, transient
 units, generators (including early/late), administrator `/etc` and
 `/usr/local/lib` units, attached directories, runtime `/run` units,
 and the vendor directory. Both `nginx.service.d` and type-wide `service.d`
-overrides are checked. A full vendor file snapshot can otherwise appear
-safe while PID 1 loads a higher-priority, independently managed unit.
+overrides are checked. Implicit NGINX service dependency directories
+`nginx.service.wants`, `nginx.service.requires`, and `nginx.service.upholds`
+are also refused across each fixed system-unit root and vendor root:
+systemd can add dependent services from symlinks in those directories
+without modifying the principal unit bytes. Empty dependency directories
+are conservatively refused; only empty, safely owned `.d` drop-in
+placeholders may be ignored. A full vendor file snapshot can otherwise
+appear safe while PID 1 loads a higher-priority, independently managed
+unit or extra dependencies.
 No arbitrary path/name/command is accepted.
 
 This static path inventory is conservative but **not authoritative** for
