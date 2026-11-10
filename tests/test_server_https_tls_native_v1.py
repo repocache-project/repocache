@@ -205,4 +205,11 @@ def test_independent_tls_pair_preflight_refuses_bad_material_before_any_reload(
         assert result.returncode != 0
     assert (cert.read_bytes(), key.read_bytes()) == (raw_cert, raw_key)
     assert not (tmp_path / "tls.sock").exists()
-    assert not (tmp_path / "nginx.pid").exists()
+    # AlmaLinux stock nginx -t may still create its configured PID file.
+    # Only the disposable tmp prefix is allowed to receive that by-product;
+    # it does not mean a master or HTTPS listener was started.
+    pid = tmp_path / "nginx.pid"
+    if pid.exists():
+        assert pid.is_file()
+        assert pid.stat().st_uid == os.geteuid()
+        assert pid.stat().st_nlink == 1
