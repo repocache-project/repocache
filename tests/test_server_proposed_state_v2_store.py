@@ -29,6 +29,7 @@ from repocache.server_proposed_state_v2_store import (
     V2_STAGE, V2_STATE,
     ProposedV2PersistenceError,
     _commit_proposed_v2_under_root as commit,
+    _commit_preflighted_proposed_v2_under_root as commit_preflighted,
     _recover_proposed_v2_under_root as recover,
     _preview_persisted_v2_nginx_candidate_under_root as render_persisted,
     _preview_proposed_v2_nginx_before_commit_under_root as precommit_nginx,
@@ -1965,3 +1966,170 @@ def test_adopted_v2_initial_history_overflow_refused_before_disk_write(fixture_r
     assert not (folder / V2_STATE).exists()
     assert not (folder / V2_JOURNAL).exists()
     assert not (folder / V2_STAGE).exists()
+
+
+def locked_preflight_commit(layout, candidate, *, expected, pins=None, inject=None):
+    fd, _, uid = layout
+    return commit_preflighted(
+        fd, candidate, owner_uid=uid, expected_generation=expected,
+        candidate_pins_by_repository={} if pins is None else pins,
+        ca_bundle_path="/etc/ssl/certs/ca-certificates.crt",
+        inject_fault=inject,
+    )
+
+
+def test_v2_same_lock_preflight_commit_bootstrap_and_no_activation(fixture_root):
+    _, folder, _ = fixture_root
+    new = snapshot(count=1)
+    candidate = locked_preflight_commit(fixture_root, new, expected=0)
+    assert candidate["state_commit_status"] == "COMMITTED_INERT_V2"
+    assert candidate["state_generation"] == 1
+    assert candidate["state_preflight_and_commit_share_exclusive_lock"] is True
+    assert candidate["status"] == (
+        "LOCKED_FIXTURE_V2_STATE_ONLY_COMMIT_NGINX_NOT_ACTIVATED"
+    )
+    assert candidate["proposed_repository_ids"] == []
+    assert (folder / V2_STATE).exists()
+    assert not (folder / V2_JOURNAL).exists()
+    assert not (folder / V2_STAGE).exists()
+    for flag in (
+        "fixture_only", "nginx_syntax_verified", "active_exposure_verified",
+        "operator_authorization_verified", "trusted_host_root_verified",
+        "authorizes_state_commit", "authorizes_nginx_activation",
+        "authorizes_nginx_reload", "authorizes_catalog_publication",
+        "authorizes_cache_cleanup",
+    ):
+        assert candidate[flag] is (flag == "fixture_only")
+    persisted = persisted_render(fixture_root, generation=1, pins={})
+    for part in ("http_upstream_fragment", "server_location_fragment",
+                 "pin_count", "proposed_repository_ids"):
+        assert persisted[part] == candidate[part]
+
+
+def test_v2_same_lock_preflight_commit_updates_active_and_preserves_noop_inode(
+    fixture_root,
+):
+    _, folder, _ = fixture_root
+    current = snapshot(count=1)
+    apply(fixture_root, current)
+    updated_doc = document(count=1)
+    updated_doc["repositories"][0]["desired_state"] = "active"
+    updated = snapshot(generation=2, previous=current, doc=updated_doc)
+    pins = {"repo-0": {"mirror0.example.invalid": ["8.8.8.8"]}}
+    preview = precommit(fixture_root, updated, expected=1, pins=pins)
+    candidate = locked_preflight_commit(fixture_root, updated, expected=1, pins=pins)
+    assert candidate["state_commit_status"] == "COMMITTED_INERT_V2"
+    assert candidate["candidate_generation"] == 2
+    assert candidate["proposed_repository_ids"] == ["repo-0"]
+    assert candidate["server_location_fragment"] == preview["server_location_fragment"]
+    assert candidate["http_upstream_fragment"] == preview["http_upstream_fragment"]
+    assert (folder / V2_STATE).exists()
+    unchanged = snapshot(generation=3, previous=updated, doc=updated_doc)
+    before = (folder / V2_STATE).read_bytes()
+    ino = (folder / V2_STATE).stat().st_ino
+    noop = locked_preflight_commit(fixture_root, unchanged, expected=2, pins=pins)
+    assert noop["state_commit_status"] == "NO_CHANGE_INERT_V2"
+    assert noop["candidate_generation"] == 2
+    assert noop["state_generation"] == 2
+    assert (folder / V2_STATE).read_bytes() == before
+    assert (folder / V2_STATE).stat().st_ino == ino
+
+
+@pytest.mark.parametrize("case", [
+    "stale", "wrong-pins", "unsafe-pin", "lock-held", "unsafe-cache-root",
+])
+def test_v2_same_lock_preflight_commit_refuses_before_state_mutation(
+    fixture_root, case,
+):
+    fd, folder, uid = fixture_root
+    current = snapshot(count=1)
+    apply(fixture_root, current)
+    updated_doc = document(count=1)
+    updated_doc["repositories"][0]["desired_state"] = "active"
+    if case == "unsafe-cache-root":
+        updated_doc["deployment"]["paths"]["cache_root"] = (
+            "/var/cache/repocache;include /tmp/foreign.conf;"
+        )
+    updated = snapshot(generation=2, previous=current, doc=updated_doc)
+    pins = {"repo-0": {"mirror0.example.invalid": ["8.8.8.8"]}}
+    if case == "wrong-pins":
+        pins = {}
+    if case == "unsafe-pin":
+        pins = {"repo-0": {"mirror0.example.invalid": ["169.254.169.254"]}}
+    expected = 0 if case == "stale" else 1
+    before = {p.name: (p.read_bytes(), p.stat().st_ino)
+              for p in folder.iterdir() if p.is_file()}
+    if case == "lock-held":
+        with _locked(fd, uid):
+            with pytest.raises(ProtectedStateStoreError, match="LOCK_UNAVAILABLE"):
+                locked_preflight_commit(
+                    fixture_root, updated, expected=expected, pins=pins,
+                )
+    else:
+        with pytest.raises(ProposedV2PersistenceError):
+            locked_preflight_commit(
+                fixture_root, updated, expected=expected, pins=pins,
+            )
+    assert {p.name: (p.read_bytes(), p.stat().st_ino)
+            for p in folder.iterdir() if p.is_file()} == before
+    assert not (folder / V2_JOURNAL).exists()
+
+
+def test_v2_same_lock_preflight_commit_detects_foreign_writer_before_journal(
+    fixture_root, monkeypatch,
+):
+    import repocache.server_proposed_state_v2_store as module
+    _, folder, _ = fixture_root
+    current = snapshot(count=1)
+    apply(fixture_root, current)
+    next_state = snapshot(count=2, generation=2, previous=current)
+    unrelated = snapshot(count=2)
+    bytes_unrelated = json.dumps(
+        unrelated, sort_keys=True, ensure_ascii=True, separators=(",", ":"),
+    ).encode("utf-8")
+    original_render = module.render_repository_nginx_bundle_candidate
+
+    def foreign_edit(*args, **kwargs):
+        # A synthetic root writer that intentionally ignores advisory flock.
+        with (folder / V2_STATE).open("wb") as stream:
+            stream.write(bytes_unrelated)
+            stream.flush()
+            os.fsync(stream.fileno())
+        return original_render(*args, **kwargs)
+
+    monkeypatch.setattr(module, "render_repository_nginx_bundle_candidate",
+                        foreign_edit)
+    with pytest.raises(ProposedV2PersistenceError,
+                       match="STATE_CHANGED_DURING_PREFLIGHT"):
+        locked_preflight_commit(fixture_root, next_state, expected=1)
+    assert (folder / V2_STATE).read_bytes() == bytes_unrelated
+    assert not (folder / V2_JOURNAL).exists()
+
+
+def test_v2_same_lock_preflight_commit_crash_requires_explicit_recovery(
+    fixture_root,
+):
+    _, folder, _ = fixture_root
+    current = snapshot(count=1)
+    apply(fixture_root, current)
+    original = (folder / V2_STATE).read_bytes()
+    next_state = snapshot(count=2, generation=2, previous=current)
+
+    def abort(phase):
+        if phase == "journal_durable":
+            raise RuntimeError("simulated durable crash")
+
+    with pytest.raises(RuntimeError, match="simulated durable crash"):
+        locked_preflight_commit(
+            fixture_root, next_state, expected=1, inject=abort,
+        )
+    assert (folder / V2_STATE).read_bytes() == original
+    assert (folder / V2_JOURNAL).exists()
+    with pytest.raises(ProposedV2PersistenceError, match="RECOVERY_REQUIRED"):
+        locked_preflight_commit(fixture_root, next_state, expected=1)
+    assert rollback(fixture_root)["status"] == "ROLLED_BACK_INERT_V2"
+    assert (folder / V2_STATE).read_bytes() == original
+    done = locked_preflight_commit(fixture_root, next_state, expected=1)
+    assert done["state_commit_status"] == "COMMITTED_INERT_V2"
+
+
