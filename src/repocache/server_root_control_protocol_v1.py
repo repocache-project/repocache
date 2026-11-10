@@ -80,7 +80,7 @@ def _peer_credentials(conn: socket.socket) -> tuple[int, int, tuple[int, ...]]:
         if len(raw) != struct.calcsize("3i"):
             _refuse("PEER_CREDENTIALS_INVALID")
         pid, uid, gid = struct.unpack("3i", raw)
-        if pid <= 0:
+        if pid <= 0 or not _valid_id(uid) or not _valid_id(gid):
             _refuse("PEER_CREDENTIALS_INVALID")
         raw_groups = conn.getsockopt(
             socket.SOL_SOCKET, _SO_PEERGROUPS, _MAX_GROUP_BYTES
@@ -90,6 +90,8 @@ def _peer_credentials(conn: socket.socket) -> tuple[int, int, tuple[int, ...]]:
         groups = struct.unpack(
             f"{len(raw_groups) // struct.calcsize('i')}i", raw_groups
         )
+        if any(not _valid_id(member_gid) for member_gid in groups):
+            _refuse("PEER_GROUPS_INVALID")
         return uid, gid, groups
     except (OSError, ValueError, struct.error):
         _refuse("PEER_CREDENTIALS_UNAVAILABLE")
