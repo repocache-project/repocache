@@ -3344,3 +3344,37 @@ def test_multi_resource_tampered_journal_refused_without_erasure(
         multi._recover_fixture_multi_resource_under_root(fd, owner_uid=uid)
     assert {n: (folder / n).read_bytes() for n in multi.ORDER} == old
     assert journal.is_file()
+
+
+def test_multi_resource_recovery_refuses_forged_next_hash_for_invalid_v2(
+    fixture_root,
+):
+    """A journal digest cannot turn invalid next-generation state into authority."""
+    multi = _multi_resource_fixture()
+    fd, folder, uid = fixture_root
+
+    def crash(point):
+        if point == "manifest_durable":
+            raise RuntimeError("crash after new resources replaced")
+
+    with pytest.raises(RuntimeError):
+        multi._commit_fixture_multi_resource_under_root(
+            fd, _multi_snapshot(1), owner_uid=uid, expected_generation=0,
+            include_bytes=b"# candidate\n", catalog_bytes=_catalog_fixture([]),
+            inject_fault=crash,
+        )
+    journal = folder / multi.JOURNAL
+    state = folder / V2_STATE
+    invalid = b'{"state_schema_version":999,"state_generation":1}'
+    state.write_bytes(invalid)
+    forged = json.loads(journal.read_bytes())
+    forged["next_sha256"][V2_STATE] = hashlib.sha256(invalid).hexdigest()
+    journal.write_bytes(multi._canonical(
+        forged, limit=multi.MAX_JOURNAL_BYTES,
+    ))
+    old = {n: (folder / n).read_bytes() for n in multi.ORDER}
+    with pytest.raises(multi.FixtureMultiResourceError,
+                       match="NEXT_STATE_INVALID"):
+        multi._recover_fixture_multi_resource_under_root(fd, owner_uid=uid)
+    assert {n: (folder / n).read_bytes() for n in multi.ORDER} == old
+    assert journal.is_file()
