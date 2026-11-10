@@ -21,6 +21,7 @@ on:
       - 'scripts/smoke_server_native_package_metadata.py'
       - 'scripts/smoke_server_native_nginx_prepackage_state.py'
       - 'scripts/smoke_server_native_nginx_container_install.py'
+      - 'scripts/ci_native_nginx_process_inode_smoke.py'
       - 'tests/test_server_native_nginx_container_install.py'
       - 'docs/architecture/SERVER_NATIVE_NGINX_PACKAGES_V1.md'
       - '.github/workflows/server-native-nginx-metadata.yml'
@@ -111,4 +112,8 @@ jobs:
               fi
               REPOCACHE_NATIVE_TEST_CONTAINER=CONFIRMED_DISPOSABLE_DOCKER_ONLY \
                 PYTHONPATH=src python3 scripts/smoke_server_native_nginx_container_install.py
+              # Start only a private, listener-free NGINX master inside this
+              # new Docker instance; observe its kernel executable inode.
+              REPOCACHE_NATIVE_TEST_CONTAINER=CONFIRMED_DISPOSABLE_DOCKER_ONLY \
+                PYTHONPATH=src python3 scripts/ci_native_nginx_process_inode_smoke.py
             '

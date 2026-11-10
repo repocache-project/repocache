@@ -190,3 +190,20 @@ semantics. `real_pid1_and_nginx_process_verified=false`, all mutation/
 reload flags false and all original native #27 acceptance gates remain
 NOT VERIFIED. A future privileged operation must independently reobserve
 and pin relevant identities under its own authenticated transaction lock.
+
+
+## Real disposable NGINX master inode smoke (not a native host service)
+
+The native package-install CI now launches a **listener-free** NGINX master
+using the distro's installed binary and a 0700 temporary private configuration
+inside the already explicitly marked fresh Debian 13 / AlmaLinux 10 Docker
+container. The process is a direct child, never a systemd nginx.service;
+no systemctl, production host config, root worker, client catalog or network
+listener is involved. Before and while the child runs, the read-only MainPID
+helper must match the kernel's /proc executable device/inode to the installed
+root-owned /usr/sbin/nginx, observe the nginx process name and reject
+stale/incorrect kernel process identity. The exact disposable child is always
+terminated and reaped within a bounded timeout. The JSON record explicitly
+sets all host-root, native systemd, SELinux, reload and catalog authority
+claims to false. This supports the low-level executable-inode invariant;
+it **does not** satisfy #27/#31/#64 booted native acceptance.
