@@ -725,3 +725,34 @@ parity, no-op idempotency, stale generation, unsafe pins, concurrent lock,
 out-of-band writer drift and interrupted-journal recovery. Genuine
 booted systemd + enforcing SELinux acceptance on Debian 13 and AlmaLinux 10
 is **NOT VERIFIED** and remains scheduled after the v0.6.0 code gates.
+
+### Candidate syntax validation hook while holding the fixture lock
+
+The private same-lock precommit API can now receive a **test-only**
+`validate_nginx_candidate` callback. It receives an independently detached
+JSON-compatible copy of the already rendered #28 candidate **after** the
+canonical v2 predecessor/transition and pin checks, but **before** any new
+journal, stage or state write. The existing state predecessor comparison runs
+**again after** this callback, so a non-cooperating writer that changes state
+during a slow syntax test is refused without replacing the changed bytes.
+
+The callback is not a privileged or production validation API: the caller
+supplies it, its implementation and environment are untrusted, and a callback
+may perform arbitrary test fixture effects. No production host helper may
+accept a validator, executable path, config path or service unit from callers.
+A callback exception is mapped to a fixed redacted
+`NGINX_FIXTURE_VALIDATION_REFUSED` error; no state journal is created. The
+detached argument prevents accidental mutation of the candidate returned to
+the test harness. Even with callback success the
+`nginx_syntax_verified`, `authorizes_nginx_reload` and
+`authorizes_catalog_publication` flags remain **false**; the new
+`fixture_validation_callback_executed` field reports only invocation.
+
+Executed evidence must still distinguish synthetic lock/validator tests from
+actual packaged NGINX syntax and from root-authenticated host activation.
+The next implementation boundary is a fixed-operation, root-owned entrypoint
+with independently verified administrative OS authorization and host
+provenance, plus validated NGINX include ownership, systemd unit, TLS/cache
+paths, full-context syntax, reload, observed exposure, same-lock state/catalog
+commit and durable known-good compensation. This new callback alone satisfies
+none of those operational acceptance requirements.
