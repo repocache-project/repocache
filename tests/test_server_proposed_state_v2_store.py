@@ -3071,6 +3071,74 @@ def test_multi_resource_foreign_symlink_refused_without_following(
     assert (folder / multi.JOURNAL).is_file()
 
 
+
+@pytest.mark.parametrize("corruption", [
+    "duplicate-key", "noncanonical-whitespace", "nonfinite", "wrong-type",
+    "invalid-utf8",
+])
+def test_multi_resource_refuses_ambiguous_catalog_before_any_write(
+    fixture_root, corruption,
+):
+    multi = _multi_resource_fixture()
+    fd, folder, uid = fixture_root
+    valid = _catalog_fixture(["repo-0"])
+    if corruption == "duplicate-key":
+        candidate = valid.replace(
+            b'"status":', b'"status":"fixture-only-observed-candidate","status":',
+            1,
+        )
+    elif corruption == "noncanonical-whitespace":
+        candidate = b"{ " + valid[1:]
+    elif corruption == "nonfinite":
+        candidate = valid.replace(b'["repo-0"]', b'["repo-0",NaN]')
+    elif corruption == "wrong-type":
+        candidate = valid.replace(b'["repo-0"]', b'[42]')
+    else:
+        candidate = valid + b"\\xff"
+    with pytest.raises(multi.FixtureMultiResourceError,
+                       match="CATALOG_INVALID"):
+        multi._commit_fixture_multi_resource_under_root(
+            fd, _multi_snapshot(1, active=True),
+            owner_uid=uid, expected_generation=0,
+            include_bytes=b"# inert NGINX fixture\\n",
+            catalog_bytes=candidate,
+        )
+    assert not (folder / V2_STATE).exists()
+    assert not (folder / multi.JOURNAL).exists()
+    assert not (folder / multi.JOURNAL_TMP).exists()
+
+
+def test_multi_resource_recovery_refuses_digest_rebound_ambiguous_catalog(
+    fixture_root,
+):
+    multi = _multi_resource_fixture()
+    fd, folder, uid = fixture_root
+    multi._commit_fixture_multi_resource_under_root(
+        fd, _multi_snapshot(1, active=True),
+        owner_uid=uid, expected_generation=0,
+        include_bytes=b"# known-good NGINX fixture\\n",
+        catalog_bytes=_catalog_fixture(["repo-0"]),
+    )
+    state = (folder / V2_STATE).read_bytes()
+    include = (folder / multi.INCLUDE).read_bytes()
+    duplicate = _catalog_fixture(["repo-0"]).replace(
+        b'"status":', b'"status":"fixture-only-observed-candidate","status":',
+        1,
+    )
+    (folder / multi.CATALOG).write_bytes(duplicate)
+    # Even a forged, internally matching owner manifest must not turn
+    # ambiguous discovery bytes into a clean recovered generation.
+    forged_manifest = multi._manifest(state, include, duplicate)
+    (folder / multi.MANIFEST).write_bytes(forged_manifest)
+    with pytest.raises(multi.FixtureMultiResourceError,
+                       match="OWNER_MANIFEST_MISSING_OR_DRIFT"):
+        multi._recover_fixture_multi_resource_under_root(fd, owner_uid=uid)
+    assert (folder / V2_STATE).read_bytes() == state
+    assert (folder / multi.CATALOG).read_bytes() == duplicate
+    assert (folder / multi.MANIFEST).read_bytes() == forged_manifest
+    assert not (folder / multi.JOURNAL).exists()
+
+
 @pytest.mark.parametrize("active_ids", [[], ["repo-0", "repo-0"], ["unknown"]])
 def test_multi_resource_refuses_inaccurate_active_catalog_before_write(
     fixture_root, active_ids,

@@ -11,12 +11,11 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
-import json
 import os
 from typing import Any, Callable
 
 from repocache.server_locked_manifest_reconcile_v1 import (
-    preview_proposed_v2_state_transition,
+    _validate_proposed_v2_snapshot, preview_proposed_v2_state_transition,
 )
 from repocache.server_proposed_state_v2_store import (
     MAX_V2_STATE_BYTES, V2_STATE, _freeze, _legacy_refusal, _no_change,
@@ -93,6 +92,34 @@ def _manifest(state: bytes, include: bytes, catalog: bytes) -> bytes:
     }, limit=LIMITS[MANIFEST])
 
 
+
+def _catalog_matches_state(catalog_bytes: bytes, state: dict[str, Any]) -> bool:
+    """Refuse ambiguous or noncanonical fixture discovery bytes.
+
+    The JSON parser must reject duplicate keys, nonfinite numbers and
+    noncanonical spellings before comparing the exact desired-active set.
+    This validates test-only data, never grants real catalog authority.
+    """
+    try:
+        catalog = _json(catalog_bytes, limit=LIMITS[CATALOG])
+        if (type(catalog) is not dict
+                or set(catalog) != {"schema_version", "status", "active_ids"}
+                or type(catalog["schema_version"]) is not int
+                or catalog["schema_version"] != 1
+                or catalog["status"] != "fixture-only-observed-candidate"
+                or type(catalog["active_ids"]) is not list):
+            return False
+        ids = catalog["active_ids"]
+        return (all(type(identifier) is str for identifier in ids)
+                and ids == sorted(set(ids))
+                and ids == sorted(
+                    item["id"] for item in state["repository_records"]
+                    if item["desired_state"] == "active"
+                ))
+    except (ValueError, TypeError, OverflowError, UnicodeError, RecursionError):
+        return False
+
+
 def _validate_old(old: dict[str, bytes | None]) -> None:
     if old[V2_STATE] is None:
         if any(old[name] is not None for name in (INCLUDE, CATALOG, MANIFEST)):
@@ -103,6 +130,15 @@ def _validate_old(old: dict[str, bytes | None]) -> None:
             or old[MANIFEST] != _manifest(
                 old[V2_STATE], old[INCLUDE], old[CATALOG],
             )):
+        _refuse("OWNER_MANIFEST_MISSING_OR_DRIFT")
+    # A matching owner digest is insufficient if the underlying bytes are
+    # structurally invalid or the catalog disagrees with the state it names.
+    try:
+        old_state = _json(old[V2_STATE], limit=LIMITS[V2_STATE])
+        _validate_proposed_v2_snapshot(old_state)
+    except (ValueError, TypeError, OverflowError, RecursionError):
+        _refuse("OWNER_MANIFEST_MISSING_OR_DRIFT")
+    if not _catalog_matches_state(old[CATALOG], old_state):
         _refuse("OWNER_MANIFEST_MISSING_OR_DRIFT")
 
 
@@ -219,21 +255,9 @@ def _commit_fixture_multi_resource_under_root(
         _refuse("CANDIDATE_INVALID")
     try:
         include_bytes.decode("utf-8", "strict")
-        catalog = json.loads(catalog_bytes)
-        if (type(catalog) is not dict or set(catalog) != {
-            "schema_version", "status", "active_ids",
-        } or catalog["schema_version"] != 1
-                or type(catalog["schema_version"]) is not int
-                or catalog["status"] != "fixture-only-observed-candidate"
-                or type(catalog["active_ids"]) is not list
-                or catalog["active_ids"] != sorted(set(catalog["active_ids"]))
-                or any(type(x) is not str for x in catalog["active_ids"])
-                or catalog["active_ids"] != sorted(
-                    r["id"] for r in frozen["repository_records"]
-                    if r["desired_state"] == "active"
-                )):
-            _refuse("CATALOG_INVALID")
-    except (ValueError, UnicodeError, TypeError, RecursionError):
+    except UnicodeError:
+        _refuse("CANDIDATE_INVALID")
+    if not _catalog_matches_state(catalog_bytes, frozen):
         _refuse("CATALOG_INVALID")
     if inject_fault is not None and not callable(inject_fault):
         _refuse("FAULT_HOOK_INVALID")
