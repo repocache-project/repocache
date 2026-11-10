@@ -97,13 +97,6 @@ jobs:
           PYTHONDONTWRITEBYTECODE: '1'
         run: |
           set -Eeuo pipefail
-          # With the now-accepted #28 per-repository proxy_cache_path
-          # renderer, actual stock nginx -t requires its fixed parent
-          # cache directory to exist. This is a disposable CI image only:
-          # NEVER create or probe this root in a production host preflight.
-          test ! -e /var/cache/nginx/repocache-managed
-          test ! -L /var/cache/nginx/repocache-managed
-          install -d -m 0700 /var/cache/nginx/repocache-managed
           python3 -B -m pytest -q -rs \
             tests/test_server_protected_state_store_v1.py \
             tests/test_server_locked_manifest_reconcile_v1.py \

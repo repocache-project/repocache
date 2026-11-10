@@ -529,12 +529,14 @@ def test_real_process_exit_and_recovery_in_second_process(
 
 
 
-def two_layout_active_snapshot():
+def two_layout_active_snapshot(*, cache_root=None):
     source = (Path(__file__).resolve().parents[1] /
               "docs/examples/server-install-v1.json")
     doc = json.loads(source.read_text(encoding="utf-8"))
     doc["expected_state_generation"] = 1
     doc["repositories"][1]["id"] = "almalinux-baseos"
+    if cache_root is not None:
+        doc["deployment"]["paths"]["cache_root"] = str(cache_root)
     for repository in doc["repositories"]:
         repository["desired_state"] = "active"
     return snapshot(generation=1, doc=doc)
@@ -656,7 +658,9 @@ def test_persisted_v2_nginx_t_succeeds_without_touching_live_config(
     ), None)
     if ca is None:
         pytest.skip("disposable container CA bundle unavailable")
-    state = two_layout_active_snapshot()
+    cache_root = tmp_path / "managed-cache"
+    cache_root.mkdir(mode=0o700)
+    state = two_layout_active_snapshot(cache_root=cache_root)
     apply(fixture_root, state)
     fd, folder, uid = fixture_root
     pinned = render_persisted(
@@ -710,7 +714,9 @@ def test_nginx_live_rollback_in_sandbox(fixture_root, tmp_path):
     ), None)
     if ca is None:
         pytest.skip("disposable container CA bundle unavailable")
-    apply(fixture_root, two_layout_active_snapshot())
+    cache_root = tmp_path / "managed-cache"
+    cache_root.mkdir(mode=0o700)
+    apply(fixture_root, two_layout_active_snapshot(cache_root=cache_root))
     fd, state_dir, uid = fixture_root
     persisted_before = (state_dir / V2_STATE).read_bytes()
     candidate = render_persisted(
@@ -2249,6 +2255,9 @@ def test_v2_same_lock_disposable_native_nginx_syntax_before_state_write(
     if native_ca is None:
         pytest.skip("distro CA bundle unavailable")
     config = document(count=1)
+    cache_root = tmp_path / "managed-cache"
+    cache_root.mkdir(mode=0o700)
+    config["deployment"]["paths"]["cache_root"] = str(cache_root)
     config["repositories"][0]["desired_state"] = "active"
     proposed = snapshot(count=1, doc=config)
     pins = {"repo-0": {"mirror0.example.invalid": ["8.8.8.8"]}}
@@ -2671,10 +2680,14 @@ def test_v2_locked_real_nginx_reload_catalog_compensation_rehearsal(
         pytest.skip("disposable CA bundle not installed")
 
     fd, folder, _ = fixture_root
-    previous = snapshot(count=1)
+    cache_root = tmp_path / "managed-cache"
+    cache_root.mkdir(mode=0o700)
+    original_doc = document(count=1)
+    original_doc["deployment"]["paths"]["cache_root"] = str(cache_root)
+    previous = snapshot(count=1, doc=original_doc)
     apply(fixture_root, previous)
     previous_state = (folder / V2_STATE).read_bytes()
-    updated_doc = document(count=1)
+    updated_doc = copy.deepcopy(original_doc)
     updated_doc["repositories"][0]["desired_state"] = "active"
     proposed = snapshot(generation=2, previous=previous, doc=updated_doc)
     pins = {"repo-0": {"mirror0.example.invalid": ["8.8.8.8"]}}

@@ -1158,19 +1158,25 @@ unchanged. Merging this preparatory branch into the protected target is
 still disallowed until its own original full acceptance gates pass.
 
 
-## Post-queue native fixture root correction (2026-11-10)
+## Post-queue native cache fixture isolation (2026-11-10)
 
-After #251's accepted stock-NGINX cache-zone renderer entered protected
-`integration/v0.6.0`, the independently run #31 state crash/recovery
-workflow exposed a missing **disposable CI fixture cache parent**:
-`proxy_cache_path` now requires its parent directory before actual
-`nginx -t`. At the first reconciled PR head the isolated two-distro
-recovery jobs therefore failed five real NGINX fixture tests each, while
-the existing exact-SHA combined workflow passed because it already prepared
-that test directory. The native state workflow now creates only the fixed
-cache parent, after proving it is absent and not a symlink, **inside its
-throwaway distro container** immediately before pytest. It never changes
-`/var/cache` or any filesystem on a real operator host and does not
-relax production cache ownership checks, release policy or test assertions.
-The required regression is a new exact-HEAD successful job, not assuming
-the previous failure is resolved merely because the workflow changed.
+After the accepted #251 NGINX renderer introduced per-repository
+`proxy_cache_path`, first-reconciled #31 CI correctly detected five
+fixture failures on each distro and in ordinary unprivileged GitHub
+Python runners. The original legacy test documents hard-coded a fixed
+cache root which is not guaranteed to exist, and the stock NGINX parser
+attempted to create children under its missing parent. The first
+container-only workflow workaround fixed the distro job but could not
+address unprivileged general Python runners. It has been superseded.
+
+The durable regression fix is now **per-test isolation**: each of the
+affected real NGINX syntax/reload tests creates a dedicated disposable
+`tmp_path/managed-cache` directory and rebases its test-only canonical
+install-v1 configuration *before* constructing the canonical state-v2
+digest and generation. No source cache path, schema, production
+renderer, runtime root or privileged service behavior is changed.
+The workflow no longer creates `/var/cache/nginx/repocache-managed`.
+Tests check real native `nginx -t`, live isolated NGINX reload and
+WAL/catalog compensation without writing outside their test root.
+All original host-root and SELinux/rollback acceptance remains
+NOT VERIFIED; the corrected tests must PASS again at the new exact HEAD.
