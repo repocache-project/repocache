@@ -8,6 +8,8 @@ on:
       - 'src/repocache/server_proposed_v2_locked_digest_v1.py'
       - 'src/repocache/server_proposed_v2_locked_catalog_binding_v1.py'
       - 'src/repocache/server_fixture_multi_resource_wal_v1.py'
+      - 'src/repocache/server_native_v2_transaction_v1.py'
+      - 'tests/test_server_native_v2_transaction_v1.py'
       - 'tests/test_server_proposed_state_v2_store.py'
       - 'scripts/ci_v06_cross_pr_lifecycle_contract.py'
       - 'scripts/ci_v06_cross_pr_multi_wal_contract.py'
@@ -110,7 +112,7 @@ jobs:
           test ! -e /var/cache/nginx/repocache-managed
           test ! -L /var/cache/nginx/repocache-managed
           install -d -m 0700 /var/cache/nginx/repocache-managed
-          python3 -B -m pytest -q -rs             tests/test_server_proposed_state_v2_store.py             tests/test_server_locked_manifest_reconcile_v1.py             tests/test_server_root_control_protocol_v1.py             tests/test_server_root_control_host_preflight_v1.py             tests/test_server_root_control_worker_v1.py             tests/test_server_root_control_client_v1.py             tests/test_server_root_control_native_syntax_v1.py             tests/test_server_root_control_pinned_tls_pair_v1.py             tests/test_server_root_control_full_context_v1.py             tests/test_server_root_control_pre_reload_v1.py             tests/test_server_root_control_fixed_candidate_v1.py             tests/test_server_root_control_v2_candidate_binding_v1.py             tests/test_server_native_nginx_service_unit_v1.py             tests/test_server_native_nginx_effective_unit_v1.py             tests/test_server_nginx_pin_render_v1.py             tests/test_server_nginx_repository_bundle_v1.py             tests/test_server_derived_catalog_candidate_v1.py             tests/test_server_derived_catalog_client_contract_v1.py             tests/test_server_repository_reconcile_v1.py
+          python3 -B -m pytest -q -rs             tests/test_server_proposed_state_v2_store.py             tests/test_server_locked_manifest_reconcile_v1.py             tests/test_server_root_control_protocol_v1.py             tests/test_server_root_control_host_preflight_v1.py             tests/test_server_root_control_worker_v1.py             tests/test_server_root_control_client_v1.py             tests/test_server_root_control_native_syntax_v1.py             tests/test_server_root_control_pinned_tls_pair_v1.py             tests/test_server_root_control_full_context_v1.py             tests/test_server_root_control_pre_reload_v1.py             tests/test_server_root_control_fixed_candidate_v1.py             tests/test_server_root_control_v2_candidate_binding_v1.py             tests/test_server_native_v2_transaction_v1.py             tests/test_server_native_nginx_service_unit_v1.py             tests/test_server_native_nginx_effective_unit_v1.py             tests/test_server_nginx_pin_render_v1.py             tests/test_server_nginx_repository_bundle_v1.py             tests/test_server_derived_catalog_candidate_v1.py             tests/test_server_derived_catalog_client_contract_v1.py             tests/test_server_repository_reconcile_v1.py
           python3 -B scripts/ci_v06_cross_pr_lifecycle_contract.py
           python3 -B scripts/ci_v06_cross_pr_multi_wal_contract.py
           # Fixed package-root syntax inspection is only exercised in this

@@ -1234,3 +1234,68 @@ operator-supplied approval-reference hash, fixed root-owned candidate bytes
 and local UID checks do not independently prove approval. The root worker
 continues to reply `ROOT_TRANSACTION_NOT_IMPLEMENTED`; no host activation.
 Only bounded Linux fixture and disposable container CI acceptance is claimed.
+
+
+## Native fixed-path v2 WAL/reload/catalog transaction engine (source implementation)
+
+The protected development branch implements a new \`server_native_v2_transaction_v1\`
+source module rather than extending the test-only shadow WAL. It performs
+actual descriptor-relative, root-owned mutations in fixed OS-root paths.
+The only mutable resources are:
+
+- \`/var/lib/repocache/server/state-v2.json\` (0600)
+- \`/etc/nginx/conf.d/repocache-managed.conf\` (0644)
+- \`/var/lib/repocache/public/catalog.json\` (0644; intended for fixed
+  \`/.well-known/repocache/catalog.json\` NGINX alias)
+- \`/var/lib/repocache/server/.state-v2-native.manifest\` (0600)
+
+Directories, the owner-pinned legacy \`.state-v1.lock\` and the independently
+prepared root-owned canonical administrative candidate must already exist.
+No write endpoint accepts operator-selected paths, binaries, units,
+environment, shell strings or callbacks. An isolated root FD is permitted
+only through a private fixture test seam, and explicitly refused if its
+inode equals the current namespace \`/\`.
+
+The transaction acquires the SAME #31 exclusive FD lock, checks complete
+prior ownership or refuses every foreign bootstrap file, validates the
+candidate's canonical state-v2 generation, whole-file CAS and permanent ID
+history, derives static HTTPS upstream destination pins through native DNS
+then uses #28's strict renderer to build the entire managed NGINX server.
+The generated server includes a fixed generation-tagged local HTTPS health
+endpoint and a fixed public client catalog alias. It protects old bytes
+and all four desired resource digests in root-owned durable
+\`.state-v2-native.pending\` **before** any resource replacement.
+
+The ordered path is: stage and fsync managed include and state on their
+own filesystems; validate the actual fixed installed \`nginx -t\`; run
+\`/usr/bin/systemctl reload nginx.service\` with fixed argv/env/timeout;
+confirm the intended native NGINX unit and a verified-TLS health response
+bearing the exact generation; inspect private, bounded installed
+\`/usr/sbin/nginx -T\` and check generated active route/catalog identity;
+publish catalog only after those observations; atomically publish the
+root-owned ownership manifest; verify exact new resource bytes and remove
+the durable WAL last.
+
+Any normal operation error attempts same-lock compensation: revoke the
+catalog, restore exact known previous include, validate and reload old
+NGINX, restore state/manifest, then remove WAL only after confirmed
+rollback. SIGKILL, crash, failed compensation, malformed WAL, changed or
+foreign resources, unsafe symlinks/hardlinks, unexpected stages and older
+state leave a durable blocker for the separate fixed \`RECOVER_V2\` path.
+A preparatory journal temp is discarded only if all old resources remain
+unchanged. Cache, logs, metrics, client sources and TLS files are never
+mutated by this engine. The initial release explicitly refuses migrations
+from older state formats.
+
+**Acceptance distinction:** The source engine is not installed, the signed
+worker/unit provenance and native SELinux/ACL policy are not yet implemented
+and it is NOT dispatched from the authenticated socket. The checked-in
+systemd unit remains a non-installed example. The distro CI runs this actual
+filesystem engine only against disposable root-owned fake directories,
+with native service/TLS effects replaced by test doubles; those tests do
+not prove PID1/systemd, mounted host paths, enforcing SELinux, native
+operator consent, real signed package installation or live network
+operation. All original #31/#64 production and booted-VM acceptance
+remain **NOT VERIFIED** until the final v0.6.0 VM campaign, as directed by
+the maintainer. Do not merge or advertise native host support until the
+applicable security and issue-specific review gates pass.
