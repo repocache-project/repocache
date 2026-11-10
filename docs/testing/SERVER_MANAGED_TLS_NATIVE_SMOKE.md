@@ -92,3 +92,18 @@ active socket or externally visible listener.
 The full root-owned transaction must separately ensure candidate
 preflight cannot mutate the live service's pid/logs/cache, and must
 perform independent TLS pair validation before any reload.
+
+
+## Contract integration
+
+The disposable test also loads the repository's published
+docs/examples/server-install-v1.json, substitutes only the synthetic
+TLS paths and passes the **whole document** through the existing
+validate_install_document(..., for_apply=True) validator before rendering
+the isolated NGINX configuration. This exercises the approved
+operator-provided TLS mode and distinct path/reference contract instead
+of treating free-form test paths as accepted server configuration. The
+negative collision test proves that cert/key references cannot be the
+same path and performs no file or host write. Real filesystem ancestry,
+ownership, TLS trust and effective native host activation still require
+independent preflight and explicit operator approval.
