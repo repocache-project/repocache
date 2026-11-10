@@ -1180,3 +1180,32 @@ Tests check real native `nginx -t`, live isolated NGINX reload and
 WAL/catalog compensation without writing outside their test root.
 All original host-root and SELinux/rollback acceptance remains
 NOT VERIFIED; the corrected tests must PASS again at the new exact HEAD.
+
+## Same-lock deterministic NGINX/catalog binding prerequisite
+
+The private read-only `server_proposed_v2_locked_catalog_binding_v1`
+preview is the next prerequisite for an authentic root-owned transaction.
+It accepts a fixture root descriptor, exact state-v2 generation and full
+state-file SHA-256, bounded pinned numeric upstream observations and an
+UNTRUSTED claimed nginx -T dump/exit code. All processing is protected by
+one owner-pinned exclusive v2 FD lock; it rejects legacy/pending journals,
+invalid full-state SHA, stale generation and replaced state inodes.
+The canonical v2 configuration is parsed and rendered through the already
+accepted strict #28 NGINX generator. The active-only #28 catalog candidate
+is independently regenerated from that *same* configuration and pin set.
+The preview enforces the exact rendered managed fragment and active ID set
+inside the claimed dump, derives deterministic bounded client-schema
+catalog bytes and exposes only their SHA-256 plus the candidate mapping.
+It rechecks the state, metadata and pending journal before unlocking.
+
+CRITICAL: nginx -T and its exit code are *caller claims* in this fixture.
+This gate does not execute nginx, verify kernel-local effective exposure,
+validate signed installed code or authorize a human operation. Even a
+matching digest, dump, generation and catalog cannot grant host write,
+reload or publication; the observation expires when the lock is released.
+The actual systemd-root worker remains ALWAYS-DENY and uninstalled.
+No production /etc, /var, cache, service or client source is changed.
+Tests exercise active-only outputs, exact bytes, stale CAS/digest, foreign
+route/duplicate/missing fragment, malformed pins, pending WAL, same-byte
+inode substitution and actual root-descriptor refusal. The real signed
+installed host transaction and booted-VM gates are still NOT VERIFIED.

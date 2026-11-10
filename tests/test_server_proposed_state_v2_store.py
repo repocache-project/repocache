@@ -3949,3 +3949,159 @@ def test_locked_v2_digest_current_root_nonroot_refused_before_open(monkeypatch):
         guard.inspect_current_namespace_locked_v2_digest(
             expected_generation=1, expected_state_sha256="a" * 64,
         )
+
+
+def _locked_catalog_binding_case(fixture_root):
+    from repocache.server_proposed_v2_locked_catalog_binding_v1 import (
+        _preview_locked_v2_catalog_binding_under_root,
+    )
+    fd, folder, uid = fixture_root
+    committed = two_layout_active_snapshot()
+    apply(fixture_root, committed)
+    raw = (folder / V2_STATE).read_bytes()
+    candidate = persisted_render(fixture_root)
+    dump = (candidate["http_upstream_fragment"]
+            + candidate["server_location_fragment"])
+    arguments = {
+        "owner_uid": uid,
+        "expected_generation": 1,
+        "expected_state_sha256": hashlib.sha256(raw).hexdigest(),
+        "candidate_pins_by_repository": pinned_two_layouts(),
+        "ca_bundle_path": "/etc/ssl/certs/ca-certificates.crt",
+        "untrusted_nginx_dump": dump,
+        "untrusted_nginx_t_exit_code": 0,
+    }
+    return fd, folder, raw, arguments, _preview_locked_v2_catalog_binding_under_root
+
+
+def test_locked_v2_catalog_binding_deterministic_and_no_publication(fixture_root):
+    fd, folder, raw, kwargs, inspect = _locked_catalog_binding_case(fixture_root)
+    first = inspect(fd, **kwargs)
+    second = inspect(fd, **kwargs)
+    assert first == second
+    assert first["status"] == "LOCKED_V2_INERT_CATALOG_BINDING_ONLY"
+    assert first["canonical_state_and_render_consistent_under_one_lock"] is True
+    assert first["untrusted_dump_matches_inert_render_structure_only"] is True
+    assert first["proposed_active_ids"] == [
+        "almalinux-baseos", "debian-trixie-main",
+    ]
+    assert first["candidate_catalog"]["schema"] == 1
+    assert len(first["candidate_catalog"]["repositories"]) == 2
+    assert first["candidate_catalog_sha256"] == hashlib.sha256(
+        json.dumps(
+            first["candidate_catalog"], sort_keys=True,
+            separators=(",", ":"), ensure_ascii=True,
+        ).encode("utf-8"),
+    ).hexdigest()
+    assert all(value is False for key, value in first.items()
+               if key.startswith("authorizes_") or key.endswith("_verified")
+               or key == "preflight_remains_valid_after_lock_release")
+    assert (folder / V2_STATE).read_bytes() == raw
+    assert not (folder / V2_JOURNAL).exists()
+    assert not any("catalog" in p.name for p in folder.iterdir())
+
+
+@pytest.mark.parametrize("bad,code", [
+    ("generation", "STALE_GENERATION"),
+    ("digest", "STATE_DIGEST_MISMATCH"),
+    ("badsha", "ARGUMENT_INVALID"),
+    ("bool_generation", "ARGUMENT_INVALID"),
+    ("false_success", "NGINX_DUMP_MISMATCH"),
+    ("missing_fragment", "NGINX_DUMP_MISMATCH"),
+    ("double_fragment", "NGINX_DUMP_MISMATCH"),
+    ("foreign_route", "NGINX_DUMP_MISMATCH"),
+    ("incomplete_pins", "NGINX_RENDER_INVALID"),
+])
+def test_locked_v2_catalog_binding_denies_foreign_or_stale_input(
+    fixture_root, bad, code,
+):
+    from repocache.server_proposed_v2_locked_catalog_binding_v1 import (
+        LockedV2CatalogBindingError,
+    )
+    fd, folder, before, opts, inspect = _locked_catalog_binding_case(fixture_root)
+    if bad == "generation":
+        opts["expected_generation"] = 2
+    elif bad == "digest":
+        opts["expected_state_sha256"] = "f" * 64
+    elif bad == "badsha":
+        opts["expected_state_sha256"] = "X" * 64
+    elif bad == "bool_generation":
+        opts["expected_generation"] = True
+    elif bad == "false_success":
+        opts["untrusted_nginx_t_exit_code"] = 1
+    elif bad == "missing_fragment":
+        opts["untrusted_nginx_dump"] = "events {}\\nhttp {}"
+    elif bad == "double_fragment":
+        opts["untrusted_nginx_dump"] *= 2
+    elif bad == "foreign_route":
+        opts["untrusted_nginx_dump"] += (
+            "location ^~ /__repocache/repos/forged/ {\\n"
+        )
+    elif bad == "incomplete_pins":
+        opts["candidate_pins_by_repository"] = {
+            "debian-trixie-main": pinned_two_layouts()["debian-trixie-main"],
+        }
+    with pytest.raises(LockedV2CatalogBindingError, match=code):
+        inspect(fd, **opts)
+    assert (folder / V2_STATE).read_bytes() == before
+    assert not (folder / V2_JOURNAL).exists()
+
+
+def test_locked_v2_catalog_binding_pending_v2_journal_refused(fixture_root):
+    from repocache.server_proposed_v2_locked_catalog_binding_v1 import (
+        LockedV2CatalogBindingError,
+    )
+    fd, folder, old_bytes, kwargs, inspect = _locked_catalog_binding_case(
+        fixture_root,
+    )
+    current = two_layout_active_snapshot()
+    proposed = snapshot(count=1, generation=2, previous=current)
+    def interrupt(phase):
+        if phase == "journal_durable":
+            raise RuntimeError("synthetic interrupted transaction")
+    with pytest.raises(RuntimeError):
+        apply(fixture_root, proposed, expected=1, inject=interrupt)
+    with pytest.raises(LockedV2CatalogBindingError, match="RECOVERY_REQUIRED"):
+        inspect(fd, **kwargs)
+    assert (folder / V2_JOURNAL).exists()
+    assert rollback(fixture_root)["status"] == "ROLLED_BACK_INERT_V2"
+    assert (folder / V2_STATE).read_bytes() == old_bytes
+
+
+def test_locked_v2_catalog_binding_detects_same_byte_inode_replacement(
+    fixture_root, monkeypatch,
+):
+    import repocache.server_proposed_v2_locked_catalog_binding_v1 as binder
+    fd, folder, original, kwargs, inspect = _locked_catalog_binding_case(
+        fixture_root,
+    )
+    saved = binder._read_v2
+    visited = []
+    def noncooperative_replace(directory, uid):
+        visited.append(1)
+        if len(visited) == 2:
+            staged = folder / ".foreign-identical-state"
+            staged.write_bytes(original)
+            staged.chmod(0o600)
+            os.replace(staged, folder / V2_STATE)
+        return saved(directory, uid)
+    monkeypatch.setattr(binder, "_read_v2", noncooperative_replace)
+    with pytest.raises(binder.LockedV2CatalogBindingError,
+                       match="STATE_CHANGED_DURING_PREVIEW"):
+        inspect(fd, **kwargs)
+
+
+def test_locked_v2_catalog_binding_refuses_actual_namespace_root_fd():
+    import repocache.server_proposed_v2_locked_catalog_binding_v1 as binder
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        with pytest.raises(ProposedV2PersistenceError,
+                           match="CURRENT_NAMESPACE_ROOT_WRITES_REFUSED"):
+            binder._preview_locked_v2_catalog_binding_under_root(
+                fd, owner_uid=0, expected_generation=1,
+                expected_state_sha256="0" * 64,
+                candidate_pins_by_repository={}, ca_bundle_path="/etc/ssl",
+                untrusted_nginx_dump="events {}", untrusted_nginx_t_exit_code=0,
+            )
+    finally:
+        os.close(fd)
