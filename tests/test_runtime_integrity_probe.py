@@ -108,7 +108,7 @@ def test_runtime_tampering_is_refused(prepared, tmp_path, tamper):
 
 @pytest.mark.parametrize("path", [
     "/absolute", "../escape", "a/../b", "a/./b", "a//b", "a/",
-    "a/\x00b", "a" * 1025, "lib/bad\\udcff.py", "lib/bad\\ud800.py",
+    "a/\x00b", "a" * 1025, "lib/bad\udcff.py", "lib/bad\ud800.py",
 ])
 def test_invalid_inventory_path_is_refused(prepared, path):
     root, inventory = prepared
