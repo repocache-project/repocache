@@ -245,3 +245,16 @@ client and server are uninstalled prototypes and **no real request can
 succeed**; \`ROOT_TRANSACTION_NOT_IMPLEMENTED\` remains a denial.
 Separate kernel/socket tests run in disposable Debian 13 and AlmaLinux 10
 containers, without installing systemd units or modifying real NGINX.
+
+
+## Closed canonical denial-packet validation
+
+The inert two-operation socket client now rejects duplicate JSON keys at
+every nesting depth, nonfinite numbers, alternate numeric spellings, unusual
+whitespace, Unicode escaping, reordered keys and any other noncanonical wire
+form. It requires the exact one-line compact, ASCII, sorted-key, newline-ended
+response emitted by the non-installed root worker. This prevents distinct
+client parsers from interpreting an ostensibly identical denial differently
+when the root transaction is later implemented. Every permitted response
+still explicitly reports NOT_IMPLEMENTED and all authority flags false.
+This parser does not authenticate installed code or authorize any write.

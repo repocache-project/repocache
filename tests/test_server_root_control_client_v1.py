@@ -147,3 +147,23 @@ def test_client_rejects_unsafe_local_socket_path_before_connect(
         with pytest.raises(FixedControlClientError,
                            match="SOCKET_UNSAFE"):
             request_fixed_inert_operation("APPLY_V2")
+
+
+@pytest.mark.parametrize("extra_wire", [
+    lambda good: good.replace(
+        b'"status":"ROOT_TRANSACTION_NOT_IMPLEMENTED"',
+        b'"status":"FAIL","status":"ROOT_TRANSACTION_NOT_IMPLEMENTED"',
+    ),
+    lambda good: good.replace(b'"schema_version":1', b'"schema_version":1.0'),
+    lambda good: good.replace(b',"status":', b', "status":'),
+    lambda good: good.replace(b'"requested_operation":"APPLY_V2"',
+                              b'"requested_operation":"\u0041PPLY_V2"'),
+    lambda good: good.replace(b'"schema_version":1',
+                              b'"schema_version":NaN,"schema_version":1'),
+])
+def test_ambiguous_or_noncanonical_fixed_denial_is_never_accepted(extra_wire):
+    altered = extra_wire(packet(_DENIAL))
+    assert altered != packet(_DENIAL)
+    with pytest.raises(FixedControlClientError,
+                       match="RESPONSE_INVALID|RESPONSE_NONCANONICAL"):
+        _parse_response(altered, operation="APPLY_V2")

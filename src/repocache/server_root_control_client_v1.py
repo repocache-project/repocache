@@ -52,13 +52,30 @@ def _validate_parent_and_socket() -> None:
         _refuse("SOCKET_UNSAFE")
 
 
+def _unique_json_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Reject ambiguous reply objects at every JSON nesting level."""
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate reply key")
+        result[key] = value
+    return result
+
+
+def _refuse_json_constant(_value: str) -> Any:
+    raise ValueError("nonfinite JSON number")
+
+
 def _parse_response(raw: bytes, *, operation: str) -> dict[str, Any]:
     if (type(raw) is not bytes or not 1 <= len(raw) <= _RESPONSE_LIMIT
             or not raw.endswith(b"\n") or raw.count(b"\n") != 1):
         _refuse("RESPONSE_INVALID")
     try:
         text = raw[:-1].decode("ascii", "strict")
-        data = json.loads(text)
+        data = json.loads(
+            text, object_pairs_hook=_unique_json_pairs,
+            parse_constant=_refuse_json_constant,
+        )
         expected = {
             "schema_version": 1,
             "status": "ROOT_TRANSACTION_NOT_IMPLEMENTED",
@@ -79,6 +96,11 @@ def _parse_response(raw: bytes, *, operation: str) -> dict[str, Any]:
         raise
     except (UnicodeError, ValueError, TypeError, KeyError, RecursionError):
         _refuse("RESPONSE_INVALID")
+    canonical = (json.dumps(
+        expected, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ) + "\\n").encode("ascii")
+    if raw != canonical:
+        _refuse("RESPONSE_NONCANONICAL")
     return data
 
 
