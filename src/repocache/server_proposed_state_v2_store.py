@@ -204,12 +204,20 @@ def _verify_recovery_next(
 
 
 def _multi_resource_pending(directory: int, uid: int) -> bool:
-    # An ordinary v2 fixture operation may not bypass an incomplete
-    # multi-resource WAL. This is an interlock, not authorization.
+    # The ordinary state-only v2 fixture writer cannot operate on *either*
+    # an interrupted multi-resource WAL or a successfully committed multi-
+    # resource ownership domain: either would desynchronize include/catalog
+    # from the single authoritative v2 state. This is an interlock only.
     return any(
-        _read_file(directory, name, uid, 16 * 1024 * 1024) is not None
-        for name in (".state-v2-multi.pending", ".state-v2-multi.pending-tmp",
-                     ".state-v2-multi.stage")
+        _read_file(directory, name, uid, maximum) is not None
+        for name, maximum in (
+            (".state-v2-multi.pending", 16 * 1024 * 1024),
+            (".state-v2-multi.pending-tmp", 16 * 1024 * 1024),
+            (".state-v2-multi.stage", 4 * 1024 * 1024),
+            (".fixture-managed-nginx.conf", 1024 * 1024),
+            (".fixture-derived-catalog.json", 512 * 1024),
+            (".fixture-active-manifest.json", 4096),
+        )
     )
 
 
