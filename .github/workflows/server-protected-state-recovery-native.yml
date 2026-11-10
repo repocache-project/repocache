@@ -5,6 +5,7 @@ on:
     paths:
       - '.github/workflows/server-protected-state-recovery-native.yml'
       - 'src/repocache/server_proposed_state_v2_store.py'
+      - 'src/repocache/server_proposed_v2_locked_digest_v1.py'
       - 'src/repocache/server_fixture_activation_flow_v1.py'
       - 'src/repocache/server_fixture_multi_resource_wal_v1.py'
       - 'src/repocache/server_protected_state_store_v1.py'
@@ -19,6 +20,7 @@ on:
     paths:
       - '.github/workflows/server-protected-state-recovery-native.yml'
       - 'src/repocache/server_proposed_state_v2_store.py'
+      - 'src/repocache/server_proposed_v2_locked_digest_v1.py'
       - 'src/repocache/server_fixture_activation_flow_v1.py'
       - 'src/repocache/server_fixture_multi_resource_wal_v1.py'
       - 'src/repocache/server_protected_state_store_v1.py'

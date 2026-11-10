@@ -5,6 +5,7 @@ on:
     paths:
       - '.github/workflows/v06-cross-pr-integration-rehearsal.yml'
       - 'src/repocache/server_proposed_state_v2_store.py'
+      - 'src/repocache/server_proposed_v2_locked_digest_v1.py'
       - 'src/repocache/server_fixture_multi_resource_wal_v1.py'
       - 'tests/test_server_proposed_state_v2_store.py'
       - 'scripts/ci_v06_cross_pr_lifecycle_contract.py'
