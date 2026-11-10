@@ -63,6 +63,9 @@ from repocache.server_root_control_full_context_v1 import (
 from repocache.server_root_control_host_preflight_v1 import (
     require_native_host_preconditions,
 )
+from repocache.server_root_control_pinned_tls_pair_v1 import (
+    _inspect_pinned_tls_pair_for_future_transaction,
+)
 from repocache.server_root_control_native_syntax_v1 import (
     inspect_installed_default_nginx_syntax_only,
 )
@@ -420,34 +423,110 @@ def _reload_native(distribution: str) -> None:
         _deny("UNIT_CHANGED")
 
 
-def _local_https_generation(document: dict[str, Any], generation: int) -> None:
-    """Verify *running* TLS NGINX answers with the exact staged generation."""
+def _fixed_https_get(document: dict[str, Any], path: str,
+                     maximum: int) -> bytes:
+    """Bounded verified-TLS local request, exact health/catalog paths only."""
+    if path not in (_HEALTH, "/.well-known/repocache/catalog.json"):
+        _deny("HTTP_PATH_REFUSED")
     address = document["deployment"]["listen"]["bind_address"]
     hostname = document["deployment"]["listen"]["hostname"]
     port = document["deployment"]["listen"]["https_port"]
     if address in ("0.0.0.0", "::"):
         address = "127.0.0.1" if address == "0.0.0.0" else "::1"
+    request = (
+        "GET " + path + " HTTP/1.1\r\nHost: " + hostname
+        + "\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n"
+    ).encode("ascii")
     try:
         context = ssl.create_default_context()
         with socket.create_connection((address, port), timeout=4) as tcp:
             with context.wrap_socket(tcp, server_hostname=hostname) as tls:
                 tls.settimeout(4)
-                tls.sendall((
-                    "GET " + _HEALTH + " HTTP/1.1\r\nHost: " + hostname
-                    + "\r\nConnection: close\r\n\r\n"
-                ).encode("ascii"))
-                response = b""
-                while b"\r\n\r\n" not in response and len(response) <= 8192:
-                    part = tls.recv(min(4096, 8193 - len(response)))
-                    if not part:
+                tls.sendall(request)
+                fragments = []
+                size = 0
+                while size <= maximum:
+                    chunk = tls.recv(min(8192, maximum + 1 - size))
+                    if not chunk:
                         break
-                    response += part
+                    fragments.append(chunk)
+                    size += len(chunk)
     except (OSError, ValueError, ssl.SSLError, TimeoutError):
         _deny("EXPOSURE_UNVERIFIED")
-    marker = f"X-Repocache-Generation: {generation}".encode("ascii").lower()
-    if (not response.startswith(b"HTTP/1.1 204 ")
-            or marker not in response.split(b"\r\n\r\n", 1)[0].lower()):
+    if size > maximum:
+        _deny("EXPOSURE_OVERSIZE")
+    raw = b"".join(fragments)
+    if b"\r\n\r\n" not in raw:
         _deny("EXPOSURE_UNVERIFIED")
+    return raw
+
+
+def _local_https_generation(document: dict[str, Any], generation: int) -> None:
+    response = _fixed_https_get(document, _HEALTH, 8192)
+    header, body = response.split(b"\r\n\r\n", 1)
+    marker = f"X-Repocache-Generation: {generation}".encode("ascii").lower()
+    if (not header.startswith(b"HTTP/1.1 204 ")
+            or marker not in header.lower().split(b"\r\n")
+            or body):
+        _deny("EXPOSURE_UNVERIFIED")
+
+
+def _local_https_catalog(document: dict[str, Any], catalog: bytes) -> None:
+    response = _fixed_https_get(
+        document, "/.well-known/repocache/catalog.json",
+        _LIMIT[_CATALOG] + 8192,
+    )
+    header, body = response.split(b"\r\n\r\n", 1)
+    lines = header.lower().split(b"\r\n")
+    length = b"content-length: " + str(len(catalog)).encode("ascii")
+    if (not header.startswith(b"HTTP/1.1 200 ")
+            or lines.count(length) != 1
+            or any(line.startswith((b"transfer-encoding:", b"content-encoding:"))
+                   for line in lines)
+            or body != catalog):
+        _deny("CATALOG_EXPOSURE_UNVERIFIED")
+
+
+def _verify_tls_pair(root_fd: int, document: dict[str, Any]) -> None:
+    """Open real root-owned cert/key without symlinks and verify exact pair.
+
+    Absolute paths originate in the *independently root-owned*, full-schema
+    candidate, not any socket request. All path ancestors must be root-owned
+    and non-writable by non-root. Pinned FDs stay open through OpenSSL load.
+    """
+    tls = document["deployment"]["tls"]
+    paths = (tls["certificate_file"], tls["private_key_file"])
+    opened: list[int] = []
+    with ExitStack() as stack:
+        for path in paths:
+            if (type(path) is not str or not path.startswith("/")
+                    or "//" in path or path.endswith("/")
+                    or any(part in ("", ".", "..") for part in path[1:].split("/"))):
+                _deny("TLS_PATH_REFUSED")
+            segments = path[1:].split("/")
+            parent_fd, chain = _walk(
+                root_fd, tuple(segments[:-1]), stack, 0,
+            )
+            try:
+                fd = os.open(
+                    segments[-1], os.O_RDONLY | os.O_NOFOLLOW
+                    | getattr(os, "O_CLOEXEC", 0), dir_fd=parent_fd,
+                )
+            except OSError:
+                _deny("TLS_FILE_UNAVAILABLE")
+            stack.callback(os.close, fd)
+            opened.append(fd)
+            _recheck(chain, 0)
+        try:
+            report = _inspect_pinned_tls_pair_for_future_transaction(
+                opened[0], opened[1], expected_owner_uid=0,
+            )
+        except (OSError, TypeError, ValueError):
+            _deny("TLS_PAIR_INVALID")
+        if (report.get("status") != "PINNED_OPEN_FD_CERT_KEY_PAIR_ONLY"
+                or report.get("private_key_pair_load_observed") is not True
+                or report.get("authorizes_nginx_reload") is not False):
+            _deny("TLS_PAIR_INVALID")
 
 
 def _resolve_pins(document: dict[str, Any]) -> dict[str, dict[str, list[str]]]:
@@ -545,6 +624,7 @@ def _apply_locked(root_fd: int, state_fd: int,
                 or doc["deployment"]["paths"]["state_root"]
                    != "/var/lib/repocache/server"):
             _deny("LAYOUT_UNSUPPORTED")
+        _verify_tls_pair(root_fd, doc)
         pins = _resolve_pins(doc)
         bundle = render_repository_nginx_bundle_candidate(
             doc, expected_state_generation=snapshot["state_generation"],
@@ -596,6 +676,7 @@ def _apply_locked(root_fd: int, state_fd: int,
         # Never publish before observing the new real route generation.
         _write_public(public_fd, _CATALOG, old[_CATALOG],
                       new[_CATALOG], _LIMIT[_CATALOG])
+        _local_https_catalog(doc, new[_CATALOG])
         _write_private(state_fd, _MANIFEST, _MANIFEST_STAGE,
                        old[_MANIFEST], new[_MANIFEST], _LIMIT[_MANIFEST])
         if _read_all(state_fd, include_fd, public_fd) != new:
@@ -716,6 +797,17 @@ def _recover_locked(state_fd: int, include_fd: int,
     if now[_MANIFEST] != old[_MANIFEST]:
         _write_private(state_fd, _MANIFEST, _MANIFEST_STAGE,
                        now[_MANIFEST], old[_MANIFEST], _LIMIT[_MANIFEST])
+    if old[V2_STATE] is not None:
+        try:
+            prior_state = _json(old[V2_STATE], limit=_LIMIT[V2_STATE])
+            prior_doc = parse_install_bytes(
+                base64.b64decode(prior_state["configuration_base64"], validate=True),
+                for_apply=True,
+            )
+        except (ValueError, TypeError):
+            _deny("PREVIOUS_STATE_INVALID")
+        _local_https_generation(prior_doc, prior_state["state_generation"])
+        _local_https_catalog(prior_doc, old[_CATALOG])
     _verify_owned(_read_all(state_fd, include_fd, public_fd))
     _unlink_known(state_fd, _WAL, raw, 0, _MAX_WAL)
     return {"status": "NATIVE_V2_ROLLED_BACK", "recovery_required": False}
