@@ -2982,6 +2982,10 @@ def test_multi_resource_crash_recovery_returns_all_exact_previous_bytes(
         ProposedV2PersistenceError, match="MULTI_RESOURCE_RECOVERY_REQUIRED",
     ):
         rollback(fixture_root)
+    with pytest.raises(
+        ProposedV2PersistenceError, match="MULTI_RESOURCE_RECOVERY_REQUIRED",
+    ):
+        preview_v2_recovery(fd, owner_uid=uid)
     recovery = multi._recover_fixture_multi_resource_under_root(
         fd, owner_uid=uid,
     )
