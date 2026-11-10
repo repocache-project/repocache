@@ -18,6 +18,9 @@ from repocache.server_install_v1 import validate_os_identity
 from repocache.server_native_nginx_service_unit_v1 import (
     VENDOR_UNIT, inspect_native_nginx_unit,
 )
+from repocache.server_native_nginx_effective_unit_v1 import (
+    EffectiveNginxUnitError, inspect_effective_native_nginx_unit,
+)
 from repocache.server_native_package_trust_v1 import (
     _NATIVE, _apt_commands, _dnf_commands, _run, _trusted_key,
 )
@@ -164,6 +167,18 @@ def run_rehearsal(
             _deny("CONTAINER_" + service_unit.code)
         if not _native_unit_package_owner(distribution, work, runner):
             _deny("CONTAINER_NATIVE_SYSTEMD_UNIT_PACKAGE_UNVERIFIED")
+        # Prove that a package-owned vendor unit alone NEVER passes the
+        # effective-PID1 gate in this Docker userspace (PID1 is not systemd).
+        # We only run the non-mutating, fixed-argument systemctl show check;
+        # no service start/reload is performed.
+        if Path("/run/systemd/system").exists():
+            _deny("CONTAINER_UNEXPECTED_SYSTEMD_PID1")
+        try:
+            inspect_effective_native_nginx_unit(distribution)
+        except EffectiveNginxUnitError:
+            effective_unit_refused = True
+        else:
+            _deny("CONTAINER_EFFECTIVE_UNIT_FALSE_AUTHORITY")
     return {
         "schema_version": 1,
         "status": "CONTAINER_NATIVE_NGINX_INSTALLED_SYNTAX_OK",
@@ -174,6 +189,9 @@ def run_rehearsal(
         "vendor_nginx_systemd_unit_bounded_read_passed": True,
         "vendor_nginx_systemd_unit_distro_package_owned": True,
         "vendor_nginx_systemd_unit_sha256": service_unit.digest,
+        "effective_nginx_unit_refused_without_systemd_pid1": (
+            effective_unit_refused
+        ),
         "native_systemd_tested": False,
         "selinux_enforcing_host_tested": False,
         "service_start_or_reload_explicitly_requested_by_test_driver": False,
