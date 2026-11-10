@@ -332,3 +332,38 @@ check ownership/ACL/SELinux/mount/symlink/foreign-state policy and all
 TLS trust/hostname/expiry requirements, then retain the immutable verified
 operation context through the actual rollback-capable reload. This module
 does not substitute for that work or local booted-VM acceptance.
+
+## Bounded real fixed `nginx -T` dump prerequisite (non-installed)
+
+The private `server_root_control_full_context_v1` module invokes exactly
+`/usr/sbin/nginx -T -c /etc/nginx/nginx.conf` under root only. It verifies
+fixed executable/config metadata and their trusted ancestors before and
+after the command; there is no caller-selected config/argument, shell,
+inherited environment, stdin, stderr forwarding, or service signal.
+A deadline and select-based incremental stdout consumption cap output at
+4 MiB *before it is accumulated*. The private dump is never returned by
+the public report: only its length and SHA-256 are exposed. Failure,
+timeout, unexpected inode changes, empty/oversized or nonzero output
+are refused via static redacted codes. No private NGINX config/TLS path
+content reaches logs or the admin socket.
+
+IMPORTANT: `nginx -T` may itself read secrets and create log/cache files.
+The fixed default `nginx.conf` check does NOT authenticate all referenced
+include files, mounted paths or actual active systemd service/NGINX
+listeners. An operator-controlled but otherwise untrusted include could
+still produce unsafe side effects; this module remains **uninstalled**
+and is NEVER wired into the root worker or any host transaction. Root
+inside the disposable CI container does not prove installed host root.
+Source/unit tests assert exact argv, bounded output, timeout/cleanup,
+nonroot/unsafe ownership/identity-change denial and that private stdout
+is never serialized. The existing explicitly disposable test-only smoke
+exercises real distro-packaged `nginx -T` success, deliberately broken
+default syntax refusal and exact restoration in Debian 13 and AlmaLinux
+10 CI images. It MUST NOT be run on a real VM or operator host.
+
+Future authorized broker work must bind this *private* native dump to the
+retained v2 FD lock and #31 generated NGINX/client catalog consistency
+check, and independently verify provenance, all included-file ownership,
+SELinux/ACL/mounts, verified running exposure, signed installed code and
+operator intent before any commit, systemd reload or catalog publication.
+The status remains **NOT VERIFIED** at real installed-host scope.
