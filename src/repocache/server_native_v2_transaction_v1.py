@@ -26,6 +26,7 @@ import socket
 import ssl
 import stat
 import subprocess
+import time
 from contextlib import ExitStack
 from typing import Any
 
@@ -459,7 +460,12 @@ def _fixed_https_get(document: dict[str, Any], path: str,
                 tls.sendall(request)
                 fragments = []
                 size = 0
+                deadline = time.monotonic() + 10.0
                 while size <= maximum:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        _deny("EXPOSURE_TIMEOUT")
+                    tls.settimeout(min(4.0, remaining))
                     chunk = tls.recv(min(8192, maximum + 1 - size))
                     if not chunk:
                         break
