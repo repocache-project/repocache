@@ -2227,3 +2227,73 @@ def test_v2_same_lock_non_callable_validator_refused_without_mutation(
             fixture_root, snapshot(count=1), expected=0, validate="nginx -t",
         )
     assert {p.name: p.read_bytes() for p in folder.iterdir()} == before
+
+
+@pytest.mark.skipif(shutil.which("nginx") is None,
+                    reason="distro-packaged nginx unavailable")
+@pytest.mark.parametrize("invalid_syntax", [False, True])
+def test_v2_same_lock_disposable_native_nginx_syntax_before_state_write(
+    fixture_root, tmp_path, invalid_syntax,
+):
+    """A real nginx -t can run under the same fixture lock, never on host."""
+    _, folder, _ = fixture_root
+    native_ca = next((
+        p for p in (
+            "/etc/ssl/certs/ca-certificates.crt",
+            "/etc/pki/tls/certs/ca-bundle.crt",
+        ) if Path(p).is_file()
+    ), None)
+    if native_ca is None:
+        pytest.skip("distro CA bundle unavailable")
+    config = document(count=1)
+    config["repositories"][0]["desired_state"] = "active"
+    proposed = snapshot(count=1, doc=config)
+    pins = {"repo-0": {"mirror0.example.invalid": ["8.8.8.8"]}}
+    observed = []
+
+    def validate(candidate):
+        assert not (folder / V2_STATE).exists()
+        assert not (folder / V2_JOURNAL).exists()
+        conf = tmp_path / "nginx.conf"
+        conf.write_text(
+            f"pid {tmp_path / 'nginx.pid'};\\n"
+            f"error_log {tmp_path / 'error.log'} notice;\\n"
+            + ("events { invalid_directive; }\\n" if invalid_syntax
+               else "events {}\\n")
+            + "http { access_log off;\\n"
+            + candidate["http_upstream_fragment"]
+            + "server { listen 127.0.0.1:19991;\\n"
+            + candidate["server_location_fragment"]
+            + "}\\n}\\n",
+            encoding="utf-8",
+        )
+        result = subprocess.run(
+            [shutil.which("nginx"), "-t", "-c", str(conf),
+             "-p", str(tmp_path)],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+        observed.append(result.returncode == 0)
+        if result.returncode:
+            raise ValueError("disposable nginx syntax error")
+
+    if invalid_syntax:
+        with pytest.raises(ProposedV2PersistenceError,
+                           match="NGINX_FIXTURE_VALIDATION_REFUSED"):
+            locked_preflight_commit(
+                fixture_root, proposed, expected=0, pins=pins,
+                validate=validate,
+            )
+        assert observed == [False]
+        assert not (folder / V2_STATE).exists()
+        assert not (folder / V2_JOURNAL).exists()
+    else:
+        result = locked_preflight_commit(
+            fixture_root, proposed, expected=0, pins=pins,
+            validate=validate,
+        )
+        assert observed == [True]
+        assert result["state_generation"] == 1
+        assert result["fixture_validation_callback_executed"] is True
+        assert result["nginx_syntax_verified"] is False
+        assert result["authorizes_nginx_reload"] is False
+        assert (folder / V2_STATE).exists()
