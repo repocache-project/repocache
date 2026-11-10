@@ -252,3 +252,53 @@ def test_authenticated_inventory_expectations_are_pinned_during_scan(
         assert verify(root, inventory).files == 2
     assert changed
     assert inventory["lib/module.py"].sha256 == hashlib.sha256(mutated).hexdigest()
+
+
+@pytest.mark.parametrize("mutated_field", ["sha256", "mode"])
+def test_expected_record_fields_are_pinned_during_measurement(
+        prepared, monkeypatch, mutated_field):
+    """A shallow dictionary copy cannot safely pin mutable record objects.
+
+    The fixture alters a later file plus its original expected-record object
+    after the scanner has started reading another file.
+    """
+    root, inventory = prepared
+    original_record = inventory["lib/module.py"]
+    module = root / "lib/module.py"
+    replacement = b"value = 'replaced during measurement'\n"
+    original_read = os.read
+    mutated = False
+
+    def mutate_record_during_read(fd, count):
+        nonlocal mutated
+        data = original_read(fd, count)
+        if data and not mutated:
+            mutated = True
+            if mutated_field == "sha256":
+                module.write_bytes(replacement)
+                object.__setattr__(
+                    original_record, "sha256",
+                    hashlib.sha256(replacement).hexdigest())
+            else:
+                module.chmod(0o600)
+                object.__setattr__(original_record, "mode", 0o600)
+        return data
+
+    monkeypatch.setattr(os, "read", mutate_record_during_read)
+    with pytest.raises(IntegrityMismatch):
+        verify(root, inventory)
+    assert mutated
+
+
+def test_expected_record_subclass_is_rejected(prepared):
+    """Only the exact immutable value-record schema is accepted."""
+    root, inventory = prepared
+
+    class DerivedExpectedRecord(ExpectedRegularFile):
+        pass
+
+    original = inventory["lib/module.py"]
+    inventory["lib/module.py"] = DerivedExpectedRecord(
+        original.sha256, original.mode)
+    with pytest.raises(IntegrityMismatch, match="record type"):
+        verify(root, inventory)

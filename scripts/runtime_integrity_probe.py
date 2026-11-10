@@ -67,7 +67,7 @@ def _expected_paths(
                 or any(part in ("", ".", "..") or "\x00" in part
                        for part in path.split("/"))
                 or not isinstance(item, ExpectedRegularFile)
-                or not isinstance(item.sha256, str)
+                or type(item.sha256) is not str
                 or re.fullmatch(r"[0-9a-f]{64}", item.sha256) is None
                 or type(item.mode) is not int or not (0 <= item.mode <= 0o777)
                 or item.mode & 0o022):
@@ -116,9 +116,19 @@ def verify_regular_tree(
         # runtime I/O; never mix multiple revisions of the expectation set.
         if len(expected) > max_entries:
             raise IntegrityMismatch("Unbounded expected inventory")
-        expected_snapshot = dict(expected)
+        entries = dict(expected)
     except (RuntimeError, ValueError, TypeError) as exc:
         raise IntegrityMismatch("Cannot snapshot expected inventory") from exc
+    # A shallow dict copy still references the caller's ExpectedRegularFile
+    # objects. Pin their primitive fields as well: frozen dataclasses can be
+    # mutated via object.__setattr__, and a hostile subclass may override
+    # attribute access. The verifier must use only locally owned records.
+    if any(type(item) is not ExpectedRegularFile for item in entries.values()):
+        raise IntegrityMismatch("Invalid expected inventory record type")
+    expected_snapshot = {
+        path: ExpectedRegularFile(item.sha256, item.mode)
+        for path, item in entries.items()
+    }
     directories = _expected_paths(expected_snapshot, max_entries)
     try:
         root = os.fstat(root_fd)
