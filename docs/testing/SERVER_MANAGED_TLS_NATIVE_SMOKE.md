@@ -22,10 +22,27 @@ CA and exact hostname validation. It requires a 200 response and
 unchanged certificate/private-key bytes.
 
 Negative cases independently refuse an untrusted CA and wrong
-hostname at real TLS handshake. Missing certificates, missing keys,
-mismatched keys and malformed PEM are rejected by actual nginx -t
-before any new master is started. Test cleanup stops the disposable
-master, preserving all host services.
+hostname at real TLS handshake. An independently initialized Python
+SSLContext(TLS_SERVER).load_cert_chain validates the exact synthetic
+certificate/key pair BEFORE any candidate daemon/reload. Missing
+certificates, missing keys, mismatched keys and malformed PEM all fail
+this independent test-only SSL preflight. nginx -t is ALSO executed
+but is not assumed sufficient on its own.
+
+**Important observed distro distinction (2026-11-10):** stock AlmaLinux 10
+NGINX 1.26.3 returned a successful nginx -t even with an absent,
+mismatched or malformed TLS key where Debian 13 nginx -t failed.
+The initial test therefore correctly FAILED on AlmaLinux, and the
+fixed procedure now requires independent certificate/key pairing
+before activation. Do NOT treat nginx -t success as proof of private
+key access, validity or certificate/key correspondence on every native
+build. A production root-owned validator must prove this without
+leaking real operator secrets and without exposing a generic
+caller-selected root file-read interface.
+
+The SSLContext pair check currently reads only synthetic private keys
+inside the disposable test, not operator files or production state.
+Test cleanup stops the disposable master, preserving all host services.
 
 Run inside a disposable supported distro container after installing
 python3, python3-pytest, nginx, openssl and ca-certificates:
