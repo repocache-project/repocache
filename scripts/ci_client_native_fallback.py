@@ -346,14 +346,19 @@ def probe(manager: str, *, tls: bool = False,
                 cases.append(("tampered-signature", "healthy", "healthy"))
             if package_transfer:
                 cases.append(("tampered-package", "healthy", "healthy"))
+                cases.append(("tampered-inrelease", "healthy", "healthy"))
             signature = base / "www" / "repo" / "repodata" / "repomd.xml.asc"
             intact_signature = signature.read_bytes() if signed_dnf else None
+            inrelease = base / "www/repo/dists/stable/InRelease"
+            intact_inrelease = inrelease.read_bytes() if package_transfer else None
             for cycle, first, second in cases:
                 primary.mode, upstream.mode = first, second
                 if cycle == "tampered-signature":
                     signature.write_bytes(b"tampered and not OpenPGP signed\n")
                 if cycle == "tampered-package":
                     package_file.write_bytes(b"synthetic package tampered after metadata signing\n")
+                if cycle == "tampered-inrelease":
+                    inrelease.write_bytes(b"invalid OpenPGP signed InRelease\n")
                 primary.hits.clear()
                 upstream.hits.clear()
                 ca = bad_ca if cycle == "wrong-ca" else certificate
@@ -402,6 +407,10 @@ def probe(manager: str, *, tls: bool = False,
                     ok = (result.returncode == 0 and package_result is not None
                           and not accepted_hash and package_result.returncode != 0
                           and bool(primary.hits))
+                elif cycle == "tampered-inrelease":
+                    # The metadata signing boundary precedes package transfer.
+                    ok = (result.returncode != 0 and bool(primary.hits)
+                          and package_result is None)
                 elif cycle == "both-failed":
                     ok = result.returncode != 0 and primary.hits and upstream.hits
                 elif cycle == "fallback":
@@ -409,7 +418,8 @@ def probe(manager: str, *, tls: bool = False,
                 else:
                     ok = result.returncode == 0 and primary.hits and not upstream.hits
                 if (package_transfer and cycle not in (
-                        "tampered-package", "wrong-ca", "both-failed")
+                        "tampered-package", "tampered-inrelease",
+                        "wrong-ca", "both-failed")
                         and not accepted_hash):
                     ok = False
                 if not ok:
@@ -419,6 +429,8 @@ def probe(manager: str, *, tls: bool = False,
                          "" if package_result is None else package_result.stdout[-3000:]))
                 if cycle == "tampered-package":
                     package_file.write_bytes(original_deb)
+                if cycle == "tampered-inrelease":
+                    inrelease.write_bytes(intact_inrelease)
                 if cycle == "tampered-signature":
                     signature.write_bytes(intact_signature)
         finally:

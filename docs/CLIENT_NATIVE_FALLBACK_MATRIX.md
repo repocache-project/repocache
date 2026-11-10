@@ -148,3 +148,13 @@ TLS wrong-CA, total outage and earlier metadata checks still fail closed.
 These are disposable unsigned payloads authenticated by synthetic signed
 APT repository metadata, not genuine publisher packages, and do not prove
 production server catalogs, real network sources or native-host operation.
+
+## APT metadata-signature tampering refusal
+
+The isolated APT HTTPS package-transfer probe additionally replaces the
+signed InRelease with invalid bytes, while both HTTPS endpoints remain
+available and provide their ordinary trusted certificates. apt-get update
+must reject the unauthenticated metadata before attempting a package
+download. The original signed InRelease is restored after the negative
+probe. This demonstrates only synthetic CI-key trust in disposable
+Debian 13 containers, not real publisher trust or production readiness.
