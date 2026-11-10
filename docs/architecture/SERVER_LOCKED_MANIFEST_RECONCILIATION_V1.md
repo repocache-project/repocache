@@ -963,3 +963,28 @@ and reject externally owned hosts. Never use this fixture module as a
 privileged generic write API. Native booted Debian 13 and AlmaLinux 10
 systemd/SELinux operational acceptance and original #31/#95 criteria remain
 **NOT VERIFIED**.
+
+
+### Cross-PR exact-head integration rehearsal (no protected merge)
+
+The optional `.github/workflows/v06-cross-pr-integration-rehearsal.yml`
+checks out the **existing #31 PR #237** head and fetches **only** the
+other already-open canonical integration PR branches #252 (#27), #251
+(#28), #254 (#64) and #214 (#95), comparing their live SHAs against
+**explicit pinned exact commits**. If a dependency branch advances,
+the rehearsal refuses a stale result instead of accidentally testing
+unknown code. All PR heads must descend from the same verified protected
+`integration/v0.6.0` base. It creates a **local throwaway Git branch and
+local merge commits** inside each disposable Debian 13 and AlmaLinux 10
+Actions container, with `contents:read`, `persist-credentials:false`,
+no push permissions and no protected target changes. It then runs combined
+state-journal/NGINX/credentialed-socket/native-unit/derived-client-catalog
+and lifecycle tests against the **actual combined source tree**, rather
+than extrapolating cross-feature compatibility from individual green PRs.
+
+A local merge/test success remains only **integration rehearsal PASS**,
+not a protected integration merge, issue/VM/release acceptance, a live
+root worker, or evidence that the parent original criteria are satisfied.
+If any dependency SHA, base or file overlap fails, update the existing
+owners' PRs and re-pin this test after inspecting the changed diff;
+never silently fetch/mix arbitrary PR heads or bypass protected CI.
