@@ -190,3 +190,32 @@ A future positive host activation remains blocked until an independently
 verified signed-installed worker and unit provenance, no foreign NGINX,
 fixed transaction path/lock, durable multi-resource compensation and
 operator-authorized service/catalog activation have passed native acceptance.
+
+
+## Authenticated operator response on the inert Unix control channel
+
+The uninstalled worker now returns a **single small, fixed-schema JSON
+denial packet**, terminated by one newline, on the *already authenticated*
+Linux AF_UNIX `SOCK_SEQPACKET` connection. This is deliberately separate
+from stdout, which belongs to the service journal and is not a reliable
+client return channel. The permitted request names are still only exact
+`apply-v2\\n` and `recover-v2\\n`; the reply is always
+`ROOT_TRANSACTION_NOT_IMPLEMENTED`, with all write, reload, catalog and
+operator-action flags **false**. The worker always exits nonzero regardless
+of successful reply delivery. It does not run a privileged dispatcher.
+
+No reply is sent for rejected identities, invalid packets, unsafe socket
+layouts or host-context failures; those paths close the connection and
+write only a fixed redacted error to the worker journal. The response
+channel uses a three-second bounded send and refuses short writes,
+transport errors and timeouts. A successful socket send does not prove
+that the remote operator accepted the packet. The fixed response contains
+no state bytes, file names, credentials, user claims or untrusted client
+text.
+
+Unit tests exercise real kernel sequential-packet receive of the complete
+single frame, absent acknowledgment on authentication failure, and
+failure-to-send refusals. This is protocol usability for an **inert
+security prerequisite**, not a completed CLI, installed worker or
+production NGINX authorization. Booted native systemd and enforcing
+AlmaLinux 10 SELinux remain NOT VERIFIED.
