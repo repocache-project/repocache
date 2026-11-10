@@ -155,3 +155,38 @@ or AlmaLinux enforcing SELinux.
 Do not provision or alter a real admin group, deploy/enable units, modify
 protected paths, grant root privileges or perform a reload as part of
 this PR. Native installation support remains NOT VERIFIED.
+
+
+## Necessary booted Linux root/namespace preflight (no host attestation)
+
+The worker now executes the private fixed-path
+`server_root_control_host_preflight_v1.require_native_host_preconditions`
+after validating its systemd-activated root-owned listening socket and
+before reading any administrative request. It refuses non-root effective,
+real or saved UID/GID, non-systemd PID 1, differing worker/PID1 mount,
+user or PID namespaces, rootless/subordinate user namespace UID maps,
+missing or group-writable systemd runtime directories, or unreadable
+kernel procfs facts. All reads are bounded and value-redacted; callers
+cannot supply a path, namespace, unit, command or required identity.
+
+**Critically, this is only a necessary-context refusal filter.** PID1
+can be `systemd` *inside a privileged container*, and a container can
+share root UID mappings and namespace inodes with its own PID1. These
+observations do not attest that the code was installed from an approved,
+signed REPOCACHE release, that it runs on the intended physical or virtual
+host, or that the effective NGINX unit and SELinux policy are protected.
+The report explicitly sets `host_root_provenance_verified=False`,
+`signed_installed_binary_verified=False`,
+`effective_systemd_unit_verified=False`,
+`selinux_acl_mount_ownership_verified=False` and all host-write,
+NGINX-reload and catalog-publication authority flags to false. The
+worker **still unconditionally returns nonzero with no host side effect**.
+
+CI tests include synthetic PID1, namespaces, UID/GID, procfs and runtime
+ownership failures plus actual Linux procfs observation in disposable
+Debian 13 and AlmaLinux 10 userspaces. These tests are neither a booted
+systemd/PID1 end-to-end acceptance nor proof of enforcing SELinux.
+A future positive host activation remains blocked until an independently
+verified signed-installed worker and unit provenance, no foreign NGINX,
+fixed transaction path/lock, durable multi-resource compensation and
+operator-authorized service/catalog activation have passed native acceptance.
