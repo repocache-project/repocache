@@ -120,7 +120,15 @@ jobs:
           }
           git merge-base --is-ancestor "$BASE_SHA" refs/remotes/origin/pr76
           git merge --no-ff --no-edit refs/remotes/origin/pr76
-          git diff --check "$BASE_SHA"..HEAD
+          # Enforce whitespace only on this PR's owned server integration
+          # surface. Other exact-SHA sibling PRs run their independent CI;
+          # intentional Markdown hard-break spaces must not be falsely
+          # classified as cross-branch integration conflicts.
+          git diff --check "$BASE_SHA"..HEAD -- \
+            '.github/workflows/v06-cross-pr-integration-rehearsal.yml' \
+            'src/repocache/server_*' \
+            'tests/test_server_*' \
+            'scripts/ci_v06_cross_pr_*'
           test -z "$(git status --porcelain)"
           echo "PASS: exact-SHA local merge of protected #255 #250 #252 #251 #214 plus draft #237 #254 #115 #249"
           echo "NOT VERIFIED: protected integration merge, host-root, systemd, SELinux, release"
