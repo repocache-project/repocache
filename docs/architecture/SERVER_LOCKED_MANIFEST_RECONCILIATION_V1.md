@@ -922,10 +922,16 @@ state, then clears the verified WAL. Explicit recovery may be retried after
 another interruption; a fully recovered state remains inert/idempotent.
 
 The fixture tests cover both initial and repeat transactions, all six
-injected crash phases, complete prior-byte replay, repeat recovery, foreign
-state/include/catalog/manifest modifications, symlink to unrelated data,
-strict active-ID exactness, unmanifested foreign include refusal, same-version
-no-op and live-namespace-root refusal.
+injected crash phases, **real separate-PID fork/os._exit process deaths** at
+each of the six WAL phases, complete prior-byte replay by a different
+process, a second interruption during rollback followed by a successful
+retry, tampered canonical/noncanonical/oversize journals, repeat recovery,
+foreign state/include/catalog/manifest modifications, symlink to unrelated
+data, strict active-ID exactness, unmanifested foreign include refusal,
+same-version no-op and live-namespace-root refusal. The ordinary state-v2
+writer, recovery **and read-only recovery preview** all refuse an in-flight
+multi-resource transaction; they never misreport an interrupted combined
+state/catalog/include deployment as clean.
 
 **This is not the final privileged writer**: it does not make any change to
 real NGINX or a public catalog; does not install packages or run systemd;
