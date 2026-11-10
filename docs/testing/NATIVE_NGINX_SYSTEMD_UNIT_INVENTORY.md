@@ -128,3 +128,45 @@ directives. The value was independently checked against the Debian
 source distribution's official
 [nginx-common.nginx.service](https://sources.debian.org/src/nginx/1.26.3-3%2Bdeb13u7/debian/nginx-common.nginx.service/).
 Runtime compatibility still requires the exact supported distro CI.
+
+
+## Effective PID1 `nginx.service` runtime preflight (read-only prerequisite)
+
+A vendor unit stored under `/usr/lib/systemd/system` is **not** proof of
+the unit loaded by an actual systemd PID1. The new independent,
+non-authorizing `server_native_nginx_effective_unit_v1.py` observes
+`nginx.service` using only fixed, non-shell
+`/usr/bin/systemctl show --no-pager --property=... nginx.service`
+arguments, bounded 5-second timeout, a fixed sanitized `PATH` and
+`LC_ALL=C` environment and `cwd=/`. The command cannot write a unit
+file, start a process, install NGINX or reload its service.
+
+Execution first requires the existing read-only #27 vendor unit inventory
+to report a valid, root-owned, unshadowed native unit. The systemctl
+executable and every fixed ancestor must be root-owned, non-group-writable,
+non-symlink and of the expected file/directory type. The returned
+key/value response is strictly parsed, bounded and must match exactly
+`Id=Names=nginx.service`, the fixed vendor `FragmentPath`,
+no effective `DropInPaths`, loaded/active/running state,
+`CanReload=yes`, `NeedDaemonReload=no` and a positive bounded
+`MainPID`. Reordered keys are acceptable, but duplicate, extra,
+unknown, conflicting, absent or malformed keys fail closed.
+Errors contain only static codes, not stderr/output or private paths.
+
+**Only a read-only observation:** systemctl output is not an authenticated
+receipt, and this code does not independently prove process executable
+inode, installed package owner trust, a real booted host, native systemd
+PID1 provenance or SELinux enforcement. Its report explicitly sets those
+flags and `authorizes_systemctl`, `authorizes_nginx_reload` and
+`authorizes_nginx_install` to **false**. Mocked positive unit tests on
+the exact source SHA prove parser and subprocess-refusal contracts only.
+The future #64 fixed-operation root worker must revalidate *all* native
+package/source/host/SELinux/NGINX ownership and read-only effective
+state immediately before any real controlled reload, then verify the
+actual running exposure and journal/compensation. A successful systemctl
+show alone cannot authorize a protected transition.
+
+Real booted Debian13 and AlmaLinux10 host unit checks and enforcing
+SELinux evidence remain **NOT VERIFIED**; a disposable image with NGINX
+installed but no systemd PID1 cannot certify them. Do not enable systemd
+or modify an actual host based on this source.
