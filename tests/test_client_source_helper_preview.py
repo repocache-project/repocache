@@ -56,7 +56,7 @@ def test_status_is_rootless_and_not_installed(capsys, monkeypatch, args):
     assert doc["installed"] is False
     assert doc["source_writes_supported"] is False
     assert doc["semantic_repository_validation_supported"] is False
-    assert doc["capabilities"] == ["status", "inspect-source",
+    assert doc["capabilities"] == ["status", "inspect-source", "validate-source",
                                     "verify-route-approval"]
     assert "commit" not in doc["capabilities"]
 
@@ -106,6 +106,8 @@ def test_bad_source_path_is_redacted_and_fails(capsys, host, source):
 @pytest.mark.parametrize("args", (
     ["--json", "commit", "--source", SOURCE],
     ["--json", "verify-route-approval", "--candidate", "bad"],
+    ["--json", "validate-source"],
+    ["--json", "validate-source", "--source", SOURCE, "--root", "/"],
     ["--json", "recover"],
     ["--json", "restore"],
     ["--json", "validate", "--source", SOURCE],
@@ -247,3 +249,83 @@ def test_root_approved_exact_route_can_be_verified_without_disclosure(
     (host / SOURCE).write_bytes(CONTENTS + b"# independent administrator edit\n")
     code, result = invoke(capsys, args, root=host)
     assert code == 3 and result["error"]["code"] == "ROUTE_APPROVAL_REFUSED"
+
+
+@pytest.mark.parametrize("relative,contents,kind", (
+    ("etc/apt/sources.list.d/native.list",
+     b"# local owner comment\n"
+     b"deb [signed-by=/etc/apt/keyrings/source.gpg] https://deb.debian.org/debian trixie main\n"
+     b"deb https://security.debian.org/debian-security trixie-security main\n",
+     "apt-list"),
+    ("etc/apt/sources.list.d/native.sources",
+     b"Types: deb\nURIs: https://deb.debian.org/debian\n"
+     b"Suites: trixie\nComponents: main\nSigned-By: /etc/apt/keyrings/source.gpg\n",
+     "apt-deb822"),
+    ("etc/yum.repos.d/native.repo",
+     b"[BaseOS]\nbaseurl=https://repo.almalinux.org/almalinux/10/BaseOS/x86_64/os/\n"
+     b"enabled=1\ngpgcheck=1\nrepo_gpgcheck=1\n",
+     "dnf-repo"),
+))
+def test_structure_validation_preserves_source_bytes_and_never_grants_writes(
+        capsys, host, relative, contents, kind):
+    path = host / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(contents)
+    before = path.stat()
+    code, doc = invoke(capsys, [
+        "--json", "validate-source", "--source", relative,
+    ], root=host)
+    assert code == 0 and doc["ok"]
+    assert doc["structural_subset_verified"] is True
+    assert doc["source_format"] == kind
+    assert doc["repository_entries"] == (2 if relative.endswith(".list") else 1)
+    for key in ("native_syntax_verified", "package_signatures_verified",
+                "upstream_fallback_verified", "managed_ownership_verified",
+                "source_contents_returned", "source_path_returned", "installed"):
+        assert doc[key] is False
+    assert relative not in json.dumps(doc)
+    assert "deb.debian.org" not in json.dumps(doc)
+    assert path.read_bytes() == contents
+    after = path.stat()
+    assert (before.st_dev, before.st_ino, before.st_mtime_ns) == (
+        after.st_dev, after.st_ino, after.st_mtime_ns)
+
+
+@pytest.mark.parametrize("relative,contents", (
+    ("etc/apt/sources.list.d/bad.list",
+     b"deb [trusted=yes] https://deb.debian.org/debian trixie main\n"),
+    ("etc/apt/sources.list.d/bad.sources",
+     b"Types: deb\nURIs: https://example.org/debian\n"
+     b"Suites: trixie\nComponents: main\nTrusted: yes\n"),
+    ("etc/yum.repos.d/bad.repo",
+     b"[bad]\nbaseurl=https://example.org/linux/\ngpgcheck=0\n"),
+    ("etc/apt/mirrors/native", b"https://deb.debian.org/debian\n"),
+    ("etc/apt/sources.list.d/empty.list", b"# no enabled repository\n"),
+))
+def test_structure_validation_refuses_unsupported_or_unsigned_sources(
+        capsys, host, relative, contents):
+    target = host / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(contents)
+    code, doc = invoke(capsys, [
+        "--json", "validate-source", "--source", relative,
+    ], root=host)
+    assert code == 3 and doc["error"]["code"] == "SOURCE_STRUCTURE_REFUSED"
+    assert relative not in json.dumps(doc)
+    assert target.read_bytes() == contents
+
+
+def test_structure_validation_rejects_symlinks_and_non_root_native(
+        capsys, host, monkeypatch):
+    path = host / SOURCE
+    path.unlink()
+    path.symlink_to(host / pre.MARKER)
+    code, doc = invoke(capsys, [
+        "--json", "validate-source", "--source", SOURCE,
+    ], root=host)
+    assert code == 3 and doc["error"]["code"] == "SOURCE_STRUCTURE_REFUSED"
+    monkeypatch.setattr(helper.os, "geteuid", lambda: 65534)
+    code, doc = invoke(capsys, [
+        "--json", "validate-source", "--source", SOURCE,
+    ])
+    assert code == 3 and doc["error"]["code"] == "ROOT_REQUIRED"

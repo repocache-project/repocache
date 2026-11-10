@@ -89,3 +89,20 @@ Unknown, mismatched, tampered or stale approvals are refused, without any
 source mutation. The module is NOT installed as a privileged helper.
 The installed client still refuses repos sync --apply and no commit,
 restore or recovery operation is exposed.
+
+## Non-installed conservative structural validation
+
+The fixed validate-source operation inspects allowlisted APT .list, deb822
+.sources and DNF .repo source files, read-only, using the existing pinned
+directory-FD source preflight and original-file inode/metadata/digest checks.
+It enforces a conservative entry grammar for all discovered entries and
+refuses unsupported, empty, ambiguous or unsigned forms as a whole.
+Local mirrorlist and DNF metalink/mirrorlist syntax is not certified.
+Outputs contain only the format and bounded entry count, no paths or bytes.
+The native action requires root and never elevates privileges automatically.
+
+A structural subset PASS is not native APT/DNF acceptance, package signing
+or fallback validation, ownership authority or real source-write permission.
+No privileged helper is installed and repos sync --apply remains disabled.
+Systemd and enforcing SELinux host tests remain reserved for final v0.6.0
+native validation as requested by the maintainer.

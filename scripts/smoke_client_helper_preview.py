@@ -86,6 +86,24 @@ def main():
         assert code == 3 and refusal["error"]["code"] == "ROUTE_APPROVAL_REFUSED"
         assert source.read_bytes() == DATA
 
+        code, structural = invoke(
+            ["--json", "validate-source", "--source", RELATIVE], root)
+        assert code == 0 and structural["structural_subset_verified"] is True
+        assert structural["source_format"] == "dnf-repo"
+        assert structural["repository_entries"] == 1
+        assert structural["native_syntax_verified"] is False
+        assert structural["package_signatures_verified"] is False
+        assert source.read_bytes() == DATA
+        bad_relative = "etc/yum.repos.d/unsigned.repo"
+        bad_target = root / bad_relative
+        bad_target.write_bytes(
+            b"[unsafe]\nbaseurl=https://example.org/repo\ngpgcheck=0\n")
+        code, blocked = invoke(
+            ["--json", "validate-source", "--source", bad_relative], root)
+        assert code == 3
+        assert blocked["error"]["code"] == "SOURCE_STRUCTURE_REFUSED"
+        assert bad_target.read_bytes().endswith(b"gpgcheck=0\n")
+
         code, bad = invoke(["--json", "inspect-source",
                             "--source", "https://user:secret@example.org/"], root)
         assert code != 0 and bad["error"]["code"] == "SOURCE_PREFLIGHT_REFUSED"
@@ -119,7 +137,7 @@ raise SystemExit(code)
 
         assert source.read_bytes() == DATA
         assert source.stat().st_ino == before.st_ino
-        print("PASS: read-only helper route-bound approval, redaction, real non-root denial")
+        print("PASS: read-only helper conservative structure, route approval, redaction, real UID denial")
 
 
 if __name__ == "__main__":
