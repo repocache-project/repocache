@@ -129,7 +129,7 @@ def serve_one_fixed_request() -> dict[str, Any]:
             }
             response = (json.dumps(
                 result, sort_keys=True, separators=(",", ":"),
-            ) + "\\n").encode("ascii")
+            ) + "\n").encode("ascii")
             try:
                 conn.settimeout(3.0)
                 written = conn.send(response)
