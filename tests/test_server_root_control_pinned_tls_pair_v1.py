@@ -138,12 +138,15 @@ def test_inode_replacement_does_not_change_pinned_pair(synthetic_pair, tmp_path,
             os.replace(staged, cert)
             return real(protocol)
         monkeypatch.setattr(gate.ssl, "SSLContext", replace_after_open)
-        # The originally opened FD remains pinned despite path substitution:
-        # it is unsafe to assert pathname stability or host provenance here.
-        result = gate._inspect_pinned_tls_pair_for_future_transaction(
-            c, k, expected_owner_uid=os.geteuid(),
-        )
-        assert result["private_key_pair_load_observed"] is True
+        # Although an open fd remains pinned, replacement unlinks its
+        # original inode (st_nlink -> 0); the guard must refuse this
+        # non-cooperating writer instead of interpreting a valid TLS
+        # pair as stable managed-path provenance.
+        with pytest.raises(gate.PinnedTLSPairError,
+                           match="FD_UNTRUSTED"):
+            gate._inspect_pinned_tls_pair_for_future_transaction(
+                c, k, expected_owner_uid=os.geteuid(),
+            )
         assert cert.read_bytes() != old
     finally:
         os.close(c)
