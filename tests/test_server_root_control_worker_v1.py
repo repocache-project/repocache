@@ -102,6 +102,15 @@ def test_accepted_admin_operation_still_refuses_all_mutations(monkeypatch):
         def __exit__(self, *_args):
             return False
 
+        def settimeout(self, seconds):
+            assert seconds == 3.0
+
+        def send(self, packet):
+            response = json.loads(packet)
+            assert packet.endswith(b"\\n")
+            assert response["status"] == "ROOT_TRANSACTION_NOT_IMPLEMENTED"
+            return len(packet)
+
     class Server:
         def __enter__(self):
             return self
@@ -257,3 +266,110 @@ def test_systemd_worker_does_not_treat_preflight_as_approval(monkeypatch):
         monkeypatch.setattr(worker,"serve_one_fixed_request",
             lambda: {"status":"ROOT_TRANSACTION_NOT_IMPLEMENTED"})
         assert worker.main() == 2
+
+
+def test_authenticated_seqpacket_receives_fixed_non_success_reply(monkeypatch):
+    """Actual kernel SOCK_SEQPACKET peer reads a single denial packet."""
+    with socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET) as pair:
+        client, accepted = pair
+        class Server:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def settimeout(self, value):
+                assert value == 3.0
+
+            def accept(self):
+                return accepted, None
+
+        monkeypatch.setattr(worker, "_systemd_listener", Server)
+        monkeypatch.setattr(worker, "authorize_fixed_root_request",
+                            lambda _: {"operation": "RECOVER_V2"})
+        output = worker.serve_one_fixed_request()
+        raw = client.recv(4096)
+        assert raw.endswith(b"\\n")
+        assert len(raw) < 1024
+        assert json.loads(raw) == output
+        assert output["requested_operation"] == "RECOVER_V2"
+        assert output["operator_action_executed"] is False
+        assert output["authorizes_nginx_reload"] is False
+        assert output["authorizes_state_write"] is False
+        assert output["authorizes_catalog_publication"] is False
+
+
+@pytest.mark.parametrize("kind", ["short-write", "network-error", "timeout"])
+def test_worker_refuses_if_authenticated_denial_cannot_be_delivered(
+    monkeypatch, kind,
+):
+    """A missing/partial response must never appear as a completed action."""
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def settimeout(self, seconds):
+            assert seconds == 3.0
+
+        def send(self, packet):
+            if kind == "short-write":
+                return len(packet) - 1
+            if kind == "timeout":
+                raise TimeoutError("private system state")
+            raise OSError("private system state")
+
+    class Server:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def settimeout(self, seconds):
+            assert seconds == 3.0
+
+        def accept(self):
+            return Connection(), None
+
+    monkeypatch.setattr(worker, "_systemd_listener", Server)
+    monkeypatch.setattr(worker, "authorize_fixed_root_request",
+                        lambda _: {"operation": "APPLY_V2"})
+    with pytest.raises(RootControlWorkerError, match=(
+        "ROOT_CONTROL_RESPONSE_INCOMPLETE" if kind == "short-write"
+        else "ROOT_CONTROL_RESPONSE_UNAVAILABLE"
+    )) as exc:
+        worker.serve_one_fixed_request()
+    assert "private" not in str(exc.value)
+
+
+def test_worker_unauthorized_peer_never_receives_an_acknowledgment(monkeypatch):
+    """Do not reply until strict peer UID/GID/operation authorization passes."""
+    from repocache.server_root_control_protocol_v1 import FixedRootControlError
+    with socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET) as pair:
+        client, accepted = pair
+        class Server:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def settimeout(self, _):
+                pass
+
+            def accept(self):
+                return accepted, None
+
+        monkeypatch.setattr(worker, "_systemd_listener", Server)
+
+        def refuse(_conn):
+            raise FixedRootControlError("ADMIN_GROUP_REQUIRED")
+
+        monkeypatch.setattr(worker, "authorize_fixed_root_request", refuse)
+        with pytest.raises(FixedRootControlError, match="ADMIN_GROUP_REQUIRED"):
+            worker.serve_one_fixed_request()
+        assert client.recv(1024) == b""
