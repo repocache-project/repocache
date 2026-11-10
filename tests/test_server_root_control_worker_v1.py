@@ -162,3 +162,31 @@ def test_main_redacts_host_errors(monkeypatch, capsys):
     report = json.loads(capsys.readouterr().out)
     assert report == {"status": "DENIED", "code": "ROOT_CONTROL_UNAVAILABLE"}
     assert "private" not in capsys.readouterr().out
+
+
+@pytest.mark.skipif(os.geteuid() != 0,
+                    reason="requires disposable native root-owned socket fixture")
+def test_actual_root_owned_socket_rejects_leaf_symlink_substitution(
+    tmp_path, monkeypatch,
+):
+    """A live kernel listener cannot excuse an untrusted path replacement."""
+    admin_gid = 49999
+    socket_path = tmp_path / "server-control.sock"
+    os.chown(tmp_path, 0, admin_gid)
+    os.chmod(tmp_path, 0o750)
+    monkeypatch.setattr(worker, "_FIXED_SOCKET", str(socket_path))
+    monkeypatch.setattr(worker, "_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setattr(worker, "_trusted_local_ids",
+                        lambda: (admin_gid, 65534))
+    with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as server:
+        server.bind(str(socket_path))
+        os.chown(socket_path, 0, admin_gid)
+        os.chmod(socket_path, 0o660)
+        server.listen(1)
+        worker._validate_listener(server)
+        socket_path.unlink()
+        socket_path.symlink_to("/etc/passwd")
+        with pytest.raises(
+            RootControlWorkerError, match="ROOT_CONTROL_SOCKET_OWNERSHIP_REFUSED",
+        ):
+            worker._validate_listener(server)
