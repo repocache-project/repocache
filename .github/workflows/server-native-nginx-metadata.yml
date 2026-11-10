@@ -7,7 +7,9 @@ on:
       - 'src/repocache/server_native_nginx_ownership_v1.py'
       - 'src/repocache/server_native_nginx_service_unit_v1.py'
       - 'src/repocache/server_native_nginx_effective_unit_v1.py'
+      - 'src/repocache/server_native_vm_readonly_v1.py'
       - 'tests/test_server_native_nginx_effective_unit_v1.py'
+      - 'tests/test_server_native_vm_readonly_v1.py'
       - 'tests/test_server_native_nginx_service_unit_v1.py'
       - 'docs/testing/NATIVE_NGINX_SYSTEMD_UNIT_INVENTORY.md'
       - 'src/repocache/server_native_nginx_local_boundary_v1.py'
@@ -22,6 +24,8 @@ on:
       - 'scripts/smoke_server_native_nginx_prepackage_state.py'
       - 'scripts/smoke_server_native_nginx_container_install.py'
       - 'scripts/ci_native_nginx_process_inode_smoke.py'
+      - 'scripts/inspect_native_vm_nginx_prerequisites.py'
+      - 'scripts/ci_native_vm_preflight_container_refusal.py'
       - 'tests/test_server_native_nginx_container_install.py'
       - 'docs/architecture/SERVER_NATIVE_NGINX_PACKAGES_V1.md'
       - '.github/workflows/server-native-nginx-metadata.yml'
@@ -116,4 +120,6 @@ jobs:
               # new Docker instance; observe its kernel executable inode.
               REPOCACHE_NATIVE_TEST_CONTAINER=CONFIRMED_DISPOSABLE_DOCKER_ONLY \
                 PYTHONPATH=src python3 scripts/ci_native_nginx_process_inode_smoke.py
+              # Refuse Docker as a booted VM even with real distro NGINX installed.
+              PYTHONPATH=src python3 -B scripts/ci_native_vm_preflight_container_refusal.py
             '

@@ -213,3 +213,40 @@ a detected replacement of the fixed installed binary path between the first
 and second kernel observations. This narrows accidental races but remains
 insufficient for binary signing, authenticated package ownership, host-root
 or real NGINX activation authority.
+
+
+## Administrator-run booted VM read-only preflight (does not install)
+
+The optional scripts/inspect_native_vm_nginx_prerequisites.py runs as a
+root-owned **observation only** on a disposable, snapshot-backed Debian 13 or
+AlmaLinux 10 guest. It never installs native packages, opens an administrative
+control socket, writes a file, changes systemd, reloads NGINX, or publishes a
+client catalog. It is deliberately non-activating.
+
+From the exact reviewed PR #252 checkout on a disposable VM with the supported
+system Python already installed, in the repository root, run:
+
+    sudo env PYTHONPATH=src python3 -B scripts/inspect_native_vm_nginx_prerequisites.py
+
+It checks OS major/system Python, root for privileged **read-only** kernel
+inspection, systemd PID1/namespace/runtime layout, refuses obvious
+Docker/Podman markers, requires SELinux enforcing on AlmaLinux 10 and
+then invokes the existing fixed-name vendor/effective native NGINX unit
+and master-executable inode observer. A **fresh VM without NGINX** correctly
+returns NOT VERIFIED and exit 2; it is **not** an instruction to install
+NGINX manually or to run any privileged helper. An observed NGINX returns
+exit 0 only as a *partial precondition*, with all mutation/reload/catalog
+authority fields false and complete_server_acceptance_passed=false.
+
+This script deliberately cannot independently attest native host versus a
+sophisticated privileged container or namespace, immutable signed application
+code, package-manager trust, actual NGINX TLS/routes, cache HIT/MISS,
+host-root installed transaction, rollback or repeat installation. It does
+not satisfy the original #27, #31, #64, #25 or #19 operational criteria.
+
+The native package-install Docker CI now additionally proves that even
+with real distro NGINX packages present, this booted-VM observer
+refuses a container. The tests also inject synthetic booted PID1/systemd
+and enforcing SELinux observations and verify all acceptance and mutation
+authority flags stay false. Positive booted VM execution and host integration
+are still NOT VERIFIED.
