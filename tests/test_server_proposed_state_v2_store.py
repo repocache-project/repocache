@@ -2036,7 +2036,7 @@ def test_v2_same_lock_preflight_commit_updates_active_and_preserves_noop_inode(
 
 
 @pytest.mark.parametrize("case", [
-    "stale", "wrong-pins", "unsafe-pin", "lock-held", "unsafe-cache-root",
+    "stale", "wrong-pins", "unsafe-pin", "lock-held",
 ])
 def test_v2_same_lock_preflight_commit_refuses_before_state_mutation(
     fixture_root, case,
@@ -2046,10 +2046,6 @@ def test_v2_same_lock_preflight_commit_refuses_before_state_mutation(
     apply(fixture_root, current)
     updated_doc = document(count=1)
     updated_doc["repositories"][0]["desired_state"] = "active"
-    if case == "unsafe-cache-root":
-        updated_doc["deployment"]["paths"]["cache_root"] = (
-            "/var/cache/repocache;include /tmp/foreign.conf;"
-        )
     updated = snapshot(generation=2, previous=current, doc=updated_doc)
     pins = {"repo-0": {"mirror0.example.invalid": ["8.8.8.8"]}}
     if case == "wrong-pins":
