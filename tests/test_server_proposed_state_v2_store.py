@@ -3321,7 +3321,11 @@ def test_multi_resource_tampered_journal_refused_without_erasure(
     elif damage == "wrong-digest":
         entry = json.loads(journal.read_bytes())
         entry["next_sha256"][multi.INCLUDE] = "a" * 64
-        journal.write_bytes(json.dumps(entry, sort_keys=True).encode("utf-8"))
+        # Keep the tampered record canonical so the recovery tests the
+        # expected next-digest refusal, not only generic JSON-format denial.
+        journal.write_bytes(multi._canonical(
+            entry, limit=multi.MAX_JOURNAL_BYTES,
+        ))
         # Hash substitution is only detected once a resource diverges from
         # *both* the original and the forged next digest.
         with pytest.raises(multi.FixtureMultiResourceError,
