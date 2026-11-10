@@ -6,6 +6,7 @@ temporary storage, with a Unix-domain SSL listener and zero public ports.
 """
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import shutil
@@ -15,6 +16,8 @@ import subprocess
 import time
 
 import pytest
+
+from repocache.server_install_v1 import validate_install_document
 
 _NGINX = shutil.which("nginx")
 _OPENSSL = shutil.which("openssl")
@@ -45,7 +48,24 @@ def _certificate(root: Path, prefix: str, *, hostname: str = _HOST):
     return cert, key
 
 
+def _validated_fixture_tls_paths(cert: Path, key: Path) -> tuple[str, str]:
+    # Consume the actual approved v1 install contract, not arbitrary NGINX
+    # paths. The only changes are synthetic test-only credential references.
+    example = (Path(__file__).resolve().parents[1] /
+               "docs/examples/server-install-v1.json")
+    document = json.loads(example.read_text(encoding="utf-8"))
+    tls = document["deployment"]["tls"]
+    assert tls["mode"] == "operator-provided"
+    tls["certificate_file"] = str(cert)
+    tls["private_key_file"] = str(key)
+    snapshot = validate_install_document(document, for_apply=True)
+    selected = snapshot["deployment"]["tls"]
+    assert selected["mode"] == "operator-provided"
+    return selected["certificate_file"], selected["private_key_file"]
+
+
 def _config(root: Path, cert: Path, key: Path) -> bytes:
+    cert_file, key_file = _validated_fixture_tls_paths(cert, key)
     sock = root / "tls.sock"
     assert len(os.fsencode(sock)) < 100
     return (
@@ -56,8 +76,8 @@ def _config(root: Path, cert: Path, key: Path) -> bytes:
         "http { access_log off;\n"
         "server {\n"
         f"listen unix:{sock} ssl;\n"
-        f"ssl_certificate {cert};\n"
-        f"ssl_certificate_key {key};\n"
+        f"ssl_certificate {cert_file};\n"
+        f"ssl_certificate_key {key_file};\n"
         "ssl_protocols TLSv1.2 TLSv1.3;\n"
         "location = /__test_health {\n"
         f'return 200 "{_REPLY.decode("ascii")}";\n'
