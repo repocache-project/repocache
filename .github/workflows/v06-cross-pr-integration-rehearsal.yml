@@ -61,6 +61,11 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
+          # checkout writes as the runner uid; distro containers execute as
+          # root. Trust only Actions' single exact workspace, not '*' or any
+          # operator-supplied or repository-controlled path.
+          test "$GITHUB_WORKSPACE" = "/__w/repocache/repocache"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           test "$(git rev-parse refs/heads/integration/v0.6.0 2>/dev/null ||             git rev-parse refs/remotes/origin/integration/v0.6.0)" = "$BASE_SHA" ||             { echo "Integration base changed; refusing stale synthetic merge"; exit 1; }
           # These are read-only fetches of already open, separate, approved-
           # scope PR branches. Any changed HEAD invalidates this rehearsal.
