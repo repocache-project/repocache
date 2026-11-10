@@ -12,6 +12,10 @@ on:
       - 'src/repocache/server_root_control_full_context_v1.py'
       - 'src/repocache/server_root_control_pre_reload_v1.py'
       - 'src/repocache/server_root_control_fixed_candidate_v1.py'
+      - 'src/repocache/server_native_root_control_entrypoint_v1.py'
+      - 'tests/test_server_native_root_control_entrypoint_v1.py'
+      - 'src/repocache/server_native_root_control_client_v1.py'
+      - 'tests/test_server_native_root_control_client_v1.py'
       - 'src/repocache/server_root_control_pinned_tls_pair_v1.py'
       - 'tests/test_server_root_control_protocol_v1.py'
       - 'tests/test_server_root_control_host_preflight_v1.py'
@@ -98,6 +102,8 @@ jobs:
             tests/test_server_root_control_full_context_v1.py \
             tests/test_server_root_control_pre_reload_v1.py \
             tests/test_server_root_control_fixed_candidate_v1.py \
+            tests/test_server_native_root_control_entrypoint_v1.py \
+            tests/test_server_native_root_control_client_v1.py \
             tests/test_server_root_control_pinned_tls_pair_v1.py
           # Distro native NGINX installed only in this disposable CI image.
           REPOCACHE_NATIVE_TEST_CONTAINER=CONFIRMED_DISPOSABLE_DOCKER_ONLY \

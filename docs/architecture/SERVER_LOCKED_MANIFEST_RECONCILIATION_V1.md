@@ -1299,3 +1299,39 @@ operation. All original #31/#64 production and booted-VM acceptance
 remain **NOT VERIFIED** until the final v0.6.0 VM campaign, as directed by
 the maintainer. Do not merge or advertise native host support until the
 applicable security and issue-specific review gates pass.
+
+
+## Actual fixed authenticated native entrypoint and operator socket client
+
+The distinct source module \`server_native_root_control_entrypoint_v1\`
+closes the #64/#31 execution seam previously absent in the inert prototype:
+it obtains exactly one kernel-credentialed AF_UNIX SOCK_SEQPACKET request
+from the fixed systemd socket, checks the root/PID1 prerequisites and
+kernel-authorized \`repocache-admin\` group and independently validates the
+supported distro from root-owned OS metadata. It dispatches ONLY
+\`APPLY_V2\` or \`RECOVER_V2\` to the fixed native transaction engine, no
+caller-selected command, script, path, unit, environment or executable.
+The response is canonical and redacted; success is sent only after the
+transaction returns committed/recovered, with no private NGINX/TLS/state.
+The existing #254 \`server_root_control_worker_v1\` intentionally remains
+an inert test of the protocol; a separately signed root-owned installed
+entrypoint must use this distinct runtime implementation after acceptance.
+
+The fixed \`server_native_root_control_client_v1\` sends only those two
+exact messages, verifies the kernel root peer and rejects noncanonical
+or contradictory success, untrusted or oversized replies, and denied
+operations. An operation whose acknowledgment is lost has an UNKNOWN
+outcome and must be reconciled under the persistent state/WAL; automatic
+resubmission or interpreting transport failure as rollback is prohibited.
+CLI \`--yes\` alone never constitutes OS-level privilege. This is source
+implementation, not an installed systemd unit or package approval.
+
+The #31 multi-resource engine additionally opens and cryptographically
+checks the full root-owned certificate/private key *pair* by pinned Linux
+descriptors before changing the managed NGINX config. After reload it
+requires both a verified-TLS generation health reply and the exact
+published active-only catalog bytes over the fixed HTTPS discovery path.
+Compensation after a failed apply restores the prior catalog and NGINX,
+then validates the prior active generation before clearing the durable
+recovery journal. Neither a green CI nor source mock is evidence of
+installed SELinux policy, exact signed worker provenance or VM success.
