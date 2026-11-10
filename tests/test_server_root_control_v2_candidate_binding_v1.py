@@ -113,7 +113,10 @@ def test_replay_or_wrong_generation_fails_closed(owned, kind, expected):
 
 def test_invalid_full_v2_config_refused_even_with_matching_candidate_digest(owned):
     bad = snapshot(count=1)
-    bad["repository_records"][0]["desired_state"] = "disabled"
+    old_state = bad["repository_records"][0]["desired_state"]
+    bad["repository_records"][0]["desired_state"] = (
+        "active" if old_state == "disabled" else "disabled"
+    )
     stage(owned, bad)
     with pytest.raises(binding.LockedRootCandidateBindingError,
                        match="PROTECTED_CANDIDATE_UNVERIFIED"):
