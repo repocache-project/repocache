@@ -115,3 +115,44 @@ failed privileged reload. They do not establish privileged operator
 authorization, root-owned state/managed include provenance, atomic catalog
 publication, crash durability, SELinux, production TLS trust or service
 manager recovery. Running this test must never touch a host NGINX service.
+
+
+## Active-only client discovery candidate from exact stock NGINX dump (#28/#95)
+
+`server_derived_catalog_candidate_v1.preview_derived_catalog_from_nginx_dump`
+is a **pure candidate renderer**. It independently revalidates the closed
+server install-v1 configuration, derives its full desired-active repository
+set and strict numeric-IP-pinned NGINX fragments, requires one exact
+configuration occurrence of both generated fragments, and rejects missing,
+duplicate, disabled, unknown or shadowed `/__repocache/repos/<id>/`
+routes and foreign managed upstream names. It derives the existing client
+schema-1 `{upstream,cache}` mappings directly from each approved repository
+record and the validated deployment HTTPS hostname/port; it never creates a
+separate operator-maintained route or approval allowlist.
+
+The existing disposable Debian 13/AlmaLinux 10 stock-NGINX smoke now uses a
+**second, isolated, unmodified project fragment** to obtain a genuine
+`nginx -T` dump before building a non-publishable discovery candidate.
+The running cache MISS/HIT test still uses its independently documented
+temporary localhost origin substitution. The preview uses the original
+8.8.8.8 numeric pin solely for NGINX syntax/parsing: it does NOT connect
+to that address or activate the preview file. Unit/security tests require
+the complete active-only ID set, correct client schema, non-default HTTPS
+port, exact fragment presence, no duplicate/foreign locations and no
+successful result for invalid syntax, malformed/oversized dump or unsafe
+address pins.
+
+**Not an activation proof:** both `nginx_t_exit_code` and
+`nginx_dump_text` are *caller-supplied values*. Even successful exact
+matching cannot attest a signed installed host, verified DNS response,
+operator authorization, actual active HTTP exposure, certificate trust,
+live systemd service, SELinux, or authoritative protected v2 generation.
+The result explicitly sets all privileged/publication/active-exposure
+flags to false. It MUST NOT be passed directly to the existing
+`catalog.publish_catalog` or served to clients. A future fixed root
+transaction must itself execute and independently authenticate the live
+NGINX syntax/active routes and must publish the client artifact atomically
+only after the validated actual service state is exposed, with documented
+recovery and no second approval database. Issue #95/#31 operational
+acceptance remains NOT VERIFIED; these are executable integration
+prerequisites only.
