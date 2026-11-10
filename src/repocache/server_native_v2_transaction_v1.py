@@ -547,7 +547,7 @@ def _apply_locked(root_fd: int, state_fd: int,
             _deny("LAYOUT_UNSUPPORTED")
         pins = _resolve_pins(doc)
         bundle = render_repository_nginx_bundle_candidate(
-            doc, expected_state_generation=generation,
+            doc, expected_state_generation=snapshot["state_generation"],
             candidate_pins_by_repository=pins, ca_bundle_path=_CA[distribution],
         )
         # Build exact deterministic file and active-only catalog.
