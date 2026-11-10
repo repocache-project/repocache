@@ -7,6 +7,7 @@ on:
       - 'src/repocache/server_proposed_state_v2_store.py'
       - 'src/repocache/server_fixture_multi_resource_wal_v1.py'
       - 'tests/test_server_proposed_state_v2_store.py'
+      - 'scripts/ci_v06_cross_pr_lifecycle_contract.py'
       - 'docs/architecture/SERVER_LOCKED_MANIFEST_RECONCILIATION_V1.md'
 
 permissions:
@@ -106,5 +107,6 @@ jobs:
           test ! -L /var/cache/nginx/repocache-managed
           install -d -m 0700 /var/cache/nginx/repocache-managed
           python3 -B -m pytest -q -rs             tests/test_server_proposed_state_v2_store.py             tests/test_server_locked_manifest_reconcile_v1.py             tests/test_server_root_control_protocol_v1.py             tests/test_server_root_control_host_preflight_v1.py             tests/test_server_root_control_worker_v1.py             tests/test_server_native_nginx_service_unit_v1.py             tests/test_server_native_nginx_effective_unit_v1.py             tests/test_server_nginx_pin_render_v1.py             tests/test_server_nginx_repository_bundle_v1.py             tests/test_server_derived_catalog_candidate_v1.py             tests/test_server_derived_catalog_client_contract_v1.py             tests/test_server_repository_reconcile_v1.py
+          python3 -B scripts/ci_v06_cross_pr_lifecycle_contract.py
           # Never modify protected branches, merge on GitHub, install a root
           # worker, start systemd, approve a catalog or publish a release.
