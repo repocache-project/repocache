@@ -988,3 +988,40 @@ root worker, or evidence that the parent original criteria are satisfied.
 If any dependency SHA, base or file overlap fails, update the existing
 owners' PRs and re-pin this test after inspecting the changed diff;
 never silently fetch/mix arbitrary PR heads or bypass protected CI.
+
+
+### Five-PR combined actual-nginx + protected shadow WAL acceptance rehearsal
+
+The same [cross-PR ephemeral combined workflow](../../.github/workflows/v06-cross-pr-integration-rehearsal.yml)
+now executes `scripts/ci_v06_cross_pr_multi_wal_contract.py` **after**
+locally merging exact pinned open #27/#28/#64/#95 branches with this #31 PR
+in a throwaway Debian13 or AlmaLinux10 container. It does not push any
+combined changes back to GitHub. It reuses the existing #95 declarative
+lifecycle planner to enable, disable and remove a supported existing
+repository; obtains the #28 generated pinned NGINX fragments; runs a
+**real packaged `nginx -T`** against a disposable full config; checks
+#251's closed client-schema-compatible derived *catalog candidate*; then
+atomically updates the #31 multi-resource shadow journal, shadow NGINX
+bytes, state-v2 and synthetic catalog in the same descriptor-held fixture
+lock. Each resulting catalog is checked against the exact desired-active
+repository IDs and retains explicit `actual_active_exposure_verified=False`
+and `authorizes_catalog_publication=False`.
+
+For an enable transition, a **forked writer really calls `os._exit(41)`**
+after replacing the shadow NGINX/state/catalog and before the manifest
+finalization. The parent independently reacquires the state lock, validates
+the durable WAL and restores the previous exact four-resource byte set,
+then retries the identical enable transition and continues to disable
+and remove under the same ownership manifest. The test confirms original
+tombstones remain retired, that the final journal is clean and that every
+step remains *non-authorizing*. It is a stronger *composition test*
+across the current concurrent PRs than separate per-file unit tests.
+
+**Crucial limits:** The native NGINX process in this rehearsal performs
+`-T` syntax inspection, **not** an installed managed-service reload.
+There is no live APT/DNF traffic, active exposure probe, root-owned
+privileged dispatcher, distributed package/host signature acceptance,
+public catalog publication, or crash-safe multi-filesystem transaction.
+The shadow NGINX/catalog are private test files only. Passing this workflow
+does not adopt any unmerged PR, authenticate a candidate's approval
+reference, qualify native systemd/SELinux or unblock protected integration.
