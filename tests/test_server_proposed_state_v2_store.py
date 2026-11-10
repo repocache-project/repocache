@@ -3470,3 +3470,94 @@ def test_multi_resource_clean_preview_refuses_legacy_state_without_manifest(
             fd, owner_uid=uid,
         )
     assert (folder / V2_STATE).read_bytes() == prior
+
+
+@pytest.mark.parametrize("marker", [
+    ".native-nginx-v1.pending", ".native-nginx-v1.pending-tmp",
+])
+def test_v2_refuses_unreconciled_native_package_effects_before_any_write(
+    fixture_root, marker,
+):
+    """APT/DNF is not an atomic rollback domain; keep its journal separate."""
+    multi = _multi_resource_fixture()
+    fd, folder, uid = fixture_root
+    marker_path = folder / marker
+    marker_path.write_bytes(b'{"native_package_effects":"unknown"}')
+    marker_path.chmod(0o600)
+    before = {p.name: p.read_bytes() for p in folder.iterdir() if p.is_file()}
+    candidate = _multi_snapshot(1)
+
+    with pytest.raises(ProposedV2PersistenceError,
+                       match="NATIVE_PACKAGE_EFFECTS_RECONCILIATION_REQUIRED"):
+        apply(fixture_root, candidate)
+    with pytest.raises(ProposedV2PersistenceError,
+                       match="NATIVE_PACKAGE_EFFECTS_RECONCILIATION_REQUIRED"):
+        rollback(fixture_root)
+    with pytest.raises(ProposedV2PersistenceError,
+                       match="NATIVE_PACKAGE_EFFECTS_RECONCILIATION_REQUIRED"):
+        preview_v2_recovery(fd, owner_uid=uid)
+    with pytest.raises(ProposedV2PersistenceError,
+                       match="NATIVE_PACKAGE_EFFECTS_RECONCILIATION_REQUIRED"):
+        multi._commit_fixture_multi_resource_under_root(
+            fd, candidate, owner_uid=uid, expected_generation=0,
+            include_bytes=b"# noninstalled candidate\n",
+            catalog_bytes=_catalog_fixture([]),
+        )
+    with pytest.raises(ProposedV2PersistenceError,
+                       match="NATIVE_PACKAGE_EFFECTS_RECONCILIATION_REQUIRED"):
+        multi._recover_fixture_multi_resource_under_root(fd, owner_uid=uid)
+    assert {p.name: p.read_bytes() for p in folder.iterdir()
+            if p.is_file()} == before
+    assert not (folder / V2_STATE).exists()
+    assert not (folder / multi.JOURNAL).exists()
+
+
+@pytest.mark.parametrize("marker", [
+    ".native-nginx-v1.pending", ".native-nginx-v1.pending-tmp",
+])
+def test_pending_native_package_effects_block_multi_wal_recovery_without_erasure(
+    fixture_root, marker,
+):
+    multi = _multi_resource_fixture()
+    fd, folder, uid = fixture_root
+    previous = _multi_snapshot(1, active=True)
+    multi._commit_fixture_multi_resource_under_root(
+        fd, previous, owner_uid=uid, expected_generation=0,
+        include_bytes=b"# known-good NGINX fixture\n",
+        catalog_bytes=_catalog_fixture(["repo-0"]),
+    )
+    replacement = _multi_snapshot(
+        2, generation=2, previous=previous, active=True,
+    )
+
+    def crash(point):
+        if point == "catalog_durable":
+            raise RuntimeError("synthetic unfinished composite transaction")
+
+    with pytest.raises(RuntimeError):
+        multi._commit_fixture_multi_resource_under_root(
+            fd, replacement, owner_uid=uid, expected_generation=1,
+            include_bytes=b"# replacement NGINX fixture\n",
+            catalog_bytes=_catalog_fixture(["repo-0", "repo-1"]),
+            inject_fault=crash,
+        )
+    before = {p.name: p.read_bytes() for p in folder.iterdir()
+              if p.is_file()}
+    marker_path = folder / marker
+    marker_path.write_bytes(b'{"native_package_effects":"unverified"}')
+    marker_path.chmod(0o600)
+
+    with pytest.raises(ProposedV2PersistenceError,
+                       match="NATIVE_PACKAGE_EFFECTS_RECONCILIATION_REQUIRED"):
+        multi._recover_fixture_multi_resource_under_root(fd, owner_uid=uid)
+    assert {p.name: p.read_bytes() for p in folder.iterdir()
+            if p.is_file()} == {**before, marker: marker_path.read_bytes()}
+    assert (folder / multi.JOURNAL).is_file()
+    # A test-only operator reconciles the simulated package marker first.
+    # No native package installation or automatic marker deletion occurs.
+    marker_path.unlink()
+    assert multi._recover_fixture_multi_resource_under_root(
+        fd, owner_uid=uid,
+    )["status"] == "ROLLED_BACK_INERT_FIXTURE_MULTI_RESOURCE"
+    assert (folder / V2_STATE).read_bytes() == before[V2_STATE]
+    assert not (folder / multi.JOURNAL).exists()
