@@ -18,7 +18,7 @@ import repocache.server_native_v2_transaction_v1 as native
 from repocache.server_protected_state_store_v1 import LOCK_NAME
 from repocache.server_proposed_state_v2_store import V2_STATE
 from repocache.server_root_control_fixed_candidate_v1 import _NAME
-from test_server_proposed_state_v2_store import snapshot
+from test_server_proposed_state_v2_store import snapshot, document
 
 pytestmark = pytest.mark.skipif(
     os.geteuid() != 0, reason="requires disposable root-owned Linux directories",
@@ -326,3 +326,45 @@ def test_catalog_validation_failure_retracts_publication(filesystem, monkeypatch
     assert not include.exists()
     assert not (state / V2_STATE).exists()
     assert_no_pending(filesystem)
+
+
+def test_active_only_catalog_is_published_from_exact_managed_routes(
+    filesystem, monkeypatch,
+):
+    config = document(2)
+    config["repositories"][0]["desired_state"] = "active"
+    stage(filesystem, snapshot(count=2, doc=config))
+    monkeypatch.setattr(native, "_resolve_pins", lambda _doc: {
+        "repo-0": {"mirror0.example.invalid": ["8.8.8.8"]},
+    })
+    result = apply(filesystem)
+    _fd, state, include, catalog, events = filesystem
+    assert result["status"] == "NATIVE_V2_COMMITTED"
+    written = json.loads(catalog.read_text())
+    assert written["schema"] == 1
+    assert len(written["repositories"]) == 1
+    assert written["repositories"][0]["upstream"] == (
+        config["repositories"][0]["upstream"]["base_url"]
+    )
+    assert written["repositories"][0]["cache"].endswith(
+        "/__repocache/repos/repo-0/"
+    )
+    nginx = include.read_text()
+    assert "location ^~ /__repocache/repos/repo-0/" in nginx
+    assert "location ^~ /__repocache/repos/repo-1/" not in nginx
+    assert_no_pending(filesystem)
+
+
+def test_private_dns_address_refused_before_durable_wal(filesystem, monkeypatch):
+    config = document(1)
+    config["repositories"][0]["desired_state"] = "active"
+    stage(filesystem, snapshot(count=1, doc=config))
+    monkeypatch.setattr(native, "_resolve_pins", lambda _doc: {
+        "repo-0": {"mirror0.example.invalid": ["127.0.0.1"]},
+    })
+    with pytest.raises(native.NativeV2TransactionError, match="CANDIDATE_INVALID"):
+        apply(filesystem)
+    _fd, state, include, catalog, _events = filesystem
+    assert not (state / native._WAL).exists()
+    assert not include.exists()
+    assert not catalog.exists()
