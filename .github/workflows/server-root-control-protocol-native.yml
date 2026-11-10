@@ -1,0 +1,59 @@
+name: Server Fixed Root Control Protocol (Distro Containers)
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/server-root-control-protocol-native.yml'
+      - 'src/repocache/server_root_control_protocol_v1.py'
+      - 'tests/test_server_root_control_protocol_v1.py'
+      - 'docs/architecture/SERVER_NATIVE_ROOT_CONTROL_V1.md'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/server-root-control-protocol-native.yml'
+      - 'src/repocache/server_root_control_protocol_v1.py'
+      - 'tests/test_server_root_control_protocol_v1.py'
+
+permissions:
+  contents: read
+
+jobs:
+  protocol:
+    name: Kernel peer credentials and exact operation refusal (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: debian13
+            image: debian:trixie-slim
+          - platform: almalinux10
+            image: almalinux:10
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install distro-native interpreter and pytest in disposable container
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [ '${{ matrix.platform }}' = 'debian13' ]; then
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq
+            apt-get install -y -qq --no-install-recommends python3 python3-pytest
+          else
+            dnf -y -q --enablerepo=crb install python3 python3-pytest
+          fi
+      - name: Run kernel peer and denied-operation tests without service activation
+        shell: bash
+        env:
+          PYTHONPATH: src
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          set -Eeuo pipefail
+          python3 -B -m pytest -q -rs tests/test_server_root_control_protocol_v1.py
+          # No privileged broker, systemd service, NGINX process, real reload
+          # or host authorization is installed or executed here.
