@@ -2332,3 +2332,26 @@ def test_private_v2_fixture_writer_refuses_bad_root_fd(invalid_fd):
                        match="FIXTURE_ROOT_INVALID"):
         commit(invalid_fd, snapshot(count=1),
                owner_uid=os.geteuid(), expected_generation=0)
+
+
+@pytest.mark.parametrize("bad_result", [
+    False, True, 0, 1, "", "valid", {}, {"returncode": 0},
+])
+def test_v2_same_lock_validation_requires_explicit_none_success(
+    fixture_root, bad_result,
+):
+    """A discarded subprocess return code must never count as validation."""
+    _, folder, _ = fixture_root
+    original = snapshot(count=1)
+    apply(fixture_root, original)
+    next_state = snapshot(count=2, generation=2, previous=original)
+    before = {p.name: (p.read_bytes(), p.stat().st_ino)
+              for p in folder.iterdir() if p.is_file()}
+    with pytest.raises(ProposedV2PersistenceError,
+                       match="NGINX_FIXTURE_VALIDATION_REFUSED"):
+        locked_preflight_commit(
+            fixture_root, next_state, expected=1,
+            validate=lambda _candidate: bad_result,
+        )
+    assert {p.name: (p.read_bytes(), p.stat().st_ino)
+            for p in folder.iterdir() if p.is_file()} == before
