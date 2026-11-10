@@ -66,7 +66,13 @@ jobs:
           # operator-supplied or repository-controlled path.
           test "$GITHUB_WORKSPACE" = "/__w/repocache/repocache"
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          test "$(git rev-parse refs/heads/integration/v0.6.0 2>/dev/null ||             git rev-parse refs/remotes/origin/integration/v0.6.0)" = "$BASE_SHA" ||             { echo "Integration base changed; refusing stale synthetic merge"; exit 1; }
+          # A SHA checkout lacks the integration base ref even with full history.
+          # Fetch one read-only canonical branch and pin its exact revision.
+          git fetch --no-tags origin +refs/heads/integration/v0.6.0:refs/remotes/origin/integration/v0.6.0
+          test "$(git rev-parse refs/remotes/origin/integration/v0.6.0)" = "$BASE_SHA" || {
+            echo "Integration base moved; stale combined rehearsal refused"
+            exit 1
+          }
           # These are read-only fetches of already open, separate, approved-
           # scope PR branches. Any changed HEAD invalidates this rehearsal.
           git fetch --no-tags origin             +refs/heads/feat/27-native-nginx-service-unit-inventory-v1:refs/remotes/origin/pr27             +refs/heads/test/28-disposable-stock-nginx-real-cache-smoke:refs/remotes/origin/pr28             +refs/heads/feat/64-fixed-credentialed-native-control-v1:refs/remotes/origin/pr64             +refs/heads/feat/v0.6.0-declarative-reconciliation-95:refs/remotes/origin/pr95
