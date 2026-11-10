@@ -252,3 +252,78 @@ def test_too_many_groups_never_bypass_identity_validation():
             peer_uid=1001, peer_gid=3000, peer_groups=(3000,) * 257,
             admin_gid=3000, service_uid=900,
         )
+
+
+@pytest.mark.skipif(
+    os.geteuid() != 0 or not hasattr(os, "fork"),
+    reason="requires disposable root-owned Linux container",
+)
+def test_actual_kernel_peer_groups_deny_service_and_allow_explicit_admin():
+    """Real fork/UID/GID kernel evidence, never an installed broker."""
+    import shutil
+    import tempfile
+
+    directory = tempfile.mkdtemp(prefix="repocache-peer-", dir="/tmp")
+    os.chmod(directory, 0o755)
+    admin_gid = 49999
+    service_uid = 65534
+    cases = (
+        (65534, [admin_gid], "SERVICE_IDENTITY_DENIED"),
+        (65533, [], "ADMIN_GROUP_REQUIRED"),
+        (65532, [admin_gid], None),
+    )
+    try:
+        for index, (uid, groups, expected_error) in enumerate(cases):
+            target = os.path.join(directory, f"peer-{index}.sock")
+            with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as server:
+                server.settimeout(5.0)
+                server.bind(target)
+                os.chmod(target, 0o666)  # intentionally permissive test socket
+                server.listen(1)
+                child = os.fork()
+                if child == 0:
+                    try:
+                        server.close()
+                        os.setgroups(groups)
+                        os.setgid(uid)
+                        os.setuid(uid)
+                        with socket.socket(
+                            socket.AF_UNIX, socket.SOCK_SEQPACKET
+                        ) as client:
+                            client.settimeout(5.0)
+                            client.connect(target)
+                            client.sendall(b"apply-v2\n")
+                        os._exit(0)
+                    except BaseException:
+                        os._exit(70)
+                try:
+                    with server.accept()[0] as conn:
+                        peer_uid, peer_gid, peer_groups = _peer_credentials(conn)
+                        assert peer_uid == uid
+                        assert peer_gid == uid
+                        assert set(peer_groups) == set(groups)
+                        if expected_error:
+                            with pytest.raises(
+                                FixedRootControlError, match=expected_error,
+                            ):
+                                _decide_peer(
+                                    peer_uid=peer_uid,
+                                    peer_gid=peer_gid,
+                                    peer_groups=peer_groups,
+                                    admin_gid=admin_gid,
+                                    service_uid=service_uid,
+                                )
+                        else:
+                            _decide_peer(
+                                peer_uid=peer_uid,
+                                peer_gid=peer_gid,
+                                peer_groups=peer_groups,
+                                admin_gid=admin_gid,
+                                service_uid=service_uid,
+                            )
+                finally:
+                    ended, status = os.waitpid(child, 0)
+                    assert ended == child
+                    assert os.waitstatus_to_exitcode(status) == 0
+    finally:
+        shutil.rmtree(directory)
