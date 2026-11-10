@@ -3526,6 +3526,7 @@ def test_pending_native_package_effects_block_multi_wal_recovery_without_erasure
         include_bytes=b"# known-good NGINX fixture\n",
         catalog_bytes=_catalog_fixture(["repo-0"]),
     )
+    known_good_state = (folder / V2_STATE).read_bytes()
     replacement = _multi_snapshot(
         2, generation=2, previous=previous, active=True,
     )
@@ -3559,5 +3560,5 @@ def test_pending_native_package_effects_block_multi_wal_recovery_without_erasure
     assert multi._recover_fixture_multi_resource_under_root(
         fd, owner_uid=uid,
     )["status"] == "ROLLED_BACK_INERT_FIXTURE_MULTI_RESOURCE"
-    assert (folder / V2_STATE).read_bytes() == before[V2_STATE]
+    assert (folder / V2_STATE).read_bytes() == known_good_state
     assert not (folder / multi.JOURNAL).exists()
