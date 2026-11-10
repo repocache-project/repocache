@@ -17,6 +17,9 @@ from repocache.server_root_control_protocol_v1 import (
     FixedRootControlError, _root_worker, _trusted_local_ids,
     authorize_fixed_root_request,
 )
+from repocache.server_root_control_host_preflight_v1 import (
+    NativeHostPreflightError, require_native_host_preconditions,
+)
 
 _FIXED_SOCKET = "/run/repocache/server-control.sock"
 _RUNTIME_DIR = "/run/repocache"
@@ -87,6 +90,10 @@ def _systemd_listener() -> socket.socket:
         _deny("ROOT_CONTROL_SOCKET_FD_INVALID")
     try:
         _validate_listener(server)
+        # The exact installed socket alone is not enough: require native
+        # non-rootless PID1/systemd context before reading operator requests.
+        # This is a necessary check, not installed-host attestation.
+        require_native_host_preconditions()
         return server
     except Exception:
         server.close()
@@ -128,7 +135,8 @@ def main() -> int:
     try:
         # No live NGINX, state, catalog or host operation is ever called.
         result = serve_one_fixed_request()
-    except (FixedRootControlError, RootControlWorkerError) as exc:
+    except (FixedRootControlError, RootControlWorkerError,
+            NativeHostPreflightError) as exc:
         result = {"status": "DENIED", "code": str(exc)}
     except (OSError, TypeError, ValueError):
         result = {"status": "DENIED", "code": "ROOT_CONTROL_UNAVAILABLE"}
