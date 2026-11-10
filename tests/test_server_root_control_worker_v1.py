@@ -24,16 +24,18 @@ def meta(kind, mode, uid=0, gid=3000, dev=3, links=1):
 
 def test_fixed_socket_metadata_is_strict_and_has_no_effects():
     _validate_layout(
-        meta(stat.S_IFDIR, 0o750),
+        meta(stat.S_IFDIR, 0o755, gid=0),
         meta(stat.S_IFSOCK, 0o660), admin_gid=3000,
     )
 
 
 @pytest.mark.parametrize("which,change", [
-    ("dir", {"st_mode": stat.S_IFDIR | 0o770}),
+    ("dir", {"st_mode": stat.S_IFDIR | 0o775}),
+    ("dir", {"st_mode": stat.S_IFDIR | 0o750}),
     ("dir", {"st_uid": 1000}),
+    ("dir", {"st_gid": 3000}),
     ("dir", {"st_gid": 7000}),
-    ("dir", {"st_mode": stat.S_IFLNK | 0o750}),
+    ("dir", {"st_mode": stat.S_IFLNK | 0o755}),
     ("sock", {"st_mode": stat.S_IFREG | 0o660}),
     ("sock", {"st_mode": stat.S_IFSOCK | 0o666}),
     ("sock", {"st_uid": 1000}),
@@ -42,7 +44,7 @@ def test_fixed_socket_metadata_is_strict_and_has_no_effects():
     ("sock", {"st_nlink": 2}),
 ])
 def test_unsafe_socket_layout_fails_closed(which, change):
-    directory = meta(stat.S_IFDIR, 0o750)
+    directory = meta(stat.S_IFDIR, 0o755, gid=0)
     listener = meta(stat.S_IFSOCK, 0o660)
     for field, value in change.items():
         setattr(directory if which == "dir" else listener, field, value)
@@ -172,8 +174,8 @@ def test_actual_root_owned_socket_rejects_leaf_symlink_substitution(
     """A live kernel listener cannot excuse an untrusted path replacement."""
     admin_gid = 49999
     socket_path = tmp_path / "server-control.sock"
-    os.chown(tmp_path, 0, admin_gid)
-    os.chmod(tmp_path, 0o750)
+    os.chown(tmp_path, 0, 0)
+    os.chmod(tmp_path, 0o755)
     monkeypatch.setattr(worker, "_FIXED_SOCKET", str(socket_path))
     monkeypatch.setattr(worker, "_RUNTIME_DIR", str(tmp_path))
     monkeypatch.setattr(worker, "_trusted_local_ids",
