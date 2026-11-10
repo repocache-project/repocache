@@ -75,3 +75,20 @@ after inspected CI; malformed/mismatched TLS rejection PASS only at
 the isolated native syntax/handshake scope; real certificate/key
 preservation, root-only production access, firewall/port safety and
 native-host operation remain NOT VERIFIED.
+
+
+## Additional AlmaLinux NGINX syntax-check side effect
+
+In the exact same AlmaLinux 10 stock package test, nginx -t sometimes
+created the configured PID file even though no TLS Unix listener or daemon
+was started. Therefore a production nginx -t is not an inherently
+side-effect-free preflight. Always validate a complete candidate under a
+verified, private temporary NGINX prefix with safely contained pid/log
+paths; never direct preflight at an existing unmanaged service config.
+This disposable test now explicitly permits only that known temporary
+PID-file by-product, checks its owner/link type and still requires no
+active socket or externally visible listener.
+
+The full root-owned transaction must separately ensure candidate
+preflight cannot mutate the live service's pid/logs/cache, and must
+perform independent TLS pair validation before any reload.
