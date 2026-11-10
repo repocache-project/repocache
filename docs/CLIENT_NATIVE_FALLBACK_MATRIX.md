@@ -99,3 +99,24 @@ trust anchors; they do not establish real CA chains, DNS, real public HTTPS
 origins, package downloads, label preservation, or host APT/DNF configuration
 safety. DNF repo metadata signing and actual signed RPM transactions remain
 NOT VERIFIED; a metadata-probe PASS must not enable --apply.
+
+## Signed DNF metadata refusal in disposable containers
+
+The AlmaLinux 10 native fallback job additionally runs a private HTTPS
+metadata probe with repo_gpgcheck=1 and a unique ephemeral OpenPGP key.
+createrepo_c produces an empty test repository; the probe signs repomd.xml
+with a detached ASCII signature and pins the corresponding public key
+through the isolated DNF gpgkey setting. The package-manager commands
+are noninteractive; no real system repository file is modified.
+
+Preference, upstream outage, recovery and total outage must still behave
+as expected when metadata signatures are required. A separate fixture
+deliberately replaces the detached signature and requires DNF makecache
+to fail, rather than silently accepting unsigned metadata or TLS bypass.
+Wrong-CA refusal continues to run in the same signed-metadata mode.
+
+These keys and metadata are synthetic and do not authenticate actual
+publisher metadata or RPM package payloads; no RPM install is attempted.
+Real signed RPM package transactions, production server catalogs and
+native host SELinux/systemd tests remain NOT VERIFIED. This test may
+not be used as permission to enable repos sync --apply.

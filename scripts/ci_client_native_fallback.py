@@ -163,10 +163,34 @@ def apt_repository(base: Path) -> Path:
     return keyring
 
 
-def dnf_repository(base: Path) -> None:
+def dnf_repository(base: Path, *, signed: bool = False) -> Path | None:
     repository = base / "www" / "repo"
     repository.mkdir(parents=True)
     checked(["createrepo_c", "--quiet", str(repository)])
+    if not signed:
+        return None
+
+    # Metadata trust is exercised using an ephemeral, container-only key.
+    # It is NOT the REPOCACHE publisher signing identity or an RPM package.
+    home = base / "dnf-gnupg"
+    home.mkdir(mode=0o700)
+    gpg = ["gpg", "--homedir", str(home), "--batch", "--yes",
+           "--pinentry-mode", "loopback", "--passphrase", ""]
+    checked(gpg + [
+        "--quick-generate-key",
+        "REPOCACHE DNF Fixture <metadata-ci@repocache.invalid>",
+        "ed25519", "sign", "1d",
+    ], timeout=90)
+    public_key = base / "dnf-metadata-public.asc"
+    with public_key.open("wb") as handle:
+        subprocess.run(gpg + ["--armor", "--export"], stdout=handle,
+                       check=True, timeout=20)
+    public_key.chmod(0o644)
+    metadata = repository / "repodata" / "repomd.xml"
+    checked(gpg + ["--armor", "--detach-sign",
+                   "--output", str(metadata.with_name("repomd.xml.asc")),
+                   str(metadata)])
+    return public_key
 
 
 def apt_command(base: Path, primary: HTTPBackend,
@@ -208,7 +232,8 @@ def apt_command(base: Path, primary: HTTPBackend,
 
 def dnf_command(base: Path, primary: HTTPBackend,
                 upstream: HTTPBackend, cycle: str,
-                *, ca_certificate: Path | None = None) -> list[str]:
+                *, ca_certificate: Path | None = None,
+                metadata_key: Path | None = None) -> list[str]:
     repo_dir = base / "repos"
     repo_dir.mkdir(exist_ok=True)
     (repo_dir / "repocache-ci.repo").write_text(
@@ -216,8 +241,9 @@ def dnf_command(base: Path, primary: HTTPBackend,
         "name=REPOCACHE Native Metadata Probe\n"
         "enabled=1\n"
         "gpgcheck=1\n"
-        "repo_gpgcheck=0\n"
-        "skip_if_unavailable=0\n"
+        ("repo_gpgcheck=1\n" if metadata_key else "repo_gpgcheck=0\n")
+        + ("gpgkey=file://%s\n" % metadata_key if metadata_key else "")
+        + "skip_if_unavailable=0\n"
         "fastestmirror=0\n"
         "baseurl=%s\n        %s\n" % (primary.origin, upstream.origin)
         + ("sslverify=1\nsslcacert=%s\n" % ca_certificate
@@ -243,16 +269,20 @@ def dnf_command(base: Path, primary: HTTPBackend,
     executable = shutil.which("dnf5") or shutil.which("dnf")
     if not executable:
         raise RuntimeError("Missing DNF on native AlmaLinux container")
-    return [executable, "--config=" + str(config), "--refresh", "makecache"]
+    return [executable, "--assumeyes", "--config=" + str(config),
+            "--refresh", "makecache"]
 
 
-def probe(manager: str, *, tls: bool = False) -> None:
+def probe(manager: str, *, tls: bool = False,
+          signed_dnf: bool = False) -> None:
+    if signed_dnf and manager != "dnf":
+        raise ValueError("Signed DNF metadata probe requires the DNF manager")
     with tempfile.TemporaryDirectory(prefix="repocache-native-fallback-") as tmp:
         base = Path(tmp)
         (base / "www").mkdir()
         keyring = apt_repository(base) if manager == "apt" else None
-        if manager == "dnf":
-            dnf_repository(base)
+        metadata_key = (dnf_repository(base, signed=signed_dnf)
+                        if manager == "dnf" else None)
 
         certificate, tls_key = temporary_tls_identity(base, "trusted") if tls else (None, None)
         # A different private CA must be rejected. Never disable TLS checking
@@ -270,8 +300,14 @@ def probe(manager: str, *, tls: bool = False) -> None:
             ]
             if tls:
                 cases.append(("wrong-ca", "healthy", "healthy"))
+            if signed_dnf:
+                cases.append(("tampered-signature", "healthy", "healthy"))
+            signature = base / "www" / "repo" / "repodata" / "repomd.xml.asc"
+            intact_signature = signature.read_bytes() if signed_dnf else None
             for cycle, first, second in cases:
                 primary.mode, upstream.mode = first, second
+                if cycle == "tampered-signature":
+                    signature.write_bytes(b"tampered and not OpenPGP signed\n")
                 primary.hits.clear()
                 upstream.hits.clear()
                 ca = bad_ca if cycle == "wrong-ca" else certificate
@@ -279,7 +315,8 @@ def probe(manager: str, *, tls: bool = False) -> None:
                                 ca_certificate=ca)
                         if manager == "apt"
                         else command(base, primary, upstream, cycle,
-                                     ca_certificate=ca))
+                                     ca_certificate=ca,
+                                     metadata_key=metadata_key))
                 result = subprocess.run(
                     argv, text=True, stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT, timeout=120, check=False,
@@ -288,9 +325,12 @@ def probe(manager: str, *, tls: bool = False) -> None:
                       (manager, "https" if tls else "http", cycle, result.returncode,
                        len(primary.hits), len(upstream.hits)), flush=True)
                 if cycle == "wrong-ca":
-                    # No HTTP request is permitted after an untrusted TLS
-                    # handshake: fallback must not bypass CA verification.
+                    # No HTTP request after untrusted TLS handshake.
                     ok = result.returncode != 0 and not primary.hits and not upstream.hits
+                elif cycle == "tampered-signature":
+                    # A valid TLS connection must not turn invalid GPG
+                    # metadata into an accepted repository or fallback.
+                    ok = result.returncode != 0 and bool(primary.hits)
                 elif cycle == "both-failed":
                     ok = result.returncode != 0 and primary.hits and upstream.hits
                 elif cycle == "fallback":
@@ -301,6 +341,8 @@ def probe(manager: str, *, tls: bool = False) -> None:
                     raise RuntimeError(
                         "Failover assertion failed for %s / %s:\n%s" %
                         (manager, cycle, result.stdout[-6000:]))
+                if cycle == "tampered-signature":
+                    signature.write_bytes(intact_signature)
         finally:
             primary.close()
             upstream.close()
@@ -311,5 +353,7 @@ if __name__ == "__main__":
     parser.add_argument("manager", choices=["apt", "dnf"])
     parser.add_argument("--tls", action="store_true",
                         help="Use private loopback TLS and test untrusted-CA refusal")
+    parser.add_argument("--signed-dnf", action="store_true",
+                        help="Require isolated signed DNF repomd.xml and tamper refusal")
     args = parser.parse_args()
-    probe(args.manager, tls=args.tls)
+    probe(args.manager, tls=args.tls, signed_dnf=args.signed_dnf)

@@ -46,6 +46,7 @@ jobs:
           docker run --rm --network bridge \
             --mount "type=bind,source=$PWD,target=/workspace,readonly" \
             --workdir /workspace almalinux:10 \
-            sh -ec 'dnf install -y python3 createrepo_c openssl >/dev/null && \
+            sh -ec 'dnf install -y python3 createrepo_c openssl gnupg2 >/dev/null && \
                     python3 scripts/ci_client_native_fallback.py dnf && \
-                    python3 scripts/ci_client_native_fallback.py dnf --tls'
+                    python3 scripts/ci_client_native_fallback.py dnf --tls && \
+                    python3 scripts/ci_client_native_fallback.py dnf --tls --signed-dnf'
