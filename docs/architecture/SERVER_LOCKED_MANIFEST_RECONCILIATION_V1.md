@@ -872,3 +872,73 @@ root-owned installed worker, independently verified host/SELinux/ACL/paths,
 native systemd control, real TLS exposure or verified client catalog. All
 original operational acceptance remains **NOT VERIFIED**; native VMs remain
 pending after substantive implementation/integration, not waived.
+
+
+### Experimental durable **three-resource** v2 undo journal (fixture shadow only)
+
+The new private `server_fixture_multi_resource_wal_v1.py` records a
+**fsynced, persistent, byte-exact undo journal** for three fixed-name
+resources held under the *same owner-pinned state-directory flock*: canonical
+v2 state, a shadow managed NGINX include and a shadow derived catalog. A
+fourth small protected sidecar binds the three hashes to the last completed
+fixture generation, preventing unmanifested prior fixture files from being
+silently adopted. All names are fixed and are accessed with Linux descriptor
+relative `O_NOFOLLOW`, owner/mode/link/size checks; no path, unit, command,
+executable or operation name is supplied by a caller. Stages and journals are
+created exclusively and fsynced before atomic replace, and each directory
+replacement is separately fsynced.
+
+**Important scope:** the shadow files
+`.fixture-managed-nginx.conf`, `.fixture-derived-catalog.json` and
+`.fixture-active-manifest.json` live **inside the protected fixture state
+directory**, NOT under installed `/etc/nginx` or a publicly served discovery
+directory. They are mode `0600`, deliberately **not an NGINX include or
+discoverable client catalog**. An exact active-ID list in this fixture input
+is a *synthetic candidate assertion*, not proof of observed live exposure.
+This module and its `_under_root` methods are private and explicitly
+refuse the process's live namespace root descriptor, and even a supplied
+alternative root FD is not proof of a trusted fixture or host-root context.
+
+The deterministic transaction writes the full prior bytes and the *next
+hashes* of all four fixed resources into a bounded JSON WAL. The log is
+first fsynced to an exclusive temp inode, atomically published and directory
+fsynced **before** the first shadow include write. Protected data
+is replaced in order: shadow include, state, shadow catalog, owner-hash
+manifest. After an optional fixture-only verifier, the four exact next bytes
+and journal inode are checked again and only then is the WAL removed.
+A fault injected at journal-temp, published-journal or any of the four
+replacement phases leaves observable durable evidence. State-only v1/v2
+private operations now detect this cross-resource marker and refuse normal
+writes/rollback until **specific** multi-resource fixture recovery occurs.
+
+Recovery obtains the *same* pinned FD lock. It validates journal format,
+exact old-byte digests, prior protected fixture ownership manifest, and
+checks that **each** current file has either the exact old or known next
+digest. A non-cooperating/foreign writer, symlink substitution, unowned
+bootstrap artifact, malformed digest, ambiguous journal or unknown temporary
+stage is refused without deleting an unexpected file. Recovery invalidates
+the owner manifest first, restores the old catalog and shadow NGINX and v2
+state, then clears the verified WAL. Explicit recovery may be retried after
+another interruption; a fully recovered state remains inert/idempotent.
+
+The fixture tests cover both initial and repeat transactions, all six
+injected crash phases, complete prior-byte replay, repeat recovery, foreign
+state/include/catalog/manifest modifications, symlink to unrelated data,
+strict active-ID exactness, unmanifested foreign include refusal, same-version
+no-op and live-namespace-root refusal.
+
+**This is not the final privileged writer**: it does not make any change to
+real NGINX or a public catalog; does not install packages or run systemd;
+does not prove a real reload, application availability, host-root provenance,
+operator authorization, mount/ACL/xattr/SELinux labels or signed artifact
+trust. It currently accepts explicitly test-supplied shadow bytes and
+callbacks, which are never a privilege boundary. It has not solved the
+v0.6.0 multi-filesystem crash/recovery boundary; an eventual production
+root-owned engine must independently derive signed, approved exact NGINX
+and active-only catalog bytes under a fixed trusted OS lock, pin real
+/etc/nginx and catalog path ancestry, preserve known-good active service
+across process death, reconcile exposure, compensate failed systemd reload,
+and reject externally owned hosts. Never use this fixture module as a
+privileged generic write API. Native booted Debian 13 and AlmaLinux 10
+systemd/SELinux operational acceptance and original #31/#95 criteria remain
+**NOT VERIFIED**.
