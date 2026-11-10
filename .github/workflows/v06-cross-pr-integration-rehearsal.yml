@@ -36,7 +36,7 @@ jobs:
       BASE_SHA: d53782ed01e1f85686f10279fd3c7eea6d7f6720
       PR27_SHA: ffea83d305c4aa51ee9553d548e1e5712edd95f0
       PR28_SHA: b23cc642cbb62eb0874c6f774f8caf4bbd25952d
-      PR64_SHA: 5cd474f89863a8d874dd948bc67d56d4b33e623b
+      PR64_SHA: 8d1927497233d92d64e047bde93633f640d45244
       PR95_SHA: fa721e8dc730a95494f0675b7efa23f545c45e0f
     steps:
       # Install git before checkout: the stock distro container images
