@@ -43,6 +43,8 @@ jobs:
       PYTHONDONTWRITEBYTECODE: '1'
       BASE_SHA: 7585a95370a4b6d13c9893b6d98b523bd9d14522
       PR64_SHA: ed046c23e452e1b8c879296e33d8618532f33c46
+      PR24_SHA: 6fb89259dc44f8bb40cdcf03e2faae725686c477
+      PR76_SHA: 704cef9e6b5fb591304a4cf3eb6286ec91573644
     steps:
       # Install git before checkout: the stock distro container images
       # lack git, so checkout would otherwise fall back to an archive with
@@ -83,8 +85,9 @@ jobs:
           }
           # The five approved, independently CI-accepted prerequisites
           # (#255, #250, #252, #251 and #214) are now in BASE_SHA.
-          # Only the still-unmerged #64 fixed socket/TLS trust-boundary
-          # prototype is fetched and locally combined; no remote push.
+          # Combine the still-unmerged #64 control, #24 client and #76
+          # signed-candidate branches at exact revisions; never push or
+          # treat this disposable source merge as acceptance to activate.
           git fetch --no-tags origin \
             +refs/heads/feat/64-fixed-credentialed-native-control-v1:refs/remotes/origin/pr64
           observed="$(git rev-parse refs/remotes/origin/pr64)"
@@ -101,9 +104,25 @@ jobs:
           git config user.name "REPOCACHE disposable CI"
           git switch -c local-v06-rehearsal
           git merge --no-ff --no-edit refs/remotes/origin/pr64
+          git fetch --no-tags origin \
+            +refs/heads/feat/client-explicit-server-functional-contract-24:refs/remotes/origin/pr24
+          test "$(git rev-parse refs/remotes/origin/pr24)" = "$PR24_SHA" || {
+            echo "Dependency #115 moved; exact-SHA source rehearsal refused"
+            exit 1
+          }
+          git merge-base --is-ancestor "$BASE_SHA" refs/remotes/origin/pr24
+          git merge --no-ff --no-edit refs/remotes/origin/pr24
+          git fetch --no-tags origin \
+            +refs/heads/fix/76-repository-transfer-v06-candidate-20261107:refs/remotes/origin/pr76
+          test "$(git rev-parse refs/remotes/origin/pr76)" = "$PR76_SHA" || {
+            echo "Dependency #249 moved; exact-SHA source rehearsal refused"
+            exit 1
+          }
+          git merge-base --is-ancestor "$BASE_SHA" refs/remotes/origin/pr76
+          git merge --no-ff --no-edit refs/remotes/origin/pr76
           git diff --check "$BASE_SHA"..HEAD
           test -z "$(git status --porcelain)"
-          echo "PASS: exact-SHA local merge of protected #255 #250 #252 #251 #214 + #237 #254"
+          echo "PASS: exact-SHA local merge of protected #255 #250 #252 #251 #214 plus draft #237 #254 #115 #249"
           echo "NOT VERIFIED: protected integration merge, host-root, systemd, SELinux, release"
       - name: Run combined state, NGINX, catalog, systemd and lifecycle tests
         shell: bash
@@ -119,6 +138,16 @@ jobs:
           python3 -B -m pytest -q -rs             tests/test_server_proposed_state_v2_store.py             tests/test_server_locked_manifest_reconcile_v1.py             tests/test_server_root_control_protocol_v1.py             tests/test_server_root_control_host_preflight_v1.py             tests/test_server_root_control_worker_v1.py             tests/test_server_root_control_client_v1.py             tests/test_server_root_control_native_syntax_v1.py             tests/test_server_root_control_pinned_tls_pair_v1.py             tests/test_server_root_control_full_context_v1.py             tests/test_server_root_control_pre_reload_v1.py             tests/test_server_root_control_fixed_candidate_v1.py             tests/test_server_root_control_v2_candidate_binding_v1.py             tests/test_server_native_v2_transaction_v1.py             tests/test_server_native_root_control_entrypoint_v1.py             tests/test_server_native_root_control_client_v1.py             tests/test_server_native_nginx_service_unit_v1.py             tests/test_server_native_nginx_effective_unit_v1.py             tests/test_server_nginx_pin_render_v1.py             tests/test_server_nginx_repository_bundle_v1.py             tests/test_server_derived_catalog_candidate_v1.py             tests/test_server_derived_catalog_client_contract_v1.py             tests/test_server_repository_reconcile_v1.py
           python3 -B scripts/ci_v06_cross_pr_lifecycle_contract.py
           python3 -B scripts/ci_v06_cross_pr_multi_wal_contract.py
+          # A small focused cross-PR client/release compatibility set covers
+          # explicit HTTPS server selection, read-only package source helper,
+          # installer argument safety and signed-release provenance parser.
+          # The owners' full independent CI still governs original criteria.
+          python3 -B -m pytest -q -rs \
+            tests/test_client.py \
+            tests/test_client_source_helper_preview.py \
+            tests/test_client_install_contract.py \
+            tests/test_release_provenance.py \
+            tests/test_public_release_acceptance.py
           # Fixed package-root syntax inspection is only exercised in this
           # disposable CI container. The root worker remains non-activating.
           REPOCACHE_NATIVE_TEST_CONTAINER=CONFIRMED_DISPOSABLE_DOCKER_ONLY \
