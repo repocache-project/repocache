@@ -168,7 +168,7 @@ def test_disposable_real_tls_server_validates_client_trust_and_hostname(
 
 @pytest.mark.parametrize("case", ["missing-cert", "missing-key", "key-mismatch",
                                    "invalid-cert", "invalid-key"])
-def test_nginx_rejects_bad_operator_tls_fixture_before_any_reload(
+def test_independent_tls_pair_preflight_refuses_bad_material_before_any_reload(
     tmp_path: Path, case: str,
 ):
     cert, key = _certificate(tmp_path, "approved")
@@ -189,8 +189,20 @@ def test_nginx_rejects_bad_operator_tls_fixture_before_any_reload(
         selected_key.chmod(0o600)
     conf = tmp_path / "nginx.conf"
     _write_config(conf, _config(tmp_path, selected_cert, selected_key))
+    # IMPORTANT distro result: stock AlmaLinux 10 NGINX 1.26.3 can report
+    # nginx -t SUCCESS for a missing, invalid or mismatched key. An actual
+    # independent TLS pair-load check is therefore mandatory and MUST run
+    # before attempting to activate the candidate. Only synthetic keys
+    # in the disposable fixture are read by this test-only SSL context.
     result = _nginx(tmp_path, conf, "-t")
-    assert result.returncode != 0
+    assert result.returncode in (0, 1)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    with pytest.raises((ssl.SSLError, OSError, ValueError)):
+        context.load_cert_chain(
+            certfile=str(selected_cert), keyfile=str(selected_key),
+        )
+    if case in ("missing-cert", "invalid-cert"):
+        assert result.returncode != 0
     assert (cert.read_bytes(), key.read_bytes()) == (raw_cert, raw_key)
     assert not (tmp_path / "tls.sock").exists()
     assert not (tmp_path / "nginx.pid").exists()
