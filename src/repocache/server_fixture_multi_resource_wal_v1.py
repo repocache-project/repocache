@@ -182,7 +182,11 @@ def _check_known(directory: int, uid: int,
 
 
 def _check_no_auxiliary_pending(directory: int, uid: int) -> None:
-    if _pending(directory, uid):
+    # Ignore only the multi-resource domain's *committed owner files*:
+    # those are expected across future multi-resource generations. Native
+    # state-only journals are still hard conflicts; this helper checks its
+    # own WAL and stage names independently below.
+    if _pending(directory, uid, include_multi=False):
         _refuse("RECOVERY_REQUIRED")
     if any(_read_file(directory, n, uid, MAX_JOURNAL_BYTES) is not None
            for n in (JOURNAL, JOURNAL_TMP)):
@@ -329,6 +333,11 @@ def _recover_fixture_multi_resource_under_root(
         if journal is None and temp is None:
             if _read_file(directory, STAGE, owner_uid, max(LIMITS.values())) is not None:
                 _refuse("ORPHAN_STAGE")
+            # A missing WAL is not evidence of a healthy generation:
+            # verify the complete closed manifest, even in read-only clean
+            # recovery mode. Never report CLEAN for an unowned or externally
+            # modified NGINX/catalog/state file.
+            _validate_old(_read_all(directory, owner_uid))
             return {"status": "CLEAN_INERT_FIXTURE", "fixture_only": True,
                     "host_recovery_verified": False}
         old, next_sha, journal_raw = journal if journal is not None else temp
