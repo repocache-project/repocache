@@ -49,6 +49,24 @@ def _refuse(code: str) -> None:
     raise ProposedV2PersistenceError("PROPOSED_V2_PERSISTENCE_" + code)
 
 
+def _refuse_actual_root_fixture_write(root_fd: int) -> None:
+    """Block accidental use of private fixture writers on the live '/'.
+
+    This comparison is only a negative safety interlock. A different FD is
+    NOT proof of a disposable sandbox, host provenance or authorization.
+    Production must use a separate, explicitly authenticated entrypoint.
+    """
+    if type(root_fd) is not int or root_fd < 0:
+        _refuse("FIXTURE_ROOT_INVALID")
+    try:
+        supplied = os.fstat(root_fd)
+        current = os.stat("/", follow_symlinks=False)
+    except OSError:
+        _refuse("FIXTURE_ROOT_UNVERIFIED")
+    if (supplied.st_dev, supplied.st_ino) == (current.st_dev, current.st_ino):
+        _refuse("CURRENT_NAMESPACE_ROOT_WRITES_REFUSED")
+
+
 def _report(status: str, generation: int) -> dict[str, Any]:
     return {
         "status": status,
@@ -294,6 +312,7 @@ def _commit_proposed_v2_under_root(
     inject_fault: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """PRIVATE Linux fixture durability only. Never call from a host CLI."""
+    _refuse_actual_root_fixture_write(root_fd)
     if (type(expected_generation) is not int
             or not 0 <= expected_generation < MAX_INT):
         _refuse("EXPECTED_GENERATION_INVALID")
@@ -323,6 +342,7 @@ def _commit_preflighted_proposed_v2_under_root(
     This does not authenticate an administrator, stage a live include, reload
     nginx or publish a catalog. Never wire this fixture helper to a host CLI.
     """
+    _refuse_actual_root_fixture_write(root_fd)
     if (type(expected_generation) is not int
             or not 0 <= expected_generation < MAX_INT):
         _refuse("EXPECTED_GENERATION_INVALID")
@@ -488,6 +508,7 @@ def _recover_proposed_v2_under_root(
     root_fd: int, *, owner_uid: int,
 ) -> dict[str, Any]:
     """PRIVATE fixture-only explicit rollback. Never performs NGINX recovery."""
+    _refuse_actual_root_fixture_write(root_fd)
     with _locked(root_fd, owner_uid) as directory:
         _legacy_refusal(directory, owner_uid)
         journal = _read_v2_journal(directory, owner_uid)
