@@ -46,8 +46,11 @@ snapshots. The code does not spawn, run or mutate anything.
 
 1. **Admin authentication and socket protection.** Native systemd socket
    activation and root-owned worker configuration must be reviewed separately.
-   An example intended policy is root-owned socket, mode `0660`, group
-   `repocache-admin`; the service UID is excluded. The deployed administrator
+   The matching systemd-native policy is a root:root
+   `0755` **non-writable parent directory** created by `DirectoryMode`,
+   and a root:`repocache-admin` `0660` Unix socket created by
+   `SocketUser/SocketGroup/SocketMode`. Admin users can traverse and connect
+   but cannot replace the socket pathname; the service UID is excluded. The deployed administrator
    must explicitly provision/revoke membership and verify the effective
    client process' **kernel credentials**. Do not enable the socket until
    actual, audited distro service packaging, module provenance, secure Python
@@ -112,3 +115,43 @@ architectural prerequisites, not acceptance, merge permission or release.
 No production listener, server activation, systemd enablement, signing,
 tagging, Merge Queue admission, ruleset modification or publication is
 authorized by this document.
+
+## Non-installed systemd reference units and ownership correction
+
+The **reference only** `docs/examples/systemd/repocache-control.socket`
+and `repocache-control.service` are deliberately excluded from any
+installer, distribution activation, package manifest and `[Install]`
+section. The service references the fixed
+`/usr/libexec/repocache/server-control-worker` binary **which is NOT
+provided or installed** by this branch. This reference must **not** be
+copied to `/etc/systemd/system` or enabled: no production worker,
+installed signed provenance, SELinux policy or full state/NGINX/catalog
+transaction has yet passed acceptance.
+
+The socket uses `ListenSequentialPacket=/run/repocache/server-control.sock`,
+`Accept=no`, `SocketUser=root`, `SocketGroup=repocache-admin`,
+`SocketMode=0660` and `DirectoryMode=0755`. Upstream systemd
+`DirectoryMode` creates parent directories root-owned; it does **not**
+assign `SocketGroup` to the directory. Accordingly, the worker now
+rejects anything other than **root:root 0755** on `/run/repocache`,
+and **root:repocache-admin 0660** on the Unix socket. An administrator
+group having write permission on the parent would be able to replace the
+socket path: `0775` or root:admin `0750` are deliberately refused.
+The run-time metadata checks still require independent installed unit,
+mount/ACL/xattr/SELinux, binary/import provenance and kernel/root
+namespace evidence before any host mutation.
+
+The reference service is `Type=oneshot`, root-owned, fixed
+`ExecStart`, no `ReadWritePaths`, read-only protected filesystem,
+restricted to AF_UNIX, bounded by a short start timeout, with
+`NoNewPrivileges` and an empty `[Install]` section (absent).
+Even a manually invoked inert worker always exits nonzero after reading
+one authenticated request. The future real executor must be separately
+reviewed, installed and accepted; these reference templates cannot
+grant privileged reload authority. Their strictly closed static contents
+are tested on both distro CI containers, **not** booted systemd PID 1
+or AlmaLinux enforcing SELinux.
+
+Do not provision or alter a real admin group, deploy/enable units, modify
+protected paths, grant root privileges or perform a reload as part of
+this PR. Native installation support remains NOT VERIFIED.
