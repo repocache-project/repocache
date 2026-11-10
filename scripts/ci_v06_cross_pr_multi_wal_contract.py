@@ -146,24 +146,30 @@ def main() -> None:
                     return None
 
                 if operation == "enable":
-                    # Crash after shadow config/state/catalog replace but
-                    # before manifest completion, then recover *all* prior
-                    # bytes and retry without losing persistent old state.
-                    def crash(point: str) -> None:
-                        if point == "catalog_durable":
-                            raise RuntimeError("synthetic multi-resource process death")
+                    # A real child process exits abruptly after the shadow
+                    # NGINX/state/catalog replacements; a *different process*
+                    # must reacquire the pinned lock and restore the old
+                    # generation. No fixture cleanup callback may execute.
+                    pid = os.fork()
+                    if pid == 0:
+                        try:
+                            def crash(point: str) -> None:
+                                if point == "catalog_durable":
+                                    os._exit(41)
 
-                    try:
-                        commit(
-                            fd, proposed, owner_uid=uid,
-                            expected_generation=index - 1,
-                            include_bytes=new_include, catalog_bytes=new_catalog,
-                            inject_fault=crash,
-                        )
-                    except RuntimeError:
-                        pass
-                    else:
-                        raise AssertionError("expected WAL fault did not execute")
+                            commit(
+                                fd, proposed, owner_uid=uid,
+                                expected_generation=index - 1,
+                                include_bytes=new_include,
+                                catalog_bytes=new_catalog,
+                                inject_fault=crash,
+                            )
+                        except BaseException:
+                            os._exit(71)
+                        os._exit(72)
+                    ended, status = os.waitpid(pid, 0)
+                    assert ended == pid
+                    assert os.waitstatus_to_exitcode(status) == 41
                     assert (folder / JOURNAL).is_file()
                     recovered = recover(fd, owner_uid=uid)
                     assert recovered["status"] == (
@@ -200,7 +206,7 @@ def main() -> None:
             print(
                 "PASS: five-PR combined #95 lifecycle, #28 actual native nginx -T, "
                 "#251 derived active-only candidate, #31 durable shadow WAL "
-                "and interrupted enable/recovery/retry; never activated host "
+                "and real-PID interrupted enable/recovery/retry; never activated host "
                 "service or published client catalog"
             )
         finally:
