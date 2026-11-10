@@ -75,7 +75,11 @@ def _systemd_listener() -> socket.socket:
         _deny("ROOT_CONTROL_SOCKET_ACTIVATION_REQUIRED")
     try:
         fd = os.dup(3)
-        server = socket.socket(fileno=fd)
+        try:
+            server = socket.socket(fileno=fd)
+        except (OSError, ValueError):
+            os.close(fd)
+            raise
     except (OSError, ValueError):
         _deny("ROOT_CONTROL_SOCKET_FD_INVALID")
     try:
@@ -126,7 +130,9 @@ def main() -> int:
     except (OSError, TypeError, ValueError):
         result = {"status": "DENIED", "code": "ROOT_CONTROL_UNAVAILABLE"}
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
-    return 0 if result.get("status") == "ROOT_TRANSACTION_NOT_IMPLEMENTED" else 2
+    # An authenticated but *unimplemented* operation must never look like a
+    # successful apply/recovery to any caller. Always exit nonzero.
+    return 2
 
 
 if __name__ == "__main__":  # intentionally NOT installed as an entrypoint
