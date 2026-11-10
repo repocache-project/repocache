@@ -170,3 +170,23 @@ Real booted Debian13 and AlmaLinux10 host unit checks and enforcing
 SELinux evidence remain **NOT VERIFIED**; a disposable image with NGINX
 installed but no systemd PID1 cannot certify them. Do not enable systemd
 or modify an actual host based on this source.
+
+
+## Additional fixed MainPID kernel-executable precondition
+
+The effective-service observer now independently checks the reported
+`MainPID` against a narrow, non-authorizing kernel /proc snapshot before
+returning a positive read-only result. It refuses PID 1, non-root process
+ownership, untrusted or mutable /usr/sbin/nginx executable metadata,
+a different running executable inode, an unexpected /proc/<PID>/comm name,
+and detectable process or executable inode changes between two observations.
+All paths are built from the strictly parsed numeric MainPID; there is no
+caller-supplied command, path, executable or reload. This is a **necessary
+read-only identity observation**, not process attestation: PID reuse and
+procfs races remain possible, package ownership or cryptographic binary
+integrity is not established, and container PID1 is not native host evidence.
+`kernel_nginx_master_executable_inode_observed=true` has no authority
+semantics. `real_pid1_and_nginx_process_verified=false`, all mutation/
+reload flags false and all original native #27 acceptance gates remain
+NOT VERIFIED. A future privileged operation must independently reobserve
+and pin relevant identities under its own authenticated transaction lock.

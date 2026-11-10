@@ -78,6 +78,12 @@ def _fake_native(monkeypatch, *, response=None, vendor=True, unsafe=None,
             ), stderr="",
         )
 
+
+    monkeypatch.setattr(
+        unit, "_observe_nginx_master_kernel",
+        lambda pid: events.append(("kernel", pid)),
+    )
+
     monkeypatch.setattr(unit, "subprocess", SimpleNamespace(
         DEVNULL=subprocess.DEVNULL,
         TimeoutExpired=subprocess.TimeoutExpired,
@@ -91,6 +97,8 @@ def test_exact_effective_running_unit_is_observation_only(monkeypatch):
     result = inspect_effective_native_nginx_unit("debian")
     assert result["status"] == "NATIVE_NGINX_EFFECTIVE_READ_ONLY_OBSERVATION"
     assert result["main_pid_observed"] == 1450
+    assert result["kernel_nginx_master_executable_inode_observed"] is True
+    assert ("kernel", 1450) in events
     assert result["vendor_unit_sha256"] == "a" * 64
     assert result["effective_unit_shape_observed"] is True
     assert all(result[key] is False for key in (
@@ -125,7 +133,7 @@ def test_effective_unit_shadows_inactive_or_stale_refused(
 
 
 @pytest.mark.parametrize("pid", [
-    "0", "-1", "1.0", "18446744073709551615", "", "abc", "True",
+    "0", "1", "-1", "1.0", "18446744073709551615", "", "abc", "True",
 ])
 def test_invalid_or_forged_mainpid_refused(monkeypatch,pid):
     _fake_native(monkeypatch, response=_response(MainPID=pid))
@@ -194,3 +202,89 @@ def test_negative_results_do_not_echo_untrusted_systemctl_text(monkeypatch):
     with pytest.raises(EffectiveNginxUnitError) as caught:
         inspect_effective_native_nginx_unit("debian")
     assert "UNSAFE_SECRET" not in str(caught.value)
+
+
+@pytest.mark.parametrize("field", [
+    "wrong_binary_inode", "foreign_binary", "foreign_process",
+    "wrong_comm", "changed_pid_inode", "changed_exe_inode",
+    "missing_proc", "symlink_binary",
+])
+def test_kernel_nginx_master_identity_fails_closed(monkeypatch, field):
+    """Only read kernel fixed-name observations; no process action."""
+    dev, inode = 7, 120
+    binary = SimpleNamespace(st_mode=stat.S_IFREG | 0o755, st_uid=0,
+                             st_gid=0, st_nlink=1, st_dev=dev, st_ino=inode)
+    process = SimpleNamespace(st_mode=stat.S_IFDIR | 0o555, st_uid=0,
+                              st_dev=9, st_ino=1450)
+    executing = SimpleNamespace(st_dev=dev, st_ino=inode)
+    count = {"process": 0, "exe": 0}
+    closed = []
+    def lstat(path):
+        assert path == "/usr/sbin/nginx"
+        if field == "foreign_binary":
+            return SimpleNamespace(**{**vars(binary), "st_uid": 2000})
+        if field == "symlink_binary":
+            return SimpleNamespace(**{**vars(binary), "st_mode": stat.S_IFLNK | 0o777})
+        return binary
+    def observe(path):
+        if field == "missing_proc":
+            raise FileNotFoundError("missing")
+        if path == "/proc/1450":
+            count["process"] += 1
+            if field == "foreign_process":
+                return SimpleNamespace(**{**vars(process), "st_uid": 2000})
+            if field == "changed_pid_inode" and count["process"] == 2:
+                return SimpleNamespace(**{**vars(process), "st_ino": 1451})
+            return process
+        if path == "/proc/1450/exe":
+            count["exe"] += 1
+            if field == "wrong_binary_inode" or (
+                field == "changed_exe_inode" and count["exe"] == 2
+            ):
+                return SimpleNamespace(st_dev=dev, st_ino=inode + 1)
+            return executing
+        raise AssertionError(path)
+    fake_os = SimpleNamespace(
+        lstat=lstat, stat=observe, O_RDONLY=0, O_NOFOLLOW=0, O_CLOEXEC=0,
+        open=lambda path, flags: 33,
+        fstat=lambda fd: SimpleNamespace(st_mode=stat.S_IFREG | 0o444, st_uid=0),
+        read=lambda fd, size: b"worker\\n" if field == "wrong_comm" else b"nginx\\n",
+        close=lambda fd: closed.append(fd),
+    )
+    monkeypatch.setattr(unit, "os", fake_os)
+    with pytest.raises(EffectiveNginxUnitError,
+                       match="NGINX_MASTER_IDENTITY_"):
+        unit._observe_nginx_master_kernel(1450)
+    if field in ("wrong_comm", "changed_pid_inode", "changed_exe_inode"):
+        assert closed == [33]
+
+
+def test_kernel_nginx_master_positive_is_only_inert_inode_observation(monkeypatch):
+    observed = []
+    binary = SimpleNamespace(st_mode=stat.S_IFREG | 0o755, st_uid=0,
+                             st_gid=0, st_nlink=1, st_dev=7, st_ino=120)
+    process = SimpleNamespace(st_mode=stat.S_IFDIR | 0o555,
+                              st_uid=0, st_dev=9, st_ino=1450)
+    monkeypatch.setattr(unit, "os", SimpleNamespace(
+        lstat=lambda path: binary,
+        stat=lambda path: observed.append(path) or (
+            process if path == "/proc/1450" else binary),
+        O_RDONLY=0, O_NOFOLLOW=0, O_CLOEXEC=0,
+        open=lambda path, flags: 33,
+        fstat=lambda fd: SimpleNamespace(st_mode=stat.S_IFREG | 0o444, st_uid=0),
+        read=lambda fd, size: b"nginx\\n",
+        close=lambda fd: None,
+    ))
+    assert unit._observe_nginx_master_kernel(1450) is None
+    assert observed == [
+        "/proc/1450", "/proc/1450/exe",
+        "/proc/1450", "/proc/1450/exe",
+    ]
+
+
+def test_kernel_master_invalid_pid_refused_before_proc_access(monkeypatch):
+    monkeypatch.setattr(unit, "os", SimpleNamespace(
+        lstat=lambda *_: pytest.fail("must refuse PID 1"),
+    ))
+    with pytest.raises(EffectiveNginxUnitError, match="INVALID_MAIN_PID"):
+        unit._observe_nginx_master_kernel(1)

@@ -87,10 +87,57 @@ def _parse_fixed_unit_status(value: Any) -> dict[str, str]:
     pid = result["MainPID"]
     if (not pid or len(pid) > 10 or not pid.isascii()
             or not pid.isdecimal()
-            or not 1 <= int(pid) <= 2**31 - 1):
+            or not 2 <= int(pid) <= 2**31 - 1):
         _deny("INVALID_MAIN_PID")
     return result
 
+
+
+def _observe_nginx_master_kernel(pid: int) -> None:
+    """Narrow /proc inode/executable check, never a process authorization.
+
+    Only a fixed OS-reported MainPID is accepted. This does not authenticate
+    installed package signatures, PID1, NGINX listening sockets or SELinux;
+    /proc changes and PID reuse may still race a later privileged operation.
+    """
+    if type(pid) is not int or not 2 <= pid <= 2**31 - 1:
+        _deny("INVALID_MAIN_PID")
+    proc = f"/proc/{pid}"
+    binary = "/usr/sbin/nginx"
+    try:
+        installed = os.lstat(binary)
+        process = os.stat(proc)
+        executing = os.stat(proc + "/exe")
+        if (not stat.S_ISREG(installed.st_mode)
+                or installed.st_uid != 0 or installed.st_gid != 0
+                or stat.S_IMODE(installed.st_mode) & 0o022
+                or installed.st_nlink != 1
+                or not stat.S_ISDIR(process.st_mode)
+                or process.st_uid != 0
+                or (executing.st_dev, executing.st_ino)
+                   != (installed.st_dev, installed.st_ino)):
+            _deny("NGINX_MASTER_IDENTITY_REFUSED")
+        fd = os.open(
+            proc + "/comm", os.O_RDONLY | os.O_NOFOLLOW
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+        try:
+            comm = os.fstat(fd)
+            if (not stat.S_ISREG(comm.st_mode)
+                    or comm.st_uid != 0 or os.read(fd, 32) != b"nginx\\n"):
+                _deny("NGINX_MASTER_IDENTITY_REFUSED")
+        finally:
+            os.close(fd)
+        current = os.stat(proc)
+        rechecked = os.stat(proc + "/exe")
+        if ((current.st_dev, current.st_ino) != (process.st_dev, process.st_ino)
+                or (rechecked.st_dev, rechecked.st_ino)
+                   != (installed.st_dev, installed.st_ino)):
+            _deny("NGINX_MASTER_IDENTITY_REFUSED")
+    except EffectiveNginxUnitError:
+        raise
+    except (OSError, TypeError, ValueError, OverflowError):
+        _deny("NGINX_MASTER_IDENTITY_UNAVAILABLE")
 
 def inspect_effective_native_nginx_unit(distribution: str) -> dict[str, Any]:
     """Observe fixed effective PID1 service only after vendor unit checks.
@@ -119,11 +166,13 @@ def inspect_effective_native_nginx_unit(distribution: str) -> dict[str, Any]:
             or len(completed.stderr) > 4096):
         _deny("SYSTEMCTL_FAILED")
     observed = _parse_fixed_unit_status(completed.stdout)
+    _observe_nginx_master_kernel(int(observed["MainPID"]))
     return {
         "schema_version": 1,
         "status": "NATIVE_NGINX_EFFECTIVE_READ_ONLY_OBSERVATION",
         "unit_name": _UNIT,
         "main_pid_observed": int(observed["MainPID"]),
+        "kernel_nginx_master_executable_inode_observed": True,
         "vendor_unit_sha256": vendor.digest,
         "effective_unit_shape_observed": True,
         "distro_package_owner_verified": False,
