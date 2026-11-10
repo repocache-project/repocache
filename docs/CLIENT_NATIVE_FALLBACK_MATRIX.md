@@ -120,3 +120,23 @@ publisher metadata or RPM package payloads; no RPM install is attempted.
 Real signed RPM package transactions, production server catalogs and
 native host SELinux/systemd tests remain NOT VERIFIED. This test may
 not be used as permission to enable repos sync --apply.
+
+## Isolated APT package download with signed metadata and file integrity
+
+The Debian 13 native HTTPS job now additionally builds a disposable
+architecture-independent .deb without maintainer scripts and indexes its
+SHA-256 and size in Packages, Packages.gz and Packages.xz. A temporary
+OpenPGP key signs the Release metadata. In private APT lists and cache
+directories, apt-get update then apt-get download must retrieve the .deb
+via cache preference, upstream outage fallback and cache recovery.
+The probe verifies the exact SHA-256 of each downloaded .deb against the
+original locally generated archive; it never executes dpkg --install.
+
+A tampered-package scenario changes the served .deb bytes AFTER the
+Release/Packages hashes have been signed. APT must reject that transfer;
+success or a downloaded package with the wrong SHA-256 fails the job.
+TLS wrong-CA, total outage and earlier metadata checks still fail closed.
+
+These are disposable unsigned payloads authenticated by synthetic signed
+APT repository metadata, not genuine publisher packages, and do not prove
+production server catalogs, real network sources or native-host operation.

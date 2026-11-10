@@ -29,7 +29,8 @@ jobs:
             sh -ec 'apt-get update -qq && \
                     apt-get install -y --no-install-recommends python3 gnupg openssl >/dev/null && \
                     python3 scripts/ci_client_native_fallback.py apt && \
-                    python3 scripts/ci_client_native_fallback.py apt --tls'
+                    python3 scripts/ci_client_native_fallback.py apt --tls && \
+                    python3 scripts/ci_client_native_fallback.py apt --tls --package-transfer'
 
   almalinux10-dnf-metadata:
     name: DNF metadata preference/fallback (almalinux:10)
