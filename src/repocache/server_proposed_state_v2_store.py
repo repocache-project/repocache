@@ -312,17 +312,22 @@ def _commit_preflighted_proposed_v2_under_root(
     candidate_pins_by_repository: Any,
     ca_bundle_path: str,
     inject_fault: Callable[[str], None] | None = None,
+    validate_nginx_candidate: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """PRIVATE fixture: render candidate and commit v2 under one FD lock.
 
-    This intentionally does not run nginx -t, authenticate an administrator,
-    stage any live include, reload nginx or publish a catalog. The atomic
-    boundary is solely the *fixture state* preflight and journal writer.
-    It MUST NOT be wired to the host CLI or installed as a privileged helper.
+    An optional test-only callback can validate a detached copy of the
+    rendered candidate (including a disposable full-context nginx -t) while
+    this same lock is held, *before* any state journal is created. Callback
+    success is not host authority, production NGINX verification or approval.
+    This does not authenticate an administrator, stage a live include, reload
+    nginx or publish a catalog. Never wire this fixture helper to a host CLI.
     """
     if (type(expected_generation) is not int
             or not 0 <= expected_generation < MAX_INT):
         _refuse("EXPECTED_GENERATION_INVALID")
+    if validate_nginx_candidate is not None and not callable(validate_nginx_candidate):
+        _refuse("NGINX_VALIDATOR_INVALID")
     frozen, raw = _freeze(proposed_snapshot)
     try:
         pin_raw = _canonical(candidate_pins_by_repository, limit=1024 * 1024)
@@ -360,7 +365,20 @@ def _commit_preflighted_proposed_v2_under_root(
         except (NginxRepositoryBundleError, ValueError, TypeError,
                 OverflowError, RecursionError):
             _refuse("NGINX_CANDIDATE_REFUSED")
-        # Detect a non-cooperating writer that ignored flock after preflight.
+        # This callback is a disposable test seam, not a privileged service
+        # runner. Give it detached data so it cannot change what we return;
+        # it cannot change the independently validated frozen state either.
+        if validate_nginx_candidate is not None:
+            try:
+                detached = _json(
+                    _canonical(candidate, limit=1024 * 1024),
+                    limit=1024 * 1024,
+                )
+                validate_nginx_candidate(detached)
+            except Exception:
+                _refuse("NGINX_FIXTURE_VALIDATION_REFUSED")
+        # Re-check state *after* validation: even a test callback may race a
+        # non-cooperating writer that ignored our advisory state lock.
         _, after = _read_v2(directory, owner_uid)
         if before != after:
             _refuse("STATE_CHANGED_DURING_PREFLIGHT")
@@ -378,6 +396,9 @@ def _commit_preflighted_proposed_v2_under_root(
             "expected_previous_generation": generation,
             "candidate_generation": render_generation,
             "state_preflight_and_commit_share_exclusive_lock": True,
+            "fixture_validation_callback_executed": (
+                validate_nginx_candidate is not None
+            ),
             "fixture_only": True,
             "operator_authorization_verified": False,
             "trusted_host_root_verified": False,
