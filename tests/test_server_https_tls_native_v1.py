@@ -233,3 +233,13 @@ def test_independent_tls_pair_preflight_refuses_bad_material_before_any_reload(
         assert pid.is_file()
         assert pid.stat().st_uid == os.geteuid()
         assert pid.stat().st_nlink == 1
+
+
+def test_canonical_install_contract_rejects_same_tls_file_for_cert_and_key(
+    tmp_path: Path,
+):
+    cert = tmp_path / "shared.pem"
+    with pytest.raises(ValueError):
+        _validated_fixture_tls_paths(cert, cert)
+    assert not cert.exists()
+    assert not (tmp_path / "nginx.conf").exists()
