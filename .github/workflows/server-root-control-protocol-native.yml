@@ -5,8 +5,10 @@ on:
     paths:
       - '.github/workflows/server-root-control-protocol-native.yml'
       - 'src/repocache/server_root_control_protocol_v1.py'
+      - 'src/repocache/server_root_control_host_preflight_v1.py'
       - 'src/repocache/server_root_control_worker_v1.py'
       - 'tests/test_server_root_control_protocol_v1.py'
+      - 'tests/test_server_root_control_host_preflight_v1.py'
       - 'tests/test_server_root_control_worker_v1.py'
       - 'tests/test_server_root_control_units_v1.py'
       - 'docs/examples/systemd/repocache-control.socket'
@@ -17,8 +19,10 @@ on:
     paths:
       - '.github/workflows/server-root-control-protocol-native.yml'
       - 'src/repocache/server_root_control_protocol_v1.py'
+      - 'src/repocache/server_root_control_host_preflight_v1.py'
       - 'src/repocache/server_root_control_worker_v1.py'
       - 'tests/test_server_root_control_protocol_v1.py'
+      - 'tests/test_server_root_control_host_preflight_v1.py'
       - 'tests/test_server_root_control_worker_v1.py'
       - 'tests/test_server_root_control_units_v1.py'
       - 'docs/examples/systemd/repocache-control.socket'
@@ -67,6 +71,7 @@ jobs:
           python3 -B -m pytest -q -rs \
             tests/test_server_root_control_protocol_v1.py \
             tests/test_server_root_control_worker_v1.py \
-            tests/test_server_root_control_units_v1.py
+            tests/test_server_root_control_units_v1.py \
+            tests/test_server_root_control_host_preflight_v1.py
           # No privileged broker, systemd service, NGINX process, real reload
           # or host authorization is installed or executed here.
