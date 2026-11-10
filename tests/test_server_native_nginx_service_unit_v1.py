@@ -218,11 +218,11 @@ def test_effective_systemd_shadow_roots_refused(
     if entry.endswith(".d"):
         fixture.mkdir()
         (fixture / "override.conf").write_text(
-            "[Service]\\nExecStart=\\nExecStart=/tmp/untrusted\\n",
+            "[Service]\nExecStart=\nExecStart=/tmp/untrusted\n",
             encoding="utf-8",
         )
     else:
-        fixture.write_text("[Service]\\nExecStart=/tmp/untrusted\\n", encoding="utf-8")
+        fixture.write_text("[Service]\nExecStart=/tmp/untrusted\n", encoding="utf-8")
     monkeypatch.setattr(unit, "_SHADOW_PATHS", (str(fixture),))
     assert unit._shadows_present()
 
