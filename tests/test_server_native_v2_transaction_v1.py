@@ -54,6 +54,8 @@ def filesystem(tmp_path, monkeypatch):
     lock.chmod(0o600)
     fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     events = []
+    monkeypatch.setattr(native, "_verify_tls_pair",
+                        lambda *_: events.append("tls"))
     monkeypatch.setattr(native, "_native_syntax_check",
                         lambda: events.append("syntax"))
     monkeypatch.setattr(native, "_reload_native",
@@ -63,6 +65,8 @@ def filesystem(tmp_path, monkeypatch):
                             ("exposure", generation)))
     monkeypatch.setattr(native, "_route_dump_check",
                         lambda *_args: events.append("dump"))
+    monkeypatch.setattr(native, "_local_https_catalog",
+                        lambda _doc, raw: events.append(("catalog-exposure", len(raw))))
     try:
         yield fd, state, include, catalog, events
     finally:
@@ -123,7 +127,9 @@ def test_first_install_commits_real_three_resource_paths(filesystem, monkeypatch
     result = apply(filesystem)
     assert result["status"] == "NATIVE_V2_COMMITTED"
     assert result["active_catalog_published"] is True
-    assert events == ["syntax", ("reload", "debian"), ("exposure", 1), "dump"]
+    assert events == ["tls", "syntax", ("reload", "debian"),
+                      ("exposure", 1), "dump",
+                      ("catalog-exposure", len(catalog.read_bytes()))]
     assert (state / V2_STATE).is_file()
     assert include.stat().st_mode & 0o777 == 0o644
     assert catalog.stat().st_mode & 0o777 == 0o644
@@ -133,7 +139,7 @@ def test_first_install_commits_real_three_resource_paths(filesystem, monkeypatch
     assert_no_pending(filesystem)
 
 
-@pytest.mark.parametrize("step", ["syntax", "reload", "exposure", "dump"])
+@pytest.mark.parametrize("step", ["syntax", "reload", "exposure", "dump", "catalog"])
 def test_failed_native_phase_rolls_back_previous_bytes(filesystem, monkeypatch,
                                                        step):
     stage(filesystem, snapshot(count=1))
@@ -143,6 +149,7 @@ def test_failed_native_phase_rolls_back_previous_bytes(filesystem, monkeypatch,
         "reload": ("_reload_native", ("reload", "debian")),
         "exposure": ("_local_https_generation", ("exposure", 1)),
         "dump": ("_route_dump_check", "dump"),
+        "catalog": ("_local_https_catalog", "catalog"),
     }
     function, marker = targets[step]
     old = getattr(native, function)
@@ -285,3 +292,37 @@ def test_unknown_root_operation_refused_without_io(filesystem):
             filesystem[0], distribution="debian", operation="LIST_FILES",
             fixture=True,
         )
+
+
+def test_invalid_tls_pair_refused_before_first_wal_or_write(filesystem, monkeypatch):
+    stage(filesystem, snapshot(count=1))
+    _fd, state, include, catalog, events = filesystem
+    def invalid(*args):
+        raise native.NativeV2TransactionError("TLS_PAIR_INVALID")
+    monkeypatch.setattr(native, "_verify_tls_pair", invalid)
+    with pytest.raises(native.NativeV2TransactionError, match="TLS_PAIR_INVALID"):
+        apply(filesystem)
+    assert not (state / native._WAL).exists()
+    assert not (state / V2_STATE).exists()
+    assert not include.exists()
+    assert not catalog.exists()
+
+
+def test_catalog_validation_failure_retracts_publication(filesystem, monkeypatch):
+    stage(filesystem, snapshot(count=1))
+    _fd, state, include, catalog, events = filesystem
+    seen = []
+    def refuse_live_catalog(_doc, expected):
+        seen.append(expected)
+        assert catalog.read_bytes() == expected
+        assert (state / native._WAL).is_file()
+        raise native.NativeV2TransactionError("CATALOG_EXPOSURE_UNVERIFIED")
+    monkeypatch.setattr(native, "_local_https_catalog", refuse_live_catalog)
+    with pytest.raises(native.NativeV2TransactionError,
+                       match="APPLY_FAILED_ROLLED_BACK"):
+        apply(filesystem)
+    assert len(seen) == 1
+    assert not catalog.exists()
+    assert not include.exists()
+    assert not (state / V2_STATE).exists()
+    assert_no_pending(filesystem)
