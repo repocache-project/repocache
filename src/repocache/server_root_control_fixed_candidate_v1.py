@@ -109,7 +109,7 @@ def _hex(value: Any) -> bool:
             and all(c in "0123456789abcdef" for c in value))
 
 
-def _proposal(raw: bytes) -> dict[str, Any]:
+def _proposal(raw: bytes) -> tuple[dict[str, Any], bytes]:
     """Validate format only; not the approved full #31 transition or intent."""
     envelope = _canonical_json(raw, _MAX_ENVELOPE)
     if set(envelope) != {
@@ -148,10 +148,9 @@ def _proposal(raw: bytes) -> dict[str, Any]:
             or type(snapshot["state_generation"]) is not int
             or snapshot["state_generation"] != generation + 1):
         _deny("STATE_VERSION_INVALID")
-    # Intentionally do not expose the snapshot in the observable report.
-    # The future root transaction must *re-read* the exact bytes under lock,
-    # validate #31 full schema/CAS/IDs and require authenticated operator intent.
-    return {
+    # Retain the immutable decoded bytes privately, never in the public
+    # inspection. This is only a prerequisite; re-read under the #31 lock.
+    report = {
         "schema_version": 1,
         "status": "FIXED_ROOT_OWNED_CANDIDATE_BYTES_ONLY",
         "expected_generation": generation,
@@ -169,11 +168,17 @@ def _proposal(raw: bytes) -> dict[str, Any]:
         "authorizes_nginx_reload": False,
         "authorizes_catalog_publication": False,
     }
+    return report, next_bytes
 
 
-def _inspect_under_root(root_fd: int, *, owner_uid: int, owner_gid: int
-                        ) -> dict[str, Any]:
-    """Private fixture seam; a caller-provided root FD is never host authority."""
+def _load_private_under_root(root_fd: int, *, owner_uid: int, owner_gid: int
+                        ) -> tuple[dict[str, Any], bytes]:
+    """Return private exact candidate bytes; no lock or authority token.
+
+    The caller must establish genuine root/host provenance and #31 lock.
+    This test-only FD entry accepts a fixture root and its outcome is NOT
+    permission for a privileged mutation or NGINX reload.
+    """
     if (type(root_fd) is not int or root_fd < 0
             or type(owner_uid) is not int or owner_uid < 0
             or type(owner_gid) is not int or owner_gid < 0):
@@ -229,7 +234,7 @@ def _inspect_under_root(root_fd: int, *, owner_uid: int, owner_gid: int
                 _deny("FILE_CHANGED")
             if _id(first) != _id(later) or _id(later) != _id(named):
                 _deny("FILE_CHANGED")
-            report = _proposal(raw)
+            report, next_bytes = _proposal(raw)
             for ancestor, segment, checked, identity in parents:
                 try:
                     now = os.stat(segment, dir_fd=ancestor,
@@ -240,12 +245,21 @@ def _inspect_under_root(root_fd: int, *, owner_uid: int, owner_gid: int
                         or _id(_safe_dir(checked, owner_uid, owner_gid))
                            != identity):
                     _deny("DIRECTORY_CHANGED")
-            return report
+            return report, next_bytes
         finally:
             os.close(fd)
     finally:
         for fd in reversed(child_fds):
             os.close(fd)
+
+
+def _inspect_under_root(root_fd: int, *, owner_uid: int, owner_gid: int
+                        ) -> dict[str, Any]:
+    """Public-shape fixture observation, without private candidate bytes."""
+    report, _private_bytes = _load_private_under_root(
+        root_fd, owner_uid=owner_uid, owner_gid=owner_gid,
+    )
+    return report
 
 
 def inspect_fixed_current_namespace_admin_candidate() -> dict[str, Any]:

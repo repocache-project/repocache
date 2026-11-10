@@ -435,3 +435,6 @@ tests in both disposable distro containers exercise bounded parsing,
 unsafe symlinks/hardlinks/modes, closed keys, generation/digest drift and
 non-root denial. Original native host/SELinux and real operational gates
 remain **NOT VERIFIED**.
+
+
+The private `_load_private_under_root` seam now retains the exact, independently re-read canonical next v2 snapshot bytes for a future same-lock transaction; the inspection API still emits only hashes, generation and size. The bytes are **not** approval or a lease, are never returned to the socket peer, and must be revalidated under the protected #31 lock. No worker dispatch, host write/reload/catalog or new privilege was added.

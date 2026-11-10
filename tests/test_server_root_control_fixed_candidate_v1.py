@@ -170,3 +170,18 @@ def test_broker_has_no_candidate_dispatch_or_privileged_writer():
     assert "ROOT_TRANSACTION_NOT_IMPLEMENTED" in stdinspect.getsource(
         serve_one_fixed_request,
     )
+
+
+def test_private_candidate_bytes_are_exact_but_not_a_permission(fixture):
+    fd, file, _ = fixture
+    report, raw = candidate._load_private_under_root(
+        fd, owner_uid=os.getuid(), owner_gid=os.getgid(),
+    )
+    assert raw == canonical(snapshot())
+    assert hashlib.sha256(raw).hexdigest() == report["next_state_sha256"]
+    assert "next_state_base64" not in report
+    assert report["state_lock_held"] is False
+    assert report["kernel_administrator_approved"] is False
+    assert report["authorizes_state_write"] is False
+    assert report["authorizes_nginx_reload"] is False
+    assert report["authorizes_catalog_publication"] is False
