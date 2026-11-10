@@ -215,7 +215,7 @@ def test_invalid_packet_does_not_execute_filesystem_or_subprocess(monkeypatch):
 
 @pytest.mark.parametrize("case", [
     "truncated-credentials", "invalid-pid", "missing-groups",
-    "bad-group-width", "negative-gid",
+    "bad-group-width", "negative-gid", "negative-group",
 ])
 def test_kernel_credential_metadata_errors_fail_closed(case):
     class Peer:
@@ -234,12 +234,14 @@ def test_kernel_credential_metadata_errors_fail_closed(case):
                 raise OSError("kernel groups unavailable")
             if case == "bad-group-width":
                 return b"x"
+            if case == "negative-group":
+                return struct.pack("i", -1)
             return struct.pack("i", 3000)
     with pytest.raises(FixedRootControlError,
                        match="PEER_CREDENTIALS|PEER_GROUPS"):
         uid, gid, groups = _peer_credentials(Peer())
-        # Kernel payload parsing and pure identity policy remain separate,
-        # so the invalid primary gid is rejected at this independent stage.
+        # Independent pure policy check is intentionally never reached for
+        # malformed kernel peer IDs, groups or unexpected credential sizes.
         _decide_peer(
             peer_uid=uid, peer_gid=gid, peer_groups=groups,
             admin_gid=3000, service_uid=900,
