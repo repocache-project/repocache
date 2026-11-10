@@ -70,14 +70,18 @@ def _capture_default_nginx_dump_private() -> bytes:
                 ready, _, _ = select.select(
                     [proc.stdout], [], [], remaining,
                 )
-                if not ready:
-                    _deny("CHECK_TIMEOUT")
-                chunk = os.read(
-                    proc.stdout.fileno(),
-                    min(65536, _MAX_DUMP_BYTES + 1 - length),
-                )
+                if ready:
+                    chunk = os.read(
+                        proc.stdout.fileno(),
+                        min(65536, _MAX_DUMP_BYTES + 1 - length),
+                    )
             except (OSError, ValueError, TypeError):
                 _deny("OUTPUT_UNAVAILABLE")
+            # Deny AFTER the OS-only exception boundary: our own
+            # FixedNginxFullContextError subclasses ValueError and must
+            # not be rewritten as a misleading output failure.
+            if not ready:
+                _deny("CHECK_TIMEOUT")
             if not chunk:
                 break
             length += len(chunk)
