@@ -1969,12 +1969,14 @@ def test_adopted_v2_initial_history_overflow_refused_before_disk_write(fixture_r
 
 
 def locked_preflight_commit(layout, candidate, *, expected, pins=None, inject=None,
-                            validate=None):
+                            validate=None, ca=None):
     fd, _, uid = layout
     return commit_preflighted(
         fd, candidate, owner_uid=uid, expected_generation=expected,
         candidate_pins_by_repository={} if pins is None else pins,
-        ca_bundle_path="/etc/ssl/certs/ca-certificates.crt",
+        ca_bundle_path=(
+            "/etc/ssl/certs/ca-certificates.crt" if ca is None else ca
+        ),
         inject_fault=inject, validate_nginx_candidate=validate,
     )
 
@@ -2281,7 +2283,7 @@ def test_v2_same_lock_disposable_native_nginx_syntax_before_state_write(
                            match="NGINX_FIXTURE_VALIDATION_REFUSED"):
             locked_preflight_commit(
                 fixture_root, proposed, expected=0, pins=pins,
-                validate=validate,
+                validate=validate, ca=native_ca,
             )
         assert observed == [False]
         assert not (folder / V2_STATE).exists()
@@ -2289,7 +2291,7 @@ def test_v2_same_lock_disposable_native_nginx_syntax_before_state_write(
     else:
         result = locked_preflight_commit(
             fixture_root, proposed, expected=0, pins=pins,
-            validate=validate,
+            validate=validate, ca=native_ca,
         )
         assert observed == [True]
         assert result["state_generation"] == 1
