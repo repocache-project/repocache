@@ -203,7 +203,19 @@ def _verify_recovery_next(
         _refuse(kind + "_INVALID")
 
 
-def _pending(directory: int, uid: int) -> bool:
+def _multi_resource_pending(directory: int, uid: int) -> bool:
+    # An ordinary v2 fixture operation may not bypass an incomplete
+    # multi-resource WAL. This is an interlock, not authorization.
+    return any(
+        _read_file(directory, name, uid, 16 * 1024 * 1024) is not None
+        for name in (".state-v2-multi.pending", ".state-v2-multi.pending-tmp",
+                     ".state-v2-multi.stage")
+    )
+
+
+def _pending(directory: int, uid: int, *, include_multi: bool = True) -> bool:
+    if include_multi and _multi_resource_pending(directory, uid):
+        return True
     if _read_v2_journal(directory, uid) is not None:
         return True
     return any(
@@ -556,6 +568,8 @@ def _recover_proposed_v2_under_root(
     _refuse_actual_root_fixture_write(root_fd)
     with _locked(root_fd, owner_uid) as directory:
         _legacy_refusal(directory, owner_uid)
+        if _multi_resource_pending(directory, owner_uid):
+            _refuse("MULTI_RESOURCE_RECOVERY_REQUIRED")
         journal = _read_v2_journal(directory, owner_uid)
         temp_entry = _read_v2_journal(
             directory, owner_uid, name=V2_JOURNAL_TMP,
