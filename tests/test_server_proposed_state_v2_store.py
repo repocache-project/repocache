@@ -3196,3 +3196,143 @@ def test_multi_resource_live_namespace_root_cannot_be_used_as_fixture():
             )
     finally:
         os.close(fd)
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"),
+                    reason="requires Linux fork and disposable protected fixture")
+@pytest.mark.parametrize("phase", [
+    "journal_tmp_durable", "journal_durable", "include_durable",
+    "state_durable", "catalog_durable", "manifest_durable",
+])
+def test_multi_resource_actual_process_death_replays_previous_bytes(
+    fixture_root, phase,
+):
+    """Kill a separate writer process without running finally or compensation."""
+    multi = _multi_resource_fixture()
+    fd, folder, uid = fixture_root
+    initial = _multi_snapshot(1, active=True)
+    multi._commit_fixture_multi_resource_under_root(
+        fd, initial, owner_uid=uid, expected_generation=0,
+        include_bytes=b"# previous exact nginx\n",
+        catalog_bytes=_catalog_fixture(["repo-0"]),
+    )
+    old = {n: (folder / n).read_bytes() for n in multi.ORDER}
+    next_state = _multi_snapshot(2, generation=2, previous=initial, active=True)
+
+    pid = os.fork()
+    if pid == 0:
+        try:
+            def die(point):
+                if point == phase:
+                    os._exit(41)
+
+            multi._commit_fixture_multi_resource_under_root(
+                fd, next_state, owner_uid=uid, expected_generation=1,
+                include_bytes=b"# replacement exact nginx\n",
+                catalog_bytes=_catalog_fixture(["repo-0", "repo-1"]),
+                inject_fault=die,
+            )
+        except BaseException:
+            os._exit(71)
+        os._exit(72)
+    ended, status = os.waitpid(pid, 0)
+    assert ended == pid
+    assert os.waitstatus_to_exitcode(status) == 41
+    assert (folder / (multi.JOURNAL_TMP if phase == "journal_tmp_durable"
+                      else multi.JOURNAL)).is_file()
+    assert multi._recover_fixture_multi_resource_under_root(
+        fd, owner_uid=uid,
+    )["status"] in (
+        "DISCARDED_UNPUBLISHED_INERT_FIXTURE_JOURNAL",
+        "ROLLED_BACK_INERT_FIXTURE_MULTI_RESOURCE",
+    )
+    assert {n: (folder / n).read_bytes() for n in multi.ORDER} == old
+    assert all(not (folder / n).exists()
+               for n in (multi.JOURNAL, multi.JOURNAL_TMP, multi.STAGE))
+
+
+def test_multi_resource_second_crash_during_rollback_is_retryable(
+    fixture_root, monkeypatch,
+):
+    multi = _multi_resource_fixture()
+    fd, folder, uid = fixture_root
+    old = _multi_snapshot(1, active=True)
+    multi._commit_fixture_multi_resource_under_root(
+        fd, old, owner_uid=uid, expected_generation=0,
+        include_bytes=b"# original\n",
+        catalog_bytes=_catalog_fixture(["repo-0"]),
+    )
+    original = {name: (folder / name).read_bytes() for name in multi.ORDER}
+    next_state = _multi_snapshot(2, generation=2, previous=old, active=True)
+
+    def crash(phase):
+        if phase == "manifest_durable":
+            raise RuntimeError("first crash")
+
+    with pytest.raises(RuntimeError):
+        multi._commit_fixture_multi_resource_under_root(
+            fd, next_state, owner_uid=uid, expected_generation=1,
+            include_bytes=b"# next\n",
+            catalog_bytes=_catalog_fixture(["repo-0", "repo-1"]),
+            inject_fault=crash,
+        )
+    real_writer = multi._write_target
+    counter = []
+
+    def fail_after_first_restoration(*args, **kwargs):
+        real_writer(*args, **kwargs)
+        counter.append(True)
+        if len(counter) == 1:
+            raise RuntimeError("second synthetic crash")
+
+    monkeypatch.setattr(multi, "_write_target", fail_after_first_restoration)
+    with pytest.raises(RuntimeError, match="second synthetic crash"):
+        multi._recover_fixture_multi_resource_under_root(fd, owner_uid=uid)
+    assert (folder / multi.JOURNAL).is_file()
+    monkeypatch.setattr(multi, "_write_target", real_writer)
+    assert multi._recover_fixture_multi_resource_under_root(
+        fd, owner_uid=uid,
+    )["status"] == "ROLLED_BACK_INERT_FIXTURE_MULTI_RESOURCE"
+    assert {n: (folder / n).read_bytes() for n in multi.ORDER} == original
+    assert not (folder / multi.JOURNAL).exists()
+
+
+@pytest.mark.parametrize("damage", ["invalid-json", "wrong-digest", "oversize"])
+def test_multi_resource_tampered_journal_refused_without_erasure(
+    fixture_root, damage,
+):
+    multi = _multi_resource_fixture()
+    fd, folder, uid = fixture_root
+
+    def crash(phase):
+        if phase == "manifest_durable":
+            raise RuntimeError("simulated crash")
+
+    with pytest.raises(RuntimeError):
+        multi._commit_fixture_multi_resource_under_root(
+            fd, _multi_snapshot(1), owner_uid=uid, expected_generation=0,
+            include_bytes=b"# nginx\n", catalog_bytes=_catalog_fixture([]),
+            inject_fault=crash,
+        )
+    journal = folder / multi.JOURNAL
+    old = {n: (folder / n).read_bytes() for n in multi.ORDER}
+    if damage == "invalid-json":
+        journal.write_bytes(b'{"truncated":')
+    elif damage == "wrong-digest":
+        entry = json.loads(journal.read_bytes())
+        entry["next_sha256"][multi.INCLUDE] = "a" * 64
+        journal.write_bytes(json.dumps(entry, sort_keys=True).encode("utf-8"))
+        # Hash substitution is only detected once a resource diverges from
+        # *both* the original and the forged next digest.
+        with pytest.raises(multi.FixtureMultiResourceError,
+                           match="FOREIGN_RESOURCE_DRIFT"):
+            multi._recover_fixture_multi_resource_under_root(fd, owner_uid=uid)
+        assert {n: (folder / n).read_bytes() for n in multi.ORDER} == old
+        return
+    else:
+        journal.write_bytes(b"x" * (multi.MAX_JOURNAL_BYTES + 1))
+    with pytest.raises((multi.FixtureMultiResourceError,
+                       ProtectedStateStoreError, ValueError)):
+        multi._recover_fixture_multi_resource_under_root(fd, owner_uid=uid)
+    assert {n: (folder / n).read_bytes() for n in multi.ORDER} == old
+    assert journal.is_file()
