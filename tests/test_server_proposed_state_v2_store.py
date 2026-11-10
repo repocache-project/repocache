@@ -1969,7 +1969,7 @@ def test_adopted_v2_initial_history_overflow_refused_before_disk_write(fixture_r
 
 
 def locked_preflight_commit(layout, candidate, *, expected, pins=None, inject=None,
-                            validate=None, ca=None):
+                            validate=None, ca=None, activate=None):
     fd, _, uid = layout
     return commit_preflighted(
         fd, candidate, owner_uid=uid, expected_generation=expected,
@@ -1978,6 +1978,7 @@ def locked_preflight_commit(layout, candidate, *, expected, pins=None, inject=No
             "/etc/ssl/certs/ca-certificates.crt" if ca is None else ca
         ),
         inject_fault=inject, validate_nginx_candidate=validate,
+        verify_fixture_activation=activate,
     )
 
 
@@ -2352,6 +2353,149 @@ def test_v2_same_lock_validation_requires_explicit_none_success(
         locked_preflight_commit(
             fixture_root, next_state, expected=1,
             validate=lambda _candidate: bad_result,
+        )
+    assert {p.name: (p.read_bytes(), p.stat().st_ino)
+            for p in folder.iterdir() if p.is_file()} == before
+
+
+def test_v2_journal_spans_post_replace_fixture_activation_barrier(
+    fixture_root,
+):
+    """Fixture preflight->durable journal->state->activation->cleanup order."""
+    fd, folder, uid = fixture_root
+    current = snapshot(count=1)
+    apply(fixture_root, current)
+    old = (folder / V2_STATE).read_bytes()
+    proposed = snapshot(count=2, generation=2, previous=current)
+    events = []
+
+    def preflight(_candidate):
+        assert (folder / V2_STATE).read_bytes() == old
+        assert not (folder / V2_JOURNAL).exists()
+        events.append("before-journal")
+
+    def activated(candidate):
+        assert candidate["proposed_repository_ids"] == []
+        assert (folder / V2_JOURNAL).is_file()
+        assert not (folder / V2_STAGE).exists()
+        assert json.loads((folder / V2_STATE).read_bytes()) == proposed
+        with pytest.raises(ProtectedStateStoreError, match="LOCK_UNAVAILABLE"):
+            with _locked(fd, uid):
+                pytest.fail("exclusive state lock released too early")
+        candidate["proposed_repository_ids"].append("forged")
+        events.append("after-replace-before-journal-release")
+
+    result = locked_preflight_commit(
+        fixture_root, proposed, expected=1, validate=preflight,
+        activate=activated,
+    )
+    assert events == ["before-journal", "after-replace-before-journal-release"]
+    assert result["fixture_validation_callback_executed"] is True
+    assert result["fixture_activation_barrier_executed"] is True
+    assert result["proposed_repository_ids"] == []
+    assert result["nginx_syntax_verified"] is False
+    assert result["authorizes_nginx_reload"] is False
+    assert result["authorizes_catalog_publication"] is False
+    assert (folder / V2_STATE).read_bytes() != old
+    assert not (folder / V2_JOURNAL).exists()
+
+
+@pytest.mark.parametrize("failure", ["exception", "false", "true", "status"])
+def test_v2_fixture_activation_failure_retains_durable_recovery_barrier(
+    fixture_root, failure,
+):
+    _, folder, _ = fixture_root
+    current = snapshot(count=1)
+    apply(fixture_root, current)
+    previous_raw = (folder / V2_STATE).read_bytes()
+    proposed = snapshot(count=2, generation=2, previous=current)
+
+    def activation(_candidate):
+        assert (folder / V2_JOURNAL).is_file()
+        assert json.loads((folder / V2_STATE).read_bytes()) == proposed
+        if failure == "exception":
+            raise RuntimeError("private fixture string not to leak")
+        return {"status": "ok"} if failure == "status" else (failure == "true")
+
+    with pytest.raises(ProposedV2PersistenceError,
+                       match="ACTIVATION_FIXTURE_REFUSED") as caught:
+        locked_preflight_commit(
+            fixture_root, proposed, expected=1, activate=activation,
+        )
+    assert "private fixture string" not in str(caught.value)
+    assert (folder / V2_JOURNAL).is_file()
+    assert json.loads((folder / V2_STATE).read_bytes()) == proposed
+    with pytest.raises(ProposedV2PersistenceError, match="RECOVERY_REQUIRED"):
+        locked_preflight_commit(fixture_root, proposed, expected=1)
+    restored = rollback(fixture_root)
+    assert restored["status"] == "ROLLED_BACK_INERT_V2"
+    assert (folder / V2_STATE).read_bytes() == previous_raw
+    assert not (folder / V2_JOURNAL).exists()
+
+
+def test_v2_noop_avoids_fixture_activation_without_mutating_old_inode(
+    fixture_root,
+):
+    _, folder, _ = fixture_root
+    old = snapshot(count=1)
+    apply(fixture_root, old)
+    repeated = snapshot(count=1, generation=2, previous=old)
+    before = (folder / V2_STATE).stat()
+
+    def forbidden(_candidate):
+        pytest.fail("identical state should not invoke an activation effect")
+
+    result = locked_preflight_commit(
+        fixture_root, repeated, expected=1, activate=forbidden,
+    )
+    assert result["state_commit_status"] == "NO_CHANGE_INERT_V2"
+    assert result["fixture_activation_barrier_executed"] is False
+    assert (folder / V2_STATE).stat().st_ino == before.st_ino
+    assert not (folder / V2_JOURNAL).exists()
+
+
+def test_v2_post_replace_fixture_barrier_refuses_noncooperating_state_writer(
+    fixture_root,
+):
+    _, folder, _ = fixture_root
+    current = snapshot(count=1)
+    apply(fixture_root, current)
+    proposed = snapshot(count=2, generation=2, previous=current)
+    foreign = snapshot(count=1, generation=2, previous=current)
+    foreign_raw = json.dumps(
+        foreign, sort_keys=True, ensure_ascii=True, separators=(",", ":"),
+    ).encode("utf-8")
+
+    def foreign_write(_candidate):
+        with (folder / V2_STATE).open("wb") as stream:
+            stream.write(foreign_raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+
+    with pytest.raises(
+        ProposedV2PersistenceError, match="STATE_CHANGED_DURING_FIXTURE_ACTIVATION",
+    ):
+        locked_preflight_commit(
+            fixture_root, proposed, expected=1, activate=foreign_write,
+        )
+    assert (folder / V2_STATE).read_bytes() == foreign_raw
+    assert (folder / V2_JOURNAL).is_file()
+    with pytest.raises(ProposedV2PersistenceError):
+        rollback(fixture_root)
+    assert (folder / V2_STATE).read_bytes() == foreign_raw
+
+
+def test_v2_invalid_activation_callback_refused_before_any_state_write(
+    fixture_root,
+):
+    _, folder, _ = fixture_root
+    before = {p.name: (p.read_bytes(), p.stat().st_ino)
+              for p in folder.iterdir() if p.is_file()}
+    with pytest.raises(
+        ProposedV2PersistenceError, match="FIXTURE_ACTIVATION_VALIDATOR_INVALID",
+    ):
+        locked_preflight_commit(
+            fixture_root, snapshot(count=1), expected=0, activate="systemctl",
         )
     assert {p.name: (p.read_bytes(), p.stat().st_ino)
             for p in folder.iterdir() if p.is_file()} == before
