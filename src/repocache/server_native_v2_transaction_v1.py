@@ -436,7 +436,12 @@ def _local_https_generation(document: dict[str, Any], generation: int) -> None:
                     "GET " + _HEALTH + " HTTP/1.1\r\nHost: " + hostname
                     + "\r\nConnection: close\r\n\r\n"
                 ).encode("ascii"))
-                response = tls.recv(4096)
+                response = b""
+                while b"\r\n\r\n" not in response and len(response) <= 8192:
+                    part = tls.recv(min(4096, 8193 - len(response)))
+                    if not part:
+                        break
+                    response += part
     except (OSError, ValueError, ssl.SSLError, TimeoutError):
         _deny("EXPOSURE_UNVERIFIED")
     marker = f"X-Repocache-Generation: {generation}".encode("ascii").lower()
@@ -475,69 +480,6 @@ def _resolve_pins(document: dict[str, Any]) -> dict[str, dict[str, list[str]]]:
             _deny("DNS_UNVERIFIED")
         answers[rid] = host_map
     return answers
-
-
-def _render(document: dict[str, Any], generation: int,
-            distribution: str) -> tuple[bytes, bytes, dict, dict]:
-    """Complete fixed NGINX http{} include and canonical active-only catalog."""
-    try:
-        bundle = render_repository_nginx_bundle_candidate(
-            document, expected_state_generation=generation - 1,
-            candidate_pins_by_repository=_resolve_pins(document),
-            ca_bundle_path=_CA[distribution],
-        )
-        config = document["deployment"]
-        listen = config["listen"]
-        tls = config["tls"]
-        # XML/NGINX directives are not permitted in these schema fields.
-        names = (listen["hostname"], listen["bind_address"],
-                 tls["certificate_file"], tls["private_key_file"])
-        if any(re.fullmatch(r"[A-Za-z0-9_.:/+-]+", s) is None for s in names):
-            _deny("NGINX_TOKEN_UNSAFE")
-        if listen["bind_address"] == "::":
-            addr = "[::]"
-        elif ":" in listen["bind_address"]:
-            addr = "[" + listen["bind_address"] + "]"
-        else:
-            addr = listen["bind_address"]
-        # The catalog endpoint is fixed and private assets stay in /var.
-        # NGINX's alias target must be provisioned root:root with 0755 parent.
-        nginx = (
-            "# REPOCACHE managed v2 - do not edit\n"
-            + bundle["http_upstream_fragment"]
-            + "\nserver {\n"
-            + f"    listen {addr}:{listen['https_port']} ssl;\n"
-            + f"    server_name {listen['hostname']};\n"
-            + f"    ssl_certificate {tls['certificate_file']};\n"
-            + f"    ssl_certificate_key {tls['private_key_file']};\n"
-            + f"    location = {_HEALTH} {{\n"
-            + '        default_type text/plain;\n'
-            + f'        add_header X-Repocache-Generation "{generation}" always;\n'
-            + "        return 204;\n"
-            + "    }\n"
-            + "    location = /.well-known/repocache/catalog.json {\n"
-            + "        default_type application/json;\n"
-            + "        alias /var/lib/repocache/public/catalog.json;\n"
-            + "        limit_except GET HEAD { deny all; }\n"
-            + "    }\n"
-            + bundle["server_location_fragment"]
-            + "}\n"
-        ).encode("ascii")
-        if not 1 <= len(nginx) <= _LIMIT[_INCLUDE]:
-            _deny("NGINX_SIZE")
-        # Pure preview only. Real -T/full-context and effective exposure
-        # MUST be checked after actual reload and before publication.
-        preview = preview_derived_catalog_from_nginx_dump(
-            document, candidate_pins_by_repository=_resolve_pins(document),
-            ca_bundle_path=_CA[distribution],
-            nginx_dump_text=nginx.decode("ascii"), nginx_t_exit_code=0,
-        )
-        catalog = _canonical(preview["candidate_catalog"], limit=_LIMIT[_CATALOG])
-        return nginx, catalog, bundle, preview
-    except NativeV2TransactionError:
-        raise
-    except (ValueError, TypeError, UnicodeError, KeyError, OverflowError):
-        _deny("RENDER_INVALID")
 
 
 def _route_dump_check(document: dict, include: bytes, catalog: bytes,
@@ -730,6 +672,15 @@ def _recover_locked(state_fd: int, include_fd: int,
     if journal is not None and uncommitted is not None:
         _deny("CONFLICTING_WALS")
     if journal is None and uncommitted is None:
+        # Never report CLEAN when a crash left an unclaimed staging inode.
+        for fd, limit in ((include_fd, _LIMIT[_INCLUDE]),
+                          (public_fd, _LIMIT[_CATALOG])):
+            if _read_public(fd, _STAGE, limit) is not None:
+                _deny("ORPHAN_STAGE")
+        for name, limit in ((_STATE_STAGE, _LIMIT[V2_STATE]),
+                            (_MANIFEST_STAGE, _LIMIT[_MANIFEST])):
+            if _read_file(state_fd, name, 0, limit) is not None:
+                _deny("ORPHAN_STAGE")
         old = _read_all(state_fd, include_fd, public_fd)
         _verify_owned(old)
         return {"status": "NATIVE_V2_CLEAN", "recovery_required": False}
