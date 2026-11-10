@@ -1098,3 +1098,9 @@ simulated catalog lives under an isolated fake root; actual NGINX service
 reload, trusted host-root administrator provenance, mounted cache ownership,
 SELinux and atomic production publication are still missing. The original
 #31 operational AC1–AC5 remain NOT VERIFIED.
+
+The five-PR CI exercise also reruns the **actual installed distro packaged
+NGINX -T** and the derived client-catalog candidate comparison *inside*
+this same-lock prepublication callback. This guards against reusing the
+initial candidate preview as an implicit commit lease. It still does not
+prove the NGINX service running on a booted host or that routes are exposed.

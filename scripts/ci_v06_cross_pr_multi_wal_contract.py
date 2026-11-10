@@ -188,6 +188,18 @@ def main() -> None:
                     assert (folder / V2_STATE).read_bytes() == canonical_bytes(proposed)
                     assert (folder / CATALOG).read_bytes() == old_bytes[CATALOG]
                     assert (folder / MANIFEST).read_bytes() == old_bytes[MANIFEST]
+                    # Repeat the real packaged NGINX -T + derived client
+                    # catalog candidate check WHILE this same fixture WAL
+                    # and FD lock remain held; the earlier staging check
+                    # is not a reusable authority or generation lease.
+                    rechecked = syntax_checked_candidate(
+                        new_doc, candidate_pins, base,
+                    )
+                    assert rechecked["desired_active_repository_ids"] == (
+                        [chosen] if operation == "enable" else []
+                    )
+                    assert rechecked["actual_active_exposure_verified"] is False
+                    assert (folder / CATALOG).read_bytes() == old_bytes[CATALOG]
                     observed.append("before-fixture-catalog")
                     return None
 
