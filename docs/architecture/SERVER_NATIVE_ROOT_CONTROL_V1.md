@@ -296,3 +296,39 @@ integrity, locked durable #31 state/NGINX/catalog WAL, known-good rollback,
 and actual active service exposure before any controlled reload/catalog.
 No host installation, socket activation, grant, service reload or actual
 catalog publication was performed by this change.
+
+
+## Independent TLS certificate/private-key pair validation (uninstalled)
+
+The private `server_root_control_pinned_tls_pair_v1.py` helper addresses a
+**measured native AlmaLinux 10 security gap**: packaged NGINX may return
+successful `nginx -t` with a missing, malformed or mismatched TLS key.
+The future root transaction MUST independently verify the selected
+operator-provided certificate/private-key pair **before** staging a managed
+NGINX reload. The new helper accepts **already opened, read-only CLOEXEC
+file descriptors**, not a filesystem pathname, shell command or socket
+request. It rejects a same-FD pair, non-regular/unowned/unsafe-mode or
+multiply-linked files, oversized credentials, writable descriptors and
+content/inode/metadata drift. The certificate and key are passed to
+Python's TLS backend through pinned Linux `/proc/self/fd/N` references;
+`load_cert_chain(password="")` uses no interactive passphrase prompt.
+Underlying OpenSSL diagnostics, file paths, PEM data and SHA-256 digests
+are never emitted or returned. Synthetic actual OpenSSL pair, mismatched
+key and invalid key tests run in both distro CI containers.
+
+**Hard security limit:** The helper is private, uninstalled and **not
+called by the root socket worker**. Its current test seam accepts an
+explicit expected file owner UID, which is not independently authenticated.
+It verifies only opened-descriptor properties and pair loading, NOT the
+trustworthiness of certificate issuer, expiry, SAN/hostname, ownership
+of directory ancestors, nofollow/protected path resolution, mount, ACL,
+SELinux, signed installed code, native host root, live NGINX listener or
+user intent. Successful SSLContext loading does not prove any of these.
+Never expose the descriptor or UID arguments to a service account or
+socket request, or use a report to authorize write/reload/publication.
+The future protected #31 transaction must derive and open both credentials
+from the **locked canonical v2 state** using audited root dirfd traversal,
+check ownership/ACL/SELinux/mount/symlink/foreign-state policy and all
+TLS trust/hostname/expiry requirements, then retain the immutable verified
+operation context through the actual rollback-capable reload. This module
+does not substitute for that work or local booted-VM acceptance.

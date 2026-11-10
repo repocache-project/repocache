@@ -82,20 +82,16 @@ def test_untrusted_pinned_fd_refused(synthetic_pair, tmp_path, case, code):
         os.close(k)
         k = os.open(key, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
-        if case == "same-fd":
-            k = c
-        if case == "bool-fd":
-            c = True
+        selected_c = True if case == "bool-fd" else c
+        selected_k = c if case == "same-fd" else k
         uid = os.geteuid() + 1 if case == "bad-uid" else os.geteuid()
         with pytest.raises(gate.PinnedTLSPairError, match=code):
             gate._inspect_pinned_tls_pair_for_future_transaction(
-                c, k, expected_owner_uid=uid,
+                selected_c, selected_k, expected_owner_uid=uid,
             )
     finally:
-        if type(c) is int:
-            os.close(c)
-        if type(k) is int and k != c:
-            os.close(k)
+        os.close(c)
+        os.close(k)
 
 
 @pytest.mark.parametrize("case", ["missing", "mismatched", "invalid"])
