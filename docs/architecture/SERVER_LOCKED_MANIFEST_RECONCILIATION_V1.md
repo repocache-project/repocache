@@ -1025,3 +1025,31 @@ public catalog publication, or crash-safe multi-filesystem transaction.
 The shadow NGINX/catalog are private test files only. Passing this workflow
 does not adopt any unmerged PR, authenticate a candidate's approval
 reference, qualify native systemd/SELinux or unblock protected integration.
+
+
+### Interlock with non-atomic native NGINX package effects (#27)
+
+The v2 state-only and multi-resource fixture writers, state-only
+read-only recovery preview and both recovery entrypoints now check the
+**same exact native package-effects marker filenames** owned by the
+existing #27 `server_native_nginx_package_journal_v1` contract:
+`.native-nginx-v1.pending` and
+`.native-nginx-v1.pending-tmp`. They are checked under the existing
+owner-pinned state lock with the native journal's bounded metadata rules,
+including refusal of symlinks, unowned files and abnormal permissions.
+
+Either marker causes the fixed
+`NATIVE_PACKAGE_EFFECTS_RECONCILIATION_REQUIRED` refusal before v2
+state/include/catalog data is created, read as authoritative, rewritten
+or recovered. This prevents an incomplete APT/DNF NGINX package change
+from being silently treated as a coherent v0.6.0-managed installation.
+It also ensures a pending *separate* multi-resource WAL cannot be
+rolled back across an unresolved native package transaction.
+
+The tests cover both native marker states during v2 bootstrap and while
+a multi-resource WAL is pending. Test-only marker removal follows an
+explicit reconciliation step; **no code automatically deletes a native
+package marker or claims native package rollback.** Real APT/DNF side
+effects, installed systemd service identity and actual SELinux policy
+remain independently NOT VERIFIED. This is a fail-closed prerequisite,
+not production NGINX installation or an installer API.
