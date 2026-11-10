@@ -93,7 +93,11 @@ command whitelist, truncation, service account refusal, missing local policy,
 unprivileged worker denial and pure group/identity decisions. It additionally
 checks abstract/wrong-type listeners, permissive/symlink/foreign socket
 metadata, missing systemd activation FD and rejection of all root worker
-operations. The worker deliberately returns a nonzero status even for a
+operations. A disposable root-owned AF_UNIX listener test also verifies that
+a valid kernel listener is accepted only while its filesystem entry retains
+the expected owner/mode/group, then refuses a symlink substitution at the
+same pathname. This is a synthetic native socket-path test, NOT booted
+systemd/SELinux acceptance. The worker deliberately returns a nonzero status even for a
 successfully authenticated request: a refused operation must never be
 mistaken for a completed administrative change.
 
