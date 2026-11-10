@@ -54,7 +54,16 @@ def _expected_paths(
         raise IntegrityMismatch("Invalid or unbounded expected inventory")
     directories: set[str] = set()
     for path, item in expected.items():
-        if (not isinstance(path, str) or not path or len(path.encode("utf-8")) > 1024
+        if not isinstance(path, str):
+            raise IntegrityMismatch("Invalid expected inventory path")
+        try:
+            # Surrogates cannot denote canonical UTF-8 inventory paths.
+            # Reject them as an integrity mismatch rather than leaking an
+            # unchecked UnicodeEncodeError from untrusted input.
+            encoded_size = len(path.encode("utf-8", errors="strict"))
+        except UnicodeEncodeError as exc:
+            raise IntegrityMismatch("Invalid expected inventory path encoding") from exc
+        if (not path or encoded_size > 1024
                 or any(part in ("", ".", "..") or "\x00" in part
                        for part in path.split("/"))
                 or not isinstance(item, ExpectedRegularFile)

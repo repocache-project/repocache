@@ -108,7 +108,7 @@ def test_runtime_tampering_is_refused(prepared, tmp_path, tamper):
 
 @pytest.mark.parametrize("path", [
     "/absolute", "../escape", "a/../b", "a/./b", "a//b", "a/",
-    "a/\x00b", "a" * 1025,
+    "a/\x00b", "a" * 1025, "lib/bad\\udcff.py", "lib/bad\\ud800.py",
 ])
 def test_invalid_inventory_path_is_refused(prepared, path):
     root, inventory = prepared
@@ -180,3 +180,41 @@ def test_changed_file_during_measurement_is_refused(prepared, monkeypatch):
     with pytest.raises(IntegrityMismatch):
         verify(root, inventory)
     assert changed
+
+
+@pytest.mark.parametrize("target_kind", ["file", "directory"])
+def test_nofollow_open_refuses_concurrent_symlink_replacement(
+        prepared, tmp_path, monkeypatch, target_kind):
+    """Exercise the metadata-to-open race without following attacker links.
+
+    This tests a *detected* mutation, not a race-free launch boundary.
+    """
+    root, inventory = prepared
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "module.py").write_bytes(b"untrusted-but-never-read")
+    if target_kind == "file":
+        victim = root / "lib/module.py"
+        displaced = root / "lib/displaced.py"
+        opened_name = "module.py"
+    else:
+        victim = root / "lib"
+        displaced = root / "displaced-lib"
+        opened_name = "lib"
+
+    original_open = os.open
+    replaced = False
+
+    def replace_at_open(path, flags, *args, **kwargs):
+        nonlocal replaced
+        if path == opened_name and kwargs.get("dir_fd") is not None and not replaced:
+            replaced = True
+            victim.rename(displaced)
+            victim.symlink_to(outside, target_is_directory=target_kind == "directory")
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", replace_at_open)
+    with pytest.raises(IntegrityMismatch):
+        verify(root, inventory)
+    assert replaced
+    assert (outside / "module.py").read_bytes() == b"untrusted-but-never-read"
