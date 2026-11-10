@@ -34,11 +34,8 @@ jobs:
     env:
       PYTHONPATH: src
       PYTHONDONTWRITEBYTECODE: '1'
-      BASE_SHA: d53782ed01e1f85686f10279fd3c7eea6d7f6720
-      PR27_SHA: 0d85b45fe663f3bc5cb7d4a2eb066f1369ce22db
-      PR28_SHA: b23cc642cbb62eb0874c6f774f8caf4bbd25952d
-      PR64_SHA: 84e7ed2d8f6c8df24dcb4ca887a5c8843736608c
-      PR95_SHA: fa721e8dc730a95494f0675b7efa23f545c45e0f
+      BASE_SHA: 7585a95370a4b6d13c9893b6d98b523bd9d14522
+      PR64_SHA: 690e05027fed0b7d4ce649ce65d02221f915df1b
     steps:
       # Install git before checkout: the stock distro container images
       # lack git, so checkout would otherwise fall back to an archive with
@@ -77,26 +74,29 @@ jobs:
             echo "Integration base moved; stale combined rehearsal refused"
             exit 1
           }
-          # These are read-only fetches of already open, separate, approved-
-          # scope PR branches. Any changed HEAD invalidates this rehearsal.
-          git fetch --no-tags origin             +refs/heads/feat/27-native-nginx-service-unit-inventory-v1:refs/remotes/origin/pr27             +refs/heads/test/28-disposable-stock-nginx-real-cache-smoke:refs/remotes/origin/pr28             +refs/heads/feat/64-fixed-credentialed-native-control-v1:refs/remotes/origin/pr64             +refs/heads/feat/v0.6.0-declarative-reconciliation-95:refs/remotes/origin/pr95
-          for item in 27 28 64 95; do
-            expected_var="PR${item}_SHA"
-            expected="${!expected_var}"
-            observed="$(git rev-parse "refs/remotes/origin/pr${item}")"
-            test "$observed" = "$expected" ||               { echo "Dependency PR #${item} moved; rerun with pinned current HEAD"; exit 1; }
-            git merge-base --is-ancestor "$BASE_SHA" "$observed"
-          done
+          # The five approved, independently CI-accepted prerequisites
+          # (#255, #250, #252, #251 and #214) are now in BASE_SHA.
+          # Only the still-unmerged #64 fixed socket/TLS trust-boundary
+          # prototype is fetched and locally combined; no remote push.
+          git fetch --no-tags origin \
+            +refs/heads/feat/64-fixed-credentialed-native-control-v1:refs/remotes/origin/pr64
+          observed="$(git rev-parse refs/remotes/origin/pr64)"
+          test "$observed" = "$PR64_SHA" || {
+            echo "Dependency PR #254 moved; update exact SHA before rehearsal"
+            exit 1
+          }
+          # This unmerged sibling still forks from the former v0.6 base;
+          # validate its exact reviewed origin, not ancestry to the new
+          # protected branch which already includes the queued PRs.
+          git merge-base --is-ancestor d53782ed01e1f85686f10279fd3c7eea6d7f6720 "$observed"
           git merge-base --is-ancestor "$BASE_SHA" HEAD
           git config user.email "read-only-rehearsal@repocache.invalid"
           git config user.name "REPOCACHE disposable CI"
           git switch -c local-v06-rehearsal
-          for item in 27 28 64 95; do
-            git merge --no-ff --no-edit "refs/remotes/origin/pr${item}"
-          done
+          git merge --no-ff --no-edit refs/remotes/origin/pr64
           git diff --check "$BASE_SHA"..HEAD
           test -z "$(git status --porcelain)"
-          echo "PASS: exact-SHA local merge of #237 #252 #251 #254 #214"
+          echo "PASS: exact-SHA local merge of protected #255 #250 #252 #251 #214 + #237 #254"
           echo "NOT VERIFIED: protected integration merge, host-root, systemd, SELinux, release"
       - name: Run combined state, NGINX, catalog, systemd and lifecycle tests
         shell: bash
@@ -109,7 +109,7 @@ jobs:
           test ! -e /var/cache/nginx/repocache-managed
           test ! -L /var/cache/nginx/repocache-managed
           install -d -m 0700 /var/cache/nginx/repocache-managed
-          python3 -B -m pytest -q -rs             tests/test_server_proposed_state_v2_store.py             tests/test_server_locked_manifest_reconcile_v1.py             tests/test_server_root_control_protocol_v1.py             tests/test_server_root_control_host_preflight_v1.py             tests/test_server_root_control_worker_v1.py             tests/test_server_root_control_client_v1.py             tests/test_server_root_control_native_syntax_v1.py             tests/test_server_native_nginx_service_unit_v1.py             tests/test_server_native_nginx_effective_unit_v1.py             tests/test_server_nginx_pin_render_v1.py             tests/test_server_nginx_repository_bundle_v1.py             tests/test_server_derived_catalog_candidate_v1.py             tests/test_server_derived_catalog_client_contract_v1.py             tests/test_server_repository_reconcile_v1.py
+          python3 -B -m pytest -q -rs             tests/test_server_proposed_state_v2_store.py             tests/test_server_locked_manifest_reconcile_v1.py             tests/test_server_root_control_protocol_v1.py             tests/test_server_root_control_host_preflight_v1.py             tests/test_server_root_control_worker_v1.py             tests/test_server_root_control_client_v1.py             tests/test_server_root_control_native_syntax_v1.py             tests/test_server_root_control_pinned_tls_pair_v1.py             tests/test_server_native_nginx_service_unit_v1.py             tests/test_server_native_nginx_effective_unit_v1.py             tests/test_server_nginx_pin_render_v1.py             tests/test_server_nginx_repository_bundle_v1.py             tests/test_server_derived_catalog_candidate_v1.py             tests/test_server_derived_catalog_client_contract_v1.py             tests/test_server_repository_reconcile_v1.py
           python3 -B scripts/ci_v06_cross_pr_lifecycle_contract.py
           python3 -B scripts/ci_v06_cross_pr_multi_wal_contract.py
           # Fixed package-root syntax inspection is only exercised in this

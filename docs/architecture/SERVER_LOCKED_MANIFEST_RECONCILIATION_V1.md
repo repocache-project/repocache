@@ -1138,3 +1138,21 @@ absent state, interrupted WAL, foreign legacy state, same-byte inode
 substitution and root refusal. Real booted native host, signed installed
 worker, operator approval, NGINX reload and postpublication acceptance
 remain NOT VERIFIED. The original issue #31 host criteria are unchanged.
+
+
+## Protected integration reconciliation after first five queued PRs (2026-11-10)
+
+The reviewed Merge Queue integrated the narrow, non-activating CI/test
+prerequisites #255 (TLS smoke), #250 (pure pressure preview), #252 (native
+NGINX unit inventory), #251 (real isolated cache/derived catalog) and #214
+(pure repository lifecycle planner), in that exact order, onto the
+protected v0.6.0 integration branch. The existing #237 PR preserves its
+previous 13-path state-v2/locked-journal changes by an explicit two-parent,
+non-protected branch reconciliation against that exact integration commit.
+The combined ephemeral rehearsal therefore reads these accepted source
+files directly from the protected base and pins **only the still-unmerged
+#254 root-control sibling**, including its independent pinned-TLS-pair
+negative tests. The approved v2 schema, original issue criteria, test-only
+origin substitutions and all no-activation/NOT VERIFIED flags remain
+unchanged. Merging this preparatory branch into the protected target is
+still disallowed until its own original full acceptance gates pass.

@@ -1,0 +1,67 @@
+name: Disposable stock NGINX HTTPS cache smoke
+on:
+  pull_request:
+    paths:
+      - .github/workflows/native-nginx-cache-smoke.yml
+      - scripts/ci_native_nginx_cache_smoke.py
+      - scripts/ci_generated_nginx_route_cache_smoke.py
+      - src/repocache/server_nginx_repository_bundle_v1.py
+      - src/repocache/server_derived_catalog_candidate_v1.py
+      - tests/test_server_derived_catalog_candidate_v1.py
+      - src/repocache/server_nginx_pin_render_v1.py
+      - docs/examples/server-install-v1.json
+      - docs/testing/NATIVE_NGINX_CACHE_SMOKE.md
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native-cache:
+    name: Disposable NGINX cache (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: debian13
+            image: debian:13-slim
+          - platform: almalinux10
+            image: almalinux:10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install native NGINX in disposable distro image
+        env:
+          BASE_IMAGE: ${{ matrix.image }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > "$RUNNER_TEMP/Dockerfile.repocache-nginx" <<'DOCKERFILE'
+          ARG BASE_IMAGE
+          FROM $BASE_IMAGE
+          RUN if command -v apt-get >/dev/null 2>&1; then \
+                apt-get update -qq && \
+                DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+                  nginx python3 openssl ca-certificates && \
+                rm -rf /var/lib/apt/lists/*; \
+              else \
+                dnf -y -q install nginx python3 openssl ca-certificates && \
+                dnf -q clean all; \
+              fi
+          DOCKERFILE
+          docker build --pull --build-arg "BASE_IMAGE=$BASE_IMAGE" \
+            -t "repocache-native-cache:${{ matrix.platform }}" \
+            -f "$RUNNER_TEMP/Dockerfile.repocache-nginx" "$RUNNER_TEMP"
+      - name: Verify real NGINX TLS, syntax, APT/DNF MISS and HIT
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker run --rm --network none --read-only --user 65534:65534 \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,nosuid,nodev,size=128m,mode=1777 \
+            --mount "type=bind,source=${{ github.workspace }},target=/repo,readonly" \
+            -e PYTHONPATH=/repo/src -e REPOCACHE_DISPOSABLE_NGINX_SMOKE=1 \
+            "repocache-native-cache:${{ matrix.platform }}" \
+            /bin/sh -eu -c 'python3 /repo/scripts/ci_native_nginx_cache_smoke.py && \
+              python3 /repo/scripts/ci_generated_nginx_route_cache_smoke.py'

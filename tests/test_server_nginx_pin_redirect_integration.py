@@ -30,9 +30,11 @@ APPROVED_HOST = "mirror.example.invalid"
 CANARY_PATH = "/__repocache_unrelated_internal_canary"
 
 
-def render(*, ca):
+def render(*, ca, cache_root=None):
     document = json.loads(EXAMPLE.read_text(encoding="utf-8"))
     document["repositories"][0]["desired_state"] = "active"
+    if cache_root is not None:
+        document["deployment"]["paths"]["cache_root"] = str(cache_root)
     return render_pinned_upstream_fragments(
         document,
         repository_id="debian-trixie-main",
@@ -150,7 +152,12 @@ def test_real_nginx_pinned_tls_sni_and_redirects(
             "-subj", "/CN=unrelated-ca.example.invalid",
             "-addext", "subjectAltName=DNS:unrelated-ca.example.invalid",
         ], check=True, capture_output=True, timeout=15)
-    candidate = render(ca=str(trusted_bundle))
+    # The real candidate now includes a zone/path per active repository.
+    # The disposable test must provide its own isolated, writable cache
+    # directory instead of ever touching the canonical host cache root.
+    candidate_cache = tmp_path / "candidate_cache"
+    (candidate_cache / "debian-trixie-main").mkdir(parents=True, mode=0o700)
+    candidate = render(ca=str(trusted_bundle), cache_root=candidate_cache)
     upstream = candidate["http_upstream_fragment"]
     assert "server 8.8.8.8:443;" in upstream
     assert "server [2001:4860:4860::8888]:443;" in upstream
