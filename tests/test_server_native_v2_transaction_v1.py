@@ -368,3 +368,67 @@ def test_private_dns_address_refused_before_durable_wal(filesystem, monkeypatch)
     assert not (state / native._WAL).exists()
     assert not include.exists()
     assert not catalog.exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="Linux fork required")
+def test_real_child_process_abrupt_exit_recovers_persistent_native_wal(
+    filesystem, monkeypatch,
+):
+    """No Python exception unwinding: child dies after fsynced WAL + state."""
+    stage(filesystem, snapshot(count=1))
+    _fd, state, include, catalog, _events = filesystem
+    original_reload = native._reload_native
+    child = os.fork()
+    if child == 0:
+        # This branch never returns; the parent alone owns pytest results.
+        native._reload_native = lambda *_args: os._exit(71)
+        try:
+            apply(filesystem)
+        except BaseException:
+            os._exit(72)
+        os._exit(73)
+    pid, result = os.waitpid(child, 0)
+    assert pid == child and os.WIFEXITED(result)
+    assert os.WEXITSTATUS(result) == 71
+    assert (state / native._WAL).is_file()
+    assert (state / V2_STATE).is_file()
+    assert include.is_file()
+    assert not catalog.exists()
+    monkeypatch.setattr(native, "_reload_native", original_reload)
+    assert recover(filesystem)["status"] == "NATIVE_V2_ROLLED_BACK"
+    assert not include.exists()
+    assert not catalog.exists()
+    assert not (state / V2_STATE).exists()
+    assert_no_pending(filesystem)
+
+
+def test_no_wal_cannot_clear_unowned_orphan_stage(filesystem):
+    _fd, state, include, catalog, _events = filesystem
+    stage_file = include.parent / native._STAGE
+    stage_file.write_bytes(b"orphan")
+    stage_file.chmod(0o644)
+    with pytest.raises(native.NativeV2TransactionError, match="ORPHAN_STAGE"):
+        recover(filesystem)
+    assert stage_file.read_bytes() == b"orphan"
+
+
+def test_owner_manifest_cannot_hide_unauthorized_catalog_mapping(filesystem):
+    stage(filesystem, snapshot(count=1))
+    apply(filesystem)
+    _fd, state, include, catalog, _events = filesystem
+    unauthorized = _canon({
+        "schema": 1,
+        "repositories": [{
+            "upstream": "https://foreign.example.invalid/",
+            "cache": "https://cache.example.invalid/__repocache/repos/foreign/",
+        }],
+    })
+    catalog.write_bytes(unauthorized)
+    catalog.chmod(0o644)
+    forged_manifest = native._manifest_for(
+        (state / V2_STATE).read_bytes(), include.read_bytes(), unauthorized,
+    )
+    (state / native._MANIFEST).write_bytes(forged_manifest)
+    (state / native._MANIFEST).chmod(0o600)
+    with pytest.raises(native.NativeV2TransactionError, match="CATALOG_DRIFT"):
+        recover(filesystem)
