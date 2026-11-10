@@ -211,3 +211,44 @@ def test_invalid_packet_does_not_execute_filesystem_or_subprocess(monkeypatch):
     finally:
         a.close()
         b.close()
+
+
+@pytest.mark.parametrize("case", [
+    "truncated-credentials", "invalid-pid", "missing-groups",
+    "bad-group-width", "negative-gid",
+])
+def test_kernel_credential_metadata_errors_fail_closed(case):
+    class Peer:
+        family = socket.AF_UNIX
+        type = socket.SOCK_SEQPACKET
+
+        def getsockopt(self, _level, option, _size):
+            if option == socket.SO_PEERCRED:
+                if case == "truncated-credentials":
+                    return b"0"
+                return struct.pack(
+                    "3i", 0 if case == "invalid-pid" else 100,
+                    1001, -1 if case == "negative-gid" else 3000,
+                )
+            if case == "missing-groups":
+                raise OSError("kernel groups unavailable")
+            if case == "bad-group-width":
+                return b"x"
+            return struct.pack("i", 3000)
+    with pytest.raises(FixedRootControlError,
+                       match="PEER_CREDENTIALS|PEER_GROUPS"):
+        uid, gid, groups = _peer_credentials(Peer())
+        # Kernel payload parsing and pure identity policy remain separate,
+        # so the invalid primary gid is rejected at this independent stage.
+        _decide_peer(
+            peer_uid=uid, peer_gid=gid, peer_groups=groups,
+            admin_gid=3000, service_uid=900,
+        )
+
+
+def test_too_many_groups_never_bypass_identity_validation():
+    with pytest.raises(FixedRootControlError, match="IDENTITY_INVALID"):
+        _decide_peer(
+            peer_uid=1001, peer_gid=3000, peer_groups=(3000,) * 257,
+            admin_gid=3000, service_uid=900,
+        )
