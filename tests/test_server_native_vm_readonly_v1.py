@@ -128,3 +128,19 @@ def test_actual_docker_userspace_cannot_claim_complete_host_acceptance():
     assert result["complete_server_acceptance_passed"] is False
     assert result["host_root_attested"] is False
     assert result["authorizes_nginx_reload"] is False
+
+
+def test_sysfs_virtual_attribute_size_does_not_mask_enforcing_status(monkeypatch):
+    # sysfs regular attrs can have st_size=4096 but return b"1\\n".
+    events = []
+    monkeypatch.setattr(vm, "os", SimpleNamespace(
+        O_RDONLY=os.O_RDONLY, O_NONBLOCK=os.O_NONBLOCK,
+        O_CLOEXEC=getattr(os, "O_CLOEXEC", 0),
+        open=lambda *_: 83,
+        fstat=lambda _: SimpleNamespace(st_mode=stat.S_IFREG | 0o444,
+                                        st_size=4096),
+        read=lambda fd, size: b"1\\n",
+        close=lambda fd: events.append(fd),
+    ))
+    assert vm._read_fixed("/sys/fs/selinux/enforce", 32) == b"1\\n"
+    assert events == [83]

@@ -25,7 +25,11 @@ def _read_fixed(path: str, size: int) -> bytes:
         raise NativeVMReadOnlyError("FIXED_READ_UNAVAILABLE") from None
     try:
         info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or not 0 <= info.st_size <= size:
+        # procfs/sysfs regular attributes often advertise a synthetic 4096
+        # byte st_size while returning only a few real bytes. Bound the
+        # actual read for all probes; bound disk-backed os-release size too.
+        if (not stat.S_ISREG(info.st_mode) or info.st_size < 0
+                or (path == "/etc/os-release" and info.st_size > size)):
             raise NativeVMReadOnlyError("FIXED_READ_UNSAFE")
         data = os.read(fd, size + 1)
         if not 1 <= len(data) <= size:
