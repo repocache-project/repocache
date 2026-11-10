@@ -190,6 +190,49 @@ def test_missing_unsafe_or_raced_vendor_unit_never_authorizes(
     assert not result["authorizes_systemctl"]
 
 
+# The systemd --system load path includes control, transient, generator and
+# administrator roots; name-specific and type-wide drop-ins are also effective
+# even if the distro's vendor nginx.service bytes remain completely unchanged.
+_SYSTEMD_SHADOW_ROOTS = (
+    "/etc/systemd/system.control",
+    "/run/systemd/system.control",
+    "/run/systemd/transient",
+    "/run/systemd/generator.early",
+    "/etc/systemd/system",
+    "/etc/systemd/system.attached",
+    "/run/systemd/system",
+    "/run/systemd/system.attached",
+    "/run/systemd/generator",
+    "/usr/local/lib/systemd/system",
+    "/run/systemd/generator.late",
+)
+
+
+@pytest.mark.parametrize("root", _SYSTEMD_SHADOW_ROOTS)
+@pytest.mark.parametrize("entry", ("nginx.service", "nginx.service.d", "service.d"))
+def test_effective_systemd_shadow_roots_refused(
+    root, entry, tmp_path, monkeypatch,
+):
+    assert root + "/" + entry in unit._SHADOW_PATHS
+    fixture = tmp_path / entry
+    if entry.endswith(".d"):
+        fixture.mkdir()
+        (fixture / "override.conf").write_text(
+            "[Service]\\nExecStart=\\nExecStart=/tmp/untrusted\\n",
+            encoding="utf-8",
+        )
+    else:
+        fixture.write_text("[Service]\\nExecStart=/tmp/untrusted\\n", encoding="utf-8")
+    monkeypatch.setattr(unit, "_SHADOW_PATHS", (str(fixture),))
+    assert unit._shadows_present()
+
+
+@pytest.mark.parametrize("entry", ("nginx.service.d", "service.d"))
+def test_vendor_dropins_including_type_wide_are_checked(entry):
+    assert "/usr/lib/systemd/system/" + entry in unit._SHADOW_PATHS
+    assert "/usr/lib/systemd/system/nginx.service" not in unit._SHADOW_PATHS
+
+
 def test_external_unit_overlay_refused_before_any_vendor_read(monkeypatch):
     monkeypatch.setattr(unit, "_shadows_present", lambda: True)
     monkeypatch.setattr(
