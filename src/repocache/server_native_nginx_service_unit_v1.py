@@ -38,10 +38,20 @@ _SYSTEM_SHADOW_ROOTS = (
 _SHADOW_PATHS = tuple(
     root + "/" + entry
     for root in _SYSTEM_SHADOW_ROOTS
-    for entry in ("nginx.service", "nginx.service.d", "service.d")
-) + (
-    "/usr/lib/systemd/system/nginx.service.d",
-    "/usr/lib/systemd/system/service.d",
+    for entry in (
+        "nginx.service", "nginx.service.d", "service.d",
+        # systemd loads implicit dependencies from these unit-specific
+        # directories even when nginx.service itself is unmodified.
+        "nginx.service.wants", "nginx.service.requires",
+        "nginx.service.upholds",
+    )
+) + tuple(
+    "/usr/lib/systemd/system/" + entry
+    for entry in (
+        "nginx.service.d", "service.d",
+        "nginx.service.wants", "nginx.service.requires",
+        "nginx.service.upholds",
+    )
 )
 _PARENT_PATHS = (
     "/", "/usr", "/usr/lib", "/usr/lib/systemd", "/usr/lib/systemd/system",
