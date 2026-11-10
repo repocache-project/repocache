@@ -107,7 +107,7 @@ def test_accepted_admin_operation_still_refuses_all_mutations(monkeypatch):
 
         def send(self, packet):
             response = json.loads(packet)
-            assert packet.endswith(b"\\n")
+            assert packet.endswith(b"\n")
             assert response["status"] == "ROOT_TRANSACTION_NOT_IMPLEMENTED"
             return len(packet)
 
@@ -290,7 +290,7 @@ def test_authenticated_seqpacket_receives_fixed_non_success_reply(monkeypatch):
                             lambda _: {"operation": "RECOVER_V2"})
         output = worker.serve_one_fixed_request()
         raw = client.recv(4096)
-        assert raw.endswith(b"\\n")
+        assert raw.endswith(b"\n")
         assert len(raw) < 1024
         assert json.loads(raw) == output
         assert output["requested_operation"] == "RECOVER_V2"
