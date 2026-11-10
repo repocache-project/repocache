@@ -21,6 +21,7 @@ from repocache.server_locked_manifest_reconcile_v1 import (
 from repocache.server_proposed_state_v2_store import (
     MAX_V2_STATE_BYTES, V2_STATE, _freeze, _legacy_refusal, _no_change,
     _pending, _read_v2, _refuse_actual_root_fixture_write,
+    _verify_recovery_next, ProposedV2PersistenceError,
 )
 from repocache.server_protected_state_store_v1 import (
     _canonical, _json, _locked, _read_file, _unlink_known,
@@ -334,6 +335,19 @@ def _recover_fixture_multi_resource_under_root(
         # A temp journal alone must never authorize a resource replacement.
         _check_known(directory, owner_uid, old, next_sha,
                      require_old=journal is None)
+        # Validate the exact old->new v2 schema, retired IDs and generation
+        # BEFORE restoring any resource. A forged next digest alone is not
+        # sufficient proof that an observed state file is a legitimate
+        # transition, even for a fixture recovery.
+        current_state = _read(directory, owner_uid, V2_STATE)
+        if journal is not None and current_state != old[V2_STATE]:
+            try:
+                _verify_recovery_next(
+                    current_state, next_sha[V2_STATE], old[V2_STATE],
+                    kind="MULTI_RESOURCE_REPLACED_STATE",
+                )
+            except (ProposedV2PersistenceError, ValueError, TypeError):
+                _refuse("NEXT_STATE_INVALID")
         # Stage is a fixed temporary inode, not a completed resource. Only
         # a complete known next-resource digest can be cleaned up.
         stage = _read_file(directory, STAGE, owner_uid, max(LIMITS.values()))
