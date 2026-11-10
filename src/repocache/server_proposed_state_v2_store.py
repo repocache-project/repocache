@@ -27,6 +27,9 @@ from repocache.server_protected_state_store_v1 import (
     _canonical, _closed, _hash, _json, _locked, _read_file, _read_state,
     _unlink_known, _write_exclusive,
 )
+from repocache.server_native_nginx_package_journal_v1 import (
+    NATIVE_PENDING_NAME, NATIVE_TMP_NAME, MAX_NATIVE_JOURNAL_BYTES,
+)
 from repocache.server_install_v1 import MAX_INT, parse_install_bytes
 from repocache.server_nginx_repository_bundle_v1 import (
     NginxRepositoryBundleError, render_repository_nginx_bundle_candidate,
@@ -105,6 +108,13 @@ def _read_v2(directory: int, uid: int) -> tuple[dict[str, Any] | None, bytes | N
 
 
 def _legacy_refusal(directory: int, uid: int) -> None:
+    # A native APT/DNF package transaction can leave non-atomic, not readily
+    # reversible effects. Neither v2 state commits nor their recovery may
+    # run while either native package-effects marker exists. This ensures
+    # neither fixture v2 writer can adopt a partially provisioned NGINX host.
+    for name in (NATIVE_PENDING_NAME, NATIVE_TMP_NAME):
+        if _read_file(directory, name, uid, MAX_NATIVE_JOURNAL_BYTES) is not None:
+            _refuse("NATIVE_PACKAGE_EFFECTS_RECONCILIATION_REQUIRED")
     # Both generations must never silently cohabit. A real v1 migration needs
     # separate authorization, conflict resolution and crash-tested journal.
     for name, bound in (
