@@ -98,3 +98,77 @@ def test_failure_emits_only_static_error(monkeypatch, capsys):
     assert payload == {
         "code": "CONTAINER_ISOLATION_UNVERIFIED", "status": "FAIL"
     }
+
+
+def test_native_unit_dpkg_owner_requires_exact_nginx_package_and_fixed_path(tmp_path):
+    from types import SimpleNamespace
+    observed = []
+
+    def native_runner(args, **kwargs):
+        observed.append(args)
+        assert kwargs["check"] is False
+        assert not kwargs.get("shell")
+        assert kwargs["env"]["PATH"] == "/usr/sbin:/usr/bin:/sbin:/bin"
+        assert args[:2] == ["/usr/bin/dpkg-query", "-S"]
+        # Debian usrmerge inventories may use /lib rather than /usr/lib.
+        if args[2] == "/lib/systemd/system/nginx.service":
+            return SimpleNamespace(
+                returncode=0,
+                stdout="nginx-common: /lib/systemd/system/nginx.service\n",
+                stderr="",
+            )
+        return SimpleNamespace(returncode=1, stdout="", stderr="no owner")
+
+    assert smoke._native_unit_package_owner("debian", tmp_path, native_runner)
+    assert len(observed) == 2
+    assert all("nginx.service" in cmd[2] for cmd in observed)
+
+
+@pytest.mark.parametrize("forged", [
+    "other-package: /lib/systemd/system/nginx.service\n",
+    "nginx-common: /tmp/fake-nginx.service\n",
+    "nginx-common: /lib/systemd/system/nginx.service extra\n",
+    "nginx-common: /lib/systemd/system/nginx.service\nUNTRUSTED",
+])
+def test_native_unit_dpkg_untrusted_owners_are_refused(tmp_path, forged):
+    from types import SimpleNamespace
+
+    def wrong_owner(args, **kwargs):
+        return SimpleNamespace(returncode=0, stdout=forged, stderr="")
+
+    assert not smoke._native_unit_package_owner("debian", tmp_path, wrong_owner)
+
+
+@pytest.mark.parametrize("package", ["nginx", "nginx-core"])
+def test_native_unit_rpm_owner_requires_exact_nginx_package(tmp_path, package):
+    from types import SimpleNamespace
+    commands = []
+
+    def native_runner(args, **kwargs):
+        commands.append(args)
+        return SimpleNamespace(returncode=0, stdout=package, stderr="")
+
+    assert smoke._native_unit_package_owner("almalinux", tmp_path, native_runner)
+    assert commands == [[
+        "/usr/bin/rpm", "-qf", "--queryformat=%{NAME}",
+        "/usr/lib/systemd/system/nginx.service",
+    ]]
+
+
+@pytest.mark.parametrize("forged", [
+    "nginx-extra", "third-party", "nginx-core\nother", "",
+])
+def test_native_unit_rpm_wrong_owner_is_refused(tmp_path, forged):
+    from types import SimpleNamespace
+
+    def wrong_owner(args, **kwargs):
+        return SimpleNamespace(returncode=0, stdout=forged, stderr="")
+
+    assert not smoke._native_unit_package_owner("almalinux", tmp_path, wrong_owner)
+
+
+def test_native_unit_owner_unknown_distribution_is_refused_without_commands(tmp_path):
+    assert not smoke._native_unit_package_owner(
+        "ubuntu", tmp_path, lambda *_args, **_kwargs:
+            pytest.fail("unsupported distro must not run a package manager"),
+    )

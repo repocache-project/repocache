@@ -187,20 +187,63 @@ def test_nginx_t_accepts_composed_candidates_in_disposable_config(tmp_path):
     ) if Path(p).is_file()), None)
     if native_ca is None:
         pytest.skip("packaged CA bundle unavailable")
-    result = render(ca=native_ca)
+    doc = document()
+    doc["deployment"]["paths"]["cache_root"] = str(tmp_path / "candidate_cache")
+    for repository in doc["repositories"]:
+        (tmp_path / "candidate_cache" / repository["id"]).mkdir(
+            parents=True, mode=0o700,
+        )
+    result = render(doc=doc, ca=native_ca)
     conf = tmp_path / "nginx.conf"
     conf.write_text(
         f"pid {tmp_path / 'nginx.pid'};\n"
         f"error_log {tmp_path / 'error.log'} notice;\n"
         "events {}\nhttp { access_log off;\n"
+        f"client_body_temp_path {tmp_path / 'candidate_client_temp'};\n"
+        f"proxy_temp_path {tmp_path / 'candidate_proxy_temp'};\n"
+        f"fastcgi_temp_path {tmp_path / 'candidate_fastcgi_temp'};\n"
+        f"uwsgi_temp_path {tmp_path / 'candidate_uwsgi_temp'};\n"
+        f"scgi_temp_path {tmp_path / 'candidate_scgi_temp'};\n"
         + result["http_upstream_fragment"]
         + "server { listen 127.0.0.1:19991;\n"
         + result["server_location_fragment"]
         + "}\n}\n",
         encoding="utf-8",
     )
+    for name in ("candidate_client_temp", "candidate_proxy_temp",
+                 "candidate_fastcgi_temp", "candidate_uwsgi_temp",
+                 "candidate_scgi_temp"):
+        (tmp_path / name).mkdir()
     checked = subprocess.run(
-        [shutil.which("nginx"), "-t", "-c", str(conf), "-p", str(tmp_path)],
+        [shutil.which("nginx"), "-t", "-e", str(tmp_path / "nginx-startup.log"),
+         "-c", str(conf), "-p", str(tmp_path)],
         capture_output=True, text=True, timeout=10, check=False,
     )
     assert checked.returncode == 0, checked.stderr
+
+
+def test_generated_bundle_preserves_per_repository_cache_isolation_and_policy():
+    doc = document()
+    doc["repositories"][0]["cache_overrides"] = {"max_size_bytes": 32768}
+    doc["repositories"][1]["cache_overrides"] = {"inactive_seconds": 240}
+    result = render(doc=doc)
+    http = result["http_upstream_fragment"]
+    locations = result["server_location_fragment"]
+    assert http.count("proxy_cache_path ") == 2
+    assert http.count("keys_zone=repocache_cache_") == 2
+    assert "debian-trixie-main levels=1:2 " in http
+    assert "almalinux-baseos levels=1:2 " in http
+    assert "inactive=604800s max_size=32768" in http
+    assert "inactive=240s max_size=10737418240" in http
+    assert "proxy_cache repocache_cache_debian_trixie_main;" in locations
+    assert "proxy_cache repocache_cache_almalinux_baseos;" in locations
+    assert result["active_exposure_verified"] is False
+    assert result["authorizes_catalog_publication"] is False
+
+
+def test_disabled_repository_has_no_allocated_cache_zone():
+    result = render(doc=document(dnf=False), candidates=pins(dnf=False))
+    assert result["http_upstream_fragment"].count("proxy_cache_path ") == 1
+    assert "repocache_cache_almalinux_baseos" not in (
+        result["http_upstream_fragment"] + result["server_location_fragment"]
+    )

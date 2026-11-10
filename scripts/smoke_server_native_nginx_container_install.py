@@ -15,6 +15,12 @@ import sys
 import tempfile
 
 from repocache.server_install_v1 import validate_os_identity
+from repocache.server_native_nginx_service_unit_v1 import (
+    VENDOR_UNIT, inspect_native_nginx_unit,
+)
+from repocache.server_native_nginx_effective_unit_v1 import (
+    EffectiveNginxUnitError, inspect_effective_native_nginx_unit,
+)
 from repocache.server_native_package_trust_v1 import (
     _NATIVE, _apt_commands, _dnf_commands, _run, _trusted_key,
 )
@@ -65,6 +71,41 @@ def _commands(distribution: str, work: Path) -> tuple[list[str], list[str]]:
         opts = [x for x in prefix if x != roots[0]]
         return [*opts, "makecache", "--refresh"], [*opts, "install", "nginx"]
     _deny("CONTAINER_DISTRIBUTION_UNSUPPORTED")
+
+
+def _native_unit_package_owner(distribution: str, work: Path, runner) -> bool:
+    """Check exact vendor unit attribution in the disposable package DB.
+
+    This is NOT cryptographic proof of host package trust: the signed native
+    sources were previously checked. No systemctl operation is performed.
+    """
+    if distribution == "debian":
+        # Debian usrmerge may record either spelling in the dpkg database.
+        for path in (
+            "/usr/lib/systemd/system/nginx.service",
+            "/lib/systemd/system/nginx.service",
+        ):
+            output, error = _run(
+                ["/usr/bin/dpkg-query", "-S", path],
+                work=work, runner=runner,
+            )
+            if error:
+                continue
+            # Multiple lines or mixed package attribution are not an
+            # unambiguous vendor-owner statement; refuse instead of
+            # accepting one safe-looking line from malicious extra output.
+            if output.strip() in (
+                "nginx-common: " + path, "nginx: " + path,
+            ):
+                return True
+        return False
+    if distribution == "almalinux":
+        output, error = _run(
+            ["/usr/bin/rpm", "-qf", "--queryformat=%{NAME}", VENDOR_UNIT],
+            work=work, runner=runner,
+        )
+        return not error and output.strip() in ("nginx", "nginx-core")
+    return False
 
 
 def run_rehearsal(
@@ -119,6 +160,25 @@ def run_rehearsal(
         )
         if failure:
             _deny("CONTAINER_NGINX_CONFIG_VALIDATION_FAILED")
+        service_unit = inspect_native_nginx_unit(distribution)
+        if service_unit.code != "VENDOR_NGINX_UNIT_OBSERVED":
+            # Expose only a strictly enumerated, static, redacted observer code.
+            # This is diagnostic evidence, not the unit contents or a path.
+            _deny("CONTAINER_" + service_unit.code)
+        if not _native_unit_package_owner(distribution, work, runner):
+            _deny("CONTAINER_NATIVE_SYSTEMD_UNIT_PACKAGE_UNVERIFIED")
+        # Prove that a package-owned vendor unit alone NEVER passes the
+        # effective-PID1 gate in this Docker userspace (PID1 is not systemd).
+        # We only run the non-mutating, fixed-argument systemctl show check;
+        # no service start/reload is performed.
+        if Path("/proc/1/comm").read_text(encoding="ascii").strip() == "systemd":
+            _deny("CONTAINER_UNEXPECTED_SYSTEMD_PID1")
+        try:
+            inspect_effective_native_nginx_unit(distribution)
+        except EffectiveNginxUnitError:
+            effective_unit_refused = True
+        else:
+            _deny("CONTAINER_EFFECTIVE_UNIT_FALSE_AUTHORITY")
     return {
         "schema_version": 1,
         "status": "CONTAINER_NATIVE_NGINX_INSTALLED_SYNTAX_OK",
@@ -126,6 +186,12 @@ def run_rehearsal(
         "authenticated_native_source_used": True,
         "native_transaction_executed_in_disposable_container": True,
         "nginx_syntax_test_passed_in_container": True,
+        "vendor_nginx_systemd_unit_bounded_read_passed": True,
+        "vendor_nginx_systemd_unit_distro_package_owned": True,
+        "vendor_nginx_systemd_unit_sha256": service_unit.digest,
+        "effective_nginx_unit_refused_without_systemd_pid1": (
+            effective_unit_refused
+        ),
         "native_systemd_tested": False,
         "selinux_enforcing_host_tested": False,
         "service_start_or_reload_explicitly_requested_by_test_driver": False,
