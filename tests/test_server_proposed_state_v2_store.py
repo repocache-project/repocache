@@ -2299,3 +2299,36 @@ def test_v2_same_lock_disposable_native_nginx_syntax_before_state_write(
         assert result["nginx_syntax_verified"] is False
         assert result["authorizes_nginx_reload"] is False
         assert (folder / V2_STATE).exists()
+
+
+@pytest.mark.parametrize("operation", ["commit", "preflight", "recover"])
+def test_private_v2_fixture_writers_refuse_actual_namespace_root(operation):
+    """Neither privileged nor unprivileged callers may use the live '/' FD."""
+    current_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        uid = os.geteuid()
+        with pytest.raises(
+            ProposedV2PersistenceError,
+            match="CURRENT_NAMESPACE_ROOT_WRITES_REFUSED",
+        ):
+            if operation == "commit":
+                commit(current_fd, snapshot(count=1), owner_uid=uid,
+                       expected_generation=0)
+            elif operation == "preflight":
+                commit_preflighted(
+                    current_fd, snapshot(count=1), owner_uid=uid,
+                    expected_generation=0, candidate_pins_by_repository={},
+                    ca_bundle_path="/etc/ssl/certs/ca-certificates.crt",
+                )
+            else:
+                recover(current_fd, owner_uid=uid)
+    finally:
+        os.close(current_fd)
+
+
+@pytest.mark.parametrize("invalid_fd", [-1, True, None, "root"])
+def test_private_v2_fixture_writer_refuses_bad_root_fd(invalid_fd):
+    with pytest.raises(ProposedV2PersistenceError,
+                       match="FIXTURE_ROOT_INVALID"):
+        commit(invalid_fd, snapshot(count=1),
+               owner_uid=os.geteuid(), expected_generation=0)
