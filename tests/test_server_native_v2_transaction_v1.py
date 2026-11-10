@@ -519,3 +519,98 @@ def test_generated_complete_managed_nginx_server_passes_real_distro_parser(
     )
     observed_catalog = json.loads(catalog)
     assert len(observed_catalog["repositories"]) == int(active)
+
+
+@pytest.mark.parametrize("resource", ["public_include", "private_state"])
+def test_interrupted_partial_stage_is_recoverable_without_unsafe_publication(
+    filesystem, monkeypatch, resource,
+):
+    """Crash after durable WAL but inside stage write, not after its fsync."""
+    stage(filesystem, snapshot(count=1))
+    _fd, state, include, catalog, events = filesystem
+    if resource == "public_include":
+        original = native._write_public
+        def torn_public(parent, name, before, after, maximum):
+            if name != native._INCLUDE:
+                return original(parent, name, before, after, maximum)
+            fd = os.open(native._STAGE, os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                         0o600, dir_fd=parent)
+            try:
+                os.write(fd, b"partial config")
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            raise KeyboardInterrupt("simulated power loss during include write")
+        monkeypatch.setattr(native, "_write_public", torn_public)
+    else:
+        original = native._write_private
+        def torn_private(parent, name, temp, before, after, maximum):
+            if name != V2_STATE:
+                return original(parent, name, temp, before, after, maximum)
+            fd = os.open(temp, os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                         0o600, dir_fd=parent)
+            try:
+                os.write(fd, b"partial state")
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            raise KeyboardInterrupt("simulated power loss during state write")
+        monkeypatch.setattr(native, "_write_private", torn_private)
+    with pytest.raises(KeyboardInterrupt):
+        apply(filesystem)
+    assert (state / native._WAL).is_file()
+    if resource == "public_include":
+        assert (include.parent / native._STAGE).stat().st_mode & 0o777 == 0o600
+        monkeypatch.setattr(native, "_write_public", original)
+    else:
+        assert (state / native._STATE_STAGE).stat().st_mode & 0o777 == 0o600
+        monkeypatch.setattr(native, "_write_private", original)
+    assert recover(filesystem)["status"] == "NATIVE_V2_ROLLED_BACK"
+    assert not (state / V2_STATE).exists()
+    assert not include.exists()
+    assert not catalog.exists()
+    assert_no_pending(filesystem)
+
+
+def test_torn_unpublished_wal_tmp_is_safe_to_discard_only_without_mutation(
+    filesystem,
+):
+    _fd, state, include, catalog, _ = filesystem
+    temp = state / native._WAL_TMP
+    temp.write_bytes(b'{"version":1,"old_base64":')
+    temp.chmod(0o600)
+    result = recover(filesystem)
+    assert result["status"] == "NATIVE_V2_UNPUBLISHED_WAL_DISCARDED"
+    assert not temp.exists()
+    assert not include.exists()
+    assert not catalog.exists()
+    assert not (state / V2_STATE).exists()
+    assert_no_pending(filesystem)
+
+
+def test_foreign_completed_public_stage_not_deleted_even_with_valid_wal(
+    filesystem, monkeypatch,
+):
+    stage(filesystem, snapshot(count=1))
+    _fd, state, include, catalog, _ = filesystem
+    original = native._write_public
+    def forged_public(parent, name, before, after, maximum):
+        if name != native._INCLUDE:
+            return original(parent, name, before, after, maximum)
+        fd = os.open(native._STAGE, os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                     0o600, dir_fd=parent)
+        try:
+            os.write(fd, b"foreign complete stage")
+            os.fchmod(fd, 0o644)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        raise KeyboardInterrupt("simulated concurrent root-owned drift")
+    monkeypatch.setattr(native, "_write_public", forged_public)
+    with pytest.raises(KeyboardInterrupt):
+        apply(filesystem)
+    monkeypatch.setattr(native, "_write_public", original)
+    with pytest.raises(native.NativeV2TransactionError, match="FOREIGN_STAGE"):
+        recover(filesystem)
+    assert (state / native._WAL).exists()
+    assert (include.parent / native._STAGE).read_bytes() == b"foreign complete stage"
