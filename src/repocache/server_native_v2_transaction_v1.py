@@ -212,13 +212,17 @@ def _write_public(parent: int, name: str, before: bytes | None,
         _deny("STAGE_UNAVAILABLE")
     try:
         try:
-            os.fchmod(fd, 0o644)
+            # Leave the temporary 0600 until all candidate bytes are fully
+            # durable. A crash during writing leaves a recognizably unfinished
+            # fixed stage which the WAL-backed recovery can safely discard.
             position = 0
             while position < len(after):
                 count = os.write(fd, after[position:])
                 if count <= 0:
                     _deny("STAGE_WRITE_FAILED")
                 position += count
+            os.fsync(fd)
+            os.fchmod(fd, 0o644)
             os.fsync(fd)
         except OSError:
             _deny("STAGE_WRITE_FAILED")
@@ -386,22 +390,60 @@ def _current_resources_allowed(old: dict[str, bytes | None],
 
 
 def _cleanup_stage(parent: int, maximum: int, new_shas: set[str]) -> None:
-    # A stale stage is never trusted unless it is exactly a WAL-recorded new
-    # resource. A foreign stage refuses recovery rather than deleting it.
-    raw = _read_public(parent, _STAGE, maximum)
-    if raw is not None:
-        if _hash(raw) not in new_shas:
+    """Discard known fixed stage only after verifying its on-disk identity.
+
+    Before the final chmod a crash leaves a partial 0600 root-owned inode.
+    A completed 0644 stage must exactly match the WAL-recorded next digest.
+    Symlink, hardlink, foreign owner, unexpected mode/dev/size always refuses.
+    """
+    try:
+        named = os.stat(_STAGE, dir_fd=parent, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    except OSError:
+        _deny("FOREIGN_STAGE")
+    try:
+        before = os.stat(_STAGE, dir_fd=parent, follow_symlinks=False)
+        directory = os.fstat(parent)
+        mode = stat.S_IMODE(before.st_mode)
+        if (not stat.S_ISREG(before.st_mode)
+                or before.st_uid != 0 or before.st_gid != 0
+                or before.st_nlink != 1 or before.st_dev != directory.st_dev
+                or mode not in (0o600, 0o644)
+                or not 0 <= before.st_size <= maximum
+                or _identity(named) != _identity(before)):
+            _deny("FOREIGN_STAGE")
+        if mode == 0o644:
+            raw = _read_public(parent, _STAGE, maximum)
+            if raw is None or _hash(raw) not in new_shas:
+                _deny("FOREIGN_STAGE")
+        # A 0600 stage cannot be complete/published: its contents may be
+        # empty/partial, but this exact root-owned staging path is safe to
+        # discard while a validated durable WAL protects the old targets.
+        if _identity(before) != _identity(
+                os.stat(_STAGE, dir_fd=parent, follow_symlinks=False)):
             _deny("FOREIGN_STAGE")
         os.unlink(_STAGE, dir_fd=parent)
         os.fsync(parent)
+    except NativeV2TransactionError:
+        raise
+    except OSError:
+        _deny("FOREIGN_STAGE")
 
 
 def _cleanup_private_stage(state_fd: int, name: str, maximum: int,
                            next_shas: set[str]) -> None:
+    """Discard only the fixed root-owned private stage under verified WAL.
+
+    The durable WAL is written before these stages. SIGKILL during
+    _write_exclusive may leave a partial 0600 file: its content is not a
+    committed target or authority, and must not strand valid recovery.
+    """
     raw = _read_file(state_fd, name, 0, maximum)
     if raw is not None:
-        if _hash(raw) not in next_shas:
-            _deny("FOREIGN_STAGE")
+        # Verify exact owned file metadata with _read_file, including no
+        # hardlink, symlink or writable mode. The journal and target SHA
+        # constraints have already been validated before this cleanup.
         _unlink_known(state_fd, name, raw, 0, maximum)
 
 
@@ -769,7 +811,36 @@ def _render_using_pins(document: dict, next_generation: int,
 def _recover_locked(state_fd: int, include_fd: int,
                     public_fd: int, distribution: str) -> dict:
     journal = _read_wal(state_fd, _WAL)
-    uncommitted = _read_wal(state_fd, _WAL_TMP)
+    try:
+        uncommitted = _read_wal(state_fd, _WAL_TMP)
+    except NativeV2TransactionError:
+        # A torn, unpublished WAL_TMP cannot have changed any target:
+        # the writer fsyncs and publishes the WAL before first mutation.
+        # Refuse all foreign target/temporary files and malformed published
+        # WALs. Only then safely discard this one root-owned temp file.
+        if journal is not None:
+            raise
+        old = _read_all(state_fd, include_fd, public_fd)
+        _verify_owned(old)
+        for fd, limit in ((include_fd, _LIMIT[_INCLUDE]),
+                          (public_fd, _LIMIT[_CATALOG])):
+            try:
+                os.stat(_STAGE, dir_fd=fd, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            except OSError:
+                _deny("ORPHAN_STAGE")
+            _deny("ORPHAN_STAGE")
+        for name, limit in ((_STATE_STAGE, _LIMIT[V2_STATE]),
+                            (_MANIFEST_STAGE, _LIMIT[_MANIFEST])):
+            if _read_file(state_fd, name, 0, limit) is not None:
+                _deny("ORPHAN_STAGE")
+        torn = _read_file(state_fd, _WAL_TMP, 0, _MAX_WAL)
+        if torn is None:
+            _deny("WAL_UNAVAILABLE")
+        _unlink_known(state_fd, _WAL_TMP, torn, 0, _MAX_WAL)
+        return {"status": "NATIVE_V2_UNPUBLISHED_WAL_DISCARDED",
+                "recovery_required": False}
     if journal is not None and uncommitted is not None:
         _deny("CONFLICTING_WALS")
     if journal is None and uncommitted is None:
