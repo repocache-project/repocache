@@ -1156,3 +1156,21 @@ negative tests. The approved v2 schema, original issue criteria, test-only
 origin substitutions and all no-activation/NOT VERIFIED flags remain
 unchanged. Merging this preparatory branch into the protected target is
 still disallowed until its own original full acceptance gates pass.
+
+
+## Post-queue native fixture root correction (2026-11-10)
+
+After #251's accepted stock-NGINX cache-zone renderer entered protected
+`integration/v0.6.0`, the independently run #31 state crash/recovery
+workflow exposed a missing **disposable CI fixture cache parent**:
+`proxy_cache_path` now requires its parent directory before actual
+`nginx -t`. At the first reconciled PR head the isolated two-distro
+recovery jobs therefore failed five real NGINX fixture tests each, while
+the existing exact-SHA combined workflow passed because it already prepared
+that test directory. The native state workflow now creates only the fixed
+cache parent, after proving it is absent and not a symlink, **inside its
+throwaway distro container** immediately before pytest. It never changes
+`/var/cache` or any filesystem on a real operator host and does not
+relax production cache ownership checks, release policy or test assertions.
+The required regression is a new exact-HEAD successful job, not assuming
+the previous failure is resolved merely because the workflow changed.
