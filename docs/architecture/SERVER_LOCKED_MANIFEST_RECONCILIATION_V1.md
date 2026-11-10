@@ -783,3 +783,45 @@ dictionary) and all ordinary exceptions are treated as a fixed redacted
 journal. This prevents a caller accidentally discarding a failed subprocess
 result. The callback remains test-only and cannot be supplied to production
 root/systemd/Polkit code; no success result is an activation permission.
+
+### Fixture post-replace barrier: preserve recovery journal until activation checks
+
+The private same-lock v2 preflight/commit helper now also accepts an optional
+**fixture-only** `verify_fixture_activation` callback. Its order is:
+
+1. Independently validate the canonical v2 transition/pins and render #28
+   candidate under the protected fixture lock; run any optional syntax
+   validator **before** creating the durable v2 journal.
+2. Create and fsync the existing bounded v2 journal/stage, replace state and
+   fsync the state directory. At this point the **old v2 bytes remain durably
+   recorded** in the still-present journal.
+3. Run the optional detached fixture activation verifier **while holding the
+   same lock**, before deleting the journal. A non-`None` return, exception,
+   changed/foreign state or changed journal refuses finalization. The pending
+   journal remains available for explicit, conservative recovery; future
+   transitions refuse `RECOVERY_REQUIRED` until reconciled.
+4. On exact successful verification, re-read and compare state/journal, then
+   remove the verified journal. A pure no-op skips the activation hook and
+   preserves the inode.
+
+The hook models the **durability barrier**, not NGINX/repository operation.
+A caller-supplied test callback is **not trusted code** and must never be
+connected to the actual host, systemd, production NGINX, signing, privileged
+catalog or live service user. Source reports retain
+`operator_authorization_verified=False`,
+`trusted_host_root_verified=False`, `nginx_syntax_verified=False`,
+`active_exposure_verified=False`, `authorizes_nginx_reload=False` and
+`authorizes_catalog_publication=False`, even if a fixture callback returns
+`None`. `fixture_activation_barrier_executed` reports test invocation only.
+
+**Crucial remaining gap:** the state-only journal does NOT contain the
+managed NGINX include, active catalog or native package/service rollback.
+Consequently a crash or callback failure after a *real* reload could leave
+the service and state divergent; the code intentionally refuses further
+fixture writes rather than claiming to recover an external service. A
+production transaction still needs a separately designed durable
+**multi-resource** journal, verified prior include/catalog bytes,
+a fixed validated NGINX reload and exposure probe, compensating reload and
+a consistent active-only catalog publication record. Native systemd and
+AlmaLinux SELinux evidence remain NOT VERIFIED. Do not merge or deploy this
+fixture as a production transaction.
