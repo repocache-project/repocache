@@ -17,12 +17,31 @@ from typing import Any
 
 VENDOR_UNIT = "/usr/lib/systemd/system/nginx.service"
 MAX_UNIT_BYTES = 65536
-_SHADOW_PATHS = (
-    "/etc/systemd/system/nginx.service",
-    "/etc/systemd/system/nginx.service.d",
-    "/run/systemd/system/nginx.service",
-    "/run/systemd/system/nginx.service.d",
+# systemd's unit load path includes D-Bus control, transient and generator
+# roots that can supersede an apparently safe distro vendor unit. Check fixed
+# service names AND type-wide service.d drop-ins; never infer the effective
+# PID 1 unit from the vendor file alone. The distributor unit itself is
+# intentionally excluded from the shadow set.
+_SYSTEM_SHADOW_ROOTS = (
+    "/etc/systemd/system.control",
+    "/run/systemd/system.control",
+    "/run/systemd/transient",
+    "/run/systemd/generator.early",
+    "/etc/systemd/system",
+    "/etc/systemd/system.attached",
+    "/run/systemd/system",
+    "/run/systemd/system.attached",
+    "/run/systemd/generator",
+    "/usr/local/lib/systemd/system",
+    "/run/systemd/generator.late",
+)
+_SHADOW_PATHS = tuple(
+    root + "/" + entry
+    for root in _SYSTEM_SHADOW_ROOTS
+    for entry in ("nginx.service", "nginx.service.d", "service.d")
+) + (
     "/usr/lib/systemd/system/nginx.service.d",
+    "/usr/lib/systemd/system/service.d",
 )
 _PARENT_PATHS = (
     "/", "/usr", "/usr/lib", "/usr/lib/systemd", "/usr/lib/systemd/system",
