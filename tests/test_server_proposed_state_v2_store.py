@@ -2256,15 +2256,15 @@ def test_v2_same_lock_disposable_native_nginx_syntax_before_state_write(
         assert not (folder / V2_JOURNAL).exists()
         conf = tmp_path / "nginx.conf"
         conf.write_text(
-            f"pid {tmp_path / 'nginx.pid'};\\n"
-            f"error_log {tmp_path / 'error.log'} notice;\\n"
-            + ("events { invalid_directive; }\\n" if invalid_syntax
-               else "events {}\\n")
-            + "http { access_log off;\\n"
+            f"pid {tmp_path / 'nginx.pid'};\n"
+            f"error_log {tmp_path / 'error.log'} notice;\n"
+            + ("events { invalid_directive; }\n" if invalid_syntax
+               else "events {}\n")
+            + "http { access_log off;\n"
             + candidate["http_upstream_fragment"]
-            + "server { listen 127.0.0.1:19991;\\n"
+            + "server { listen 127.0.0.1:19991;\n"
             + candidate["server_location_fragment"]
-            + "}\\n}\\n",
+            + "}\n}\n",
             encoding="utf-8",
         )
         result = subprocess.run(
