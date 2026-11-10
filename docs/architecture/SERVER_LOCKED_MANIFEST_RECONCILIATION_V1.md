@@ -825,3 +825,50 @@ a fixed validated NGINX reload and exposure probe, compensating reload and
 a consistent active-only catalog publication record. Native systemd and
 AlmaLinux SELinux evidence remain NOT VERIFIED. Do not merge or deploy this
 fixture as a production transaction.
+
+### Ordered NGINX/catalog compensation in the same fixture v2 lock
+
+A private, non-installed `server_fixture_activation_flow_v1` module now
+rehearses the **ordered** test-only side effects while the previously added
+v2 post-replace barrier keeps the state WAL durable and the owner-pinned
+exclusive lock held:
+
+1. Receive a detached **already independently rendered** candidate and
+   reject malformed candidate status, duplicate/unordered IDs and false
+   claim of NGINX/catalog authority.
+2. Atomically stage the disposable managed NGINX candidate; run real native
+   packaged `nginx -t` on the test-only complete config; invoke a test-only
+   reload; verify the actual running test master responds with the new
+   `/__test_health` marker.
+3. Only after that observed disposable service transition, atomically
+   publish a **fixture-only** candidate catalog to the sandbox and verify its
+   enabled-ID set. No production client discovery is emitted.
+4. A failure at *any* stage (including after publication) invokes one
+   compensating test callback. Tests restore the previous NGINX config, reload
+   the previous worker and restore the exact previous synthetic catalog.
+   The state WAL is **still pending**, so a subsequent explicit v2 fixture
+   recovery restores the previous persisted state under the protected lock.
+5. Successful verification finalizes the state WAL; all reported root,
+   NGINX, catalog and external authority flags remain **false**. The callback
+   return contract is exactly `None`; any other value, exception or failed
+   compensation refuses with a fixed non-secret diagnostic.
+
+The new tests execute the actual stock NGINX master in temporary Unix socket
+trees on Debian 13 and AlmaLinux 10. They cover both the successful
+stage/validate/reload/observe/publish sequence and a post-publication error
+requiring real NGINX reload compensation, catalog restoration and state
+journal rollback. Negative tests exercise failure at every ordered phase,
+invalid callback results, compensation failure and malformed candidate
+refusal.
+
+**Strict limit:** these are arbitrary **test-supplied** callbacks and
+temporary paths. They are never exposed to unprivileged callers or a root
+daemon; a generic callback must never be accepted by a privileged operation.
+The observed marker is not genuine APT/DNF repository data or native service
+acceptance. Exception-time compensation cannot run after abrupt process
+termination/power loss, and the fixture WAL does not yet protect NGINX include
+or catalog bytes. There is still **no durable multi-resource host journal**,
+root-owned installed worker, independently verified host/SELinux/ACL/paths,
+native systemd control, real TLS exposure or verified client catalog. All
+original operational acceptance remains **NOT VERIFIED**; native VMs remain
+pending after substantive implementation/integration, not waived.
