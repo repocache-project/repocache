@@ -41,6 +41,16 @@ override is present. Read-only candidates use 60s HTTP 200 GET/HEAD
 cache validity while respecting upstream Cache-Control, with concurrent
 fill locking and Authorization/Cookie request cache bypass + no-store.
 
+An install-v1 `cache_root` may be a canonical filesystem path yet still
+contain characters that alter an unquoted NGINX `proxy_cache_path`
+directive. The candidate renderer therefore independently restricts the
+exact cache-root token to ASCII letters, digits, slash, underscore, dot,
+plus and hyphen. It refuses whitespace, semicolons, quotes, comments,
+variables and other configuration metacharacters before fragment emission.
+The normal install-v1 document validator intentionally has a broader path
+contract; this additional NGINX-context check does not replace trusted
+filesystem ownership and containment verification.
+
 **Security:** even nginx -t can create cache directories when parsing a
 candidate. The test uses only non-root disposable, temporary fixture paths.
 A real privileged apply MUST separately verify every cache ancestor,
