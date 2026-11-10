@@ -367,3 +367,32 @@ check, and independently verify provenance, all included-file ownership,
 SELinux/ACL/mounts, verified running exposure, signed installed code and
 operator intent before any commit, systemd reload or catalog publication.
 The status remains **NOT VERIFIED** at real installed-host scope.
+
+
+## Combined fixed native NGINX pre-reload observation (not installed)
+
+The private `server_root_control_pre_reload_v1` module composes the
+already merged #27 exact effective vendor `nginx.service` observer with #64's
+necessary native root/PID1 preflight, fixed `nginx -t` and bounded private
+`nginx -T`. It checks native host prerequisites again and compares the
+effective unit's master PID and vendor unit digest before and after the
+inspection. It rejects a changed effective unit, untrusted status, malformed
+digest, failed syntax/full-context, root identity mismatch and unsupported
+distribution with fixed redacted errors.
+
+This is **not** a snapshot lock, an attestation, or a reload transaction.
+The native helpers can have filesystem side effects despite being observations,
+and their output can race between checks. No independent included-file,
+package/signature, TLS trust, SELinux/ACL/mount, operator approval or actual
+live-routing proof is established. The report explicitly denies write,
+`systemctl`, reload and catalog-publication authority. Nothing imports this
+module into the socket worker, and all actual operations remain deliberately
+`ROOT_TRANSACTION_NOT_IMPLEMENTED`.
+
+For the later installed host-root executor, this prerequisite must run only
+after signed binary/unit provenance, authenticated administrator intent and
+retained #31 exclusive state-v2 lock/WAL are established, with active
+exposure verification and durable rollback before active-only publication.
+The two-distro GitHub Actions tests here use mocked service observations and
+never invoke native systemd or reload. Booted native VM acceptance is
+**NOT VERIFIED**.
