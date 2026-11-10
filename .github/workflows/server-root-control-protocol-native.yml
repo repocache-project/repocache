@@ -5,14 +5,18 @@ on:
     paths:
       - '.github/workflows/server-root-control-protocol-native.yml'
       - 'src/repocache/server_root_control_protocol_v1.py'
+      - 'src/repocache/server_root_control_worker_v1.py'
       - 'tests/test_server_root_control_protocol_v1.py'
+      - 'tests/test_server_root_control_worker_v1.py'
       - 'docs/architecture/SERVER_NATIVE_ROOT_CONTROL_V1.md'
   push:
     branches: [main]
     paths:
       - '.github/workflows/server-root-control-protocol-native.yml'
       - 'src/repocache/server_root_control_protocol_v1.py'
+      - 'src/repocache/server_root_control_worker_v1.py'
       - 'tests/test_server_root_control_protocol_v1.py'
+      - 'tests/test_server_root_control_worker_v1.py'
 
 permissions:
   contents: read
@@ -54,6 +58,8 @@ jobs:
           PYTHONDONTWRITEBYTECODE: '1'
         run: |
           set -Eeuo pipefail
-          python3 -B -m pytest -q -rs tests/test_server_root_control_protocol_v1.py
+          python3 -B -m pytest -q -rs \
+            tests/test_server_root_control_protocol_v1.py \
+            tests/test_server_root_control_worker_v1.py
           # No privileged broker, systemd service, NGINX process, real reload
           # or host authorization is installed or executed here.
