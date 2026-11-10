@@ -3094,13 +3094,13 @@ def test_multi_resource_refuses_ambiguous_catalog_before_any_write(
     elif corruption == "wrong-type":
         candidate = valid.replace(b'["repo-0"]', b'[42]')
     else:
-        candidate = valid + b"\\xff"
+        candidate = valid + bytes([0xff])
     with pytest.raises(multi.FixtureMultiResourceError,
                        match="CATALOG_INVALID"):
         multi._commit_fixture_multi_resource_under_root(
             fd, _multi_snapshot(1, active=True),
             owner_uid=uid, expected_generation=0,
-            include_bytes=b"# inert NGINX fixture\\n",
+            include_bytes=b"# inert NGINX fixture",
             catalog_bytes=candidate,
         )
     assert not (folder / V2_STATE).exists()
@@ -3116,7 +3116,7 @@ def test_multi_resource_recovery_refuses_digest_rebound_ambiguous_catalog(
     multi._commit_fixture_multi_resource_under_root(
         fd, _multi_snapshot(1, active=True),
         owner_uid=uid, expected_generation=0,
-        include_bytes=b"# known-good NGINX fixture\\n",
+        include_bytes=b"# known-good NGINX fixture",
         catalog_bytes=_catalog_fixture(["repo-0"]),
     )
     state = (folder / V2_STATE).read_bytes()

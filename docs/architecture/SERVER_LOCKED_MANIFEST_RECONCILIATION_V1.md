@@ -920,7 +920,13 @@ sidecar, not native state-only journals.
 Even without any pending WAL, a clean-recovery observation validates the
 full protected prior-state/include/catalog owner-hash sidecar. A missing
 journal is never permission to report `CLEAN` if an externally altered
-include/catalog/state could still be present.
+include/catalog/state could still be present. Both the candidate catalog
+and the retained prior catalog must be strictly canonical JSON with no
+duplicate keys, nonfinite values or ambiguous encodings, and the exact
+sorted active-ID set must match the complete validated v2 state. Even a
+rebound owner-manifest digest cannot turn a malformed prior catalog into
+an accepted clean generation. Negative tests verify refusal without
+creating or deleting any protected state or journal bytes.
 
 Recovery obtains the *same* pinned FD lock. It validates journal format,
 exact old-byte digests, prior protected fixture ownership manifest, and
