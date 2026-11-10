@@ -47,10 +47,13 @@ def dump(d):
             + "}\n}\n")
 
 
-def preview(d, raw=None, **kwargs):
+_DUMP_NOT_PROVIDED = object()
+
+
+def preview(d, raw=_DUMP_NOT_PROVIDED, **kwargs):
     return preview_derived_catalog_from_nginx_dump(
         d, candidate_pins_by_repository=pins(d), ca_bundle_path=_CA,
-        nginx_dump_text=dump(d) if raw is None else raw,
+        nginx_dump_text=(dump(d) if raw is _DUMP_NOT_PROVIDED else raw),
         nginx_t_exit_code=kwargs.pop("exit_code", 0),
         **kwargs,
     )
