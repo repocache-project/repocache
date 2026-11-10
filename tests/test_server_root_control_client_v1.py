@@ -157,7 +157,7 @@ def test_client_rejects_unsafe_local_socket_path_before_connect(
     lambda good: good.replace(b'"schema_version":1', b'"schema_version":1.0'),
     lambda good: good.replace(b',"status":', b', "status":'),
     lambda good: good.replace(b'"requested_operation":"APPLY_V2"',
-                              b'"requested_operation":"\u0041PPLY_V2"'),
+                              b'"requested_operation":"\\u0041PPLY_V2"'),
     lambda good: good.replace(b'"schema_version":1',
                               b'"schema_version":NaN,"schema_version":1'),
 ])
@@ -165,5 +165,5 @@ def test_ambiguous_or_noncanonical_fixed_denial_is_never_accepted(extra_wire):
     altered = extra_wire(packet(_DENIAL))
     assert altered != packet(_DENIAL)
     with pytest.raises(FixedControlClientError,
-                       match="RESPONSE_INVALID|RESPONSE_NONCANONICAL"):
+                       match="RESPONSE_INVALID|RESPONSE_NONCANONICAL|RESPONSE_UNEXPECTED"):
         _parse_response(altered, operation="APPLY_V2")

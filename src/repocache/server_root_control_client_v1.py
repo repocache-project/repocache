@@ -98,7 +98,7 @@ def _parse_response(raw: bytes, *, operation: str) -> dict[str, Any]:
         _refuse("RESPONSE_INVALID")
     canonical = (json.dumps(
         expected, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
-    ) + "\\n").encode("ascii")
+    ) + "\n").encode("ascii")
     if raw != canonical:
         _refuse("RESPONSE_NONCANONICAL")
     return data
