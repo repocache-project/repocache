@@ -34,9 +34,12 @@ def _validate_layout(
     runtime: os.stat_result, listener: os.stat_result, *, admin_gid: int,
 ) -> None:
     """Validate fixed-path metadata supplied by native lstat operations."""
+    # Native systemd.socket DirectoryMode creates parent directories as
+    # root:root. Admin users only need traverse (0755); they must NEVER
+    # have directory write rights, even if they may connect to the socket.
     if (not stat.S_ISDIR(runtime.st_mode) or runtime.st_uid != 0
-            or runtime.st_gid != admin_gid
-            or stat.S_IMODE(runtime.st_mode) != 0o750
+            or runtime.st_gid != 0
+            or stat.S_IMODE(runtime.st_mode) != 0o755
             or not stat.S_ISSOCK(listener.st_mode)
             or listener.st_uid != 0 or listener.st_gid != admin_gid
             or stat.S_IMODE(listener.st_mode) != 0o660
