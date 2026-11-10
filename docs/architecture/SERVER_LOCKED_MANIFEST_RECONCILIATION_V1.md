@@ -1209,3 +1209,28 @@ Tests exercise active-only outputs, exact bytes, stale CAS/digest, foreign
 route/duplicate/missing fragment, malformed pins, pending WAL, same-byte
 inode substitution and actual root-descriptor refusal. The real signed
 installed host transaction and booted-VM gates are still NOT VERIFIED.
+
+
+## Same-lock root-owned candidate / persisted v2 CAS binding (non-activating)
+
+The existing #31 development branch now includes #64's exact source revision
+in its non-protected two-parent history, preserving independent PR #254 for
+separate review and eventual first merge. The private
+`server_root_control_v2_candidate_binding_v1` module acquires the #31
+protected exclusive descriptor lock, refuses legacy or pending journals,
+reads actual canonical predecessor state under lock, independently reads
+the fixed root-owned administrator candidate (with a second read before
+unlock), compares precise predecessor generation and whole-file digest,
+validates the entire #31 v2 snapshot transition, including permanent
+historic ID reservations, and rechecks state bytes/inode before returning.
+
+The returned report is an **inert preview only**. Even while the state
+lock is held during inspection, it is released before return. A future
+trusted installed root broker must independently authenticate the operator,
+package/code and host provenance, and maintain this SAME lock throughout
+all file staging, NGINX syntax/reload/exposure verification, durable
+cross-resource compensation and active-only catalog publication. The
+operator-supplied approval-reference hash, fixed root-owned candidate bytes
+and local UID checks do not independently prove approval. The root worker
+continues to reply `ROOT_TRANSACTION_NOT_IMPLEMENTED`; no host activation.
+Only bounded Linux fixture and disposable container CI acceptance is claimed.
