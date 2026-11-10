@@ -237,11 +237,16 @@ def _commit_fixture_multi_resource_under_root(
     include_bytes: bytes, catalog_bytes: bytes,
     inject_fault: Callable[[str], None] | None = None,
     verify_fixture_effects: Callable[[], None] | None = None,
+    verify_fixture_exposure_before_publish: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """One protected fixture lock, one persistent WAL, three fixed resources.
 
     NEVER supply an executable, host path, validator or callback from a
     privileged service. This private API is strictly for disposable tests.
+    The optional prepublication callback runs only after candidate include
+    and v2 state are durable, while the old catalog and owner manifest remain
+    intact under the same lock and live WAL. Its return value NEVER proves
+    actual NGINX exposure or grants publication authority.
     """
     _refuse_actual_root_fixture_write(root_fd)
     frozen, state = _freeze(proposed_snapshot)
@@ -263,6 +268,9 @@ def _commit_fixture_multi_resource_under_root(
         _refuse("FAULT_HOOK_INVALID")
     if verify_fixture_effects is not None and not callable(verify_fixture_effects):
         _refuse("FIXTURE_CALLBACK_INVALID")
+    if (verify_fixture_exposure_before_publish is not None
+            and not callable(verify_fixture_exposure_before_publish)):
+        _refuse("FIXTURE_PREPUBLICATION_CALLBACK_INVALID")
 
     with _locked(root_fd, owner_uid) as directory:
         _legacy_refusal(directory, owner_uid)
@@ -305,9 +313,36 @@ def _commit_fixture_multi_resource_under_root(
             _refuse("JOURNAL_IO_REFUSED")
         if inject_fault is not None:
             inject_fault("journal_durable")
+        # The inert candidate include and protected state must be durable
+        # while the previously published catalog and manifest remain intact.
+        # A real host transaction MUST independently verify service exposure
+        # before publishing; this callback is only a disposable test seam.
         for name, phase in (
             (INCLUDE, "include_durable"),
             (V2_STATE, "state_durable"),
+        ):
+            _write_target(directory, owner_uid, name, old[name], next_bytes[name])
+            if inject_fault is not None:
+                inject_fault(phase)
+        if verify_fixture_exposure_before_publish is not None:
+            try:
+                if verify_fixture_exposure_before_publish() is not None:
+                    _refuse("FIXTURE_PREPUBLICATION_REFUSED")
+            except Exception:
+                _refuse("FIXTURE_PREPUBLICATION_REFUSED")
+            # A callback can mutate fake files in this process despite the
+            # advisory lock. It cannot bypass the pending WAL or publish an
+            # unverified catalog by racing the fixture's own observer.
+            if (any(_read(directory, owner_uid, n) != next_bytes[n]
+                    for n in (INCLUDE, V2_STATE))
+                    or any(_read(directory, owner_uid, n) != old[n]
+                           for n in (CATALOG, MANIFEST))
+                    or _read_file(directory, JOURNAL, owner_uid,
+                                  MAX_JOURNAL_BYTES) != journal
+                    or _read_file(directory, STAGE, owner_uid,
+                                  max(LIMITS.values())) is not None):
+                _refuse("FIXTURE_PREPUBLICATION_DRIFT")
+        for name, phase in (
             (CATALOG, "catalog_durable"),
             (MANIFEST, "manifest_durable"),
         ):
@@ -334,6 +369,9 @@ def _commit_fixture_multi_resource_under_root(
             "state_generation": frozen["state_generation"],
             "fixture_only": True,
             "durable_shadow_wal_exercised": True,
+            "prepublication_fixture_barrier_executed": (
+                verify_fixture_exposure_before_publish is not None
+            ),
             "host_activation_verified": False,
             "operator_authorization_verified": False,
             "authorizes_nginx_reload": False,

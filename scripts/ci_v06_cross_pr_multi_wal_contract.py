@@ -180,14 +180,27 @@ def main() -> None:
                         "CLEAN_INERT_FIXTURE"
                     )
 
+                def verify_before_catalog() -> None:
+                    # A proposed mapping must not enter even the inert
+                    # fixture catalog before the durable candidate is checked.
+                    assert (folder / JOURNAL).is_file()
+                    assert (folder / INCLUDE).read_bytes() == new_include
+                    assert (folder / V2_STATE).read_bytes() == canonical_bytes(proposed)
+                    assert (folder / CATALOG).read_bytes() == old_bytes[CATALOG]
+                    assert (folder / MANIFEST).read_bytes() == old_bytes[MANIFEST]
+                    observed.append("before-fixture-catalog")
+                    return None
+
                 report = commit(
                     fd, proposed, owner_uid=uid,
                     expected_generation=index - 1,
                     include_bytes=new_include, catalog_bytes=new_catalog,
+                    verify_fixture_exposure_before_publish=verify_before_catalog,
                     verify_fixture_effects=before_cleanup,
                 )
                 assert report["state_generation"] == index
-                assert observed == ["fixture-barrier"]
+                assert observed == ["before-fixture-catalog", "fixture-barrier"]
+                assert report["prepublication_fixture_barrier_executed"] is True
                 assert all(not (folder / name).exists()
                            for name in (JOURNAL, JOURNAL_TMP, STAGE))
                 assert report["authorizes_nginx_reload"] is False

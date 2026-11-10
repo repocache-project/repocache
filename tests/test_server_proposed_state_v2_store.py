@@ -3200,6 +3200,178 @@ def test_multi_resource_manifest_detects_foreign_modification_on_update(
     )
 
 
+
+def test_multi_resource_prepublication_barrier_orders_catalog_after_effects(
+    fixture_root,
+):
+    """A test callback cannot publish a new catalog before exposure checks."""
+    multi = _multi_resource_fixture()
+    fd, folder, uid = fixture_root
+    old_state = _multi_snapshot(1, active=True)
+    multi._commit_fixture_multi_resource_under_root(
+        fd, old_state, owner_uid=uid, expected_generation=0,
+        include_bytes=b"# previous candidate\n",
+        catalog_bytes=_catalog_fixture(["repo-0"]),
+    )
+    prior_catalog = (folder / multi.CATALOG).read_bytes()
+    prior_manifest = (folder / multi.MANIFEST).read_bytes()
+    next_state = _multi_snapshot(
+        2, generation=2, previous=old_state, active=True,
+    )
+    events = []
+
+    def prepublication():
+        events.append("before_catalog")
+        assert (folder / multi.JOURNAL).is_file()
+        assert (folder / V2_STATE).read_bytes() == multi._canonical(
+            next_state, limit=multi.LIMITS[V2_STATE],
+        )
+        assert (folder / multi.INCLUDE).read_bytes() == b"# next candidate\n"
+        assert (folder / multi.CATALOG).read_bytes() == prior_catalog
+        assert (folder / multi.MANIFEST).read_bytes() == prior_manifest
+        return None
+
+    def after_publication():
+        events.append("after_catalog")
+        assert (folder / multi.JOURNAL).is_file()
+        assert (folder / multi.CATALOG).read_bytes() == _catalog_fixture(
+            ["repo-0", "repo-1"],
+        )
+        assert (folder / multi.MANIFEST).read_bytes() != prior_manifest
+        return None
+
+    result = multi._commit_fixture_multi_resource_under_root(
+        fd, next_state, owner_uid=uid, expected_generation=1,
+        include_bytes=b"# next candidate\n",
+        catalog_bytes=_catalog_fixture(["repo-0", "repo-1"]),
+        verify_fixture_exposure_before_publish=prepublication,
+        verify_fixture_effects=after_publication,
+    )
+    assert events == ["before_catalog", "after_catalog"]
+    assert result["prepublication_fixture_barrier_executed"] is True
+    assert result["authorizes_catalog_publication"] is False
+    assert multi._recover_fixture_multi_resource_under_root(
+        fd, owner_uid=uid,
+    )["status"] == "CLEAN_INERT_FIXTURE"
+
+
+@pytest.mark.parametrize("failure", [
+    "raise", "non-none", "catalog-race", "state-race", "manifest-race",
+    "journal-race",
+])
+def test_multi_resource_prepublication_failure_never_publishes_catalog(
+    fixture_root, failure,
+):
+    multi = _multi_resource_fixture()
+    fd, folder, uid = fixture_root
+    previous = _multi_snapshot(1, active=True)
+    multi._commit_fixture_multi_resource_under_root(
+        fd, previous, owner_uid=uid, expected_generation=0,
+        include_bytes=b"# old\n", catalog_bytes=_catalog_fixture(["repo-0"]),
+    )
+    old = {n: (folder / n).read_bytes() for n in multi.ORDER}
+    candidate = _multi_snapshot(2, generation=2, previous=previous, active=True)
+
+    def prepublication():
+        if failure == "raise":
+            raise RuntimeError("private key never leaked")
+        if failure == "non-none":
+            return False
+        if failure == "catalog-race":
+            (folder / multi.CATALOG).write_bytes(b"foreign-catalog")
+        elif failure == "state-race":
+            (folder / V2_STATE).write_bytes(b"foreign-state")
+        elif failure == "manifest-race":
+            (folder / multi.MANIFEST).write_bytes(b"foreign-manifest")
+        elif failure == "journal-race":
+            (folder / multi.JOURNAL).write_bytes(b"foreign-journal")
+        return None
+
+    with pytest.raises(multi.FixtureMultiResourceError,
+                       match="FIXTURE_PREPUBLICATION_") as error:
+        multi._commit_fixture_multi_resource_under_root(
+            fd, candidate, owner_uid=uid, expected_generation=1,
+            include_bytes=b"# next\n",
+            catalog_bytes=_catalog_fixture(["repo-0", "repo-1"]),
+            verify_fixture_exposure_before_publish=prepublication,
+        )
+    assert "private key" not in str(error.value)
+    assert (folder / multi.JOURNAL).is_file()
+    if failure not in ("catalog-race", "journal-race"):
+        assert (folder / multi.CATALOG).read_bytes() == old[multi.CATALOG]
+    if failure == "journal-race":
+        # Untrusted WAL must block recovery, never be silently discarded.
+        with pytest.raises(multi.FixtureMultiResourceError):
+            multi._recover_fixture_multi_resource_under_root(fd, owner_uid=uid)
+    elif failure in ("catalog-race", "state-race", "manifest-race"):
+        # Foreign modification must not be erased by rollback.
+        with pytest.raises(multi.FixtureMultiResourceError,
+                           match="FOREIGN_RESOURCE_DRIFT"):
+            multi._recover_fixture_multi_resource_under_root(fd, owner_uid=uid)
+    else:
+        restored = multi._recover_fixture_multi_resource_under_root(
+            fd, owner_uid=uid,
+        )
+        assert restored["status"] == "ROLLED_BACK_INERT_FIXTURE_MULTI_RESOURCE"
+        assert {n: (folder / n).read_bytes() for n in multi.ORDER} == old
+
+
+def test_multi_resource_prepublication_callback_type_refused_without_wal(
+    fixture_root,
+):
+    multi = _multi_resource_fixture()
+    fd, folder, uid = fixture_root
+    with pytest.raises(multi.FixtureMultiResourceError,
+                       match="FIXTURE_PREPUBLICATION_CALLBACK_INVALID"):
+        multi._commit_fixture_multi_resource_under_root(
+            fd, _multi_snapshot(1), owner_uid=uid, expected_generation=0,
+            include_bytes=b"# candidate\n",
+            catalog_bytes=_catalog_fixture([]),
+            verify_fixture_exposure_before_publish=True,
+        )
+    assert not (folder / multi.JOURNAL).exists()
+    assert not (folder / V2_STATE).exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="Linux fork required")
+def test_multi_resource_actual_pid_death_at_prepublication_is_recoverable(
+    fixture_root,
+):
+    multi = _multi_resource_fixture()
+    fd, folder, uid = fixture_root
+    initial = _multi_snapshot(1, active=True)
+    multi._commit_fixture_multi_resource_under_root(
+        fd, initial, owner_uid=uid, expected_generation=0,
+        include_bytes=b"# prior\n", catalog_bytes=_catalog_fixture(["repo-0"]),
+    )
+    before = {name: (folder / name).read_bytes() for name in multi.ORDER}
+    next_state = _multi_snapshot(
+        2, generation=2, previous=initial, active=True,
+    )
+    pid = os.fork()
+    if pid == 0:
+        try:
+            multi._commit_fixture_multi_resource_under_root(
+                fd, next_state, owner_uid=uid, expected_generation=1,
+                include_bytes=b"# next\n",
+                catalog_bytes=_catalog_fixture(["repo-0", "repo-1"]),
+                verify_fixture_exposure_before_publish=lambda: os._exit(41),
+            )
+        except BaseException:
+            os._exit(72)
+        os._exit(73)
+    ended, status = os.waitpid(pid, 0)
+    assert ended == pid
+    assert os.waitstatus_to_exitcode(status) == 41
+    assert (folder / multi.CATALOG).read_bytes() == before[multi.CATALOG]
+    assert (folder / multi.JOURNAL).is_file()
+    restored = multi._recover_fixture_multi_resource_under_root(
+        fd, owner_uid=uid,
+    )
+    assert restored["status"] == "ROLLED_BACK_INERT_FIXTURE_MULTI_RESOURCE"
+    assert {name: (folder / name).read_bytes() for name in multi.ORDER} == before
+
+
 def test_multi_resource_callback_failure_preserves_complete_undo_log(
     fixture_root,
 ):

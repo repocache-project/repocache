@@ -1073,3 +1073,28 @@ a **read-only necessary condition**. The combined workflow pins PR #252's
 exact head, refusing changed dependency refs. This is never a production
 transaction, unit reload, activated catalog, host-root attestation or
 booted systemd/SELinux test; issue #31 AC1-AC5 remain NOT VERIFIED.
+
+
+## Fixture WAL pre-publication separation (not host authorization)
+
+The private multi-resource shadow transaction now exposes an **optional
+fixture-only** pre-publication verification seam. While the same owner-pinned
+exclusive FD lock and durable WAL remain held, the candidate NGINX include
+and v2 state are written first; the prior catalog and owner manifest are
+still byte-identical and must remain so until the verification callback
+returns exactly None. Immediately after the callback, the journal and all
+four fixed resources are re-read to detect out-of-band fixture drift; only
+then is the inert candidate catalog replaced, followed by the new owner
+manifest and existing post-publication check. A failure at the barrier
+preserves the WAL and previous published catalog; a separate replay can
+restore exact known-good shadow bytes. The combined five-PR CI rehearsal
+exercises this order on enable/disable/remove, including fork/PID crash.
+
+**Important:** The callback is supplied by disposable tests only. Without
+it the fixture WAL remains intentionally inert and makes **no** actual
+exposure-verification claim. Even when it runs, synthetic exposure cannot
+make an untrusted desired-active state an authorized public catalog. The
+simulated catalog lives under an isolated fake root; actual NGINX service
+reload, trusted host-root administrator provenance, mounted cache ownership,
+SELinux and atomic production publication are still missing. The original
+#31 operational AC1–AC5 remain NOT VERIFIED.
