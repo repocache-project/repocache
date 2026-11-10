@@ -1118,3 +1118,23 @@ tests alongside #31's staged multi-resource fixture WAL. This does not
 connect a real root socket worker to these operations: a valid kernel peer
 still receives `ROOT_TRANSACTION_NOT_IMPLEMENTED`. Syntax-only output
 cannot grant NGINX service reload, resource publication or root writes.
+
+## Whole-state v2 digest plus generation under the retained lock (no authority)
+
+The private read-only server_proposed_v2_locked_digest_v1 precondition
+compares a canonical committed v2 snapshot to a caller-asserted SHA-256
+of the *entire state file*, not just the configuration. Under the same
+owner-pinned exclusive state FD lock it checks the expected generation,
+old v1/native-package markers, pending WAL, canonical v2 bytes, inode
+metadata and an immediate second read. It detects even a noncooperating
+root actor substituting an identically encoded inode while flock is held.
+The fixed current-namespace wrapper accepts no caller root path, UID or FD
+and requires root for *read-only* inspection. A hash equality check is
+neither a signature nor authenticated operator intent; it never grants
+host write, reload or catalog publication, and expires on lock release.
+
+Tests cover valid fixture read, stale hash/generation, malformed claims,
+absent state, interrupted WAL, foreign legacy state, same-byte inode
+substitution and root refusal. Real booted native host, signed installed
+worker, operator approval, NGINX reload and postpublication acceptance
+remain NOT VERIFIED. The original issue #31 host criteria are unchanged.

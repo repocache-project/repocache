@@ -3802,3 +3802,137 @@ def test_pending_native_package_effects_block_multi_wal_recovery_without_erasure
     )["status"] == "ROLLED_BACK_INERT_FIXTURE_MULTI_RESOURCE"
     assert (folder / V2_STATE).read_bytes() == known_good_state
     assert not (folder / multi.JOURNAL).exists()
+
+
+def test_locked_v2_digest_precondition_never_grants_authority(fixture_root):
+    from repocache.server_proposed_v2_locked_digest_v1 import _inspect_under_root
+    fd, folder, uid = fixture_root
+    apply(fixture_root, snapshot(2))
+    original = (folder / V2_STATE).read_bytes()
+    report = _inspect_under_root(
+        fd, owner_uid=uid, expected_generation=1,
+        expected_state_sha256=hashlib.sha256(original).hexdigest(),
+    )
+    assert report["status"] == "LOCKED_PERSISTED_V2_DIGEST_OBSERVED_ONLY"
+    assert report["whole_state_bytes_digest_matches"] is True
+    assert report["canonical_v2_snapshot_observed"] is True
+    assert report["preflight_remains_valid_after_lock_release"] is False
+    assert all(value is False for key, value in report.items()
+               if key.startswith("authorizes_") or key.endswith("_verified"))
+    assert (folder / V2_STATE).read_bytes() == original
+
+
+@pytest.mark.parametrize("failure,code", [
+    ("digest", "STATE_DIGEST_MISMATCH"),
+    ("generation", "STALE_GENERATION"),
+    ("nonhex", "ARGUMENT_INVALID"),
+    ("boolean", "ARGUMENT_INVALID"),
+])
+def test_locked_v2_digest_refuses_wrong_intent_without_mutation(
+    fixture_root, failure, code,
+):
+    from repocache.server_proposed_v2_locked_digest_v1 import (
+        LockedV2DigestError, _inspect_under_root,
+    )
+    fd, folder, uid = fixture_root
+    apply(fixture_root, snapshot(2))
+    previous = (folder / V2_STATE).read_bytes()
+    digest = hashlib.sha256(previous).hexdigest()
+    generation = 1
+    if failure == "digest":
+        digest = "0" * 64 if digest != "0" * 64 else "1" * 64
+    elif failure == "generation":
+        generation = 2
+    elif failure == "nonhex":
+        digest = "X" * 64
+    else:
+        generation = True
+    with pytest.raises(LockedV2DigestError, match=code):
+        _inspect_under_root(
+            fd, owner_uid=uid, expected_generation=generation,
+            expected_state_sha256=digest,
+        )
+    assert (folder / V2_STATE).read_bytes() == previous
+
+
+def test_locked_v2_digest_blocks_absent_and_unrecovered_wal(fixture_root):
+    from repocache.server_proposed_v2_locked_digest_v1 import (
+        LockedV2DigestError, _inspect_under_root,
+    )
+    fd, folder, uid = fixture_root
+    with pytest.raises(LockedV2DigestError, match="STATE_ABSENT"):
+        _inspect_under_root(
+            fd, owner_uid=uid, expected_generation=1,
+            expected_state_sha256="a" * 64,
+        )
+    def interrupt(phase):
+        if phase == "journal_durable":
+            raise RuntimeError("fixture interrupted after durable journal")
+    with pytest.raises(RuntimeError, match="fixture interrupted"):
+        apply(fixture_root, snapshot(2), inject=interrupt)
+    assert (folder / V2_JOURNAL).exists()
+    with pytest.raises(LockedV2DigestError, match="RECOVERY_REQUIRED"):
+        _inspect_under_root(
+            fd, owner_uid=uid, expected_generation=1,
+            expected_state_sha256="a" * 64,
+        )
+    assert (folder / V2_JOURNAL).exists()
+    assert rollback(fixture_root)["status"] == "ROLLED_BACK_INERT_V2"
+
+
+def test_locked_v2_digest_refuses_foreign_legacy_state(fixture_root):
+    from repocache.server_proposed_v2_locked_digest_v1 import (
+        LockedV2DigestError, _inspect_under_root,
+    )
+    fd, folder, uid = fixture_root
+    apply(fixture_root, snapshot(2))
+    old = (folder / V2_STATE).read_bytes()
+    legacy = folder / "state-v1.json"
+    legacy.write_bytes(b"foreign")
+    legacy.chmod(0o600)
+    with pytest.raises(LockedV2DigestError,
+                       match="PROTECTED_STATE_UNVERIFIED"):
+        _inspect_under_root(
+            fd, owner_uid=uid, expected_generation=1,
+            expected_state_sha256=hashlib.sha256(old).hexdigest(),
+        )
+    assert legacy.read_bytes() == b"foreign"
+    assert (folder / V2_STATE).read_bytes() == old
+
+
+def test_locked_v2_digest_refuses_same_byte_inode_swap(fixture_root, monkeypatch):
+    import repocache.server_proposed_v2_locked_digest_v1 as guard
+    fd, folder, uid = fixture_root
+    apply(fixture_root, snapshot(2))
+    raw = (folder / V2_STATE).read_bytes()
+    real = guard._read_v2
+    calls = []
+
+    def read_with_foreign_swap(directory, owner):
+        calls.append(1)
+        if len(calls) == 2:
+            replacement = folder / ".foreign-same-bytes"
+            replacement.write_bytes(raw)
+            replacement.chmod(0o600)
+            os.replace(replacement, folder / V2_STATE)
+        return real(directory, owner)
+
+    monkeypatch.setattr(guard, "_read_v2", read_with_foreign_swap)
+    with pytest.raises(guard.LockedV2DigestError,
+                       match="STATE_CHANGED_DURING_INSPECTION"):
+        guard._inspect_under_root(
+            fd, owner_uid=uid, expected_generation=1,
+            expected_state_sha256=hashlib.sha256(raw).hexdigest(),
+        )
+
+
+def test_locked_v2_digest_current_root_nonroot_refused_before_open(monkeypatch):
+    import repocache.server_proposed_v2_locked_digest_v1 as guard
+    monkeypatch.setattr(guard.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(guard.os, "open",
+                        lambda *_a, **_k: pytest.fail("must not open /"))
+    with pytest.raises(guard.LockedV2DigestError,
+                       match="ROOT_READ_ONLY_INSPECTION_REQUIRED"):
+        guard.inspect_current_namespace_locked_v2_digest(
+            expected_generation=1, expected_state_sha256="a" * 64,
+        )
