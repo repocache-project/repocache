@@ -223,10 +223,9 @@ def _commit_fixture_multi_resource_under_root(
                 or type(catalog["active_ids"]) is not list
                 or catalog["active_ids"] != sorted(set(catalog["active_ids"]))
                 or any(type(x) is not str for x in catalog["active_ids"])
-                or not all(
-                    x in [r["id"] for r in frozen["repository_records"]
-                          if r["desired_state"] == "active"]
-                    for x in catalog["active_ids"]
+                or catalog["active_ids"] != sorted(
+                    r["id"] for r in frozen["repository_records"]
+                    if r["desired_state"] == "active"
                 )):
             _refuse("CATALOG_INVALID")
     except (ValueError, UnicodeError, TypeError, RecursionError):
@@ -320,7 +319,7 @@ def _recover_fixture_multi_resource_under_root(
     _refuse_actual_root_fixture_write(root_fd)
     with _locked(root_fd, owner_uid) as directory:
         _legacy_refusal(directory, owner_uid)
-        if _pending(directory, owner_uid):
+        if _pending(directory, owner_uid, include_multi=False):
             _refuse("FOREIGN_STATE_JOURNAL_PENDING")
         journal = _read_record(directory, owner_uid, JOURNAL)
         temp = _read_record(directory, owner_uid, JOURNAL_TMP)
@@ -340,6 +339,9 @@ def _recover_fixture_multi_resource_under_root(
         stage = _read_file(directory, STAGE, owner_uid, max(LIMITS.values()))
         if stage is not None and _digest(stage) not in set(next_sha.values()):
             _refuse("FOREIGN_STAGE")
+        if stage is not None:
+            _unlink_known(directory, STAGE, stage,
+                          owner_uid, max(LIMITS.values()))
         # Invalidate the active marker FIRST. After this point new attempts
         # always see a pending journal until every prior byte is restored.
         for name in (MANIFEST, CATALOG, INCLUDE, V2_STATE):
@@ -347,9 +349,6 @@ def _recover_fixture_multi_resource_under_root(
             if current != old[name]:
                 _write_target(directory, owner_uid, name,
                               current, old[name])
-        if stage is not None:
-            _unlink_known(directory, STAGE, stage,
-                          owner_uid, max(LIMITS.values()))
         _validate_old(_read_all(directory, owner_uid))
         _unlink_known(directory, JOURNAL if journal is not None else JOURNAL_TMP,
                       journal_raw, owner_uid, MAX_JOURNAL_BYTES)
