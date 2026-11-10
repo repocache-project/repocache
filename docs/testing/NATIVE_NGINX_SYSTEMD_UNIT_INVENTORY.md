@@ -207,3 +207,9 @@ terminated and reaped within a bounded timeout. The JSON record explicitly
 sets all host-root, native systemd, SELinux, reload and catalog authority
 claims to false. This supports the low-level executable-inode invariant;
 it **does not** satisfy #27/#31/#64 booted native acceptance.
+
+The inode precondition also refuses a non-executable native binary mode or
+a detected replacement of the fixed installed binary path between the first
+and second kernel observations. This narrows accidental races but remains
+insufficient for binary signing, authenticated package ownership, host-root
+or real NGINX activation authority.

@@ -110,7 +110,7 @@ def _observe_nginx_master_kernel(pid: int) -> None:
         executing = os.stat(proc + "/exe")
         if (not stat.S_ISREG(installed.st_mode)
                 or installed.st_uid != 0 or installed.st_gid != 0
-                or stat.S_IMODE(installed.st_mode) & 0o022
+                or stat.S_IMODE(installed.st_mode) != 0o755
                 or installed.st_nlink != 1
                 or not stat.S_ISDIR(process.st_mode)
                 or process.st_uid != 0
@@ -130,9 +130,13 @@ def _observe_nginx_master_kernel(pid: int) -> None:
             os.close(fd)
         current = os.stat(proc)
         rechecked = os.stat(proc + "/exe")
+        binary_again = os.lstat(binary)
         if ((current.st_dev, current.st_ino) != (process.st_dev, process.st_ino)
                 or (rechecked.st_dev, rechecked.st_ino)
-                   != (installed.st_dev, installed.st_ino)):
+                   != (installed.st_dev, installed.st_ino)
+                or any(getattr(binary_again, name) != getattr(installed, name)
+                       for name in ("st_dev", "st_ino", "st_mode",
+                                    "st_uid", "st_gid", "st_nlink"))):
             _deny("NGINX_MASTER_IDENTITY_REFUSED")
     except EffectiveNginxUnitError:
         raise

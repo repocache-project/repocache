@@ -207,7 +207,8 @@ def test_negative_results_do_not_echo_untrusted_systemctl_text(monkeypatch):
 @pytest.mark.parametrize("field", [
     "wrong_binary_inode", "foreign_binary", "foreign_process",
     "wrong_comm", "changed_pid_inode", "changed_exe_inode",
-    "missing_proc", "symlink_binary",
+    "missing_proc", "symlink_binary", "nonexecutable_binary",
+    "replaced_binary",
 ])
 def test_kernel_nginx_master_identity_fails_closed(monkeypatch, field):
     """Only read kernel fixed-name observations; no process action."""
@@ -219,8 +220,14 @@ def test_kernel_nginx_master_identity_fails_closed(monkeypatch, field):
     executing = SimpleNamespace(st_dev=dev, st_ino=inode)
     count = {"process": 0, "exe": 0}
     closed = []
+    seen_binary = {"calls": 0}
     def lstat(path):
         assert path == "/usr/sbin/nginx"
+        seen_binary["calls"] += 1
+        if field == "replaced_binary" and seen_binary["calls"] == 2:
+            return SimpleNamespace(**{**vars(binary), "st_ino": inode + 2})
+        if field == "nonexecutable_binary":
+            return SimpleNamespace(**{**vars(binary), "st_mode": stat.S_IFREG | 0o600})
         if field == "foreign_binary":
             return SimpleNamespace(**{**vars(binary), "st_uid": 2000})
         if field == "symlink_binary":
