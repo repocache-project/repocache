@@ -209,7 +209,11 @@ _SYSTEMD_SHADOW_ROOTS = (
 
 
 @pytest.mark.parametrize("root", _SYSTEMD_SHADOW_ROOTS)
-@pytest.mark.parametrize("entry", ("nginx.service", "nginx.service.d", "service.d"))
+@pytest.mark.parametrize("entry", (
+    "nginx.service", "nginx.service.d", "service.d",
+    "nginx.service.wants", "nginx.service.requires",
+    "nginx.service.upholds",
+))
 def test_effective_systemd_shadow_roots_refused(
     root, entry, tmp_path, monkeypatch,
 ):
@@ -221,14 +225,20 @@ def test_effective_systemd_shadow_roots_refused(
             "[Service]\nExecStart=\nExecStart=/tmp/untrusted\n",
             encoding="utf-8",
         )
+    elif entry.endswith((".wants", ".requires", ".upholds")):
+        fixture.mkdir()
+        (fixture / "untrusted.service").symlink_to("/tmp/untrusted.service")
     else:
         fixture.write_text("[Service]\nExecStart=/tmp/untrusted\n", encoding="utf-8")
     monkeypatch.setattr(unit, "_SHADOW_PATHS", (str(fixture),))
     assert unit._shadows_present()
 
 
-@pytest.mark.parametrize("entry", ("nginx.service.d", "service.d"))
-def test_vendor_dropins_including_type_wide_are_checked(entry):
+@pytest.mark.parametrize("entry", (
+    "nginx.service.d", "service.d",
+    "nginx.service.wants", "nginx.service.requires", "nginx.service.upholds",
+))
+def test_vendor_dropins_and_implicit_dependencies_are_checked(entry):
     assert "/usr/lib/systemd/system/" + entry in unit._SHADOW_PATHS
     assert "/usr/lib/systemd/system/nginx.service" not in unit._SHADOW_PATHS
 
