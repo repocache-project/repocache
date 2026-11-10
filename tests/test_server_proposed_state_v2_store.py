@@ -2882,3 +2882,317 @@ def test_v2_locked_real_nginx_reload_catalog_compensation_rehearsal(
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait(timeout=3)
+
+
+# Fixed-name three-resource v2 journal: deliberately private Linux fixtures.
+def _multi_resource_fixture():
+    from repocache import server_fixture_multi_resource_wal_v1 as multi
+    return multi
+
+
+def _catalog_fixture(ids):
+    return json.dumps({
+        "schema_version": 1,
+        "status": "fixture-only-observed-candidate",
+        "active_ids": ids,
+    }, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _multi_snapshot(count, *, generation=1, previous=None, active=False):
+    doc = document(count=count)
+    if active:
+        for row in doc["repositories"]:
+            row["desired_state"] = "active"
+    return snapshot(generation=generation, previous=previous, doc=doc)
+
+
+def test_multi_resource_durable_bootstrap_and_active_only_fixture_catalog(
+    fixture_root,
+):
+    multi = _multi_resource_fixture()
+    fd, folder, uid = fixture_root
+    new = _multi_snapshot(1, active=True)
+    result = multi._commit_fixture_multi_resource_under_root(
+        fd, new, owner_uid=uid, expected_generation=0,
+        include_bytes=b"# disposable managed NGINX candidate\n",
+        catalog_bytes=_catalog_fixture(["repo-0"]),
+    )
+    assert result["status"] == "COMMITTED_INERT_FIXTURE_MULTI_RESOURCE"
+    assert result["state_generation"] == 1
+    assert result["durable_shadow_wal_exercised"] is True
+    assert result["host_activation_verified"] is False
+    assert result["authorizes_nginx_reload"] is False
+    assert result["authorizes_catalog_publication"] is False
+    assert json.loads((folder / V2_STATE).read_bytes()) == new
+    assert (folder / multi.INCLUDE).read_bytes() == (
+        b"# disposable managed NGINX candidate\n"
+    )
+    assert json.loads((folder / multi.CATALOG).read_bytes())["active_ids"] == ["repo-0"]
+    assert (folder / multi.MANIFEST).is_file()
+    assert all(not (folder / name).exists()
+               for name in (multi.JOURNAL, multi.JOURNAL_TMP, multi.STAGE))
+    assert all((folder / name).stat().st_mode & 0o777 == 0o600
+               for name in (V2_STATE, multi.INCLUDE, multi.CATALOG, multi.MANIFEST))
+    assert multi._recover_fixture_multi_resource_under_root(
+        fd, owner_uid=uid,
+    )["status"] == "CLEAN_INERT_FIXTURE"
+
+
+@pytest.mark.parametrize("phase", [
+    "journal_tmp_durable", "journal_durable", "include_durable",
+    "state_durable", "catalog_durable", "manifest_durable",
+])
+@pytest.mark.parametrize("bootstrap", [True, False])
+def test_multi_resource_crash_recovery_returns_all_exact_previous_bytes(
+    fixture_root, phase, bootstrap,
+):
+    multi = _multi_resource_fixture()
+    fd, folder, uid = fixture_root
+    prior = None
+    old_gen = 0
+    if not bootstrap:
+        prior = _multi_snapshot(1, active=True)
+        multi._commit_fixture_multi_resource_under_root(
+            fd, prior, owner_uid=uid, expected_generation=0,
+            include_bytes=b"# prior NGINX\n",
+            catalog_bytes=_catalog_fixture(["repo-0"]),
+        )
+        old_gen = 1
+    old = {name: (folder / name).read_bytes() if (folder / name).exists()
+           else None for name in multi.ORDER}
+    next_state = _multi_snapshot(
+        2, generation=old_gen + 1, previous=prior, active=True,
+    )
+
+    def interrupt(point):
+        if point == phase:
+            raise RuntimeError("disposable process interruption")
+
+    with pytest.raises(RuntimeError, match="disposable process interruption"):
+        multi._commit_fixture_multi_resource_under_root(
+            fd, next_state, owner_uid=uid, expected_generation=old_gen,
+            include_bytes=b"# next NGINX\n",
+            catalog_bytes=_catalog_fixture(["repo-0", "repo-1"]),
+            inject_fault=interrupt,
+        )
+    # Ordinary state APIs must NOT claim clean or bypass this journal.
+    with pytest.raises(ProposedV2PersistenceError, match="RECOVERY_REQUIRED"):
+        apply(fixture_root, _multi_snapshot(1))
+    with pytest.raises(
+        ProposedV2PersistenceError, match="MULTI_RESOURCE_RECOVERY_REQUIRED",
+    ):
+        rollback(fixture_root)
+    recovery = multi._recover_fixture_multi_resource_under_root(
+        fd, owner_uid=uid,
+    )
+    assert recovery["status"] in (
+        "ROLLED_BACK_INERT_FIXTURE_MULTI_RESOURCE",
+        "DISCARDED_UNPUBLISHED_INERT_FIXTURE_JOURNAL",
+    )
+    assert recovery["host_recovery_verified"] is False
+    assert recovery["nginx_service_reloaded"] is False
+    assert recovery["catalog_publication_verified"] is False
+    for name, bytes_before in old.items():
+        path = folder / name
+        assert (path.read_bytes() if path.exists() else None) == bytes_before
+    assert all(not (folder / name).exists()
+               for name in (multi.JOURNAL, multi.JOURNAL_TMP, multi.STAGE))
+    assert multi._recover_fixture_multi_resource_under_root(
+        fd, owner_uid=uid,
+    )["status"] == "CLEAN_INERT_FIXTURE"
+    retried = multi._commit_fixture_multi_resource_under_root(
+        fd, next_state, owner_uid=uid, expected_generation=old_gen,
+        include_bytes=b"# next NGINX\n",
+        catalog_bytes=_catalog_fixture(["repo-0", "repo-1"]),
+    )
+    assert retried["status"] == "COMMITTED_INERT_FIXTURE_MULTI_RESOURCE"
+
+
+@pytest.mark.parametrize("target", ["state", "include", "catalog", "manifest"])
+def test_multi_resource_recovery_refuses_external_drift_without_erasure(
+    fixture_root, target,
+):
+    multi = _multi_resource_fixture()
+    fd, folder, uid = fixture_root
+    new = _multi_snapshot(1, active=True)
+
+    def crash(point):
+        if point == "manifest_durable":
+            raise RuntimeError("simulated abrupt process exit")
+
+    with pytest.raises(RuntimeError):
+        multi._commit_fixture_multi_resource_under_root(
+            fd, new, owner_uid=uid, expected_generation=0,
+            include_bytes=b"# candidate nginx\n",
+            catalog_bytes=_catalog_fixture(["repo-0"]),
+            inject_fault=crash,
+        )
+    name = {"state": V2_STATE, "include": multi.INCLUDE,
+            "catalog": multi.CATALOG, "manifest": multi.MANIFEST}[target]
+    path = folder / name
+    altered = path.read_bytes() + b"external modification"
+    path.write_bytes(altered)
+    with pytest.raises(multi.FixtureMultiResourceError,
+                       match="FOREIGN_RESOURCE_DRIFT"):
+        multi._recover_fixture_multi_resource_under_root(fd, owner_uid=uid)
+    assert path.read_bytes() == altered
+    assert (folder / multi.JOURNAL).is_file()
+
+
+def test_multi_resource_foreign_symlink_refused_without_following(
+    fixture_root, tmp_path,
+):
+    multi = _multi_resource_fixture()
+    fd, folder, uid = fixture_root
+
+    def crash(phase):
+        if phase == "include_durable":
+            raise RuntimeError("simulated crash")
+
+    with pytest.raises(RuntimeError):
+        multi._commit_fixture_multi_resource_under_root(
+            fd, _multi_snapshot(1), owner_uid=uid, expected_generation=0,
+            include_bytes=b"# nginx candidate\n",
+            catalog_bytes=_catalog_fixture([]), inject_fault=crash,
+        )
+    secret = tmp_path / "unrelated-secret"
+    secret.write_bytes(b"keep out")
+    include = folder / multi.INCLUDE
+    include.unlink()
+    include.symlink_to(secret)
+    with pytest.raises((multi.FixtureMultiResourceError, ProtectedStateStoreError)):
+        multi._recover_fixture_multi_resource_under_root(fd, owner_uid=uid)
+    assert include.is_symlink()
+    assert secret.read_bytes() == b"keep out"
+    assert (folder / multi.JOURNAL).is_file()
+
+
+@pytest.mark.parametrize("active_ids", [[], ["repo-0", "repo-0"], ["unknown"]])
+def test_multi_resource_refuses_inaccurate_active_catalog_before_write(
+    fixture_root, active_ids,
+):
+    multi = _multi_resource_fixture()
+    fd, folder, uid = fixture_root
+    with pytest.raises(multi.FixtureMultiResourceError,
+                       match="CATALOG_INVALID"):
+        multi._commit_fixture_multi_resource_under_root(
+            fd, _multi_snapshot(1, active=True),
+            owner_uid=uid, expected_generation=0,
+            include_bytes=b"# nginx candidate\n",
+            catalog_bytes=_catalog_fixture(active_ids),
+        )
+    assert not (folder / multi.JOURNAL).exists()
+    assert not (folder / V2_STATE).exists()
+
+
+def test_multi_resource_manifest_rejects_unowned_prior_files(fixture_root):
+    multi = _multi_resource_fixture()
+    fd, folder, uid = fixture_root
+    (folder / multi.INCLUDE).write_bytes(b"# foreign configuration\n")
+    (folder / multi.INCLUDE).chmod(0o600)
+    with pytest.raises(multi.FixtureMultiResourceError,
+                       match="FOREIGN_BOOTSTRAP_RESOURCE"):
+        multi._commit_fixture_multi_resource_under_root(
+            fd, _multi_snapshot(1),
+            owner_uid=uid, expected_generation=0,
+            include_bytes=b"# new configuration\n",
+            catalog_bytes=_catalog_fixture([]),
+        )
+    assert (folder / multi.INCLUDE).read_bytes() == b"# foreign configuration\n"
+    assert not (folder / multi.JOURNAL).exists()
+
+
+def test_multi_resource_manifest_detects_foreign_modification_on_update(
+    fixture_root,
+):
+    multi = _multi_resource_fixture()
+    fd, folder, uid = fixture_root
+    old = _multi_snapshot(1, active=True)
+    multi._commit_fixture_multi_resource_under_root(
+        fd, old, owner_uid=uid, expected_generation=0,
+        include_bytes=b"# known-good\n",
+        catalog_bytes=_catalog_fixture(["repo-0"]),
+    )
+    (folder / multi.INCLUDE).write_bytes(b"# mutated by external actor\n")
+    next_state = _multi_snapshot(2, generation=2, previous=old, active=True)
+    with pytest.raises(multi.FixtureMultiResourceError,
+                       match="OWNER_MANIFEST_MISSING_OR_DRIFT"):
+        multi._commit_fixture_multi_resource_under_root(
+            fd, next_state, owner_uid=uid, expected_generation=1,
+            include_bytes=b"# new candidate\n",
+            catalog_bytes=_catalog_fixture(["repo-0", "repo-1"]),
+        )
+    assert not (folder / multi.JOURNAL).exists()
+    assert (folder / multi.INCLUDE).read_bytes() == (
+        b"# mutated by external actor\n"
+    )
+
+
+def test_multi_resource_callback_failure_preserves_complete_undo_log(
+    fixture_root,
+):
+    multi = _multi_resource_fixture()
+    fd, folder, uid = fixture_root
+
+    def fail():
+        assert (folder / multi.JOURNAL).is_file()
+        assert (folder / multi.MANIFEST).is_file()
+        raise RuntimeError("private NGINX password should never leak")
+
+    with pytest.raises(multi.FixtureMultiResourceError,
+                       match="FIXTURE_EFFECTS_REFUSED") as caught:
+        multi._commit_fixture_multi_resource_under_root(
+            fd, _multi_snapshot(1, active=True),
+            owner_uid=uid, expected_generation=0,
+            include_bytes=b"# candidate\n",
+            catalog_bytes=_catalog_fixture(["repo-0"]),
+            verify_fixture_effects=fail,
+        )
+    assert "private NGINX" not in str(caught.value)
+    assert (folder / multi.JOURNAL).is_file()
+    assert multi._recover_fixture_multi_resource_under_root(
+        fd, owner_uid=uid,
+    )["status"] == "ROLLED_BACK_INERT_FIXTURE_MULTI_RESOURCE"
+    assert not (folder / multi.MANIFEST).exists()
+    assert not (folder / V2_STATE).exists()
+
+
+def test_multi_resource_identical_generation_is_inert(fixture_root):
+    multi = _multi_resource_fixture()
+    fd, folder, uid = fixture_root
+    old = _multi_snapshot(1, active=True)
+    multi._commit_fixture_multi_resource_under_root(
+        fd, old, owner_uid=uid, expected_generation=0,
+        include_bytes=b"# nginx known-good\n",
+        catalog_bytes=_catalog_fixture(["repo-0"]),
+    )
+    inode = (folder / V2_STATE).stat().st_ino
+    next_state = _multi_snapshot(1, generation=2, previous=old, active=True)
+    status = multi._commit_fixture_multi_resource_under_root(
+        fd, next_state, owner_uid=uid, expected_generation=1,
+        include_bytes=b"# nginx known-good\n",
+        catalog_bytes=_catalog_fixture(["repo-0"]),
+    )
+    assert status["status"] == "NO_CHANGE_INERT_FIXTURE"
+    assert (folder / V2_STATE).stat().st_ino == inode
+    assert not (folder / multi.JOURNAL).exists()
+
+
+def test_multi_resource_live_namespace_root_cannot_be_used_as_fixture():
+    multi = _multi_resource_fixture()
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(ProposedV2PersistenceError,
+                           match="CURRENT_NAMESPACE_ROOT_WRITES_REFUSED"):
+            multi._commit_fixture_multi_resource_under_root(
+                fd, _multi_snapshot(1), owner_uid=os.geteuid(),
+                expected_generation=0, include_bytes=b"# inert\n",
+                catalog_bytes=_catalog_fixture([]),
+            )
+        with pytest.raises(ProposedV2PersistenceError,
+                           match="CURRENT_NAMESPACE_ROOT_WRITES_REFUSED"):
+            multi._recover_fixture_multi_resource_under_root(
+                fd, owner_uid=os.geteuid(),
+            )
+    finally:
+        os.close(fd)
