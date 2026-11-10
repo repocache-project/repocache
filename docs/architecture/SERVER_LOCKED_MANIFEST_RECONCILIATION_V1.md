@@ -685,3 +685,43 @@ the ordering required by the future host transaction without adding
 an installer, privileged service, authorization token, actual atomic
 catalog, or production commit/reload control. It is not a substitute
 for genuine booted systemd/SELinux, owner approval or live cache HIT.
+
+### Same-lock v2 NGINX-candidate preflight + private state commit (fixture only)
+
+The private `_commit_preflighted_proposed_v2_under_root` now narrows the
+previous preflight-to-state-commit window. It freezes the complete untrusted
+v2 snapshot and pin dictionary **before** locking, then takes the existing
+protected fixture FD lock **once**. While held it rejects legacy/pending
+state and stale generations, validates the canonical transition against the
+*actual persisted predecessor*, renders the already owned #28 candidate
+via the same source, rechecks predecessor bytes and passes that exact
+expected previous state to the shared journalled commit body.
+
+The previous private writer's locked journal/stage/fsync/rename and recovery
+semantics remain unchanged. A no-op leaves the inode untouched and renders
+the persisted generation. The helper refuses unsafe/incomplete pins,
+concurrent/out-of-band state replacement, another held lock and interrupted
+transactions **before new state writes**. Fault-injection tests still require
+explicit, conservative rollback following a durable journal interruption.
+Both the original writer and the new combined entry use the same
+`_commit_locked_proposed_v2` implementation rather than diverging
+between two protected-state commit semantics.
+
+**Important security boundary:** this locks *only a disposable state-v2
+fixture*. It does **not** execute full-context `nginx -t`, validate root
+provenance/ACL/mount/SELinux, authenticate an administrator, stage a managed
+NGINX include, reload systemd, attest actual exposure or atomically
+publish an active-only catalog. The generated fragments and committed
+fixture state may therefore differ from the live service. Every returned
+service/catalog/host/privileged authorization flag remains FALSE, even
+after a fixture state write. Do not expose the private helper through
+CLI/systemd/Polkit or treat a successful result as production acceptance.
+Actual orchestration still requires the separately approved privileged
+root-owned transaction and integration with #27/#28/#95; the newer NGINX
+cache-root syntax guard remains owned by existing #28 PR #251 until merged.
+
+The new focused tests cover clean bootstrap, changed active candidate
+parity, no-op idempotency, stale generation, unsafe pins, concurrent lock,
+out-of-band writer drift and interrupted-journal recovery. Genuine
+booted systemd + enforcing SELinux acceptance on Debian 13 and AlmaLinux 10
+is **NOT VERIFIED** and remains scheduled after the v0.6.0 code gates.
