@@ -240,6 +240,7 @@ def _commit_locked_proposed_v2(
     inject_fault: Callable[[str], None] | None = None,
     require_previous_bytes: bool = False,
     previous_bytes: bytes | None = None,
+    verify_fixture_after_replace: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Private fixture transaction body; caller must hold the pinned FD lock.
 
@@ -299,6 +300,23 @@ def _commit_locked_proposed_v2(
         inject_fault("replace_durable")
     if _read_file(directory, V2_JOURNAL, owner_uid, MAX_V2_JOURNAL_BYTES) != journal:
         _refuse("JOURNAL_CHANGED")
+    # PRIVATE fixture-only post-replace barrier: a future native transaction
+    # must keep a durable multi-resource journal until the actual service and
+    # derived catalog are consistently activated. This callback is NEVER a
+    # host authorization or a production execution API. A failed check leaves
+    # the v2 journal durable for explicit recovery, rather than silently
+    # reporting a committed generation as an activated deployment.
+    if verify_fixture_after_replace is not None:
+        try:
+            if verify_fixture_after_replace() is not None:
+                _refuse("ACTIVATION_FIXTURE_REFUSED")
+        except Exception:
+            _refuse("ACTIVATION_FIXTURE_REFUSED")
+        if _read_file(directory, V2_JOURNAL, owner_uid, MAX_V2_JOURNAL_BYTES) != journal:
+            _refuse("JOURNAL_CHANGED_AFTER_FIXTURE_ACTIVATION")
+        _, after_activation = _read_v2(directory, owner_uid)
+        if after_activation != raw:
+            _refuse("STATE_CHANGED_DURING_FIXTURE_ACTIVATION")
     _unlink_known(
         directory, V2_JOURNAL, journal,
         owner_uid, MAX_V2_JOURNAL_BYTES,
@@ -332,6 +350,7 @@ def _commit_preflighted_proposed_v2_under_root(
     ca_bundle_path: str,
     inject_fault: Callable[[str], None] | None = None,
     validate_nginx_candidate: Callable[[dict[str, Any]], None] | None = None,
+    verify_fixture_activation: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """PRIVATE fixture: render candidate and commit v2 under one FD lock.
 
@@ -348,6 +367,8 @@ def _commit_preflighted_proposed_v2_under_root(
         _refuse("EXPECTED_GENERATION_INVALID")
     if validate_nginx_candidate is not None and not callable(validate_nginx_candidate):
         _refuse("NGINX_VALIDATOR_INVALID")
+    if verify_fixture_activation is not None and not callable(verify_fixture_activation):
+        _refuse("FIXTURE_ACTIVATION_VALIDATOR_INVALID")
     frozen, raw = _freeze(proposed_snapshot)
     try:
         pin_raw = _canonical(candidate_pins_by_repository, limit=1024 * 1024)
@@ -406,10 +427,26 @@ def _commit_preflighted_proposed_v2_under_root(
         _, after = _read_v2(directory, owner_uid)
         if before != after:
             _refuse("STATE_CHANGED_DURING_PREFLIGHT")
+        def verify_after_replace() -> None:
+            if verify_fixture_activation is None:
+                return None
+            # Separate detached copy: a test callback may not rewrite the
+            # candidate later returned to the caller. A failed test-only
+            # activation leaves the protected v2 journal pending.
+            detached = _json(
+                _canonical(candidate, limit=1024 * 1024),
+                limit=1024 * 1024,
+            )
+            return verify_fixture_activation(detached)
+
         written = _commit_locked_proposed_v2(
             directory, frozen, raw, owner_uid=owner_uid,
             expected_generation=generation, inject_fault=inject_fault,
             require_previous_bytes=True, previous_bytes=before,
+            verify_fixture_after_replace=(
+                verify_after_replace if verify_fixture_activation is not None
+                else None
+            ),
         )
         # Return a candidate, NEVER an observed active mapping or permission.
         return {
@@ -422,6 +459,10 @@ def _commit_preflighted_proposed_v2_under_root(
             "state_preflight_and_commit_share_exclusive_lock": True,
             "fixture_validation_callback_executed": (
                 validate_nginx_candidate is not None
+            ),
+            "fixture_activation_barrier_executed": (
+                verify_fixture_activation is not None
+                and written["status"] != "NO_CHANGE_INERT_V2"
             ),
             "fixture_only": True,
             "operator_authorization_verified": False,
