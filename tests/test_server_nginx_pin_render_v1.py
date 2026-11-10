@@ -97,6 +97,28 @@ def test_ca_bundle_cannot_inject_directives(bad_ca):
         render(ca=bad_ca)
 
 
+@pytest.mark.parametrize("cache_root", [
+    "/var/cache/repocache managed",
+    "/var/cache/repocache; include /tmp/foreign.conf;",
+    "/var/cache/repocache#comment",
+    "/var/cache/repocache$uri",
+    '/var/cache/repocache"quote',
+    "/var/cache/repocache{block}",
+    "/var/cache/répertoire",
+])
+def test_canonical_install_cache_root_cannot_inject_nginx(cache_root):
+    from repocache.server_install_v1 import validate_install_document
+
+    doc = document()
+    doc["deployment"]["paths"]["cache_root"] = cache_root
+    # A valid canonical install-v1 filesystem reference is not necessarily
+    # a safe *unquoted NGINX argument*. The renderer must enforce that
+    # separate syntax boundary before emitting a fragment.
+    assert validate_install_document(doc, for_apply=True)
+    with pytest.raises(PinnedNginxError, match="render: invalid"):
+        render(doc=doc)
+
+
 def test_disabled_repository_cannot_be_rendered():
     doc = document()
     doc["repositories"][0]["desired_state"] = "disabled"
