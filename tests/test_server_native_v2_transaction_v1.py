@@ -432,3 +432,90 @@ def test_owner_manifest_cannot_hide_unauthorized_catalog_mapping(filesystem):
     (state / native._MANIFEST).chmod(0o600)
     with pytest.raises(native.NativeV2TransactionError, match="CATALOG_DRIFT"):
         recover(filesystem)
+
+
+@pytest.mark.parametrize("active", [False, True])
+def test_generated_complete_managed_nginx_server_passes_real_distro_parser(
+    filesystem, monkeypatch, tmp_path, active,
+):
+    """Genuine nginx -t; NEVER reload the runner's installed NGINX service."""
+    import shutil
+    import subprocess
+    from repocache.server_nginx_repository_bundle_v1 import (
+        render_repository_nginx_bundle_candidate,
+    )
+
+    nginx = shutil.which("nginx")
+    openssl = shutil.which("openssl")
+    if nginx is None or openssl is None:
+        pytest.skip("native nginx/openssl unavailable in this environment")
+    ca = next((
+        path for path in (
+            "/etc/ssl/certs/ca-certificates.crt",
+            "/etc/pki/tls/certs/ca-bundle.crt",
+        ) if Path(path).is_file()
+    ), None)
+    if ca is None:
+        pytest.skip("native distro CA bundle unavailable")
+    key = tmp_path / "private.key"
+    certificate = tmp_path / "certificate.pem"
+    proc = subprocess.run(
+        [openssl, "req", "-x509", "-nodes", "-newkey", "rsa:2048",
+         "-sha256", "-days", "1", "-subj", "/CN=cache.example.invalid",
+         "-keyout", str(key), "-out", str(certificate)],
+        shell=False, check=False, capture_output=True, timeout=20,
+    )
+    if proc.returncode:
+        pytest.fail("disposable test certificate creation failed")
+    key.chmod(0o600)
+    cfg = document(1)
+    cfg["expected_state_generation"] = 1
+    cfg["deployment"]["tls"]["certificate_file"] = str(certificate)
+    cfg["deployment"]["tls"]["private_key_file"] = str(key)
+    cfg["deployment"]["paths"]["cache_root"] = str(tmp_path / "cache")
+    (tmp_path / "cache").mkdir(mode=0o700)
+    cfg["repositories"][0]["desired_state"] = (
+        "active" if active else "disabled"
+    )
+    pins = ({
+        "repo-0": {"mirror0.example.invalid": ["8.8.8.8"]},
+    } if active else {})
+    bundle = render_repository_nginx_bundle_candidate(
+        cfg, expected_state_generation=1,
+        candidate_pins_by_repository=pins, ca_bundle_path=ca,
+    )
+    source, catalog, *_ = native._render_using_pins(
+        cfg, 1, "debian" if "ca-certificates" in ca else "almalinux",
+        pins, bundle,
+    )
+    if active:
+        assert b"location ^~ /__repocache/repos/repo-0/" in source
+        (tmp_path / "cache/repo-0").mkdir(mode=0o700)
+    else:
+        assert b"location ^~ /__repocache/repos/repo-0/" not in source
+    assert b"X-Repocache-Generation" in source
+    assert b"/.well-known/repocache/catalog.json" in source
+    candidate = tmp_path / "repocache-managed.conf"
+    candidate.write_bytes(source)
+    (tmp_path / "logs").mkdir(mode=0o700)
+    config = tmp_path / "nginx.conf"
+    config.write_text(
+        f"pid {tmp_path / 'nginx.pid'};\n"
+        f"error_log {tmp_path / 'logs/error.log'} notice;\n"
+        "events {}\n"
+        "http {\n"
+        "  access_log off;\n"
+        f"  include {candidate};\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [nginx, "-t", "-c", str(config), "-p", str(tmp_path)],
+        shell=False, check=False, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
+    )
+    assert completed.returncode == 0, (
+        "generated managed NGINX server rejected by distro parser"
+    )
+    observed_catalog = json.loads(catalog)
+    assert len(observed_catalog["repositories"]) == int(active)
