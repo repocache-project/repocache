@@ -908,8 +908,19 @@ manifest. After an optional fixture-only verifier, the four exact next bytes
 and journal inode are checked again and only then is the WAL removed.
 A fault injected at journal-temp, published-journal or any of the four
 replacement phases leaves observable durable evidence. State-only v1/v2
-private operations now detect this cross-resource marker and refuse normal
-writes/rollback until **specific** multi-resource fixture recovery occurs.
+private operations now detect either an in-flight WAL **or a successfully
+committed multi-resource owner marker**, and refuse state-only writes,
+read-only recovery previews and state-only rollback. An interrupted WAL
+requires **specific** multi-resource fixture recovery; a clean completed
+multi-resource ownership domain requires a **multi-resource** future write
+rather than a state-only update that would leave published routes/cat
+stale. Multi-resource commits themselves ignore only the committed owner
+sidecar, not native state-only journals.
+
+Even without any pending WAL, a clean-recovery observation validates the
+full protected prior-state/include/catalog owner-hash sidecar. A missing
+journal is never permission to report `CLEAN` if an externally altered
+include/catalog/state could still be present.
 
 Recovery obtains the *same* pinned FD lock. It validates journal format,
 exact old-byte digests, prior protected fixture ownership manifest, and
