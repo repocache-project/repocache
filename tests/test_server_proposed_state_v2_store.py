@@ -2499,3 +2499,386 @@ def test_v2_invalid_activation_callback_refused_before_any_state_write(
         )
     assert {p.name: (p.read_bytes(), p.stat().st_ino)
             for p in folder.iterdir() if p.is_file()} == before
+
+
+def test_fixture_flow_strict_order_and_catalog_only_after_live_probe():
+    from repocache.server_fixture_activation_flow_v1 import (
+        run_fixture_activation_flow,
+    )
+    observed = []
+    candidate = {
+        "status": "MULTI_REPOSITORY_RENDER_CANDIDATE_ONLY",
+        "authorizes_nginx_activation": False,
+        "authorizes_catalog_publication": False,
+        "proposed_repository_ids": ["repo-0"],
+    }
+
+    def phase(name):
+        def execute():
+            observed.append(name)
+            return None
+        return execute
+
+    def stage(value):
+        assert value is candidate
+        observed.append("stage")
+
+    run_fixture_activation_flow(
+        candidate, stage_managed_candidate=stage,
+        syntax_check=phase("syntax"),
+        reload_candidate=phase("reload"),
+        verify_live_exposure=phase("live"),
+        publish_derived_catalog=phase("publish"),
+        verify_derived_catalog=phase("verified"),
+        compensate=phase("compensate"),
+    )
+    assert observed == [
+        "stage", "syntax", "reload", "live", "publish", "verified",
+    ]
+
+
+@pytest.mark.parametrize("phase", [
+    "stage", "syntax", "reload", "live", "publish", "verified",
+])
+@pytest.mark.parametrize("return_bad", [False, True])
+def test_fixture_flow_failure_always_compensates_once(phase, return_bad):
+    from repocache.server_fixture_activation_flow_v1 import (
+        FixtureActivationFlowError, run_fixture_activation_flow,
+    )
+    candidate = {
+        "status": "MULTI_REPOSITORY_RENDER_CANDIDATE_ONLY",
+        "authorizes_nginx_activation": False,
+        "authorizes_catalog_publication": False,
+        "proposed_repository_ids": ["repo-0"],
+    }
+    observed = []
+
+    def step(name):
+        def execute(*_args):
+            observed.append(name)
+            if name == phase:
+                if return_bad:
+                    return False  # must not be mistaken for success
+                raise RuntimeError("PRIVATE ORIGINAL ERROR MUST NOT LEAK")
+        return execute
+
+    with pytest.raises(FixtureActivationFlowError,
+                       match="FIXTURE_ACTIVATION_STEP_FAILED") as exc:
+        run_fixture_activation_flow(
+            candidate,
+            stage_managed_candidate=step("stage"),
+            syntax_check=step("syntax"),
+            reload_candidate=step("reload"),
+            verify_live_exposure=step("live"),
+            publish_derived_catalog=step("publish"),
+            verify_derived_catalog=step("verified"),
+            compensate=step("compensate"),
+        )
+    assert observed.count("compensate") == 1
+    assert observed[-1] == "compensate"
+    assert "PRIVATE ORIGINAL" not in str(exc.value)
+
+
+@pytest.mark.parametrize("compensate_bad", ["exception", "return"])
+def test_fixture_flow_failed_compensation_is_explicit(compensate_bad):
+    from repocache.server_fixture_activation_flow_v1 import (
+        FixtureActivationFlowError, run_fixture_activation_flow,
+    )
+    candidate = {
+        "status": "MULTI_REPOSITORY_RENDER_CANDIDATE_ONLY",
+        "authorizes_nginx_activation": False,
+        "authorizes_catalog_publication": False,
+        "proposed_repository_ids": [],
+    }
+
+    def bad():
+        raise RuntimeError("secret synthetic path")
+
+    def compensate():
+        if compensate_bad == "return":
+            return False
+        raise RuntimeError("secret synthetic recovery error")
+
+    with pytest.raises(FixtureActivationFlowError,
+                       match="FIXTURE_ACTIVATION_COMPENSATION_FAILED") as exc:
+        run_fixture_activation_flow(
+            candidate, stage_managed_candidate=lambda _: None,
+            syntax_check=bad,
+            reload_candidate=lambda: None,
+            verify_live_exposure=lambda: None,
+            publish_derived_catalog=lambda: None,
+            verify_derived_catalog=lambda: None,
+            compensate=compensate,
+        )
+    assert "secret" not in str(exc.value)
+
+
+@pytest.mark.parametrize("invalid", [
+    {}, {"status": "MULTI_REPOSITORY_RENDER_CANDIDATE_ONLY"},
+    {"status": "MULTI_REPOSITORY_RENDER_CANDIDATE_ONLY",
+     "authorizes_nginx_activation": True,
+     "authorizes_catalog_publication": False,
+     "proposed_repository_ids": []},
+    {"status": "MULTI_REPOSITORY_RENDER_CANDIDATE_ONLY",
+     "authorizes_nginx_activation": False,
+     "authorizes_catalog_publication": False,
+     "proposed_repository_ids": ["b", "a"]},
+])
+def test_fixture_flow_refuses_invalid_candidates_before_any_callbacks(invalid):
+    from repocache.server_fixture_activation_flow_v1 import (
+        FixtureActivationFlowError, run_fixture_activation_flow,
+    )
+
+    def forbidden(*args):
+        pytest.fail("invalid candidate must never invoke any callback")
+
+    with pytest.raises(FixtureActivationFlowError,
+                       match="FIXTURE_ACTIVATION_CANDIDATE_INVALID"):
+        run_fixture_activation_flow(
+            invalid,
+            stage_managed_candidate=forbidden, syntax_check=forbidden,
+            reload_candidate=forbidden, verify_live_exposure=forbidden,
+            publish_derived_catalog=forbidden,
+            verify_derived_catalog=forbidden, compensate=forbidden,
+        )
+
+
+@pytest.mark.parametrize("fail_after_catalog", [False, True])
+@pytest.mark.skipif(
+    shutil.which("nginx") is None,
+    reason="disposable distro-packaged NGINX is required",
+)
+def test_v2_locked_real_nginx_reload_catalog_compensation_rehearsal(
+    fixture_root, tmp_path, fail_after_catalog,
+):
+    """Exercise real, isolated NGINX + fixture catalog under the v2 state WAL.
+
+    This has no native systemd, root-owned installed helper or durable
+    multi-resource recovery: callback compensation is NOT crash-safe.
+    """
+    from repocache.server_fixture_activation_flow_v1 import (
+        run_fixture_activation_flow,
+    )
+    import socket
+    import time
+
+    nginx = shutil.which("nginx")
+    ca = next((p for p in (
+        "/etc/ssl/certs/ca-certificates.crt",
+        "/etc/pki/tls/certs/ca-bundle.crt",
+    ) if Path(p).is_file()), None)
+    if ca is None:
+        pytest.skip("disposable CA bundle not installed")
+
+    fd, folder, _ = fixture_root
+    previous = snapshot(count=1)
+    apply(fixture_root, previous)
+    previous_state = (folder / V2_STATE).read_bytes()
+    updated_doc = document(count=1)
+    updated_doc["repositories"][0]["desired_state"] = "active"
+    proposed = snapshot(generation=2, previous=previous, doc=updated_doc)
+    pins = {"repo-0": {"mirror0.example.invalid": ["8.8.8.8"]}}
+
+    conf = tmp_path / "nginx.conf"
+    stage_file = tmp_path / "nginx.stage"
+    next_file = tmp_path / "nginx.candidate"
+    pid = tmp_path / "nginx.pid"
+    log = tmp_path / "error.log"
+    sock = tmp_path / "nginx.sock"
+    catalog = tmp_path / "derived-fixture-catalog.json"
+    catalog_tmp = tmp_path / "catalog.stage"
+    assert len(os.fsencode(sock)) < 100
+    previous_catalog = b'{"status":"fixture-previous"}\n'
+    catalog.write_bytes(previous_catalog)
+
+    def config(body, candidate=None):
+        return (
+            f"pid {pid};\nerror_log {log} notice;\n"
+            "worker_processes 1;\nevents { worker_connections 32; }\n"
+            "http { access_log off;\n"
+            + (candidate["http_upstream_fragment"] if candidate else "")
+            + f"server {{ listen unix:{sock};\n"
+            + f'location = /__test_health {{ return 200 "{body}"; }}\n'
+            + (candidate["server_location_fragment"] if candidate else "")
+            + "}\n}\n"
+        ).encode("utf-8")
+
+    old_nginx = config("known-good")
+    def atomically_stage(raw):
+        with stage_file.open("wb") as handle:
+            handle.write(raw)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(stage_file, conf)
+
+    def nginx_command(*args, config_file=None):
+        path = conf if config_file is None else config_file
+        return subprocess.run(
+            [nginx, *args, "-c", str(path), "-p", str(tmp_path)],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+
+    def health():
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(1)
+            connection.connect(str(sock))
+            connection.sendall(
+                b"GET /__test_health HTTP/1.0\r\n"
+                b"Host: localhost\r\nConnection: close\r\n\r\n"
+            )
+            chunks = bytearray()
+            while len(chunks) < 4096:
+                block = connection.recv(4096 - len(chunks))
+                if not block:
+                    break
+                chunks.extend(block)
+        return bytes(chunks)
+
+    def wait_health(expected, process):
+        for _ in range(100):
+            assert process.poll() is None, "isolated NGINX process exited"
+            try:
+                reply = health()
+                if (b" 200 " in reply.split(b"\r\n", 1)[0]
+                        and reply.endswith(expected)):
+                    return
+            except (OSError, TimeoutError):
+                pass
+            time.sleep(0.05)
+        pytest.fail("disposable NGINX health did not match expected")
+
+    atomically_stage(old_nginx)
+    assert nginx_command("-t").returncode == 0
+    process = subprocess.Popen(
+        [nginx, "-c", str(conf), "-p", str(tmp_path), "-g", "daemon off;"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    events = []
+
+    try:
+        wait_health(b"known-good", process)
+
+        # This is the pre-journal syntax validator; neither state nor
+        # catalog/configuration may have mutated when it runs.
+        def validate_before_journal(candidate):
+            assert (folder / V2_STATE).read_bytes() == previous_state
+            assert not (folder / V2_JOURNAL).exists()
+            assert conf.read_bytes() == old_nginx
+            next_file.write_bytes(config("activated", candidate))
+            assert nginx_command("-t", config_file=next_file).returncode == 0
+            events.append("preflight")
+
+        def activate(candidate):
+            assert (folder / V2_JOURNAL).is_file()
+            assert (folder / V2_STATE).read_bytes() != previous_state
+
+            def stage(_candidate):
+                assert _candidate["proposed_repository_ids"] == ["repo-0"]
+                atomically_stage(next_file.read_bytes())
+                events.append("stage")
+
+            def syntax():
+                assert nginx_command("-t").returncode == 0
+                events.append("syntax")
+
+            def reload():
+                result = nginx_command("-s", "reload")
+                assert result.returncode == 0, "isolated reload failed"
+                events.append("reload")
+
+            def exposure():
+                wait_health(b"activated", process)
+                assert candidate["server_location_fragment"].encode() in conf.read_bytes()
+                events.append("exposure")
+
+            def publish():
+                assert "exposure" in events
+                payload = json.dumps({
+                    "schema_version": 1,
+                    "status": "fixture-only-observed-candidate",
+                    "active_ids": candidate["proposed_repository_ids"],
+                }, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                with catalog_tmp.open("wb") as handle:
+                    handle.write(payload)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(catalog_tmp, catalog)
+                events.append("publish")
+
+            def verify_catalog():
+                assert json.loads(catalog.read_bytes())["active_ids"] == ["repo-0"]
+                events.append("verify")
+                if fail_after_catalog:
+                    raise RuntimeError("synthetic post-publication failure")
+
+            def compensate():
+                atomically_stage(old_nginx)
+                assert nginx_command("-t").returncode == 0
+                assert nginx_command("-s", "reload").returncode == 0
+                wait_health(b"known-good", process)
+                with catalog_tmp.open("wb") as handle:
+                    handle.write(previous_catalog)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(catalog_tmp, catalog)
+                events.append("compensate")
+
+            return run_fixture_activation_flow(
+                candidate, stage_managed_candidate=stage,
+                syntax_check=syntax, reload_candidate=reload,
+                verify_live_exposure=exposure,
+                publish_derived_catalog=publish,
+                verify_derived_catalog=verify_catalog,
+                compensate=compensate,
+            )
+
+        if fail_after_catalog:
+            with pytest.raises(
+                ProposedV2PersistenceError,
+                match="ACTIVATION_FIXTURE_REFUSED",
+            ):
+                locked_preflight_commit(
+                    fixture_root, proposed, expected=1, pins=pins,
+                    ca=ca, validate=validate_before_journal,
+                    activate=activate,
+                )
+            assert events == [
+                "preflight", "stage", "syntax", "reload", "exposure",
+                "publish", "verify", "compensate",
+            ]
+            assert (folder / V2_JOURNAL).is_file()
+            assert conf.read_bytes() == old_nginx
+            assert catalog.read_bytes() == previous_catalog
+            wait_health(b"known-good", process)
+            assert rollback(fixture_root)["status"] == "ROLLED_BACK_INERT_V2"
+            assert (folder / V2_STATE).read_bytes() == previous_state
+            assert not (folder / V2_JOURNAL).exists()
+        else:
+            report = locked_preflight_commit(
+                fixture_root, proposed, expected=1, pins=pins,
+                ca=ca, validate=validate_before_journal,
+                activate=activate,
+            )
+            assert report["state_generation"] == 2
+            assert report["fixture_activation_barrier_executed"] is True
+            assert not report["authorizes_nginx_activation"]
+            assert not report["authorizes_catalog_publication"]
+            assert events == [
+                "preflight", "stage", "syntax", "reload", "exposure",
+                "publish", "verify",
+            ]
+            assert not (folder / V2_JOURNAL).exists()
+            assert json.loads(catalog.read_bytes())["active_ids"] == ["repo-0"]
+            wait_health(b"activated", process)
+    finally:
+        if process.poll() is None:
+            nginx_command("-s", "quit")
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.terminate()
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=3)
