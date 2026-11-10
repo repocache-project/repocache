@@ -248,7 +248,7 @@ def test_kernel_nginx_master_identity_fails_closed(monkeypatch, field):
         lstat=lstat, stat=observe, O_RDONLY=0, O_NOFOLLOW=0, O_CLOEXEC=0,
         open=lambda path, flags: 33,
         fstat=lambda fd: SimpleNamespace(st_mode=stat.S_IFREG | 0o444, st_uid=0),
-        read=lambda fd, size: b"worker\\n" if field == "wrong_comm" else b"nginx\\n",
+        read=lambda fd, size: b"worker\n" if field == "wrong_comm" else b"nginx\n",
         close=lambda fd: closed.append(fd),
     )
     monkeypatch.setattr(unit, "os", fake_os)
@@ -272,7 +272,7 @@ def test_kernel_nginx_master_positive_is_only_inert_inode_observation(monkeypatc
         O_RDONLY=0, O_NOFOLLOW=0, O_CLOEXEC=0,
         open=lambda path, flags: 33,
         fstat=lambda fd: SimpleNamespace(st_mode=stat.S_IFREG | 0o444, st_uid=0),
-        read=lambda fd, size: b"nginx\\n",
+        read=lambda fd, size: b"nginx\n",
         close=lambda fd: None,
     ))
     assert unit._observe_nginx_master_kernel(1450) is None

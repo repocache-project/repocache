@@ -124,7 +124,7 @@ def _observe_nginx_master_kernel(pid: int) -> None:
         try:
             comm = os.fstat(fd)
             if (not stat.S_ISREG(comm.st_mode)
-                    or comm.st_uid != 0 or os.read(fd, 32) != b"nginx\\n"):
+                    or comm.st_uid != 0 or os.read(fd, 32) != b"nginx\n"):
                 _deny("NGINX_MASTER_IDENTITY_REFUSED")
         finally:
             os.close(fd)
