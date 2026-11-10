@@ -756,3 +756,20 @@ provenance, plus validated NGINX include ownership, systemd unit, TLS/cache
 paths, full-context syntax, reload, observed exposure, same-lock state/catalog
 commit and durable known-good compensation. This new callback alone satisfies
 none of those operational acceptance requirements.
+
+### Deliberate refusal of live-root fixture writes
+
+The private proposed-v2 fixture commit, same-lock preflight commit and
+rollback entrypoints now reject a descriptor whose device/inode identity
+matches the actual `/` of the invoking process. This is a **negative
+accidental-misuse guard**: the private fixture API must not be silently reused
+by the future root-owned host helper to mutate the actual namespace root.
+Invalid root descriptors also fail closed before opening state or taking locks.
+
+An FD that differs from `/` does **not** establish that it is a trusted test
+sandbox; bind mounts, alternate namespaces and privileges still require
+independent scrutiny. The private Linux fixture code remains non-authorizing.
+A future production transaction must use a separately reviewed, fixed-path
+root-owned host entrypoint with real administrative authentication and
+complete native recovery/NGINX/catalog acceptance; this guard does not
+implement such an entrypoint or prove host-root provenance.
