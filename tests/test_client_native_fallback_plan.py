@@ -181,3 +181,24 @@ def test_unrecognized_third_party_sibling_preserved_but_not_selected():
     with pytest.raises(plan.FallbackRefused):
         compile_one("etc/yum.repos.d/alma.repo", text, foreign,
                     upstream="https://untrusted.example.org/r/")
+
+
+def test_exact_apt_noop_requires_both_source_and_companion_bytes():
+    p = compile_one("etc/apt/sources.list", APT, APT)
+    assert p.companion is not None
+    assert plan.proposal_bytes_converged(p, p.proposed, p.companion[1])
+    assert not plan.proposal_bytes_converged(p, p.proposed)
+    assert not plan.proposal_bytes_converged(p, p.proposed, b"tampered")
+    assert not plan.proposal_bytes_converged(p, p.original, p.companion[1])
+    assert not plan.proposal_bytes_converged(p, p.proposed + b" ", p.companion[1])
+    assert not plan.proposal_bytes_converged(p, "not bytes", p.companion[1])
+
+
+def test_exact_dnf_noop_requires_source_without_companion():
+    p = compile_one("etc/yum.repos.d/alma.repo", DNF, DNF,
+                    upstream=RPM_UPSTREAM)
+    assert p.companion is None
+    assert plan.proposal_bytes_converged(p, p.proposed)
+    assert not plan.proposal_bytes_converged(p, p.original)
+    assert not plan.proposal_bytes_converged(p, p.proposed, b"unexpected")
+    assert not plan.proposal_bytes_converged(object(), p.proposed)
