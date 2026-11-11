@@ -104,3 +104,20 @@ def test_symlink_and_hardlinked_lock_files_are_refused(tmp_path):
     os.link(paths[names[1]], needle)
     with pytest.raises(locks.LockInspectionRefused):
         locks.inspect_native_locks("apt", root=tmp_path, proc_locks="")
+
+
+def test_symlinked_parent_directory_is_refused(tmp_path):
+    setup_locks(tmp_path, locks.APT)
+    parent = tmp_path / "var/lib/dpkg"
+    parent.rename(tmp_path / "var/lib/dpkg-original")
+    parent.symlink_to("dpkg-original", target_is_directory=True)
+    with pytest.raises(locks.LockInspectionRefused):
+        locks.inspect_native_locks("apt", root=tmp_path, proc_locks="")
+
+
+def test_group_writable_parent_is_refused(tmp_path):
+    setup_locks(tmp_path, locks.APT)
+    parent = tmp_path / "var/lib/dpkg"
+    parent.chmod(0o775)
+    with pytest.raises(locks.LockInspectionRefused):
+        locks.inspect_native_locks("apt", root=tmp_path, proc_locks="")
