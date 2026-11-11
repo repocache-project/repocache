@@ -67,7 +67,7 @@ def test_apt_mirror_priority_signing_and_original_bytes(source, body, entry):
 
 
 def test_dnf5_ordered_baseurl_preserves_gpg_and_siblings():
-    p = compile_one("etc/yum.repos.d/alma.repo", DNF + DNF_SIBLING, DNF,
+    p = compile_one("etc/yum.repos.d/alma.repo", DNF + DNF_SIBLING, DNF + "\n",
                     upstream=RPM_UPSTREAM)
     assert p.kind == "dnf-repo"
     assert p.companion is None
