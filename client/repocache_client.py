@@ -315,16 +315,34 @@ def _select_repositories(repositories: list[dict],
     return matched
 
 
+def _strict_catalog_pairs(pairs: list[tuple[str, object]]) -> dict:
+    """Reject ambiguous duplicate JSON keys before catalog normalization."""
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ClientError("Duplicate catalog JSON field")
+        result[key] = value
+    return result
+
+
 def _fetch_json(url: str, *, max_bytes: int):
+    # Never follow redirects or allow ambient proxy settings to redirect a
+    # versioned local server catalog to an untrusted HTTP(S) destination.
+    # Standard OS CA validation and hostname checking remain compulsory.
     req = Request(url, headers={"Accept": "application/json",
                                 "User-Agent": "repocache-client/0.4"})
-    with urlopen(req, timeout=5) as response:
-        if response.url != url:
-            raise ClientError("Catalog redirects are not permitted")
+    opener = build_opener(ProxyHandler({}), _RejectRedirects(),
+                          HTTPSHandler(context=ssl.create_default_context()))
+    with opener.open(req, timeout=5) as response:
+        if response.url != url or response.status != 200:
+            raise ClientError("Catalog response origin or status is invalid")
         data = response.read(max_bytes + 1)
     if len(data) > max_bytes:
         raise ClientError("Catalog too large")
-    return json.loads(data.decode("utf-8"))
+    return json.loads(data.decode("utf-8"),
+                      object_pairs_hook=_strict_catalog_pairs,
+                      parse_constant=lambda _v: (_ for _ in ()).throw(
+                          ClientError("Non-finite catalog value")))
 
 
 def _catalog(server: str) -> dict:
@@ -333,24 +351,35 @@ def _catalog(server: str) -> dict:
                           max_bytes=MAX_CATALOG_BYTES)
     except (OSError, ValueError) as exc:
         raise ClientError("Catalog unavailable or invalid") from exc
-    if not isinstance(doc, dict) or doc.get("schema") != 1:
+    if (type(doc) is not dict or set(doc) != {"schema", "repositories"}
+            or type(doc["schema"]) is not int or doc["schema"] != 1):
         raise ClientError("Unsupported catalog schema")
-    items = doc.get("repositories")
-    if not isinstance(items, list) or len(items) > 500:
+    items = doc["repositories"]
+    if type(items) is not list or len(items) > 500:
         raise ClientError("Invalid catalog entries")
     verified = []
+    upstreams: set[str] = set()
+    cache_routes: set[str] = set()
     for mapping in items:
-        if not isinstance(mapping, dict):
+        if type(mapping) is not dict or set(mapping) != {"upstream", "cache"}:
             raise ClientError("Invalid catalog entry")
-        source = mapping.get("upstream")
-        cache = mapping.get("cache")
-        if not isinstance(source, str) or not isinstance(cache, str):
+        source = mapping["upstream"]
+        cache = mapping["cache"]
+        if type(source) is not str or type(cache) is not str:
             raise ClientError("Missing catalog URLs")
         if (not source.startswith("https://") or not cache.startswith("https://")
                 or _safe_url(source) != source or _safe_url(cache) != cache
                 or not source.endswith("/") or not cache.endswith("/")
-                or not _same_https_origin(cache, server)):
+                or not _same_https_origin(cache, server)
+                or re.fullmatch(
+                    r"/__repocache/repos/[a-z][a-z0-9-]{0,47}/",
+                    urlsplit(cache).path, flags=re.ASCII,
+                ) is None):
             raise ClientError("Invalid catalog URL")
+        if source in upstreams or cache in cache_routes:
+            raise ClientError("Ambiguous catalog repository mapping")
+        upstreams.add(source)
+        cache_routes.add(cache)
         verified.append({"upstream": source, "cache": cache})
     return {"schema": 1, "repositories": verified}
 
