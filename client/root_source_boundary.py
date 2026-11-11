@@ -171,6 +171,11 @@ def _exclusive_lock(state_fd: int, owner: int) -> Iterator[None]:
                 or (info.st_dev, info.st_ino) != (named.st_dev, named.st_ino)):
             raise BoundaryRefused("Unsafe transaction lock inode")
         try:
+            if os.listxattr(fd):
+                raise BoundaryRefused("Unexpected protected lock attributes")
+        except OSError as exc:
+            raise BoundaryRefused("Cannot inspect transaction lock attributes") from exc
+        try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except (BlockingIOError, OSError) as exc:
             raise BoundaryBusy("Protected transaction already locked") from exc
@@ -286,6 +291,10 @@ def validate(ident: str, *, _test_root: Path | None = None) -> dict:
                 before = pre.inspect_source(record["source"], root=root)
                 if before["sha256"] != record["source_sha256"]:
                     raise BoundaryRefused("Original source baseline does not match")
+                # Until native SELinux/ACL preservation is proven, even a
+                # read-only positive does not bless a labelled host writer.
+                if before["extended_attributes_present"]:
+                    raise BoundaryRefused("Unreviewed source security metadata")
                 raw = _source_bytes(root, record["source"], before)
                 chunks = entries.boundaries(record["source"], raw)
                 if len([x for x in chunks
@@ -345,6 +354,7 @@ def main(argv: list[str] | None = None, *, _test_root: Path | None = None) -> in
     validate_cmd = commands.add_parser("validate", add_help=False)
     validate_cmd.add_argument("--candidate", required=True)
     arguments = list(sys.argv[1:] if argv is None else argv)
+    wants_json = "--json" in arguments
     try:
         options = parser.parse_args(arguments)
         result = (status() if options.action == "status"
@@ -358,7 +368,7 @@ def main(argv: list[str] | None = None, *, _test_root: Path | None = None) -> in
         result = {"schema": 1, "status": "refused", "ok": False,
                   "write_eligible": False, "error": {"code": code}}
         success = False
-    if options.json if "options" in locals() else "--json" in arguments:
+    if wants_json:
         print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     elif success:
         print("Root validation complete; source writes disabled.")
