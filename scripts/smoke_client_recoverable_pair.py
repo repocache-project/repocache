@@ -72,8 +72,7 @@ def build(root: Path, manager: str):
     item = state / ("candidate-" + IDENT + ".json")
     item.write_text(json.dumps(approval, sort_keys=True))
     item.chmod(0o600)
-    mirror = root / "etc/apt/mirrors/repocache-" + IDENT + ".list" if False else (
-        root / ("etc/apt/mirrors/repocache-" + IDENT + ".list"))
+    mirror = root / ("etc/apt/mirrors/repocache-" + IDENT + ".list")
     return source, mirror, lock, state
 
 
