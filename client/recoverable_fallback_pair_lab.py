@@ -339,7 +339,7 @@ def apply_sandbox(root: Path, ident: str, *, crash: str | None = None) -> dict:
                         os.fsync(fd)
                     _crash(crash, "companion")
                 with atom._source_directory(root, proposal.source) as (fd, leaf):
-                    atom._replace(fd, source_temp, leaf, _identity(source[1]))
+                    atom._replace(fd, source_temp, leaf, tuple(_identity(source[1])))
                 _crash(crash, "source")
                 j["phase"] = "installed"
                 _put_journal(statefd, ident, j)
@@ -402,7 +402,7 @@ def _restore_locked(root: Path, fdstate: int, ident: str, j: dict,
                 pending = _read_named(fd, temp)
                 if not _matches(pending, original, j["restore_id"]):
                     raise PairRefused("Foreign rollback temp")
-            atom._replace(fd, temp, leaf, j["proposed_id"])
+            atom._replace(fd, temp, leaf, tuple(j["proposed_id"]))
             _crash(crash, "source-restored")
     elif not (from_original or from_restored):
         raise PairRefused("Unrecognized restore state")
