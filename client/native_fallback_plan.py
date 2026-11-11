@@ -234,3 +234,20 @@ def compile_fallback(*, source: str, original: bytes,
         selected_sha256=selected_entry_sha256, route_sha256=_sha(cache.encode("ascii")),
         original=original, proposed=proposed, companion=companion,
     )
+
+
+def proposal_bytes_converged(proposal: FallbackProposal, current: bytes,
+                             companion: bytes | None = None) -> bool:
+    """Identify an exact byte-level no-op for a *previously staged* proposal.
+
+    This cannot authenticate the observed file's inode, ownership, ACL,
+    xattrs, approved route or journal; only a future root helper can do so.
+    """
+    if (type(proposal) is not FallbackProposal or type(current) is not bytes
+            or current != proposal.proposed
+            or _sha(current) != proposal.proposed_sha256):
+        return False
+    if proposal.companion is None:
+        return companion is None
+    return (type(companion) is bytes
+            and companion == proposal.companion[1])
