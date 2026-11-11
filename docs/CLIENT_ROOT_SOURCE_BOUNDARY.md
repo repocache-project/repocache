@@ -22,7 +22,10 @@ private `0700` state, existing `0600` root-owned and single-linked manifest
 and exclusive flock inode, stable pathname/inode metadata, bounded manifest
 bytes and no unknown xattrs. It never creates the state or a lock file. All
 filesystem inspection is performed while holding the exclusive lock
-nonblockingly; a competing client operation fails immediately.
+nonblockingly; a competing client operation fails immediately. The lock inode
+and source inode must not carry unreviewed extended attributes; real SELinux
+labels will therefore refuse this source-only candidate until native label
+handling is separately implemented and accepted.
 
 The current strictly bounded schema-1 candidate manifest contains only:
 `schema`, `id`, allowlisted `source`, `source_sha256`, `entry_sha256`,
