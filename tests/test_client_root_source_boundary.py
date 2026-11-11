@@ -197,3 +197,19 @@ def test_plain_status_refuses_nonroot(monkeypatch):
         helper.status()
     with pytest.raises(helper.BoundaryRefused):
         helper.validate(IDENT)
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="Positive native refusal requires root")
+def test_labelled_source_and_lock_xattrs_fail_closed(tmp_path):
+    rec, source, manifest, lock = private_fixture(tmp_path)
+    for path in (source, lock):
+        try:
+            os.setxattr(path, "user.repocache-ci-boundary", b"label")
+        except (OSError, AttributeError) as exc:
+            pytest.skip(f"Container filesystem does not expose user xattrs: {exc}")
+        try:
+            with pytest.raises(helper.BoundaryRefused):
+                helper.validate(IDENT, _test_root=tmp_path)
+        finally:
+            os.removexattr(path, "user.repocache-ci-boundary")
+        assert helper.validate(IDENT, _test_root=tmp_path)["write_eligible"] is False
