@@ -178,9 +178,11 @@ def hostile(manager):
         # Foreign replacement with the exact same content has a different
         # inode. No digest-based forced restore may erase its ownership.
         copied = src.read_bytes()
-        src.unlink()
-        src.write_bytes(copied)
-        src.chmod(0o644)
+        foreign = src.with_name(src.name + ".foreign")
+        foreign.write_bytes(copied)
+        foreign.chmod(0o644)
+        assert foreign.stat().st_ino != src.stat().st_ino
+        os.replace(foreign, src)
         refuses(lambda: pair.restore_sandbox(root, IDENT),
                 "Foreign equal-content source must be rejected")
         assert src.read_bytes() == copied
