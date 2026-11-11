@@ -166,8 +166,10 @@ def _put_journal(fd: int, ident: str, j: dict) -> None:
         raise PairRefused("Pending journal requires manual recovery") from exc
     try:
         try:
-            os.write(out, data)
-            os.fsync(out)
+            with os.fdopen(out, "wb", closefd=False) as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(out)
         finally:
             os.close(out)
         # Any existing journal must be a known, valid, pinned inode.
@@ -274,6 +276,15 @@ def apply_sandbox(root: Path, ident: str, *, crash: str | None = None) -> dict:
                 if journal is not None:
                     if journal["phase"] != "installed":
                         raise PairRefused("Interrupted or restored transaction needs review")
+                    approval = boundary._manifest(statefd, ident)
+                    if (approval["source"] != journal["source"]
+                            or approval["source_sha256"] != journal["original_digest"]
+                            or _hash(approval["cache"].encode("ascii"))
+                               != approval["route_sha256"]
+                            or (journal["companion"] is not None and
+                                journal["companion"] !=
+                                "etc/apt/mirrors/repocache-" + ident + ".list")):
+                        raise PairRefused("Installed approval identity changed")
                     with _paths(root, journal) as (fd, leaf):
                         curr = _read_named(fd, leaf)
                         if not _matches(curr, _decode(journal["proposed"]),
@@ -379,9 +390,11 @@ def _restore_locked(root: Path, fdstate: int, ident: str, j: dict,
         if not (from_original or from_restored) or mirror_state is not None:
             raise PairRefused("Restored transaction modified externally")
         return {"status": "restored", "write_eligible": False}
+    if (j["phase"] == "installed" and
+            (not from_proposed or
+             (j["companion"] is not None and mirror_state is None))):
+        raise PairRefused("Committed transaction not intact")
     if j["phase"] == "installed" and crash is None:
-        if not from_proposed or (j["companion"] is not None and mirror_state is None):
-            raise PairRefused("Committed transaction not intact")
         return {"status": "installed-sandbox", "write_eligible": False}
     if j["phase"] == "armed" and (from_proposed and
                                   j["companion"] is not None and
