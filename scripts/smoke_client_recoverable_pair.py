@@ -190,6 +190,47 @@ def hostile(manager):
             assert mirror.exists()
         print(f"{manager}: equal-content foreign inode refusal PASS", flush=True)
 
+    with tempfile.TemporaryDirectory(prefix="repocache-pair-approval-ci-") as place:
+        root = Path(place)
+        src, mirror, lock, state = build(root, manager)
+        pair.apply_sandbox(root, IDENT)
+        manifest = state / ("candidate-" + IDENT + ".json")
+        approval = json.loads(manifest.read_text())
+        approval["route_sha256"] = sha(b"changed route without consent")
+        manifest.write_text(json.dumps(approval))
+        refuses(lambda: pair.apply_sandbox(root, IDENT),
+                "Stale route must not be idempotently accepted")
+        print(f"{manager}: no-op replay requires authentic route binding PASS",
+              flush=True)
+
+    if manager == "apt":
+        with tempfile.TemporaryDirectory(prefix="repocache-pair-missing-ci-") as place:
+            root = Path(place)
+            src, mirror, lock, state = build(root, manager)
+            pair.apply_sandbox(root, IDENT)
+            proposed = src.read_bytes()
+            mirror.unlink()
+            refuses(lambda: pair.restore_sandbox(root, IDENT),
+                    "Missing committed mirror must not authorize source restore")
+            assert src.read_bytes() == proposed
+            print("apt: missing committed mirror refuses destructive rollback PASS",
+                  flush=True)
+
+        with tempfile.TemporaryDirectory(prefix="repocache-pair-mirror-ci-") as place:
+            root = Path(place)
+            src, mirror, lock, state = build(root, manager)
+            pair.apply_sandbox(root, IDENT)
+            foreign = mirror.with_name(mirror.name + ".foreign")
+            foreign.write_bytes(mirror.read_bytes())
+            foreign.chmod(0o644)
+            assert foreign.stat().st_ino != mirror.stat().st_ino
+            os.replace(foreign, mirror)
+            proposed = src.read_bytes()
+            refuses(lambda: pair.restore_sandbox(root, IDENT),
+                    "Foreign mirror with equal bytes must not be removed")
+            assert src.read_bytes() == proposed and mirror.exists()
+            print("apt: foreign equal-content mirror inode refused PASS", flush=True)
+
     with tempfile.TemporaryDirectory(prefix="repocache-pair-lock-ci-") as place:
         root = Path(place)
         src, mirror, lock, state = build(root, manager)
