@@ -372,9 +372,11 @@ def _catalog(server: str) -> dict:
                 or not source.endswith("/") or not cache.endswith("/")
                 or not _same_https_origin(cache, server)
                 or re.fullmatch(
-                    r"/__repocache/repos/[a-z][a-z0-9-]{0,47}/",
+                    r"/(?:[A-Za-z0-9._~+-]+/)+",
                     urlsplit(cache).path, flags=re.ASCII,
-                ) is None):
+                ) is None
+                or any(part in (".", "..")
+                       for part in urlsplit(cache).path.split("/"))):
             raise ClientError("Invalid catalog URL")
         if source in upstreams or cache in cache_routes:
             raise ClientError("Ambiguous catalog repository mapping")

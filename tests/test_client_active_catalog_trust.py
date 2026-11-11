@@ -50,6 +50,13 @@ def test_exact_active_only_catalog_is_read_only_and_interoperable(monkeypatch):
     assert _catalog(monkeypatch, {"schema": 1, "repositories": []}) == {
         "schema": 1, "repositories": [],
     }
+    # Schema 1 also remains compatible with the audited legacy explicit
+    # per-path NGINX approval catalog; it remains read-only here.
+    legacy = {"schema": 1, "repositories": [{
+        "upstream": "https://deb.debian.org/debian/",
+        "cache": SERVER + "/debian/",
+    }]}
+    assert _catalog(monkeypatch, legacy) == legacy
 
 
 @pytest.mark.parametrize("document", [
@@ -75,7 +82,7 @@ def test_exact_active_only_catalog_is_read_only_and_interoperable(monkeypatch):
     ]},
     {"schema": 1, "repositories": [{
         **VALID["repositories"][0],
-        "cache": SERVER + "/evil/repo/",
+        "cache": SERVER + "/evil//repo/",
     }]},
     {"schema": 1, "repositories": [{
         **VALID["repositories"][0],

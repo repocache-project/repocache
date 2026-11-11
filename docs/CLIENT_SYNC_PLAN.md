@@ -76,10 +76,14 @@ Schema 1 has exactly the top-level `schema` integer and `repositories`
 array, with each entry containing exactly `upstream` and `cache` URLs.
 The client refuses Boolean/float schema aliases, unknown required fields,
 duplicate upstream or cache mappings, insecure/noncanonical URLs, foreign
-cache origins and arbitrary paths. Every cache mapping must match the actual
-managed active-only route format
-`/__repocache/repos/<canonical-repository-id>/`; a catalog entry cannot
-point a future approved rewrite to some other endpoint on the same host.
+cache origins and arbitrary paths. Every cache mapping must have a canonical absolute slash-terminated
+route, with no empty, dot, dot-dot, or encoded segments. The new native
+active-only route format is
+`/__repocache/repos/<canonical-repository-id>/`; the existing explicitly
+approved legacy schema-1 `/debian/`-style route remains read-compatible.
+This **does not** authorize adopting a legacy or changed route into APT/DNF
+sources: UC-45 requires a new administrator decision for the exact URI
+before any future privileged source write.
 No catalog response is itself an administrative authorization, even if it
 passes every validation. Signed native APT/DNF fallback, exact UC-45 route
 consent, verified source ownership and durable rollback remain independent
