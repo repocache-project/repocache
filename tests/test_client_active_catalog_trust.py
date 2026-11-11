@@ -90,7 +90,7 @@ def test_exact_active_only_catalog_is_read_only_and_interoperable(monkeypatch):
     }]},
     {"schema": 1, "repositories": [{
         **VALID["repositories"][0],
-        "cache": SERVER + "/__repocache/repos/UPPER/",
+        "cache": SERVER + "/__repocache/repos/%2e%2e/",
     }]},
     {"schema": 1, "repositories": [{
         **VALID["repositories"][0],
