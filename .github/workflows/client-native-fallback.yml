@@ -24,13 +24,15 @@ jobs:
         run: |
           set -Eeuo pipefail
           docker run --rm --network bridge \
+            --env REPOCACHE_DISPOSABLE_NATIVE_CI=1 \
             --mount "type=bind,source=$PWD,target=/workspace,readonly" \
             --workdir /workspace debian:trixie-slim \
             sh -ec 'apt-get update -qq && \
                     apt-get install -y --no-install-recommends python3 gnupg openssl >/dev/null && \
                     python3 scripts/ci_client_native_fallback.py apt && \
                     python3 scripts/ci_client_native_fallback.py apt --tls && \
-                    python3 scripts/ci_client_native_fallback.py apt --tls --package-transfer'
+                    python3 scripts/ci_client_native_fallback.py apt --tls --package-transfer && \
+                    python3 scripts/ci_compiled_native_fallback.py apt'
 
   almalinux10-dnf-metadata:
     name: DNF metadata preference/fallback (almalinux:10)
@@ -45,9 +47,11 @@ jobs:
         run: |
           set -Eeuo pipefail
           docker run --rm --network bridge \
+            --env REPOCACHE_DISPOSABLE_NATIVE_CI=1 \
             --mount "type=bind,source=$PWD,target=/workspace,readonly" \
             --workdir /workspace almalinux:10 \
             sh -ec 'dnf install -y python3 createrepo_c openssl gnupg2 >/dev/null && \
                     python3 scripts/ci_client_native_fallback.py dnf && \
                     python3 scripts/ci_client_native_fallback.py dnf --tls && \
-                    python3 scripts/ci_client_native_fallback.py dnf --tls --signed-dnf'
+                    python3 scripts/ci_client_native_fallback.py dnf --tls --signed-dnf && \
+                    python3 scripts/ci_compiled_native_fallback.py dnf'
