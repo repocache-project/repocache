@@ -128,10 +128,15 @@ def _get_journal(fd: int, ident: str) -> dict | None:
                 not j["companion"].startswith("etc/apt/mirrors/repocache-"))
             or type(j["mode"]) is not int or j["mode"] not in (0o600, 0o640, 0o644)
             or type(j["gid"]) is not int or j["gid"] < 0
+            # Original and proposed inode IDs are mandatory. A missing
+            # identity is NOT equivalent to an absent optional mirror.
             or any(type(j[key]) is not list or len(j[key]) != 2
                    or any(type(x) is not int or x < 0 for x in j[key])
-                   for key in ("original_id", "proposed_id", "mirror_id")
-                   if j[key] is not None)
+                   for key in ("original_id", "proposed_id"))
+            or (j["mirror_id"] is not None and (
+                type(j["mirror_id"]) is not list or len(j["mirror_id"]) != 2
+                or any(type(x) is not int or x < 0
+                       for x in j["mirror_id"])))
             or (j["restore_id"] is not None and (
                 type(j["restore_id"]) is not list or len(j["restore_id"]) != 2
                 or any(type(x) is not int or x < 0 for x in j["restore_id"])))):
