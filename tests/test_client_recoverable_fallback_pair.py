@@ -61,3 +61,38 @@ def test_crash_fault_requires_explicit_accepted_label():
 @pytest.mark.parametrize("payload", [b"", b"a\0b", os.urandom(32)])
 def test_base64_protected_journal_round_trip(payload):
     assert lab._decode(lab._blob(payload)) == payload
+
+
+@pytest.mark.parametrize("missing_identity", ["original_id", "proposed_id"])
+def test_corrupt_journal_missing_required_inode_identity_is_refused(
+    tmp_path, monkeypatch, missing_identity,
+):
+    """A root-owned journal with a null mandatory inode must fail closed."""
+    ident = "a" * 32
+    current, proposed = b"upstream", b"compiled-fallback"
+    journal = {
+        "schema": 1, "id": ident, "phase": "armed",
+        "source": "etc/yum.repos.d/approved.repo", "companion": None,
+        "original": lab._blob(current), "proposed": lab._blob(proposed),
+        "mirror": lab._blob(b""), "original_id": [8, 12],
+        "proposed_id": [8, 13], "mirror_id": None, "restore_id": None,
+        "mode": 0o644, "gid": 0,
+        "original_digest": lab._hash(current),
+        "proposed_digest": lab._hash(proposed),
+        "mirror_digest": lab._hash(b""),
+    }
+    journal[missing_identity] = None
+    # The test stubs only the root-required inode reader, not the schema:
+    # the corrupted journal still has a real, existing stable leaf name.
+    path = tmp_path / lab._journal_name(ident)
+    path.write_bytes(b"fixture")
+    import json
+    wire = json.dumps(journal, separators=(",", ":")).encode("ascii")
+    monkeypatch.setattr(lab.boundary, "_read_pinned",
+                        lambda *_args, **_kwargs: wire)
+    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(lab.PairRefused, match="journal schema"):
+            lab._get_journal(fd, ident)
+    finally:
+        os.close(fd)
