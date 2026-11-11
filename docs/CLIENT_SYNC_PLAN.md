@@ -94,3 +94,19 @@ duplicates, redirects, TLS-only opener, bounded response, origin/path checks
 and non-publishing behavior. The repository's client/source transaction and
 native OS acceptance requirements remain **NOT VERIFIED** until proven on
 the appropriate installed environments.
+
+## Installed server-origin configuration
+
+Without an explicit `--server`, the client reads at most 4096 bytes from
+`/etc/repocache-client/config.json` using independently opened Linux
+directory/file descriptors with `O_NOFOLLOW`, ownership and no-group/world
+writable checks, a single-link regular-file requirement and stable
+inode/mtime/ctime rechecks. The only supported installed configuration key
+is the canonical `server` HTTPS origin; duplicate keys, malformed/oversized
+JSON, unsafe symlinked parent directories and changed files are refused.
+
+If `--server` is provided, no installed config is read. A missing client
+configuration does not authorize implicit DNS, DHCP, environment, example
+host or proxy discovery. This boundary is read-only and does not authenticate
+privileged source transactions or replace explicit UC-45 route approval.
+Tests: `tests/test_client_installed_origin_config.py`.
