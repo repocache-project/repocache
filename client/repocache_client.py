@@ -61,6 +61,81 @@ def _server(value: str) -> str:
     return value.rstrip("/")
 
 
+def _installed_server_config(root: Path) -> str:
+    """Read a bounded, inode-pinned installed origin; never trust path links.
+
+    An explicit --server bypasses this optional lookup entirely. Root-owned
+    files remain readable by an unprivileged client, but neither a symlinked
+    parent, an attacker-owned/multi-linked file nor a mutable config can
+    silently choose the future active catalog origin.
+    """
+    flags = (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+             | getattr(os, "O_CLOEXEC", 0))
+    file_flags = (os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                  | getattr(os, "O_CLOEXEC", 0))
+    opened = []
+    try:
+        directory = os.open(root, flags)
+        opened.append(directory)
+        permitted_owners = {0, os.geteuid()}
+        for part in ("etc", "repocache-client"):
+            parent = os.fstat(directory)
+            if (not stat.S_ISDIR(parent.st_mode)
+                    or parent.st_uid not in permitted_owners
+                    or parent.st_mode & 0o022):
+                raise ClientError("Unsafe installed client configuration")
+            directory = os.open(part, flags, dir_fd=directory)
+            opened.append(directory)
+        parent = os.fstat(directory)
+        if (not stat.S_ISDIR(parent.st_mode)
+                or parent.st_uid not in permitted_owners
+                or parent.st_mode & 0o022):
+            raise ClientError("Unsafe installed client configuration")
+        source = os.open("config.json", file_flags, dir_fd=directory)
+        opened.append(source)
+        before = os.fstat(source)
+        named = os.stat("config.json", dir_fd=directory, follow_symlinks=False)
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                or before.st_uid not in permitted_owners
+                or before.st_mode & 0o022
+                or not 1 <= before.st_size <= 4096):
+            raise ClientError("Unsafe installed client configuration")
+        payload = os.read(source, 4097)
+        after = os.fstat(source)
+        current = os.stat("config.json", dir_fd=directory, follow_symlinks=False)
+        identity = lambda info: (
+            info.st_dev, info.st_ino, info.st_mode, info.st_uid,
+            info.st_gid, info.st_nlink, info.st_size,
+            info.st_mtime_ns, info.st_ctime_ns,
+        )
+        if (len(payload) != before.st_size
+                or identity(before) != identity(after)
+                or identity(before) != identity(named)
+                or identity(before) != identity(current)):
+            raise ClientError("Installed client configuration changed")
+        def unique_config_pairs(pairs):
+            doc = {}
+            for key, value in pairs:
+                if key in doc:
+                    raise ClientError("Invalid installed client configuration")
+                doc[key] = value
+            return doc
+        config = json.loads(payload.decode("utf-8"),
+                            object_pairs_hook=unique_config_pairs)
+        if (type(config) is not dict or set(config) != {"server"}
+                or type(config["server"]) is not str):
+            raise ClientError("Invalid installed client configuration")
+        return config["server"]
+    except FileNotFoundError:
+        # A missing installation is not automatic discovery authority.
+        return ""
+    except (OSError, ValueError, UnicodeError):
+        raise ClientError("Unsafe installed client configuration") from None
+    finally:
+        for descriptor in reversed(opened):
+            os.close(descriptor)
+
+
 def _safe_url(value: str) -> str:
     try:
         p = urlsplit(value.strip())
@@ -699,13 +774,10 @@ def run(argv: list[str] | None = None, root: Path = Path("/")) -> int:
         repos_action.choices["repos"].print_help()
         return 0
     try:
-        cfg = root / CONFIG_FILE.relative_to("/")
-        configured = ""
-        if cfg.is_file() and not cfg.is_symlink():
-            item = json.loads(cfg.read_text())
-            if isinstance(item, dict):
-                configured = str(item.get("server") or "")
-        selected_server = args.server if args.server is not None else configured
+        # An explicit origin does not consult a possibly malformed installed
+        # config. Without --server, trust only the bounded root-owned file.
+        selected_server = (args.server if args.server is not None
+                           else _installed_server_config(root))
         if not selected_server:
             raise ClientError("Server must be explicitly configured using --server or config.json")
         server = _server(selected_server)
