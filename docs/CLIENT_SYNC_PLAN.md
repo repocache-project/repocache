@@ -46,3 +46,67 @@ The current implementation intentionally does **not**:
 - Coordinate CLI changes with [#107](https://github.com/teixemf/repocache/issues/107) and authenticated submissions with [#22](https://github.com/teixemf/repocache/issues/22)/draft PR #46.
 
 The catalog cache origin is compared against the configured server using HTTPS scheme, host and effective port, rather than just the hostname. A different port or plaintext HTTP is not an equivalent REPOCACHE server.
+
+
+## Read-only diagnostic fallback honesty
+
+The optional fallback check in repocache-client check is a diagnostic, not
+an apply gate. A configured mixture of cache and upstream URLs never marks
+native fallback as verified. It now reports NOT VERIFIED (nonfatal) whenever
+any enabled local source uses a REPOCACHE route, regardless of whether that
+source also contains a direct upstream URI. If all enabled sources remain
+direct, fallback is reported as not applicable rather than failed. The check
+does not contact a package manager, change any repository source, or claim
+that a sandbox TLS metadata probe validates real signed package downloads.
+
+This fixes the prior misleading success status for a merely mixed URL
+configuration, while preserving non-interactive check exit behavior and
+the fail-closed refusal of sync --apply.
+
+## Active-only discovery boundary — strict v0.6.0 catalog validation
+
+For the approved schema-1 discovery endpoint, the standalone client uses
+exactly one configured HTTPS server origin. A catalog read disables automatic
+HTTP redirects and ignores ambient proxy settings, requires native TLS CA and
+hostname verification, an exact HTTP 200 from the original URL, and a
+512,000-byte maximum body. Duplicate JSON fields and nonfinite JSON values
+are refused before interpreting any source-to-cache mapping.
+
+Schema 1 has exactly the top-level `schema` integer and `repositories`
+array, with each entry containing exactly `upstream` and `cache` URLs.
+The client refuses Boolean/float schema aliases, unknown required fields,
+duplicate upstream or cache mappings, insecure/noncanonical URLs, foreign
+cache origins and arbitrary paths. Every cache mapping must have a canonical absolute slash-terminated
+route, with no empty, dot, dot-dot, or encoded segments. The new native
+active-only route format is
+`/__repocache/repos/<canonical-repository-id>/`; the existing explicitly
+approved legacy schema-1 `/debian/`-style route remains read-compatible.
+This **does not** authorize adopting a legacy or changed route into APT/DNF
+sources: UC-45 requires a new administrator decision for the exact URI
+before any future privileged source write.
+No catalog response is itself an administrative authorization, even if it
+passes every validation. Signed native APT/DNF fallback, exact UC-45 route
+consent, verified source ownership and durable rollback remain independent
+prerequisites for any future `repos sync --apply`.
+
+Tests in `tests/test_client_active_catalog_trust.py` exercise the parser,
+duplicates, redirects, TLS-only opener, bounded response, origin/path checks
+and non-publishing behavior. The repository's client/source transaction and
+native OS acceptance requirements remain **NOT VERIFIED** until proven on
+the appropriate installed environments.
+
+## Installed server-origin configuration
+
+Without an explicit `--server`, the client reads at most 4096 bytes from
+`/etc/repocache-client/config.json` using independently opened Linux
+directory/file descriptors with `O_NOFOLLOW`, ownership and no-group/world
+writable checks, a single-link regular-file requirement and stable
+inode/mtime/ctime rechecks. The only supported installed configuration key
+is the canonical `server` HTTPS origin; duplicate keys, malformed/oversized
+JSON, unsafe symlinked parent directories and changed files are refused.
+
+If `--server` is provided, no installed config is read. A missing client
+configuration does not authorize implicit DNS, DHCP, environment, example
+host or proxy discovery. This boundary is read-only and does not authenticate
+privileged source transactions or replace explicit UC-45 route approval.
+Tests: `tests/test_client_installed_origin_config.py`.
