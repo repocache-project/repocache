@@ -8,6 +8,9 @@ on:
       - 'src/repocache/server_host_checks_v1.py'
       - 'tests/test_server_install_v1.py'
       - 'tests/test_server_preflight_v1.py'
+      - 'src/repocache/native_acceptance_evidence_v1.py'
+      - 'scripts/collect_native_candidate_evidence.py'
+      - 'tests/test_native_acceptance_evidence_v1.py'
       - 'tests/test_server_host_checks_v1.py'
       - '.github/workflows/server-preflight-distro.yml'
   workflow_dispatch:
@@ -139,6 +142,60 @@ jobs:
           python3 -B -m pytest -q -rs \
             tests/test_server_install_v1.py \
             tests/test_server_preflight_v1.py \
-            tests/test_server_host_checks_v1.py
+            tests/test_server_host_checks_v1.py \
+            tests/test_native_acceptance_evidence_v1.py
           # This is distro userspace/container evidence, NOT a booted
           # systemd or SELinux enforcing/managed-label acceptance test.
+      - name: Inspect an exact unsigned candidate without native or publisher PASS
+        shell: bash
+        env:
+          PYTHONPATH: src
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          set -Eeuo pipefail
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+          printf '%s' 'disposable unsigned candidate bytes' > "$work/candidate.tar.gz"
+          chmod 0600 "$work/candidate.tar.gz"
+          sha="$(sha256sum "$work/candidate.tar.gz" | cut -d' ' -f1)"
+          source_sha='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+          set +e
+          python3 -B scripts/collect_native_candidate_evidence.py \
+            --candidate "$work/candidate.tar.gz" --sha256 "$sha" \
+            --source-sha "$source_sha" > "$work/receipt.json"
+          code="$?"
+          set -e
+          test "$code" -eq 2
+          python3 -B - "$work/receipt.json" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+          receipt = json.loads(Path(sys.argv[1]).read_text())
+          assert receipt["status"] == "NOT VERIFIED"
+          assert receipt["artifact_digest_matched"] is True
+          assert receipt["native_prerequisites_observed"] is False
+          assert receipt["native_probe_code"] == "CONTAINER_CONTEXT_REFUSED"
+          assert receipt["complete_server_acceptance_passed"] is False
+          assert receipt["publisher_signature_verified"] is False
+          assert receipt["authorizes_host_write"] is False
+          assert receipt["authorizes_publication"] is False
+          print("PASS: exact bytes verified but unsigned Docker candidate remains NOT VERIFIED")
+          PY
+          set +e
+          python3 -B scripts/collect_native_candidate_evidence.py \
+            --candidate "$work/candidate.tar.gz" \
+            --sha256 '0000000000000000000000000000000000000000000000000000000000000000' \
+            --source-sha "$source_sha" > "$work/rejected.json"
+          code="$?"
+          set -e
+          test "$code" -eq 1
+          python3 -B - "$work/rejected.json" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+          receipt = json.loads(Path(sys.argv[1]).read_text())
+          assert receipt["status"] == "FAIL"
+          assert receipt["code"] == "CANDIDATE_DIGEST_MISMATCH"
+          assert receipt["authorizes_publication"] is False
+          print("PASS: candidate digest mismatch refuses native release evidence")
+          PY
