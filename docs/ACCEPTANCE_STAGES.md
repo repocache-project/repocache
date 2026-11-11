@@ -2,7 +2,7 @@
 
 **Scope:** every maintainer-selected milestone and release (`vMAJOR.MINOR.PATCH`),
 including future releases; no version-specific exception is implied.
-**Status:** proposed repository-wide policy until accepted on protected `main`.
+**Adoption:** only the version merged into protected `main` is effective; an unmerged proposal cannot approve its own protected integration.
 This process stages delivery and evidence; it does not narrow the accepted
 product, OS, CLI, security, compatibility, rollback or release requirements.
 
