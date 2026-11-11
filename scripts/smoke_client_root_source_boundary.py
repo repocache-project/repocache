@@ -111,6 +111,42 @@ def smoke(manager: str):
         assert source.read_bytes() == before
         print(f"{manager}: stale-route, drift and symlink refusal PASS", flush=True)
 
+        # Restore exact protected manifest for real non-root and xattr tests.
+        manifest.unlink()
+        manifest.write_text(json.dumps(record, sort_keys=True))
+        manifest.chmod(0o600)
+        child = os.fork()
+        if child == 0:
+            try:
+                os.setuid(65534)
+                try:
+                    boundary.validate(IDENT, _test_root=root)
+                except boundary.BoundaryRefused:
+                    os._exit(0)
+                os._exit(1)
+            except BaseException:
+                os._exit(2)
+        _, status = os.waitpid(child, 0)
+        if not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
+            raise RuntimeError("OS non-root authorization refusal failed")
+        print(f"{manager}: real non-root OS refusal PASS", flush=True)
+
+        # A labelled inode must NEVER acquire writer authority before real
+        # SELinux/ACL/xattr preservation has been independently accepted.
+        for inode in (source, lock):
+            try:
+                os.setxattr(inode, "user.repocache-ci-boundary", b"unreviewed")
+            except (AttributeError, OSError):
+                print(f"{manager}: user xattrs unsupported; negative check NOT VERIFIED",
+                      flush=True)
+                continue
+            try:
+                expect_reject(root)
+            finally:
+                os.removexattr(inode, "user.repocache-ci-boundary")
+            boundary.validate(IDENT, _test_root=root)
+        print(f"{manager}: unreviewed xattrs refused (where supported)", flush=True)
+
 
 if __name__ == "__main__":
     # Tests exactly both supported format boundaries on native OS Python.
