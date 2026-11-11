@@ -19,6 +19,21 @@ The one-time bootstrap sequence (PRs #230, #183 and #231) is **historical migrat
 
 Check current target heads, rulesets and CI when resuming. If one lane's required checks or acceptance are missing, block **that integration**, not independent approved work. Future release routing remains constrained by the maintainer-selected version, actual protected branch rules and original acceptance.
 
+## Universal acceptance scheduling
+
+For any `vX.Y.Z`, use the
+[three-stage implementation/native/publisher model](ACCEPTANCE_STAGES.md).
+Complete approved, CI-verifiable Stage-A implementation on the selected
+`integration/vX.Y.Z` lane first; do not wait for the final native campaign
+to integrate genuinely non-activating, fully accepted code. Prepare the
+complete booted-VM acceptance runbook before a release cut and consolidate
+the necessary Stage-B host tests on the assembled installable candidate.
+The stabilization and publisher sequence below is unchanged: no Stage-A
+merge implies release readiness, final signed identity or approval to
+promote to `main`. An issue-specific pre-merge native/security criterion
+remains mandatory unless an authenticated maintainer scope amendment
+explicitly authorizes a narrower Stage-A deliverable.
+
 ## Branches and allowed changes
 
 | Ref | Purpose | Allowed changes |

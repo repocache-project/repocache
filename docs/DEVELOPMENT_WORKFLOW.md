@@ -30,6 +30,33 @@ If a required test can only occur *after* a merge or on the real owner workstati
 
 If an issue's parents refer to another release (e.g. future online dependency activation), document the cross-release dependency for maintainer triage. Never silently move an issue, treat a PR title's version as authoritative or conflate optional production activation with code acceptance.
 
+## 2a. Reusable acceptance stages for **every** milestone
+
+Before implementing a release or issue, follow the canonical
+[CI/native/publisher acceptance stages](ACCEPTANCE_STAGES.md); this procedure
+is **version-independent** and supersedes version-specific scheduling
+assumptions, not individual acceptance criteria. Assign each original
+requirement to executable CI evidence (Stage A), an intrinsically booted
+native environment (Stage B), independent review/owner-key/publisher action
+(Stage C), or the applicable combination. A Stage-A PR may merge when **all
+original criteria applicable to its genuinely bounded, approved
+non-activating scope** are PASS, even while the parent release's Stage B/C
+criteria remain OPEN/NOT VERIFIED. Never use staging to waive a required
+original issue-specific *pre-merge* review, native operational gate or
+signed-publisher proof. Record any authenticated scope decision before
+declaring a formerly blocking test outside the PR's scope.
+
+**Complete the code before seeking the final host campaign.** Real
+privileged writers, source apply/fallback, storage ownership, NGINX
+activation, systemd provisioning, recovery and signed-release tooling
+remain Stage-A implementation work wherever they can be developed and
+exercised in available CI. Stage B exists to prove the assembled software on
+a booted native OS, not to substitute for incomplete programming. Prepare a
+single final VM runbook/evidence owner per milestone and link the resulting
+per-criterion outcomes back to the original issues. A missing VM blocks
+only the affected Stage-B/operational acceptance, not an independently
+accepted safe CI increment.
+
 ## 3. Implementation and integration
 
 - Use a dedicated feature/docs/test/fix branch from a verified base. Respect protected `main`, `release/*` and `integration/*` branches, PR-only routing, strict checks and no force/deletion bypass.
