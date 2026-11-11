@@ -48,6 +48,31 @@ def _active_records(text: str) -> set[tuple[int, int, int]]:
     return observed
 
 
+def _pinned_lock_stat(root: Path, relative: str, *, owner: int):
+    """Inspect a native lock leaf through pinned nofollow parent dirfds."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    opened = []
+    try:
+        current = os.open(root, flags)
+        opened.append(current)
+        for part in relative.split("/")[:-1]:
+            parent = os.fstat(current)
+            if (not stat.S_ISDIR(parent.st_mode) or parent.st_uid != owner
+                    or stat.S_IMODE(parent.st_mode) & 0o022):
+                raise LockInspectionRefused("Unsafe native lock parent")
+            current = os.open(part, flags, dir_fd=current)
+            opened.append(current)
+        parent = os.fstat(current)
+        if (not stat.S_ISDIR(parent.st_mode) or parent.st_uid != owner
+                or stat.S_IMODE(parent.st_mode) & 0o022):
+            raise LockInspectionRefused("Unsafe native lock directory")
+        return os.stat(relative.rsplit("/", 1)[-1], dir_fd=current,
+                       follow_symlinks=False)
+    finally:
+        for fd in reversed(opened):
+            os.close(fd)
+
+
 def inspect_native_locks(manager: str, *, root: Path = Path("/"),
                          proc_locks: str | None = None) -> dict:
     """Inspect fixed native lock-file inodes without writing or assuming safety.
@@ -80,15 +105,16 @@ def inspect_native_locks(manager: str, *, root: Path = Path("/"),
     busy = []
     checked = APT if manager == "apt" else DNF5
     for relative in checked:
-        leaf = root / relative
         try:
-            observed = leaf.lstat()
+            observed = _pinned_lock_stat(
+                root, relative, owner=0 if native else os.geteuid())
         except FileNotFoundError:
             missing.append(relative)
             continue
         except OSError as exc:
             raise LockInspectionRefused("Native lock inode unavailable") from exc
-        if not stat.S_ISREG(observed.st_mode) or observed.st_nlink != 1:
+        if (not stat.S_ISREG(observed.st_mode) or observed.st_nlink != 1
+                or observed.st_uid != (0 if native else os.geteuid())):
             raise LockInspectionRefused("Unsafe package-manager lock inode")
         identity = (os.major(observed.st_dev), os.minor(observed.st_dev),
                     observed.st_ino)
