@@ -14,6 +14,35 @@ Closes #
 
 Describe design choices, API/CLI compatibility, and any changes to NGINX, repository sources or stored metrics.
 
+## Acceptance stage and evidence owner (all milestones)
+
+Follow [the cross-milestone acceptance stages](../docs/ACCEPTANCE_STAGES.md).
+Identify the actual stage of **this PR**, not merely the stage of its parent
+issue or intended release. Every applicable original criterion must PASS in
+the environment required by its approved scope before protected integration.
+
+- [ ] **Stage A — CI implementation:** exact source SHA, native-container and
+      regression/security/failure tests, and any safe non-activating behavior
+      are independently complete. State explicitly if privileged writes or
+      live activation remain unavailable.
+- [ ] **Stage B — booted native acceptance:** completed on the appropriate
+      installed host where applicable, or **NOT VERIFIED** and tracked against
+      the final host-campaign owner. Never label an unexecuted VM test PASS.
+- [ ] **Stage C — review/publisher/owner authority:** applicable independent
+      issue-specific reviews, genuine signing and release operations are
+      completed separately or explicitly remain **NOT VERIFIED**.
+- [ ] The parent issue's still-open requirements and the next implementable
+      CI task are linked; an independently accepted PR does not close them.
+- [ ] If the original issue mandates VM/security review **before any PR merge**,
+      cite an authenticated issue-specific scope decision before excluding
+      that requirement from the bounded Stage-A PR. No silent waiver.
+
+**This PR's stage and accepted scope:**
+
+**Parent issue / native final-acceptance owner:**
+
+**Stage-A evidence; Stage-B/C PASS / FAIL / NOT VERIFIED:**
+
 ## Verification
 
 - [ ] `PYTHONPATH=src python -m pytest -q` passes.
