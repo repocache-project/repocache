@@ -12,6 +12,28 @@ Before any merge, verify live target/head SHA, branch ancestry and conflicts, co
 
 A separately agreed **issue-specific human/security review or operational test** is still mandatory where its original acceptance criteria explicitly require it, until the maintainer approves a valid, separately recorded change to that specific scope. This governance amendment does **not** waive those criteria, or signed publisher-key verification, native booted Debian 13/AlmaLinux 10 testing, SELinux enforcing, deployment or production gates where applicable.
 
+## Milestone-independent, staged acceptance (not a gate waiver)
+
+Apply [the canonical acceptance-staging model](ACCEPTANCE_STAGES.md)
+to **all** selected milestones. A parent issue may combine non-activating,
+CI-verifiable Stage-A code with booted-host Stage-B and owner/security/release
+Stage-C outcomes. A focused Stage-A PR may merge only after *its own
+approved, original applicable criteria* PASS with real scoped evidence.
+Its merge must not close the wider issue, claim real host support, or
+make an unimplemented privileged/activation path available. Keep the parent
+issue's native, signing, compatibility, rollback and reviewer criteria OPEN
+until validated in the appropriate environment.
+
+A mere label of "CI-only" is **not** a maintainer scope decision. Where the
+original issue expressly requires full native acceptance **before any PR
+merge**, obtain an authenticated, explicit issue-specific scope amendment
+before integrating a safe non-activating Stage-A increment; preserve all
+original feature/production obligations and record their future acceptance
+owner. Do not bypass issue-specific mandatory independent security review
+or maintainer merger approval. Follow the existing conditional standing
+versioned-integration delegation **only after** all applicable scoped
+criteria, current CI, security and merge/queue requirements pass.
+
 ## Security disposition
 
 - **Critical / High:** never merge with an unresolved material security defect.
