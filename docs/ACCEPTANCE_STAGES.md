@@ -75,8 +75,10 @@ explicitly superseded by an authenticated maintainer decision, with provenance.
 A VM-only requirement is not a PR Stage-A criterion *only where the
 maintainer-approved scope of that PR genuinely excludes native activation*.
 An original issue may remain NOT VERIFIED while its safe prerequisite PR
-is integrated. Never silently reclassify an applicable criterion to avoid
-a merge gate.
+is integrated. A narrower pre-merge evidence requirement needs an authenticated,
+issue-specific scope amendment where the accepted issue originally required
+full native or security acceptance before any linked PR merge. Never silently
+reclassify an applicable criterion to avoid a merge gate.
 
 ## Integration, queue and protected operations
 

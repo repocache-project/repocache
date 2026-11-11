@@ -16,7 +16,7 @@ Describe design choices, API/CLI compatibility, and any changes to NGINX, reposi
 
 ## Acceptance stage and evidence owner (all milestones)
 
-Follow [the cross-milestone acceptance stages](../docs/ACCEPTANCE_STAGES.md).
+Follow [the cross-milestone acceptance stages](https://github.com/repocache-project/repocache/blob/main/docs/ACCEPTANCE_STAGES.md).
 Identify the actual stage of **this PR**, not merely the stage of its parent
 issue or intended release. Every applicable original criterion must PASS in
 the environment required by its approved scope before protected integration.
