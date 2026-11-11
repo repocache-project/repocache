@@ -38,4 +38,9 @@ jobs:
                 dnf install -y python3 >/dev/null
               fi
               python3 scripts/smoke_client_helper_preview.py
+              if command -v apt-get >/dev/null 2>&1; then
+                python3 scripts/smoke_client_root_source_boundary.py apt
+              else
+                python3 scripts/smoke_client_root_source_boundary.py dnf
+              fi
             '
