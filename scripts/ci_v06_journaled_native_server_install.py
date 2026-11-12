@@ -214,6 +214,8 @@ def run() -> dict[str, Any]:
 
 
 def main() -> int:
+    global _STAGE
+    _STAGE = "UNVERIFIED"
     try:
         result = run()
     except Exception as exc:
