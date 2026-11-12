@@ -41,10 +41,9 @@ jobs:
     env:
       PYTHONPATH: src
       PYTHONDONTWRITEBYTECODE: '1'
-      BASE_SHA: 7585a95370a4b6d13c9893b6d98b523bd9d14522
-      PR64_SHA: ed046c23e452e1b8c879296e33d8618532f33c46
-      PR24_SHA: 6fb89259dc44f8bb40cdcf03e2faae725686c477
-      PR76_SHA: 704cef9e6b5fb591304a4cf3eb6286ec91573644
+      BASE_SHA: 675e7b49b3573b1e5ede2ca023ed55e270397d4f
+      PR64_SHA: 418c8617967d2925ec85b15f3845465dec8cd178
+      PR76_SHA: dcc10af0850e053798b6b1dc9bf9732ec048eb68
     steps:
       # Install git before checkout: the stock distro container images
       # lack git, so checkout would otherwise fall back to an archive with
@@ -83,11 +82,10 @@ jobs:
             echo "Integration base moved; stale combined rehearsal refused"
             exit 1
           }
-          # The five approved, independently CI-accepted prerequisites
-          # (#255, #250, #252, #251 and #214) are now in BASE_SHA.
-          # Combine the still-unmerged #64 control, #24 client and #76
-          # signed-candidate branches at exact revisions; never push or
-          # treat this disposable source merge as acceptance to activate.
+          # The protected base includes #255, #250, #252, #251, #214,
+          # #115, #258, #259, #260 and #263. Do not replay merged PRs.
+          # Combine only still-unmerged #64 and #76 at exact revisions;
+          # never push or treat a disposable merge as authority to activate.
           git fetch --no-tags origin \
             +refs/heads/feat/64-fixed-credentialed-native-control-v1:refs/remotes/origin/pr64
           observed="$(git rev-parse refs/remotes/origin/pr64)"
@@ -95,23 +93,14 @@ jobs:
             echo "Dependency PR #254 moved; update exact SHA before rehearsal"
             exit 1
           }
-          # This unmerged sibling still forks from the former v0.6 base;
-          # validate its exact reviewed origin, not ancestry to the new
-          # protected branch which already includes the queued PRs.
+          # Recheck the dependency's reviewed ancestry and the exact
+          # current protected base before any disposable source merging.
           git merge-base --is-ancestor d53782ed01e1f85686f10279fd3c7eea6d7f6720 "$observed"
           git merge-base --is-ancestor "$BASE_SHA" HEAD
           git config user.email "read-only-rehearsal@repocache.invalid"
           git config user.name "REPOCACHE disposable CI"
           git switch -c local-v06-rehearsal
           git merge --no-ff --no-edit refs/remotes/origin/pr64
-          git fetch --no-tags origin \
-            +refs/heads/feat/client-explicit-server-functional-contract-24:refs/remotes/origin/pr24
-          test "$(git rev-parse refs/remotes/origin/pr24)" = "$PR24_SHA" || {
-            echo "Dependency #115 moved; exact-SHA source rehearsal refused"
-            exit 1
-          }
-          git merge-base --is-ancestor "$BASE_SHA" refs/remotes/origin/pr24
-          git merge --no-ff --no-edit refs/remotes/origin/pr24
           git fetch --no-tags origin \
             +refs/heads/fix/76-repository-transfer-v06-candidate-20261107:refs/remotes/origin/pr76
           test "$(git rev-parse refs/remotes/origin/pr76)" = "$PR76_SHA" || {
@@ -130,7 +119,7 @@ jobs:
             'tests/test_server_*' \
             'scripts/ci_v06_cross_pr_*'
           test -z "$(git status --porcelain)"
-          echo "PASS: exact-SHA local merge of protected #255 #250 #252 #251 #214 plus draft #237 #254 #115 #249"
+          echo "PASS: exact-SHA disposable test: current protected v0.6 base plus draft #237 #254 #249"
           echo "NOT VERIFIED: protected integration merge, host-root, systemd, SELinux, release"
       - name: Run combined state, NGINX, catalog, systemd and lifecycle tests
         shell: bash
