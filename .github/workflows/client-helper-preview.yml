@@ -40,7 +40,9 @@ jobs:
               python3 scripts/smoke_client_helper_preview.py
               if command -v apt-get >/dev/null 2>&1; then
                 python3 scripts/smoke_client_root_source_boundary.py apt
+                python3 scripts/smoke_client_recoverable_pair.py apt
               else
                 python3 scripts/smoke_client_root_source_boundary.py dnf
+                python3 scripts/smoke_client_recoverable_pair.py dnf
               fi
             '
