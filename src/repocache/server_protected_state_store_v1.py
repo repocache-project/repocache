@@ -267,6 +267,46 @@ def _recheck_after_mutation(
         _fail("PROTECTED_DIRECTORY_CHANGED")
 
 
+def _recheck_after_native_package_effects(
+    chain: list[tuple[int, str, int, tuple[int, ...]]],
+    owner_uid: int,
+) -> None:
+    """Permit only normal shared-parent metadata churn during APT/DNF.
+
+    A native package transaction can create /var/lib/nginx, modify /var/cache
+    or rotate /var/log while holding the REPOCACHE state lock. That can change
+    st_nlink, mtime and ctime of /var and /var/lib without changing the
+    identity or security of the pinned REPOCACHE state directory. Continue
+    requiring exact dev/inode/type/mode/UID/GID on those shared parents,
+    byte-for-byte stable /var/lib/repocache, and structural identity of the
+    state leaf whose own timestamps change for the durable journal.
+    """
+    if (len(chain) != len(_STATE_SEGMENTS)
+            or tuple(entry[1] for entry in chain) != _STATE_SEGMENTS):
+        _fail("PROTECTED_DIRECTORY_CHAIN_INVALID")
+    for index, (parent, name, child, original) in enumerate(chain):
+        try:
+            named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            opened = _safe_directory(child, owner_uid)
+            seen = _identity(named)
+            pinned = _identity(opened)
+            # Shared native-package parents: /var, /var/lib. APT/DNF can add
+            # children to these directories while retaining their identity.
+            if index < 2:
+                unchanged = seen[:5] == original[:5] and pinned[:5] == original[:5]
+            # The REPOCACHE subtree is never owned by native NGINX packages.
+            elif index == 2:
+                unchanged = seen == original and pinned == original
+            # The protected state leaf legitimately records a new marker.
+            else:
+                unchanged = seen[:6] == original[:6] and pinned[:6] == original[:6]
+            if not unchanged or opened.st_dev != os.fstat(parent).st_dev:
+                _fail("PROTECTED_DIRECTORY_CHANGED")
+        except ProtectedStateStoreError:
+            raise
+        except (OSError, ValueError, TypeError):
+            _fail("PROTECTED_DIRECTORY_CHANGED")
+
 
 # The private proposed v2 fixture store reuses this state lock. V1 must
 # reciprocally refuse *any* proposed v2 file before reading or modifying
@@ -293,9 +333,13 @@ def _refuse_proposed_v2_coexistence(directory: int) -> None:
 
 
 @contextmanager
-def _locked(root_fd: int, owner_uid: int) -> Iterator[int]:
-    """Fixture-only pinned path. Lock inode must be preprovisioned, never created here."""
-    if type(root_fd) is not int or root_fd < 0 or type(owner_uid) is not int:
+def _locked(
+    root_fd: int, owner_uid: int, *,
+    allow_native_package_parent_changes: bool = False,
+) -> Iterator[int]:
+    """Pinned lock; the normal strict state-only contract remains the default."""
+    if (type(root_fd) is not int or root_fd < 0 or type(owner_uid) is not int
+            or type(allow_native_package_parent_changes) is not bool):
         _fail("PROTECTED_ROOT_INVALID")
     with ExitStack() as stack:
         try:
@@ -319,7 +363,10 @@ def _locked(root_fd: int, owner_uid: int) -> Iterator[int]:
             _fail("PROTECTED_LOCK_UNAVAILABLE")
         try:
             yield state_fd
-            _recheck_after_mutation(chain, owner_uid)
+            if allow_native_package_parent_changes:
+                _recheck_after_native_package_effects(chain, owner_uid)
+            else:
+                _recheck_after_mutation(chain, owner_uid)
             if _identity(named) != _identity(os.stat(LOCK_NAME, dir_fd=state_fd,
                                                       follow_symlinks=False)):
                 _fail("PROTECTED_LOCK_CHANGED")

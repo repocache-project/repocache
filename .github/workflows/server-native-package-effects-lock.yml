@@ -1,0 +1,82 @@
+name: Server Native Package Effects Lock Scope
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/server-native-package-effects-lock.yml'
+      - 'src/repocache/server_native_nginx_package_journal_v1.py'
+      - 'tests/test_server_native_nginx_package_journal_v1.py'
+      - 'src/repocache/server_protected_state_store_v1.py'
+      - 'docs/architecture/SERVER_NATIVE_PACKAGE_EFFECTS_LOCK_SCOPE_V1.md'
+  push:
+    branches: [main, 'integration/**']
+    paths:
+      - '.github/workflows/server-native-package-effects-lock.yml'
+      - 'src/repocache/server_native_nginx_package_journal_v1.py'
+      - 'tests/test_server_native_nginx_package_journal_v1.py'
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  native-effects-lock:
+    name: Pending package lock scope (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: debian13
+            image: debian:trixie-slim
+          - platform: almalinux10
+            image: almalinux:10
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install distro-native Python and pytest in disposable container
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [ '${{ matrix.platform }}' = 'debian13' ]; then
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq
+            apt-get install -y -qq --no-install-recommends python3 python3-pytest
+          else
+            dnf -y -q --enablerepo=crb install python3 python3-pytest
+          fi
+          python3 --version
+          python3 -m pytest --version
+      - name: Actual lock, journal durability, and failure-injection regressions
+        shell: bash
+        env:
+          PYTHONPATH: src
+          PYTHONDONTWRITEBYTECODE: '1'
+          EXPECTED_PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -Eeuo pipefail
+          python3 -B - <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+          from repocache.server_install_v1 import validate_os_identity
+          targets = {
+              "debian13": ("debian", (3, 13)),
+              "almalinux10": ("almalinux", (3, 12)),
+          }
+          distro, version = targets[os.environ["EXPECTED_PLATFORM"]]
+          assert sys.version_info[:2] == version
+          assert validate_os_identity(
+              Path("/etc/os-release").read_text(encoding="utf-8"),
+              sys.version_info[:2],
+          ) == distro
+          print("PASS: exact supported userspace; fixture-only lock scope")
+          PY
+          python3 -B -m pytest -q -rs \
+            tests/test_server_native_nginx_package_journal_v1.py \
+            tests/test_server_protected_state_store_v1.py
+          # No package install, systemd, host-root or SELinux authority.

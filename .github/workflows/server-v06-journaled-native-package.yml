@@ -1,0 +1,73 @@
+name: Server v0.6 Journaled Native Package Installation (Containers)
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/server-v06-journaled-native-package.yml'
+      - 'scripts/ci_v06_journaled_native_server_install.py'
+      - 'tests/test_ci_v06_journaled_native_server_install.py'
+      - 'scripts/smoke_server_native_nginx_container_install.py'
+      - 'src/repocache/server_protected_namespace_bootstrap_v1.py'
+      - 'src/repocache/server_native_nginx_package_journal_v1.py'
+      - 'src/repocache/server_protected_state_store_v1.py'
+      - 'tests/test_server_native_parent_drift_lock_v1.py'
+      - 'src/repocache/server_native_nginx_prepackage_state_v1.py'
+      - 'src/repocache/server_native_nginx_local_boundary_v1.py'
+      - 'docs/testing/SERVER_V06_JOURNALED_NATIVE_INSTALL.md'
+  push:
+    branches: [main, 'integration/**']
+    paths:
+      - '.github/workflows/server-v06-journaled-native-package.yml'
+      - 'scripts/ci_v06_journaled_native_server_install.py'
+      - 'src/repocache/server_protected_namespace_bootstrap_v1.py'
+      - 'src/repocache/server_native_nginx_package_journal_v1.py'
+      - 'src/repocache/server_protected_state_store_v1.py'
+      - 'tests/test_server_native_parent_drift_lock_v1.py'
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  actual-package-install:
+    name: Journaled real native NGINX install (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: debian13
+            image: debian:trixie-slim
+          - platform: almalinux10
+            image: almalinux:10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run actual package transaction in disposable clean container only
+        shell: bash
+        env:
+          DISTRO_IMAGE: ${{ matrix.image }}
+        run: |
+          set -Eeuo pipefail
+          docker run --rm --network bridge \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace,readonly" \
+            --workdir /workspace "$DISTRO_IMAGE" sh -ec '
+              set -eu
+              if command -v apt-get >/dev/null 2>&1; then
+                apt-get update -qq
+                DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends python3 ca-certificates >/dev/null
+              else
+                dnf -y -q install python3 ca-certificates >/dev/null
+              fi
+              export PYTHONPATH=/workspace/src
+              export REPOCACHE_NATIVE_TEST_CONTAINER=CONFIRMED_DISPOSABLE_DOCKER_ONLY
+              if ! python3 -B scripts/ci_v06_journaled_native_server_install.py > /tmp/repocache-v06-journaled-result.json; then
+                cat /tmp/repocache-v06-journaled-result.json
+                exit 1
+              fi
+              grep -Fq DISPOSABLE_JOURNALED_NATIVE_INSTALL_PASS /tmp/repocache-v06-journaled-result.json
+              cat /tmp/repocache-v06-journaled-result.json
+              echo "PASS: real native NGINX install under retained lock; no VM GO"
+            '
