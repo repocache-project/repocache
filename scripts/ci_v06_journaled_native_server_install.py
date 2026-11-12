@@ -127,16 +127,22 @@ def run() -> dict[str, Any]:
     )
     root_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        initial = bootstrap_protected_namespace_under_root(
-            root_fd, owner_uid=0,
-        )
+        try:
+            initial = bootstrap_protected_namespace_under_root(
+                root_fd, owner_uid=0,
+            )
+        except (OSError, ValueError, TypeError):
+            _deny("PROTECTED_BOOTSTRAP_UNVERIFIED")
         if initial["status"] != "FRESH_PROTECTED_LOCK_DURABLE":
             _deny("PROTECTED_BOOTSTRAP_INCOMPLETE")
-        preflight = inspect_native_nginx_local_boundary(
-            os_release=os_release,
-            python_version=(sys.version_info.major, sys.version_info.minor),
-            document=doc,
-        ).to_dict()
+        try:
+            preflight = inspect_native_nginx_local_boundary(
+                os_release=os_release,
+                python_version=(sys.version_info.major, sys.version_info.minor),
+                document=doc,
+            ).to_dict()
+        except (OSError, ValueError, TypeError):
+            _deny("LOCAL_PREPACKAGE_UNVERIFIED")
         if (preflight["code"] != "LOCAL_READ_ONLY_SNAPSHOT_OBSERVED"
                 or preflight["authorizes_package_transaction"]
                 or preflight["can_install"]):
@@ -153,9 +159,14 @@ def run() -> dict[str, Any]:
             if (prepared["status"] != "NATIVE_PACKAGE_EFFECTS_JOURNAL_DURABLE"
                     or prepared["authorizes_package_installation"]):
                 _deny("NATIVE_PACKAGE_MARKER_NOT_READY")
-            result = run_rehearsal(
-                distribution=distribution, runner=guarded_runner,
-            )
+            try:
+                result = run_rehearsal(
+                    distribution=distribution, runner=guarded_runner,
+                )
+            except NativeIntegrationError:
+                raise
+            except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+                _deny("NATIVE_PACKAGE_REHEARSAL_UNVERIFIED")
         if (len(seen) < 4 or any(item != "CONTENDED" for item in seen)
                 or not result["native_transaction_executed_in_disposable_container"]
                 or not result["nginx_syntax_test_passed_in_container"]
