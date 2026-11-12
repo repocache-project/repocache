@@ -157,3 +157,34 @@ def test_disabled_mutation_or_privilege_sources():
     assert "os.rmdir(" not in src
     assert "os.chmod(" not in src
     assert '"authorizes_host_installation": False' in src
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="real isolated chown requires container root")
+def test_native_root_provisions_unprivileged_cache_uid_without_log_uid_change(
+    fixture,
+):
+    # Executed in the Debian 13 / AlmaLinux 10 disposable root containers.
+    # This proves the cache is genuinely chown'd on its newly created inode,
+    # without adopting foreign data or chown'ing the root-owned log leaf.
+    _, root, uid = fixture
+    assert uid == 0
+    report = call(fixture, cache_uid=65534)
+    cache, logs = leaves(root)
+    assert cache.stat().st_uid == 65534
+    assert logs.stat().st_uid == 0
+    assert cache.stat().st_mode & 0o777 == 0o700
+    assert logs.stat().st_mode & 0o777 == 0o700
+    for label, leaf in (("cache", cache), ("logs", logs)):
+        assert report["directory_identities"][label]["ino"] == leaf.stat().st_ino
+    # Revalidation with a changed expected NGINX UID is refused.
+    with pytest.raises(NativeStorageProvisionError):
+        call(fixture, cache_uid=0, existing=report["directory_identities"])
+    assert cache.stat().st_uid == 65534
+    # Exact expected UID + recorded inode preserves existing cache bytes.
+    (cache / "retained-artifact").write_bytes(b"no-cache-data-loss")
+    rerun = call(
+        fixture, cache_uid=65534,
+        existing=report["directory_identities"],
+    )
+    assert rerun["status"] == "EXISTING_STORAGE_VALIDATED"
+    assert (cache / "retained-artifact").read_bytes() == b"no-cache-data-loss"
