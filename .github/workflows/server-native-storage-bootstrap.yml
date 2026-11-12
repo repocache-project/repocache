@@ -1,0 +1,68 @@
+name: Server Native Cache and Log Storage Bootstrap (Distro Containers)
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/server-native-storage-bootstrap.yml'
+      - 'src/repocache/server_native_storage_bootstrap_v1.py'
+      - 'src/repocache/server_cache_pressure_observe_v1.py'
+      - 'src/repocache/server_protected_state_inspect_v1.py'
+      - 'tests/test_server_native_storage_bootstrap_v1.py'
+      - 'scripts/ci_native_server_storage_bootstrap.py'
+      - 'docs/testing/SERVER_NATIVE_STORAGE_BOOTSTRAP.md'
+  push:
+    branches: [main, 'integration/**']
+    paths:
+      - '.github/workflows/server-native-storage-bootstrap.yml'
+      - 'src/repocache/server_native_storage_bootstrap_v1.py'
+      - 'tests/test_server_native_storage_bootstrap_v1.py'
+      - 'scripts/ci_native_server_storage_bootstrap.py'
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  native-worker-storage:
+    name: Cache and log native worker ownership (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: debian13
+            image: debian:trixie-slim
+          - platform: almalinux10
+            image: almalinux:10
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install distro-native Python, pytest and NGINX in disposable container
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [ '${{ matrix.platform }}' = 'debian13' ]; then
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq
+            apt-get install -y -qq --no-install-recommends \
+              nginx python3 python3-pytest
+          else
+            dnf -y -q --enablerepo=crb install nginx python3 python3-pytest
+          fi
+          python3 --version
+          /usr/sbin/nginx -v
+      - name: Exercise native worker cache, root-only logs, repeat preservation and refusals
+        shell: bash
+        env:
+          PYTHONPATH: src
+          PYTHONDONTWRITEBYTECODE: '1'
+          REPOCACHE_NATIVE_STORAGE_CI: CONFIRMED_DISPOSABLE_DOCKER_ONLY
+        run: |
+          set -Eeuo pipefail
+          python3 -B -m pytest -q -rs tests/test_server_native_storage_bootstrap_v1.py
+          python3 -B scripts/ci_native_server_storage_bootstrap.py
+          # No booted PID1/systemd or SELinux enforcing acceptance.
