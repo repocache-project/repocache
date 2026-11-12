@@ -151,6 +151,23 @@ a repeat `publish` refuses before any API write (stricter one-time
 publication policy from #88). A safe recovery path reports the already
 published version and its immutable verified identity via `status`.
 
+### Canonical repository and signing identity (v0.6.0)
+
+The workstation operator MUST resolve its Git origin and all GitHub API,
+Actions, Draft Release, staged asset and publication operations against the
+canonical `repocache-project/repocache` repository. The earlier
+`teixemf/repocache` origin is refused for any new candidate; redirects or
+similarly named repositories do not confer approval. The explicitly approved
+maintainer GitHub actor remains the individual `teixemf`, not the
+organization login. This separation does not grant any new release action.
+
+Historical immutable public v0.4.0 signatures retain their original signed
+repository identity and must never be rewritten or mistaken for the new
+v0.6.0 schema-1 signed publisher identity. This change is an independent
+Stage-A #88 source/CI prerequisite only; the authoritative #76 gate still
+must be merged into protected main and authenticate genuine owner-signed final
+assets before any actual stage, signing authorization or publication.
+
 ## 4. Integration with the current GitHub roadmap
 
 - **#88:** command parser/UX shell, workstation packaging, resume state,

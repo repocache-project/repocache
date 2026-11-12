@@ -32,7 +32,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-REPO = "teixemf/repocache"
+REPO = "repocache-project/repocache"
+# Maintainer actor identity is a user, not the organization repository owner.
 OWNER = "teixemf"
 TAG = re.compile(r"^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 HEX40 = re.compile(r"^[a-f0-9]{40}$")
@@ -283,9 +284,9 @@ def root_path() -> Path:
     # The operator must be launched from its trusted source checkout.
     remote = command(["git", "-C", str(path), "remote", "get-url", "origin"]).decode().strip()
     if remote not in (
-            "https://github.com/teixemf/repocache.git",
-            "https://github.com/teixemf/repocache",
-            "git@github.com:teixemf/repocache.git"):
+            "https://github.com/repocache-project/repocache.git",
+            "https://github.com/repocache-project/repocache",
+            "git@github.com:repocache-project/repocache.git"):
         raise OperatorError("UNTRUSTED_REPOSITORY", "Checkout origin is not REPOCACHE")
     if not (path / "scripts/offline_sign_release.py").is_file():
         raise OperatorError("INVALID_WORKTREE", "REPOCACHE release scripts are missing")
