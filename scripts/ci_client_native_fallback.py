@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Isolated, executable APT/DNF HTTP metadata failover probe (#24).
+"""Isolated APT/DNF signed-metadata, HTTPS and package-fallback CI (#24).
 
-This experiment runs ONLY in disposable Debian 13/AlmaLinux 10 containers.
-It does not configure a production REPOCACHE host, disable repository signing
-or prove package download, installation, real TLS or power-loss behavior.
-
-Exit nonzero if native metadata preference/fallback/recovery fails. Record
-manager version and local HTTP request counts for reproducible evidence.
+Runs ONLY in disposable Debian 13 / AlmaLinux 10 containers. The APT
+variant fetches an actual synthetic .deb and verifies package hashes via
+an ephemeral signed Release; the DNF variant checks signed repomd.xml with
+a separate ephemeral GPG key and refuses tampered signatures. Neither
+installs packages nor uses publisher keys or modifies host repository sources.
+No real origin trust, production SELinux or power-loss claim is made.
 """
 from __future__ import annotations
 
@@ -17,14 +17,32 @@ import hashlib
 import http.server
 import lzma
 import shutil
+import ssl
 import subprocess
 import tempfile
 import threading
 from pathlib import Path
 
 
+class _GracefulTLSServer(http.server.ThreadingHTTPServer):
+    """Send TLS close_notify: Debian APT rejects abrupt TLS EOF on metadata."""
+
+    def shutdown_request(self, request):
+        if isinstance(request, ssl.SSLSocket):
+            try:
+                request.settimeout(3)
+                plain = request.unwrap()
+                plain.close()
+            except (OSError, TimeoutError):
+                # The peer may have disconnected before TLS shutdown.
+                request.close()
+        else:
+            super().shutdown_request(request)
+
+
 class HTTPBackend:
-    def __init__(self, files: Path):
+    def __init__(self, files: Path, *, certificate: Path | None = None,
+                 key: Path | None = None):
         self.mode = "healthy"
         self.hits: list[str] = []
 
@@ -48,15 +66,24 @@ class HTTPBackend:
             def log_message(handler, _format, *args):
                 pass
 
-        self.server = http.server.ThreadingHTTPServer(
+        self.server = _GracefulTLSServer(
             ("127.0.0.1", 0),
             lambda *args, **kwargs: Handler(*args, directory=str(files), **kwargs),
         )
+        if certificate is not None:
+            if key is None:
+                raise ValueError("TLS test server key is required")
+            tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            tls_context.load_cert_chain(str(certificate), str(key))
+            self.server.socket = tls_context.wrap_socket(
+                self.server.socket, server_side=True)
         self.thread = threading.Thread(
             target=self.server.serve_forever, daemon=True,
         )
         self.thread.start()
-        self.origin = "http://127.0.0.1:%d/repo/" % self.server.server_port
+        scheme = "https" if certificate is not None else "http"
+        self.origin = "%s://127.0.0.1:%d/repo/" % (
+            scheme, self.server.server_port)
 
     def close(self):
         self.server.shutdown()
@@ -75,14 +102,66 @@ def checked(argv: list[str], *, timeout: int = 120) -> subprocess.CompletedProce
     return result
 
 
-def apt_repository(base: Path) -> Path:
+
+def temporary_tls_identity(base: Path, label: str) -> tuple[Path, Path]:
+    """Generate private, short-lived loopback TLS identity for CI only."""
+    cert = base / (label + "-tls-cert.pem")
+    key = base / (label + "-tls-key.pem")
+    checked([
+        "openssl", "req", "-x509", "-newkey", "rsa:2048",
+        "-sha256", "-nodes", "-days", "1",
+        "-keyout", str(key), "-out", str(cert),
+        "-subj", "/CN=repocache-ci-loopback",
+        "-addext", "subjectAltName=IP:127.0.0.1,DNS:localhost",
+    ], timeout=60)
+    key.chmod(0o600)
+    cert.chmod(0o644)
+    return cert, key
+
+
+def apt_repository(base: Path, *, package_transfer: bool = False) -> Path:
     repository = base / "www" / "repo"
     index_dir = repository / "dists" / "stable" / "main" / "binary-amd64"
     index_dir.mkdir(parents=True)
+    packages = b""
+    if package_transfer:
+        # Actual .deb payload transfer, authenticated by the fixture's
+        # signed Release -> Packages -> package SHA256 hash chain.
+        build = base / "build-deb"
+        control = build / "DEBIAN"
+        control.mkdir(parents=True)
+        (control / "control").write_text(
+            "Package: repocache-ci-probe\n"
+            "Version: 0.0.1\n"
+            "Section: misc\nPriority: optional\n"
+            "Architecture: all\n"
+            "Maintainer: REPOCACHE CI <ci@repocache.invalid>\n"
+            "Description: Isolated no-install transport integrity test\n",
+            encoding="utf-8",
+        )
+        content = build / "usr/share/doc/repocache-ci-probe"
+        content.mkdir(parents=True)
+        (content / "README").write_text(
+            "Synthetic REPOCACHE CI package. Never install.\n",
+            encoding="utf-8",
+        )
+        deb_name = "repocache-ci-probe_0.0.1_all.deb"
+        filename = "pool/main/r/repocache-ci-probe/" + deb_name
+        target = repository / filename
+        target.parent.mkdir(parents=True)
+        checked(["dpkg-deb", "--build", str(build), str(target)])
+        archive = target.read_bytes()
+        packages = (
+            "Package: repocache-ci-probe\n"
+            "Version: 0.0.1\nArchitecture: all\n"
+            "Filename: %s\nSize: %d\nSHA256: %s\n"
+            "Description: Synthetic repository transport test\n\n"
+            % (filename, len(archive), hashlib.sha256(archive).hexdigest())
+        ).encode("ascii")
     files = {
-        "main/binary-amd64/Packages": b"",
-        "main/binary-amd64/Packages.gz": gzip.compress(b"", mtime=0),
-        "main/binary-amd64/Packages.xz": lzma.compress(b""),
+        "main/binary-amd64/Packages": packages,
+        "main/binary-amd64/Packages.gz": gzip.compress(packages, mtime=0),
+        "main/binary-amd64/Packages.xz": lzma.compress(packages),
     }
     for name, data in files.items():
         (repository / "dists" / "stable" / name).write_bytes(data)
@@ -119,14 +198,39 @@ def apt_repository(base: Path) -> Path:
     return keyring
 
 
-def dnf_repository(base: Path) -> None:
+def dnf_repository(base: Path, *, signed: bool = False) -> Path | None:
     repository = base / "www" / "repo"
     repository.mkdir(parents=True)
     checked(["createrepo_c", "--quiet", str(repository)])
+    if not signed:
+        return None
+
+    # Metadata trust is exercised using an ephemeral, container-only key.
+    # It is NOT the REPOCACHE publisher signing identity or an RPM package.
+    home = base / "dnf-gnupg"
+    home.mkdir(mode=0o700)
+    gpg = ["gpg", "--homedir", str(home), "--batch", "--yes",
+           "--pinentry-mode", "loopback", "--passphrase", ""]
+    checked(gpg + [
+        "--quick-generate-key",
+        "REPOCACHE DNF Fixture <metadata-ci@repocache.invalid>",
+        "ed25519", "sign", "1d",
+    ], timeout=90)
+    public_key = base / "dnf-metadata-public.asc"
+    with public_key.open("wb") as handle:
+        subprocess.run(gpg + ["--armor", "--export"], stdout=handle,
+                       check=True, timeout=20)
+    public_key.chmod(0o644)
+    metadata = repository / "repodata" / "repomd.xml"
+    checked(gpg + ["--armor", "--detach-sign",
+                   "--output", str(metadata.with_name("repomd.xml.asc")),
+                   str(metadata)])
+    return public_key
 
 
 def apt_command(base: Path, primary: HTTPBackend,
-                upstream: HTTPBackend, cycle: str, keyring: Path) -> list[str]:
+                upstream: HTTPBackend, cycle: str, keyring: Path,
+                *, ca_certificate: Path | None = None) -> list[str]:
     mirrors = base / "mirrors.txt"
     mirrors.write_text(
         primary.origin + "\tpriority:1\n" +
@@ -154,11 +258,17 @@ def apt_command(base: Path, primary: HTTPBackend,
         "-o", "APT::Update::Error-Mode=any",
         "-o", "Acquire::Retries=0",
         "-o", "APT::Sandbox::User=root",
-    ]
+    ] + ([
+        "-o", "Acquire::https::CaInfo=" + str(ca_certificate),
+        "-o", "Acquire::https::Verify-Peer=true",
+        "-o", "Acquire::https::Verify-Host=true",
+    ] if ca_certificate is not None else [])
 
 
 def dnf_command(base: Path, primary: HTTPBackend,
-                upstream: HTTPBackend, cycle: str) -> list[str]:
+                upstream: HTTPBackend, cycle: str,
+                *, ca_certificate: Path | None = None,
+                metadata_key: Path | None = None) -> list[str]:
     repo_dir = base / "repos"
     repo_dir.mkdir(exist_ok=True)
     (repo_dir / "repocache-ci.repo").write_text(
@@ -166,10 +276,13 @@ def dnf_command(base: Path, primary: HTTPBackend,
         "name=REPOCACHE Native Metadata Probe\n"
         "enabled=1\n"
         "gpgcheck=1\n"
-        "repo_gpgcheck=0\n"
-        "skip_if_unavailable=0\n"
+        + ("repo_gpgcheck=1\n" if metadata_key else "repo_gpgcheck=0\n")
+        + ("gpgkey=file://%s\n" % metadata_key if metadata_key else "")
+        + "skip_if_unavailable=0\n"
         "fastestmirror=0\n"
-        "baseurl=%s\n        %s\n" % (primary.origin, upstream.origin),
+        "baseurl=%s\n        %s\n" % (primary.origin, upstream.origin)
+        + ("sslverify=1\nsslcacert=%s\n" % ca_certificate
+           if ca_certificate is not None else ""),
         encoding="utf-8",
     )
     cache = base / ("dnf-cache-" + cycle)
@@ -191,19 +304,34 @@ def dnf_command(base: Path, primary: HTTPBackend,
     executable = shutil.which("dnf5") or shutil.which("dnf")
     if not executable:
         raise RuntimeError("Missing DNF on native AlmaLinux container")
-    return [executable, "--config=" + str(config), "--refresh", "makecache"]
+    return [executable, "--assumeyes", "--config=" + str(config),
+            "--refresh", "makecache"]
 
 
-def probe(manager: str) -> None:
+def probe(manager: str, *, tls: bool = False,
+          signed_dnf: bool = False,
+          package_transfer: bool = False) -> None:
+    if package_transfer and manager != "apt":
+        raise ValueError("Package transfer probe requires APT")
+    if signed_dnf and manager != "dnf":
+        raise ValueError("Signed DNF metadata probe requires the DNF manager")
     with tempfile.TemporaryDirectory(prefix="repocache-native-fallback-") as tmp:
         base = Path(tmp)
         (base / "www").mkdir()
-        keyring = apt_repository(base) if manager == "apt" else None
-        if manager == "dnf":
-            dnf_repository(base)
+        keyring = (apt_repository(base, package_transfer=package_transfer)
+                   if manager == "apt" else None)
+        package_file = (base / "www/repo/pool/main/r/repocache-ci-probe/"
+                        "repocache-ci-probe_0.0.1_all.deb")
+        original_deb = package_file.read_bytes() if package_transfer else None
+        metadata_key = (dnf_repository(base, signed=signed_dnf)
+                        if manager == "dnf" else None)
 
-        primary = HTTPBackend(base / "www")
-        upstream = HTTPBackend(base / "www")
+        certificate, tls_key = temporary_tls_identity(base, "trusted") if tls else (None, None)
+        # A different private CA must be rejected. Never disable TLS checking
+        # or downgrade to HTTP for a metadata probe.
+        bad_ca = temporary_tls_identity(base, "untrusted")[0] if tls else None
+        primary = HTTPBackend(base / "www", certificate=certificate, key=tls_key)
+        upstream = HTTPBackend(base / "www", certificate=certificate, key=tls_key)
         try:
             command = apt_command if manager == "apt" else dnf_command
             cases = [
@@ -212,30 +340,99 @@ def probe(manager: str) -> None:
                 ("recovery", "healthy", "healthy"),
                 ("both-failed", "unavailable", "unavailable"),
             ]
+            if tls:
+                cases.append(("wrong-ca", "healthy", "healthy"))
+            if signed_dnf:
+                cases.append(("tampered-signature", "healthy", "healthy"))
+            if package_transfer:
+                cases.append(("tampered-package", "healthy", "healthy"))
+                cases.append(("tampered-inrelease", "healthy", "healthy"))
+            signature = base / "www" / "repo" / "repodata" / "repomd.xml.asc"
+            intact_signature = signature.read_bytes() if signed_dnf else None
+            inrelease = base / "www/repo/dists/stable/InRelease"
+            intact_inrelease = inrelease.read_bytes() if package_transfer else None
             for cycle, first, second in cases:
                 primary.mode, upstream.mode = first, second
+                if cycle == "tampered-signature":
+                    signature.write_bytes(b"tampered and not OpenPGP signed\n")
+                if cycle == "tampered-package":
+                    package_file.write_bytes(b"synthetic package tampered after metadata signing\n")
+                if cycle == "tampered-inrelease":
+                    inrelease.write_bytes(b"invalid OpenPGP signed InRelease\n")
                 primary.hits.clear()
                 upstream.hits.clear()
-                argv = (command(base, primary, upstream, cycle, keyring)
+                ca = bad_ca if cycle == "wrong-ca" else certificate
+                argv = (command(base, primary, upstream, cycle, keyring,
+                                ca_certificate=ca)
                         if manager == "apt"
-                        else command(base, primary, upstream, cycle))
+                        else command(base, primary, upstream, cycle,
+                                     ca_certificate=ca,
+                                     metadata_key=metadata_key))
                 result = subprocess.run(
                     argv, text=True, stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT, timeout=120, check=False,
                 )
-                print("%s %s exit=%d primary_hits=%d upstream_hits=%d" %
-                      (manager, cycle, result.returncode,
+                package_result = None
+                accepted_hash = False
+                if package_transfer and result.returncode == 0:
+                    download_dir = base / ("apt-download-" + cycle)
+                    download_dir.mkdir()
+                    download_command = list(argv)
+                    download_command[1] = "download"
+                    download_command.append("repocache-ci-probe")
+                    package_result = subprocess.run(
+                        download_command, cwd=download_dir,
+                        text=True, stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT, timeout=120, check=False,
+                    )
+                    download_path = download_dir / "repocache-ci-probe_0.0.1_all.deb"
+                    accepted_hash = (
+                        package_result.returncode == 0 and download_path.is_file()
+                        and hashlib.sha256(download_path.read_bytes()).digest()
+                        == hashlib.sha256(original_deb).digest()
+                    )
+                    print("apt package %s download_exit=%d verified_hash=%s" %
+                          (cycle, package_result.returncode, accepted_hash),
+                          flush=True)
+                print("%s %s %s exit=%d primary_hits=%d upstream_hits=%d" %
+                      (manager, "https" if tls else "http", cycle, result.returncode,
                        len(primary.hits), len(upstream.hits)), flush=True)
-                if cycle == "both-failed":
+                if cycle == "wrong-ca":
+                    # No HTTP request after untrusted TLS handshake.
+                    ok = result.returncode != 0 and not primary.hits and not upstream.hits
+                elif cycle == "tampered-signature":
+                    # Invalid GPG metadata must never be accepted.
+                    ok = result.returncode != 0 and bool(primary.hits)
+                elif cycle == "tampered-package":
+                    ok = (result.returncode == 0 and package_result is not None
+                          and not accepted_hash and package_result.returncode != 0
+                          and bool(primary.hits))
+                elif cycle == "tampered-inrelease":
+                    # The metadata signing boundary precedes package transfer.
+                    ok = (result.returncode != 0 and bool(primary.hits)
+                          and package_result is None)
+                elif cycle == "both-failed":
                     ok = result.returncode != 0 and primary.hits and upstream.hits
                 elif cycle == "fallback":
                     ok = result.returncode == 0 and primary.hits and upstream.hits
                 else:
                     ok = result.returncode == 0 and primary.hits and not upstream.hits
+                if (package_transfer and cycle not in (
+                        "tampered-package", "tampered-inrelease",
+                        "wrong-ca", "both-failed")
+                        and not accepted_hash):
+                    ok = False
                 if not ok:
                     raise RuntimeError(
-                        "Failover assertion failed for %s / %s:\n%s" %
-                        (manager, cycle, result.stdout[-6000:]))
+                        "Failover assertion failed for %s / %s:\n%s\n%s" %
+                        (manager, cycle, result.stdout[-6000:],
+                         "" if package_result is None else package_result.stdout[-3000:]))
+                if cycle == "tampered-package":
+                    package_file.write_bytes(original_deb)
+                if cycle == "tampered-inrelease":
+                    inrelease.write_bytes(intact_inrelease)
+                if cycle == "tampered-signature":
+                    signature.write_bytes(intact_signature)
         finally:
             primary.close()
             upstream.close()
@@ -244,5 +441,12 @@ def probe(manager: str) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("manager", choices=["apt", "dnf"])
+    parser.add_argument("--tls", action="store_true",
+                        help="Use private loopback TLS and test untrusted-CA refusal")
+    parser.add_argument("--signed-dnf", action="store_true",
+                        help="Require isolated signed DNF repomd.xml and tamper refusal")
+    parser.add_argument("--package-transfer", action="store_true",
+                        help="Require signed APT metadata, real deb transfer and tamper refusal")
     args = parser.parse_args()
-    probe(args.manager)
+    probe(args.manager, tls=args.tls, signed_dnf=args.signed_dnf,
+          package_transfer=args.package_transfer)

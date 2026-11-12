@@ -5,6 +5,7 @@ on:
       - .github/workflows/native-nginx-cache-smoke.yml
       - scripts/ci_native_nginx_cache_smoke.py
       - scripts/ci_generated_nginx_route_cache_smoke.py
+      - scripts/ci_nginx_cache_policy_capability.py
       - src/repocache/server_nginx_repository_bundle_v1.py
       - src/repocache/server_derived_catalog_candidate_v1.py
       - tests/test_server_derived_catalog_candidate_v1.py
@@ -64,4 +65,5 @@ jobs:
             -e PYTHONPATH=/repo/src -e REPOCACHE_DISPOSABLE_NGINX_SMOKE=1 \
             "repocache-native-cache:${{ matrix.platform }}" \
             /bin/sh -eu -c 'python3 /repo/scripts/ci_native_nginx_cache_smoke.py && \
-              python3 /repo/scripts/ci_generated_nginx_route_cache_smoke.py'
+              python3 /repo/scripts/ci_generated_nginx_route_cache_smoke.py && \
+              python3 /repo/scripts/ci_nginx_cache_policy_capability.py'

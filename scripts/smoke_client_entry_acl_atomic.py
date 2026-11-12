@@ -69,7 +69,7 @@ def approve_and_stage(root: Path, relative: str, body: bytes):
     identity = registry.register_entry_candidate_sandbox(
         root, relative, digest(body), first["sha256"])["id"]
     approved = approval.approve_entry_plan_sandbox(
-        root, identity, digest(body), first["sha256"])
+        root, identity, digest(body), first["sha256"], URL)
     assert approved["scope"] == "sandbox-only"
     prepared = staging.stage_entry_change_sandbox(root, identity, URL)
     assert prepared["state"] == "prepared"

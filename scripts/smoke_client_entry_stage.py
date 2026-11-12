@@ -65,7 +65,8 @@ def main():
             id = candidate.register_entry_candidate_sandbox(
                 root, relative, sha(original), first["sha256"])["id"]
             approval.approve_entry_plan_sandbox(root, id,
-                                                sha(original), first["sha256"])
+                                                sha(original), first["sha256"],
+                                                "https://cache.invalid/packages/")
             response = bridge.stage_entry_change_sandbox(
                 root, id, "https://cache.invalid/packages/")
             assert response["state"] == "prepared"
