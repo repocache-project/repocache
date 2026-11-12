@@ -131,21 +131,31 @@ def _prepare_native_journal_under_lock(
 def _retain_native_package_journal_lock_under_root(
     root_fd: int, *, owner_uid: int, distribution: str,
     inject_fault: Callable[[str], None] | None = None,
+    allow_native_package_parent_changes: bool = False,
 ) -> Iterator[dict[str, Any]]:
     """Fixture-only same-lock scope spanning the future native transaction.
 
     The marker is durably recorded BEFORE yielding; exiting never silently
     cleans a possibly irreversible APT/DNF package effect. The caller is not
     authenticated and no package command, root helper or service is exposed.
+
+    Only an explicitly reviewed native package-effects scope may set the
+    shared-parent-drift flag: APT/DNF can change /var or /var/lib metadata
+    without changing their fixed ownership and pinned inodes. The default
+    short-lived preparer remains strict. This flag NEVER authenticates root.
     """
     if (type(root_fd) is not int or root_fd < 0
             or type(owner_uid) is not int or owner_uid < 0
             or type(distribution) is not str
             or distribution not in _NATIVE_MANAGERS
-            or (inject_fault is not None and not callable(inject_fault))):
+            or (inject_fault is not None and not callable(inject_fault))
+            or type(allow_native_package_parent_changes) is not bool):
         _deny("NATIVE_JOURNAL_ARGUMENT_INVALID")
     try:
-        with _locked(root_fd, owner_uid) as directory:
+        with _locked(
+            root_fd, owner_uid,
+            allow_native_package_parent_changes=allow_native_package_parent_changes,
+        ) as directory:
             try:
                 prepared = _prepare_native_journal_under_lock(
                     directory, owner_uid=owner_uid,
