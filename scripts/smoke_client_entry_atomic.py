@@ -70,7 +70,7 @@ def fixture(root, relative, body):
     chosen = boundaries.boundaries(relative, body)[0]
     ident = candidates.register_entry_candidate_sandbox(
         root, relative, sha(body), chosen["sha256"])["id"]
-    approvals.approve_entry_plan_sandbox(root, ident, sha(body), chosen["sha256"])
+    approvals.approve_entry_plan_sandbox(root, ident, sha(body), chosen["sha256"], URL)
     stage_info = bridge.stage_entry_change_sandbox(root, ident, URL)
     return path, ident, stage_info["stage_id"], chosen
 
@@ -126,6 +126,165 @@ tool.apply_entry_sandbox(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5])
     assert proc.returncode == -signal.SIGKILL, proc.stderr
 
 
+def shared_file_approval_conflict(root):
+    """Distinct approvals never grant independent writes to a shared file.
+
+    Tested in a private sandbox only. A whole file is the transaction unit.
+    """
+    for relative, baseline in FILES.items():
+        # The common DNF fixture deliberately disables its second section.
+        # Use two structurally eligible test entries without changing that
+        # negative fixture or relaxing production parser/approval rules.
+        before = (baseline.replace(b"enabled=0", b"enabled=1")
+                  if relative.endswith(".repo") else baseline)
+        shared = relative.replace("mixture.", "samefile.", 1)
+        path, first_candidate, first_stage, _ = fixture(root, shared, before)
+        entries = boundaries.boundaries(shared, before)
+        assert len(entries) == 2
+        assert all(entry["structure_subset_pass"] for entry in entries)
+        second = entries[1]
+        second_candidate = candidates.register_entry_candidate_sandbox(
+            root, shared, sha(before), second["sha256"])["id"]
+        approvals.approve_entry_plan_sandbox(
+            root, second_candidate, sha(before), second["sha256"], URL)
+
+        # Both approvals can be recorded for different repository entries.
+        # Only one whole-file stage may be prepared, irrespective of entry ID.
+        assert candidates.inspect_entry_candidate_sandbox(
+            root, second_candidate)["state"] == "intact"
+        try:
+            bridge.stage_entry_change_sandbox(root, second_candidate, URL)
+        except stage.StageError as exc:
+            assert "A pending stage already owns this source" in str(exc)
+        else:
+            raise AssertionError("Conflicting shared-file stage was accepted")
+        assert path.read_bytes() == before
+        assert stage.inspect(root, first_stage)["status"] == "prepared"
+
+        # A separate approval must never borrow the other entry's stage ID.
+        try:
+            wrapper.apply_entry_sandbox(
+                root, second_candidate, first_stage, URL)
+        except approvals.ApprovalRefused as exc:
+            assert "unapproved shared-file changes" in str(exc)
+        else:
+            raise AssertionError("Foreign entry reused another stage")
+        assert path.read_bytes() == before
+
+        # The first approved entry can still be installed, without changing
+        # the second entry's bytes, as the only staged whole-file transaction.
+        assert wrapper.apply_entry_sandbox(
+            root, first_candidate, first_stage, URL)["state"] == "installed"
+        installed = path.read_bytes()
+        assert installed != before
+        assert_siblings(shared, before, installed)
+        status = candidates.inspect_entry_candidate_sandbox(
+            root, second_candidate)
+        assert status["state"] == "file-drift"
+        assert status["entry_intact"] and not status["file_intact"]
+        try:
+            bridge.stage_entry_change_sandbox(root, second_candidate, URL)
+        except approvals.ApprovalRefused:
+            pass
+        else:
+            raise AssertionError("Stale second-entry approval survived commit")
+        assert path.read_bytes() == installed
+
+        # Rollback restores bytes but not the immutable inode/metadata baseline.
+        # An old approval cannot silently rebase and apply the other entry.
+        assert wrapper.rollback_entry_sandbox(
+            root, first_candidate, first_stage, URL)["state"] == "restored"
+        assert path.read_bytes() == before
+        status = candidates.inspect_entry_candidate_sandbox(
+            root, second_candidate)
+        assert status["state"] == "file-drift"
+        assert status["write_eligible"] is False
+        try:
+            bridge.stage_entry_change_sandbox(root, second_candidate, URL)
+        except approvals.ApprovalRefused:
+            pass
+        else:
+            raise AssertionError("Rollback silently renewed stale approval")
+        assert path.read_bytes() == before
+
+
+def independent_transaction_failure_recovery(root):
+    """A failure or crash on one source must not roll back another source.
+
+    This is a private /tmp laboratory, NOT an installed multi-file writer.
+    """
+    apt_relative = "etc/apt/sources.list.d/isolated-success.list"
+    apt_before = FILES["etc/apt/sources.list.d/mixture.list"]
+    apt_path, apt_candidate, apt_stage, _ = fixture(root, apt_relative, apt_before)
+    dnf_relative = "etc/yum.repos.d/isolated-failure.repo"
+    dnf_before = FILES["etc/yum.repos.d/mixture.repo"]
+    dnf_path, dnf_candidate, dnf_stage, _ = fixture(root, dnf_relative, dnf_before)
+
+    assert wrapper.apply_entry_sandbox(
+        root, apt_candidate, apt_stage, URL)["state"] == "installed"
+    apt_applied = apt_path.read_bytes()
+    apt_inode = apt_path.stat().st_ino
+    assert apt_applied != apt_before
+    assert_siblings(apt_relative, apt_before, apt_applied)
+
+    # Inject a failure AFTER the second source's durable journal and
+    # temporary file exist but BEFORE its atomic rename.
+    original_replace = atomic._replace
+
+    def injected_io_error(*args):
+        raise OSError(5, "injected sandbox I/O failure before rename")
+
+    atomic._replace = injected_io_error
+    try:
+        try:
+            wrapper.apply_entry_sandbox(root, dnf_candidate, dnf_stage, URL)
+        except stage.StageError as exc:
+            # The path-safety boundary deliberately wraps OS failures in a
+            # stable refusal. Preserve the injected failure as its cause.
+            assert "Unsafe repository source pathname" in str(exc)
+            assert isinstance(exc.__cause__, OSError)
+            assert "injected sandbox I/O failure" in str(exc.__cause__)
+        else:
+            raise AssertionError("Injected second-source write unexpectedly succeeded")
+    finally:
+        atomic._replace = original_replace
+
+    pending = dnf_path.parent / (".repocache-atomic-" + dnf_stage)
+    assert dnf_path.read_bytes() == dnf_before
+    assert pending.is_file()
+    assert apt_path.read_bytes() == apt_applied
+    assert apt_path.stat().st_ino == apt_inode
+
+    # Recovery of only the second journal must preserve the first commit.
+    recovered = wrapper.recover_entry_sandbox(root, dnf_candidate, dnf_stage, URL)
+    assert recovered["state"] == "not-applied"
+    assert dnf_path.read_bytes() == dnf_before
+    assert not pending.exists()
+    assert apt_path.read_bytes() == apt_applied
+    assert apt_path.stat().st_ino == apt_inode
+    assert atomic.recover_sandbox(root, apt_stage)["status"] == "installed"
+
+    # In a fresh third source, SIGKILL immediately after rename should
+    # restore only that source, never the previously committed APT source.
+    crash_relative = "etc/yum.repos.d/isolated-crash.repo"
+    crash_path, crash_candidate, crash_stage, _ = fixture(
+        root, crash_relative, dnf_before)
+    interrupted_install(root, crash_candidate, crash_stage)
+    assert crash_path.read_bytes() != dnf_before
+    assert wrapper.recover_entry_sandbox(
+        root, crash_candidate, crash_stage, URL)["state"] == "restored"
+    assert crash_path.read_bytes() == dnf_before
+    assert apt_path.read_bytes() == apt_applied
+    assert apt_path.stat().st_ino == apt_inode
+
+    # Successful changes remain independently reversible after other failures.
+    assert wrapper.rollback_entry_sandbox(
+        root, apt_candidate, apt_stage, URL)["state"] == "restored"
+    assert apt_path.read_bytes() == apt_before
+    assert dnf_path.read_bytes() == dnf_before
+    assert crash_path.read_bytes() == dnf_before
+
+
 def main():
     assert os.geteuid() == 0, "Native positive sandbox scenario requires UID 0"
     with tempfile.TemporaryDirectory(prefix="rc-shared-atomic-") as private:
@@ -168,6 +327,12 @@ def main():
             assert restored["state"] == "restored"
             assert source.read_bytes() == original
             assert_siblings(relative, original, changed)
+
+        # Distinct entry approvals in one shared file must be serialized.
+        shared_file_approval_conflict(root)
+
+        # A failed source cannot roll back another successfully installed source.
+        independent_transaction_failure_recovery(root)
 
         # Sibling changed after planning => stale stage must never apply.
         other = "etc/apt/sources.list.d/conflict.list"
@@ -223,7 +388,7 @@ def main():
             raise AssertionError("Unsupported source xattrs were overwritten")
         assert path.read_bytes() == before
 
-    print("PASS: mixed-file atomic apply/rollback, preserved siblings, drift and SIGKILL recovery")
+    print("PASS: shared-file approval serialization, stale approval refusal, independent recovery and SIGKILL rollback")
 
 
 if __name__ == "__main__":

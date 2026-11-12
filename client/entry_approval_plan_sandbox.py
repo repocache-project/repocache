@@ -84,9 +84,10 @@ def _parse_approval(name: str, data: bytes) -> dict:
         raise ApprovalRefused("Invalid protected approval") from exc
     required = {"schema", "candidate_id", "source_file_sha256",
                 "source_entry_sha256", "decision", "approver_euid",
-                "scope", "production_write_eligible"}
+                "scope", "production_write_eligible",
+                "route_sha256", "route_approval_policy"}
     if (type(doc) is not dict or set(doc) != required
-            or type(doc["schema"]) is not int or doc["schema"] != 1
+            or type(doc["schema"]) is not int or doc["schema"] != 2
             or type(doc["candidate_id"]) is not str
             or _name(doc["candidate_id"]) != name
             or type(doc["source_file_sha256"]) is not str
@@ -94,6 +95,9 @@ def _parse_approval(name: str, data: bytes) -> dict:
             or type(doc["source_entry_sha256"]) is not str
             or not registry.DIGEST.fullmatch(doc["source_entry_sha256"])
             or doc["decision"] != "approve-entry-plan"
+            or type(doc["route_sha256"]) is not str
+            or not registry.DIGEST.fullmatch(doc["route_sha256"])
+            or doc["route_approval_policy"] != "explicit-exact-route-v1"
             or type(doc["approver_euid"]) is not int
             or doc["approver_euid"] != 0
             or doc["scope"] != "sandbox-only"
@@ -128,8 +132,9 @@ def _read_approval(root: Path, ident: str) -> dict:
 
 def approve_entry_plan_sandbox(root: Path, candidate_id: str,
                                expected_file_sha256: str,
-                               expected_entry_sha256: str) -> dict:
-    """Root-only explicit decision for a specific candidate baseline.
+                               expected_entry_sha256: str,
+                               approved_https_url: str) -> dict:
+    """Root-only explicit decision for one candidate and exact HTTPS route.
 
     This creates only a private non-authoritative laboratory record.
     EUID=0 is required for the positive path, even in disposable containers.
@@ -142,16 +147,20 @@ def approve_entry_plan_sandbox(root: Path, candidate_id: str,
             or not isinstance(expected_entry_sha256, str)
             or not registry.DIGEST.fullmatch(expected_entry_sha256)):
         raise ApprovalRefused("Invalid approval preconditions")
+    # Approval binds one exact, validated HTTPS route, not just the source.
+    route_hash = hashlib.sha256(_replacement_url(approved_https_url)).hexdigest()
     candidate = _candidate(Path(root), candidate_id)
     if (candidate["file_sha256"] != expected_file_sha256
             or candidate["entry_sha256"] != expected_entry_sha256):
         raise ApprovalRefused("Approval differs from candidate baseline")
     _snapshot(Path(root), candidate)
     approval = {
-        "schema": 1, "candidate_id": candidate_id,
+        "schema": 2, "candidate_id": candidate_id,
         "source_file_sha256": expected_file_sha256,
         "source_entry_sha256": expected_entry_sha256,
         "decision": "approve-entry-plan", "approver_euid": 0,
+        "route_sha256": route_hash,
+        "route_approval_policy": "explicit-exact-route-v1",
         "scope": "sandbox-only", "production_write_eligible": False,
     }
     with registry._registry_fd(root, create=True, subdir=APPROVAL_DIR) as fd:
@@ -283,6 +292,8 @@ def _build_plan(root: Path, candidate_id: str, https_url: str) -> dict:
         raise ApprovalRefused("Ambiguous candidate target")
     old = selected[0]
     uri = _replacement_url(https_url)
+    if hashlib.sha256(uri).hexdigest() != approved["route_sha256"]:
+        raise ApprovalRefused("Proposed route differs from explicit approval")
     part = source[old["start"]:old["end"]]
     new = _change_entry(candidate["source"], candidate["kind"], part, uri)
     proposed = source[:old["start"]] + new + source[old["end"]:]

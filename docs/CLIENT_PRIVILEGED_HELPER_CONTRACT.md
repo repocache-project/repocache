@@ -1,6 +1,6 @@
 # Client privileged source-helper contract (design only)
 
-**Status:** PROPOSED architecture, no executable privileged helper; [issue #24](https://github.com/teixemf/repocache/issues/24).  
+**Status:** Maintainer-approved minimal helper trust boundary (2026-11-09); no installed privileged writer; [issue #24](https://github.com/repocache-project/repocache/issues/24).  
 **Scope:** Debian 13 and AlmaLinux 10 only.  
 **Related:** protected staging #131, sandbox atomic recovery #132, source preflight #133, metadata #134, metadata-transaction integration #135. #131–#135 are merged into main. This document proposes a future helper only and does not grant production write authority.
 
@@ -48,3 +48,61 @@ The current sandbox laboratory tests some of these invariants under synthetic co
 The helper is **NOT IMPLEMENTED** and source edits remain blocked until all relevant evidence is PASS: protected ownership registry; real APT/DNF parser and multi-entry preservation; authentic package manager fallback and TLS/GPG tests under failure; root/non-root permission paths; fail-fast locks; race testing under hostile concurrent processes; complete fault injection including SIGKILL, disk-full and power failure; SELinux enforcing, ACLs and xattrs; signed clean-install/upgrade/recovery workflow; compatibility and migration; reviewed CI and security gates; explicit maintainer merge approval.
 
 No production use and no `repos sync --apply` enablement follow from this design alone.
+
+
+## Approved helper architecture and UC-45 decision (2026-11-09)
+
+The maintainer approved a narrowly-scoped, root-owned helper for fixed
+status, validation, commit, restore and recovery responsibilities, with
+least privilege and explicit OS authorization. This approval is **not** an
+authorization for an installed writer or real package-manager source changes.
+
+UC-45 requires an **explicit new administrator approval for each new exact
+server-published cache route**. A changed host, port or path is not covered
+by an old authorization, even if the upstream and repository ID remain
+unchanged. The client must compare an independently authenticated active
+catalog with an owned source baseline, verify TLS, signature trust and
+native upstream fallback, and obtain fresh route-specific approval before
+any later privileged source transaction.
+
+The existing root-only sandbox approval record now binds one exact validated
+HTTPS destination through SHA-256 (schema v2). A different proposed route
+is rejected before transaction staging. This lab authorization is immutable
+per candidate and cannot be silently reused or replaced. The production
+route reapproval protocol, helper installation, privilege handoff and actual
+native source writer are NOT IMPLEMENTED / NOT VERIFIED. Installed
+repocache-client repos sync --apply remains disabled.
+
+## Safe incremental fixed-operation helper implementation
+
+The existing non-installed read-only source_helper_preview module now
+supports a fixed verify-route-approval operation for the private,
+root-owned candidate and route approval sandbox registry. It accepts only
+a strict candidate identifier and SHA-256 digest of an exact approved
+HTTPS route; no raw route, arbitrary path or shell command is accepted.
+It verifies root authorization, protected approval and candidate identity,
+and the whole source baseline without disclosing route or source bytes.
+
+Native production invocation is refused (NOT_INSTALLED). Non-root fixture
+invocation is rejected before reading any protected approval (ROOT_REQUIRED).
+Unknown, mismatched, tampered or stale approvals are refused, without any
+source mutation. The module is NOT installed as a privileged helper.
+The installed client still refuses repos sync --apply and no commit,
+restore or recovery operation is exposed.
+
+## Non-installed conservative structural validation
+
+The fixed validate-source operation inspects allowlisted APT .list, deb822
+.sources and DNF .repo source files, read-only, using the existing pinned
+directory-FD source preflight and original-file inode/metadata/digest checks.
+It enforces a conservative entry grammar for all discovered entries and
+refuses unsupported, empty, ambiguous or unsigned forms as a whole.
+Local mirrorlist and DNF metalink/mirrorlist syntax is not certified.
+Outputs contain only the format and bounded entry count, no paths or bytes.
+The native action requires root and never elevates privileges automatically.
+
+A structural subset PASS is not native APT/DNF acceptance, package signing
+or fallback validation, ownership authority or real source-write permission.
+No privileged helper is installed and repos sync --apply remains disabled.
+Systemd and enforcing SELinux host tests remain reserved for final v0.6.0
+native validation as requested by the maintainer.

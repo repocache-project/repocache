@@ -11,6 +11,7 @@ import configparser
 import base64
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import re
@@ -25,7 +26,6 @@ from urllib.parse import urlsplit, urlunsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen, build_opener, HTTPRedirectHandler, HTTPSHandler, ProxyHandler
 
-DEFAULT_SERVER = "https://cache.example.org"
 CONFIG_FILE = Path("/etc/repocache-client/config.json")
 MAX_CATALOG_BYTES = 512_000
 
@@ -42,9 +42,98 @@ def _server(value: str) -> str:
         raise ClientError("Invalid server address") from exc
     if (p.scheme != "https" or not p.hostname or p.username is not None
             or p.password is not None or p.path not in ("", "/")
-            or p.query or p.fragment or (port is not None and port < 1)):
-        raise ClientError("Server must be a HTTPS origin without credentials or paths")
+            or p.query or p.fragment or port == 0 or p.netloc.endswith(":")
+            or any(ord(char) < 33 or ord(char) > 126 for char in value)
+            or "\\" in value or "%" in value
+            or "?" in value or "#" in value):
+        raise ClientError("Server must be a canonical HTTPS origin")
+    hostname = p.hostname
+    try:
+        ipaddress.ip_address(hostname)
+    except ValueError:
+        labels = hostname.split(".")
+        numeric = re.compile(r"(?:[0-9]+|0[xX][0-9A-Fa-f]+)\Z", re.ASCII)
+        dns_label = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z", re.ASCII)
+        if (len(hostname) > 253 or len(labels) < 2
+                or all(numeric.fullmatch(label) for label in labels)
+                or any(not dns_label.fullmatch(label) for label in labels)):
+            raise ClientError("Server must be a canonical HTTPS origin")
     return value.rstrip("/")
+
+
+def _installed_server_config(root: Path) -> str:
+    """Read a bounded, inode-pinned installed origin; never trust path links.
+
+    An explicit --server bypasses this optional lookup entirely. Root-owned
+    files remain readable by an unprivileged client, but neither a symlinked
+    parent, an attacker-owned/multi-linked file nor a mutable config can
+    silently choose the future active catalog origin.
+    """
+    flags = (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+             | getattr(os, "O_CLOEXEC", 0))
+    file_flags = (os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                  | getattr(os, "O_CLOEXEC", 0))
+    opened = []
+    try:
+        directory = os.open(root, flags)
+        opened.append(directory)
+        permitted_owners = {0, os.geteuid()}
+        for part in ("etc", "repocache-client"):
+            parent = os.fstat(directory)
+            if (not stat.S_ISDIR(parent.st_mode)
+                    or parent.st_uid not in permitted_owners
+                    or parent.st_mode & 0o022):
+                raise ClientError("Unsafe installed client configuration")
+            directory = os.open(part, flags, dir_fd=directory)
+            opened.append(directory)
+        parent = os.fstat(directory)
+        if (not stat.S_ISDIR(parent.st_mode)
+                or parent.st_uid not in permitted_owners
+                or parent.st_mode & 0o022):
+            raise ClientError("Unsafe installed client configuration")
+        source = os.open("config.json", file_flags, dir_fd=directory)
+        opened.append(source)
+        before = os.fstat(source)
+        named = os.stat("config.json", dir_fd=directory, follow_symlinks=False)
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                or before.st_uid not in permitted_owners
+                or before.st_mode & 0o022
+                or not 1 <= before.st_size <= 4096):
+            raise ClientError("Unsafe installed client configuration")
+        payload = os.read(source, 4097)
+        after = os.fstat(source)
+        current = os.stat("config.json", dir_fd=directory, follow_symlinks=False)
+        identity = lambda info: (
+            info.st_dev, info.st_ino, info.st_mode, info.st_uid,
+            info.st_gid, info.st_nlink, info.st_size,
+            info.st_mtime_ns, info.st_ctime_ns,
+        )
+        if (len(payload) != before.st_size
+                or identity(before) != identity(after)
+                or identity(before) != identity(named)
+                or identity(before) != identity(current)):
+            raise ClientError("Installed client configuration changed")
+        def unique_config_pairs(pairs):
+            doc = {}
+            for key, value in pairs:
+                if key in doc:
+                    raise ClientError("Invalid installed client configuration")
+                doc[key] = value
+            return doc
+        config = json.loads(payload.decode("utf-8"),
+                            object_pairs_hook=unique_config_pairs)
+        if (type(config) is not dict or set(config) != {"server"}
+                or type(config["server"]) is not str):
+            raise ClientError("Invalid installed client configuration")
+        return config["server"]
+    except FileNotFoundError:
+        # A missing installation is not automatic discovery authority.
+        return ""
+    except (OSError, ValueError, UnicodeError):
+        raise ClientError("Unsafe installed client configuration") from None
+    finally:
+        for descriptor in reversed(opened):
+            os.close(descriptor)
 
 
 def _safe_url(value: str) -> str:
@@ -301,16 +390,34 @@ def _select_repositories(repositories: list[dict],
     return matched
 
 
+def _strict_catalog_pairs(pairs: list[tuple[str, object]]) -> dict:
+    """Reject ambiguous duplicate JSON keys before catalog normalization."""
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ClientError("Duplicate catalog JSON field")
+        result[key] = value
+    return result
+
+
 def _fetch_json(url: str, *, max_bytes: int):
+    # Never follow redirects or allow ambient proxy settings to redirect a
+    # versioned local server catalog to an untrusted HTTP(S) destination.
+    # Standard OS CA validation and hostname checking remain compulsory.
     req = Request(url, headers={"Accept": "application/json",
                                 "User-Agent": "repocache-client/0.4"})
-    with urlopen(req, timeout=5) as response:
-        if response.url != url:
-            raise ClientError("Catalog redirects are not permitted")
+    opener = build_opener(ProxyHandler({}), _RejectRedirects(),
+                          HTTPSHandler(context=ssl.create_default_context()))
+    with opener.open(req, timeout=5) as response:
+        if response.url != url or response.status != 200:
+            raise ClientError("Catalog response origin or status is invalid")
         data = response.read(max_bytes + 1)
     if len(data) > max_bytes:
         raise ClientError("Catalog too large")
-    return json.loads(data.decode("utf-8"))
+    return json.loads(data.decode("utf-8"),
+                      object_pairs_hook=_strict_catalog_pairs,
+                      parse_constant=lambda _v: (_ for _ in ()).throw(
+                          ClientError("Non-finite catalog value")))
 
 
 def _catalog(server: str) -> dict:
@@ -319,24 +426,37 @@ def _catalog(server: str) -> dict:
                           max_bytes=MAX_CATALOG_BYTES)
     except (OSError, ValueError) as exc:
         raise ClientError("Catalog unavailable or invalid") from exc
-    if not isinstance(doc, dict) or doc.get("schema") != 1:
+    if (type(doc) is not dict or set(doc) != {"schema", "repositories"}
+            or type(doc["schema"]) is not int or doc["schema"] != 1):
         raise ClientError("Unsupported catalog schema")
-    items = doc.get("repositories")
-    if not isinstance(items, list) or len(items) > 500:
+    items = doc["repositories"]
+    if type(items) is not list or len(items) > 500:
         raise ClientError("Invalid catalog entries")
     verified = []
+    upstreams: set[str] = set()
+    cache_routes: set[str] = set()
     for mapping in items:
-        if not isinstance(mapping, dict):
+        if type(mapping) is not dict or set(mapping) != {"upstream", "cache"}:
             raise ClientError("Invalid catalog entry")
-        source = mapping.get("upstream")
-        cache = mapping.get("cache")
-        if not isinstance(source, str) or not isinstance(cache, str):
+        source = mapping["upstream"]
+        cache = mapping["cache"]
+        if type(source) is not str or type(cache) is not str:
             raise ClientError("Missing catalog URLs")
         if (not source.startswith("https://") or not cache.startswith("https://")
                 or _safe_url(source) != source or _safe_url(cache) != cache
                 or not source.endswith("/") or not cache.endswith("/")
-                or not _same_https_origin(cache, server)):
+                or not _same_https_origin(cache, server)
+                or re.fullmatch(
+                    r"/(?:[A-Za-z0-9._~+-]+/)+",
+                    urlsplit(cache).path, flags=re.ASCII,
+                ) is None
+                or any(part in (".", "..")
+                       for part in urlsplit(cache).path.split("/"))):
             raise ClientError("Invalid catalog URL")
+        if source in upstreams or cache in cache_routes:
+            raise ClientError("Ambiguous catalog repository mapping")
+        upstreams.add(source)
+        cache_routes.add(cache)
         verified.append({"upstream": source, "cache": cache})
     return {"schema": 1, "repositories": verified}
 
@@ -407,6 +527,25 @@ def _sync_plan(repos: list[dict], catalog: dict) -> dict:
         }))
     return {"repositories": planned, "plan_summary": counts,
             "dry_run": True, "planned_changes": 0}
+
+
+def _fallback_check(repos: list[dict]) -> dict:
+    """Do not confuse a mixed URL configuration with native failover proof.
+
+    Native APT/DNF fallback requires exact-format, authenticated on-host
+    evidence, never mere source inspection or a synthetic metadata probe.
+    """
+    cached = [repo for repo in repos if repo.get("enabled", True)
+              and repo.get("route") != "direct"]
+    return {
+        "name": "fallback", "ok": not cached, "required": False,
+        "detail": (
+            "Not applicable: no enabled REPOCACHE-routed sources"
+            if not cached else
+            "NOT VERIFIED: configured cache/upstream URLs do not prove "
+            "native APT/DNF failover or authenticated package fallback"
+        ),
+    }
 
 
 def _connectivity(server: str) -> list[dict]:
@@ -635,13 +774,13 @@ def run(argv: list[str] | None = None, root: Path = Path("/")) -> int:
         repos_action.choices["repos"].print_help()
         return 0
     try:
-        cfg = root / CONFIG_FILE.relative_to("/")
-        configured = ""
-        if cfg.is_file() and not cfg.is_symlink():
-            item = json.loads(cfg.read_text())
-            if isinstance(item, dict):
-                configured = str(item.get("server") or "")
-        server = _server(args.server or configured or DEFAULT_SERVER)
+        # An explicit origin does not consult a possibly malformed installed
+        # config. Without --server, trust only the bounded root-owned file.
+        selected_server = (args.server if args.server is not None
+                           else _installed_server_config(root))
+        if not selected_server:
+            raise ClientError("Server must be explicitly configured using --server or config.json")
+        server = _server(selected_server)
         repos = discover(root, server)
         distro = _distro(root)
         if args.command == "check":
@@ -665,10 +804,7 @@ def run(argv: list[str] | None = None, root: Path = Path("/")) -> int:
                                    else "not supported by catalog")
                 if repo["compatibility"] == "invalid":
                     repo["support"] = "invalid repository URL"
-            cached = [r for r in repos if r["enabled"] and r["route"] != "direct"]
-            ok_fallback = sum(r["route"] == "mixed" for r in cached)
-            checks.append({"name": "fallback", "ok": bool(cached) and ok_fallback == len(cached),
-                           "required": False, "detail": "Configured fallback check"})
+            checks.append(_fallback_check(repos))
             bad = any(r["enabled"] and r["compatibility"] == "invalid" for r in repos)
             code = 1 if not all(c["ok"] for c in checks if c.get("required", True)) else 3 if bad else 0
             result = {"ok": code == 0, "os": distro, "server": server,
