@@ -41,7 +41,8 @@ jobs:
     env:
       PYTHONPATH: src
       PYTHONDONTWRITEBYTECODE: '1'
-      BASE_SHA: 675e7b49b3573b1e5ede2ca023ed55e270397d4f
+      BASE_SHA: 34213b7c8cd958dad5af91cd041288e17cb5b1e0
+      FORK_SHA: 675e7b49b3573b1e5ede2ca023ed55e270397d4f
       PR64_SHA: 418c8617967d2925ec85b15f3845465dec8cd178
       PR76_SHA: dcc10af0850e053798b6b1dc9bf9732ec048eb68
     steps:
@@ -96,6 +97,7 @@ jobs:
           # Recheck the dependency's reviewed ancestry and the exact
           # current protected base before any disposable source merging.
           git merge-base --is-ancestor d53782ed01e1f85686f10279fd3c7eea6d7f6720 "$observed"
+          git merge-base --is-ancestor "$FORK_SHA" "$observed"
           git merge-base --is-ancestor "$BASE_SHA" HEAD
           git config user.email "read-only-rehearsal@repocache.invalid"
           git config user.name "REPOCACHE disposable CI"
@@ -107,7 +109,10 @@ jobs:
             echo "Dependency #249 moved; exact-SHA source rehearsal refused"
             exit 1
           }
-          git merge-base --is-ancestor "$BASE_SHA" refs/remotes/origin/pr76
+          # #254 and #249 were correctly branched from the prior protected
+          # base. Their own original ancestry is checked separately from the
+          # now-current integration ancestor after #265-#269.
+          git merge-base --is-ancestor "$FORK_SHA" refs/remotes/origin/pr76
           git merge --no-ff --no-edit refs/remotes/origin/pr76
           # Enforce whitespace only on this PR's owned server integration
           # surface. Other exact-SHA sibling PRs run their independent CI;
