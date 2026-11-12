@@ -59,7 +59,10 @@ jobs:
               fi
               export PYTHONPATH=/workspace/src
               export REPOCACHE_NATIVE_TEST_CONTAINER=CONFIRMED_DISPOSABLE_DOCKER_ONLY
-              python3 -B scripts/ci_v06_journaled_native_server_install.py > /tmp/repocache-v06-journaled-result.json
+              if ! python3 -B scripts/ci_v06_journaled_native_server_install.py > /tmp/repocache-v06-journaled-result.json; then
+                cat /tmp/repocache-v06-journaled-result.json
+                exit 1
+              fi
               grep -Fq DISPOSABLE_JOURNALED_NATIVE_INSTALL_PASS /tmp/repocache-v06-journaled-result.json
               cat /tmp/repocache-v06-journaled-result.json
               echo "PASS: real native NGINX install under retained lock; no VM GO"
