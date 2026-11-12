@@ -36,6 +36,7 @@ from smoke_server_native_nginx_container_install import run_rehearsal
 _ROOT = Path(__file__).resolve().parents[1]
 _STATE = Path("/var/lib/repocache/server")
 _CI_MARKER = "CONFIRMED_DISPOSABLE_DOCKER_ONLY"
+_STAGE = "UNVERIFIED"  # Static CI-only phase for redacted failure triage.
 
 
 class NativeIntegrationError(ValueError):
@@ -121,12 +122,17 @@ def _verify_pending_lock(distribution: str, seen: list[str]) -> None:
 
 
 def run() -> dict[str, Any]:
+    global _STAGE
+    _STAGE = "CONTEXT"
     distribution, os_release = _require_disposable_context()
+    _STAGE = "DOCUMENT"
     doc = json.loads(
         (_ROOT / "docs/examples/server-install-v1.json").read_text(encoding="utf-8")
     )
+    _STAGE = "ROOT_FD"
     root_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
+        _STAGE = "BOOTSTRAP"
         try:
             initial = bootstrap_protected_namespace_under_root(
                 root_fd, owner_uid=0,
@@ -135,6 +141,7 @@ def run() -> dict[str, Any]:
             _deny("PROTECTED_BOOTSTRAP_UNVERIFIED")
         if initial["status"] != "FRESH_PROTECTED_LOCK_DURABLE":
             _deny("PROTECTED_BOOTSTRAP_INCOMPLETE")
+        _STAGE = "PREPACKAGE"
         try:
             preflight = inspect_native_nginx_local_boundary(
                 os_release=os_release,
@@ -153,12 +160,14 @@ def run() -> dict[str, Any]:
             _verify_pending_lock(distribution, seen)
             return subprocess.run(command, **kwargs)
 
+        _STAGE = "RETAINED_LOCK"
         with _retain_native_package_journal_lock_under_root(
             root_fd, owner_uid=0, distribution=distribution,
         ) as prepared:
             if (prepared["status"] != "NATIVE_PACKAGE_EFFECTS_JOURNAL_DURABLE"
                     or prepared["authorizes_package_installation"]):
                 _deny("NATIVE_PACKAGE_MARKER_NOT_READY")
+            _STAGE = "NATIVE_INSTALL"
             try:
                 result = run_rehearsal(
                     distribution=distribution, runner=guarded_runner,
@@ -167,11 +176,13 @@ def run() -> dict[str, Any]:
                 raise
             except (OSError, ValueError, TypeError, subprocess.SubprocessError):
                 _deny("NATIVE_PACKAGE_REHEARSAL_UNVERIFIED")
+        _STAGE = "POST_TRANSACTION"
         if (len(seen) < 4 or any(item != "CONTENDED" for item in seen)
                 or not result["native_transaction_executed_in_disposable_container"]
                 or not result["nginx_syntax_test_passed_in_container"]
                 or not (_STATE / NATIVE_PENDING_NAME).is_file()):
             _deny("NATIVE_PACKAGE_TRANSACTION_NOT_EVIDENCED")
+        _STAGE = "REENTRY"
         try:
             _prepare_native_journal_under_root(
                 root_fd, owner_uid=0, distribution=distribution,
@@ -181,6 +192,7 @@ def run() -> dict[str, Any]:
                 _deny("NATIVE_PACKAGE_REENTRY_UNVERIFIED")
         else:
             _deny("NATIVE_PACKAGE_REENTRY_NOT_BLOCKED")
+        _STAGE = "COMPLETE"
         return {
             "schema_version": 1,
             "status": "DISPOSABLE_JOURNALED_NATIVE_INSTALL_PASS",
@@ -206,7 +218,8 @@ def main() -> int:
         result = run()
     except Exception as exc:
         code = (str(exc) if type(exc) is NativeIntegrationError
-                else "NATIVE_INTEGRATION_UNVERIFIED")
+                else ("NATIVE_INTEGRATION_" + _STAGE + "_UNVERIFIED"
+                      if _STAGE != "UNVERIFIED" else "NATIVE_INTEGRATION_UNVERIFIED"))
         print(json.dumps({
             "schema_version": 1, "status": "FAIL", "code": code,
             "authorizes_host_installation": False,
