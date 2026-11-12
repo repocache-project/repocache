@@ -1,0 +1,88 @@
+name: Server v0.6 read-only native preflight
+
+on:
+  pull_request:
+  push:
+    branches: [main, 'integration/**', 'release/**']
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  readonly-native-preflight:
+    name: Read-only server preflight (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: debian13
+            image: debian:13-slim
+          - platform: almalinux10
+            image: almalinux:10
+    container: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install native Python in disposable CI container
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          case '${{ matrix.platform }}' in
+            debian13)
+              apt-get update -qq
+              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends python3
+              ;;
+            almalinux10)
+              dnf -y -q install python3
+              ;;
+          esac
+      - name: Validate supported host without modifying its configuration
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +e
+          /usr/bin/python3 -I scripts/server_v06_preflight.py \
+            --document "$GITHUB_WORKSPACE/docs/examples/server-install-v1.json" \
+            --intent inspect > /tmp/v06-observation.json
+          rc=$?
+          set -e
+          test "$rc" -eq 1 -o "$rc" -eq 3
+          /usr/bin/python3 -I - <<'PY'
+          import json
+          from pathlib import Path
+          report = json.loads(Path("/tmp/v06-observation.json").read_text())
+          assert report["schema_version"] == 1
+          assert report["kind"] == "repocache.server.vm-preflight.partial"
+          assert report["read_only"] is True
+          assert report["authorizes_installation"] is False
+          assert report["status"] in ("FAIL", "NOT VERIFIED")
+          assert report["checks"]
+          assert all(set(c) == {"check", "status", "code", "guidance"}
+                     for c in report["checks"])
+          assert any(c["check"] == "supported_os_and_python" and c["status"] == "PASS"
+                     for c in report["checks"]), report
+          print("PASS: native OS identity observed; installation not authorized")
+          PY
+      - name: Verify invalid deployment refused before host inspection
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          printf '%s\n' '{"kind":"unsupported"}' > /tmp/v06-invalid.json
+          set +e
+          /usr/bin/python3 -I scripts/server_v06_preflight.py \
+            --document /tmp/v06-invalid.json > /tmp/v06-invalid-result.json
+          rc=$?
+          set -e
+          test "$rc" -eq 2
+          /usr/bin/python3 -I - <<'PY'
+          import json
+          from pathlib import Path
+          report = json.loads(Path("/tmp/v06-invalid-result.json").read_text())
+          assert report["status"] == "FAIL"
+          assert report["authorizes_installation"] is False
+          assert report["error"]["code"] == "INVALID_INPUT_OR_HOST_OBSERVATION"
+          print("PASS: invalid deployment refused without host mutation")
+          PY
