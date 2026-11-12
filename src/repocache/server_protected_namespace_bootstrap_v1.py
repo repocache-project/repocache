@@ -129,8 +129,16 @@ def bootstrap_protected_namespace_under_root(
                 if inject_fault is not None:
                     inject_fault("lock_durable")
             lock = _lock_identity(state_fd, owner_uid)
+            # A newly created child directory legitimately increments its
+            # parent's st_nlink on traditional Unix filesystems; some Linux
+            # filesystems report a constant link count instead. Only this
+            # narrowly accounted-for change is permitted for a fresh create.
+            lib_after = _structural(_safe_directory(lib_fd, owner_uid))
+            allowed_links = ({lib_before[5], lib_before[5] + 1}
+                             if fresh else {lib_before[5]})
             if (_structural(os.fstat(state_fd)) != state_initial
-                    or _structural(_safe_directory(lib_fd, owner_uid)) != lib_before):
+                    or lib_after[:5] != lib_before[:5]
+                    or lib_after[5] not in allowed_links):
                 _deny("ANCESTRY_CHANGED")
             _recheck(chain[:-1], owner_uid)
             # Use exactly the real #31 state lock/identity checks; a second
