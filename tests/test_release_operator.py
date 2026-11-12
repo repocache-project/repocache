@@ -1072,3 +1072,70 @@ def test_release_operator_uses_canonical_repository_for_all_remote_operations(mo
         with pytest.raises(release.OperatorError) as caught:
             release.gh_json(endpoint)
         assert caught.value.code == "INVALID_ENDPOINT"
+
+
+def test_canonical_release_run_requires_individual_authorized_actor(monkeypatch):
+    """Organization repository identity never implies a publisher actor grant."""
+    version = "v0.6.0"
+    commit = "b" * 40
+    called = []
+
+    def remote(actor):
+        def fake(endpoint):
+            called.append(endpoint)
+            assert endpoint.startswith("repos/repocache-project/repocache/")
+            if "/git/ref/tags/" in endpoint:
+                return {"ref": "refs/tags/" + version,
+                        "object": {"type": "commit", "sha": commit}}
+            if "/commits/" in endpoint:
+                return {"sha": commit}
+            if "/compare/" in endpoint:
+                return {"status": "ahead", "base_commit": {"sha": commit}}
+            if "/runs?" in endpoint:
+                return {"total_count": 1, "workflow_runs": [{
+                    "head_sha": commit, "head_branch": version,
+                    "event": "workflow_dispatch", "status": "completed",
+                    "conclusion": "success", "actor": {"login": actor},
+                    "id": 101, "run_attempt": 1,
+                }]}
+            if "/jobs?" in endpoint:
+                return {"total_count": 5, "jobs": [
+                    {"name": str(n), "status": "completed", "conclusion": "success"}
+                    for n in range(5)
+                ]}
+            raise AssertionError("Unexpected GitHub endpoint")
+        return fake
+
+    monkeypatch.setattr(release, "gh_json", remote("teixemf"))
+    assert release.approved_build(version) == (commit, 101, 1)
+    assert len(called) == 5
+    called.clear()
+    for actor in ("repocache-project", "unapproved-actor"):
+        monkeypatch.setattr(release, "gh_json", remote(actor))
+        with pytest.raises(release.OperatorError) as caught:
+            release.approved_build(version)
+        assert caught.value.code == "BUILD_NOT_VERIFIED"
+    assert all(endpoint.startswith("repos/repocache-project/repocache/")
+               for endpoint in called)
+
+
+def test_canonical_release_token_does_not_authorize_organization_actor(monkeypatch):
+    """No GitHub secret or remote write: exercise exact actor authorization."""
+    from repocache_release import publication
+
+    def command_for(actor):
+        def fake(argv, **_kwargs):
+            if argv == ["gh", "auth", "token"]:
+                return b"nonsecret-test-token"
+            if argv == ["gh", "api", "user"]:
+                return json.dumps({"login": actor}).encode("ascii")
+            raise AssertionError("Unexpected command")
+        return fake
+
+    monkeypatch.setattr(release, "command", command_for("teixemf"))
+    assert publication.token(release) == "nonsecret-test-token"
+    for actor in ("repocache-project", "unapproved-actor"):
+        monkeypatch.setattr(release, "command", command_for(actor))
+        with pytest.raises(release.OperatorError) as caught:
+            publication.token(release)
+        assert caught.value.code == "AUTHORIZATION_REQUIRED"

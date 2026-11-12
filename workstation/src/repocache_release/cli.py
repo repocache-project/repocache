@@ -1,8 +1,9 @@
 """Noninteractive maintainer release operator — CLI architecture v1 / #88.
 
-Only read-only inspection, verified candidate preparation and explicit local
-offline signing are currently exposed. Stage/publish are intentionally not
-registered until authentic #76 signed-candidate acceptance is integrated.
+Read-only inspection, verified candidate preparation and explicit local
+offline signing are exposed. Stage/publish command names are registered but
+their remote-write paths fail closed until the exact protected-main #76
+signed-candidate acceptance is integrated and separately authorized.
 Never imports or executes downloaded unsigned candidate content.
 """
 from __future__ import annotations
