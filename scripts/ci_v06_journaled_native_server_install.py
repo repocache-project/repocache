@@ -165,6 +165,10 @@ def run() -> dict[str, Any]:
         _STAGE = "RETAINED_LOCK"
         with _retain_native_package_journal_lock_under_root(
             root_fd, owner_uid=0, distribution=distribution,
+            # APT/DNF legitimately adds children to /var/lib while holding
+            # the fixed lock. Its inode/owner/mode security boundary remains
+            # strict; only shared-ancestor timestamps/link counts can drift.
+            allow_native_package_parent_changes=True,
         ) as prepared:
             if (prepared["status"] != "NATIVE_PACKAGE_EFFECTS_JOURNAL_DURABLE"
                     or prepared["authorizes_package_installation"]):
