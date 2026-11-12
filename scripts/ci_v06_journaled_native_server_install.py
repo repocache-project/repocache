@@ -31,7 +31,9 @@ from repocache.server_protected_namespace_bootstrap_v1 import (
 )
 from repocache.server_protected_state_store_v1 import LOCK_NAME
 
-from smoke_server_native_nginx_container_install import run_rehearsal
+from smoke_server_native_nginx_container_install import (
+    ContainerInstallRehearsalError, run_rehearsal,
+)
 
 _ROOT = Path(__file__).resolve().parents[1]
 _STATE = Path("/var/lib/repocache/server")
@@ -174,6 +176,10 @@ def run() -> dict[str, Any]:
                 )
             except NativeIntegrationError:
                 raise
+            except ContainerInstallRehearsalError as exc:
+                # The existing disposable-container runner raises only fixed
+                # reviewed codes; never print package-manager stderr/stdout.
+                _deny("NATIVE_PACKAGE_" + str(exc))
             except (OSError, ValueError, TypeError, subprocess.SubprocessError):
                 _deny("NATIVE_PACKAGE_REHEARSAL_UNVERIFIED")
         _STAGE = "POST_TRANSACTION"
