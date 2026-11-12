@@ -1,0 +1,87 @@
+name: Server Protected Namespace Bootstrap (Distro Containers)
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/server-protected-namespace-bootstrap-native.yml'
+      - 'src/repocache/server_protected_namespace_bootstrap_v1.py'
+      - 'src/repocache/server_protected_state_store_v1.py'
+      - 'src/repocache/server_protected_state_inspect_v1.py'
+      - 'tests/test_server_protected_namespace_bootstrap_v1.py'
+      - 'docs/architecture/SERVER_PROTECTED_NAMESPACE_BOOTSTRAP_V1.md'
+  push:
+    branches: [main, 'integration/**']
+    paths:
+      - '.github/workflows/server-protected-namespace-bootstrap-native.yml'
+      - 'src/repocache/server_protected_namespace_bootstrap_v1.py'
+      - 'src/repocache/server_protected_state_store_v1.py'
+      - 'tests/test_server_protected_namespace_bootstrap_v1.py'
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  bootstrap-native:
+    name: Protected bootstrap fixture (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: debian13
+            image: debian:trixie-slim
+          - platform: almalinux10
+            image: almalinux:10
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install distro-native Python and pytest inside disposable container
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [ '${{ matrix.platform }}' = 'debian13' ]; then
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq
+            apt-get install -y -qq --no-install-recommends python3 python3-pytest
+          else
+            dnf -y -q --enablerepo=crb install python3 python3-pytest
+          fi
+          python3 --version
+          python3 -m pytest --version
+      - name: Validate distro identity and real filesystem bootstrap behavior
+        shell: bash
+        env:
+          PYTHONPATH: src
+          PYTHONDONTWRITEBYTECODE: '1'
+          EXPECTED_PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -Eeuo pipefail
+          python3 -B - <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+          from repocache.server_install_v1 import validate_os_identity
+          target = {
+              "debian13": ("debian", (3, 13)),
+              "almalinux10": ("almalinux", (3, 12)),
+          }
+          distro, version = target[os.environ["EXPECTED_PLATFORM"]]
+          assert sys.version_info[:2] == version
+          assert validate_os_identity(
+              Path("/etc/os-release").read_text(encoding="utf-8"),
+              sys.version_info[:2],
+          ) == distro
+          print("PASS: exact supported distro userspace; fixture-only host writes")
+          PY
+          python3 -B -m pytest -q -rs \
+            tests/test_server_protected_namespace_bootstrap_v1.py \
+            tests/test_server_protected_state_store_v1.py \
+            tests/test_server_native_nginx_prepackage_state_v1.py \
+            tests/test_server_native_nginx_package_journal_v1.py
+          # This job mutates only disposable tmp_path fixtures. Never claim
+          # host-root provenance, booted systemd, SELinux or installed server.
