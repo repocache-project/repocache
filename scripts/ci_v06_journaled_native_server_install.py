@@ -180,8 +180,22 @@ def run() -> dict[str, Any]:
                 # The existing disposable-container runner raises only fixed
                 # reviewed codes; never print package-manager stderr/stdout.
                 _deny("NATIVE_PACKAGE_" + str(exc))
-            except (OSError, ValueError, TypeError, subprocess.SubprocessError):
-                _deny("NATIVE_PACKAGE_REHEARSAL_UNVERIFIED")
+            except (OSError, ValueError, TypeError, subprocess.SubprocessError) as exc:
+                # Never include exception messages or native manager output;
+                # emit only built-in type categories from a fixed allowlist.
+                category = type(exc).__name__
+                _deny("NATIVE_PACKAGE_REHEARSAL_" +
+                      (category.upper() if category in {
+                          "TypeError", "ValueError", "OSError",
+                          "SubprocessError", "TimeoutExpired",
+                      } else "UNVERIFIED"))
+            except Exception as exc:
+                category = type(exc).__name__
+                _deny("NATIVE_PACKAGE_REHEARSAL_" +
+                      (category.upper() if category in {
+                          "AttributeError", "AssertionError", "KeyError",
+                          "NameError", "RuntimeError", "ImportError",
+                      } else "UNVERIFIED"))
         _STAGE = "POST_TRANSACTION"
         if (len(seen) < 4 or any(item != "CONTENDED" for item in seen)
                 or not result["native_transaction_executed_in_disposable_container"]
