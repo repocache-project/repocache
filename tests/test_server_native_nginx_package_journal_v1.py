@@ -186,3 +186,87 @@ def test_concurrent_state_lock_prevents_second_journal_writer(protected_root):
                 fd, owner_uid=uid, distribution="debian",
             )
     assert not (folder / NATIVE_PENDING_NAME).exists()
+
+
+@pytest.mark.parametrize("distribution", ["debian", "almalinux"])
+def test_retained_lock_spans_package_effects_scope_and_blocks_concurrent_state(
+    protected_root, distribution,
+):
+    from repocache.server_native_nginx_package_journal_v1 import (
+        _retain_native_package_journal_lock_under_root,
+    )
+    from repocache.server_protected_state_store_v1 import ProtectedStateStoreError
+
+    fd, folder, uid = protected_root
+    with _retain_native_package_journal_lock_under_root(
+        fd, owner_uid=uid, distribution=distribution,
+    ) as status:
+        assert status["status"] == "NATIVE_PACKAGE_EFFECTS_JOURNAL_DURABLE"
+        assert status["operator_authorization_authenticated"] is False
+        assert status["authorizes_package_installation"] is False
+        assert (folder / NATIVE_PENDING_NAME).exists()
+        assert not (folder / NATIVE_TMP_NAME).exists()
+        # The fixed #31 lock is *still held* while the hypothetical native
+        # package transaction executes. The legacy short-lived preparer
+        # cannot reenter, even from a second file descriptor in this process.
+        with pytest.raises(ProtectedStateStoreError,
+                           match="^PROTECTED_LOCK_UNAVAILABLE$"):
+            with _locked(fd, uid):
+                pytest.fail("concurrent state lock admitted")
+        with pytest.raises(NativePackageJournalError,
+                           match="^NATIVE_JOURNAL_STATE_UNVERIFIED$"):
+            _prepare_native_journal_under_root(
+                fd, owner_uid=uid, distribution=distribution,
+            )
+    # Once the transaction ends, the pending marker is still durable.
+    # It must NEVER be interpreted as package installation completion.
+    assert (folder / NATIVE_PENDING_NAME).exists()
+    with pytest.raises(NativePackageJournalError,
+                       match="^NATIVE_PACKAGE_EFFECTS_RECONCILIATION_REQUIRED$"):
+        _prepare_native_journal_under_root(
+            fd, owner_uid=uid, distribution=distribution,
+        )
+
+
+def test_native_package_operation_exception_leaves_pending_hard_stop(
+    protected_root,
+):
+    from repocache.server_native_nginx_package_journal_v1 import (
+        _retain_native_package_journal_lock_under_root,
+    )
+    fd, folder, uid = protected_root
+    with pytest.raises(RuntimeError, match="simulated native package error"):
+        with _retain_native_package_journal_lock_under_root(
+            fd, owner_uid=uid, distribution="debian",
+        ) as status:
+            assert status["package_transaction_executed"] is False
+            assert (folder / NATIVE_PENDING_NAME).exists()
+            raise RuntimeError("simulated native package error")
+    with pytest.raises(NativePackageJournalError,
+                       match="^NATIVE_PACKAGE_EFFECTS_RECONCILIATION_REQUIRED$"):
+        _prepare_native_journal_under_root(
+            fd, owner_uid=uid, distribution="debian",
+        )
+
+
+@pytest.mark.parametrize("dist", ["debian", "almalinux"])
+def test_fault_before_lock_scope_yields_never_run_package_effects(
+    protected_root, dist,
+):
+    from repocache.server_native_nginx_package_journal_v1 import (
+        _retain_native_package_journal_lock_under_root,
+    )
+    fd, folder, uid = protected_root
+    with pytest.raises(RuntimeError, match="before package"):
+        with _retain_native_package_journal_lock_under_root(
+            fd, owner_uid=uid, distribution=dist,
+            inject_fault=lambda point: (
+                (_ for _ in ()).throw(RuntimeError("before package"))
+                if point == "native_journal_link_durable" else None
+            ),
+        ):
+            pytest.fail("package callback reached despite journal fault")
+    assert ((folder / NATIVE_PENDING_NAME).exists()
+            or (folder / NATIVE_TMP_NAME).exists())
+    with pytest.raises(NativePackageJournalError):
+        _prepare_native_journal_under_root(fd, owner_uid=uid, distribution=dist)
