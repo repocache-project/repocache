@@ -44,7 +44,7 @@ jobs:
       BASE_SHA: 34213b7c8cd958dad5af91cd041288e17cb5b1e0
       FORK_SHA: 675e7b49b3573b1e5ede2ca023ed55e270397d4f
       PR64_SHA: 6781507c6b93c6e2c7abef8d620c1c6d3a11582e
-      PR76_SHA: dcc10af0850e053798b6b1dc9bf9732ec048eb68
+      PR76_SHA: 035fb7284e415b4cd77b882931b7ac5d120bc3d6
     steps:
       # Install git before checkout: the stock distro container images
       # lack git, so checkout would otherwise fall back to an archive with
