@@ -53,7 +53,7 @@ def main():
         config=(f"pid {root/'nginx.pid'};\n"
                 f"error_log {root/'error.log'} notice;\n"
                 "worker_processes 1;\nevents { worker_connections 32; }\n"
-                "http {\n" + temp_paths + "server {\n" + result["server_context_fragment"]
+                "http {\naccess_log off;\n" + temp_paths + "server {\n" + result["server_context_fragment"]
                 + 'location = /__test { return 200 "repocache-https"; }\n'
                 + "}\n}\n")
         conf=root/"nginx.conf"
