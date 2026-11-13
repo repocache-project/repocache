@@ -11,8 +11,8 @@ import re
 import sys
 
 _MAX_INPUT = 16 * 1024
-_SHA40 = re.compile(r"[0-9a-f]{40}\\Z")
-_SHA64 = re.compile(r"[0-9a-f]{64}\\Z")
+_SHA40 = re.compile(r"[0-9a-f]{40}\Z")
+_SHA64 = re.compile(r"[0-9a-f]{64}\Z")
 _CODES = frozenset((
     "CANDIDATE_UNAVAILABLE", "CANDIDATE_PATH_REFUSED",
     "CANDIDATE_INODE_REFUSED", "CANDIDATE_DRIFT_REFUSED",
