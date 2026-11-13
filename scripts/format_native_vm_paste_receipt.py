@@ -74,12 +74,42 @@ def _receipt(data: bytes) -> dict:
             or item.get("authorizes_host_write") is not False
             or item.get("authorizes_publication") is not False):
         raise ValueError("contradictory or unsafe receipt")
-    if ((item["code"] == "CANDIDATE_DIGEST_MISMATCH") !=
-            (item["status"] == "FAIL")
-            or (item["code"].startswith("DIGEST_MATCH_") and not matched)
-            or (native and (item["code"] != "DIGEST_MATCH_NATIVE_READONLY_OBSERVED"
-                            or item["native_probe_code"] !=
-                               "OBSERVATION_ONLY_NO_HOST_AUTHORITY"))):
+    # Every collector outcome has a unique, non-authorizing evidence shape.
+    # A forged positive digest must not be labelled as unreadable input,
+    # and a mismatch must never be softened to NOT VERIFIED.
+    code = item["code"]
+    native_code = item["native_probe_code"]
+    if any(
+        (key.startswith("authorizes_") or key.endswith("_verified"))
+        and value is not False
+        for key, value in item.items()
+    ):
+        raise ValueError("forged positive authorization")
+    if code in {
+        "CANDIDATE_UNAVAILABLE", "CANDIDATE_PATH_REFUSED",
+        "CANDIDATE_INODE_REFUSED", "CANDIDATE_DRIFT_REFUSED",
+    }:
+        consistent = (
+            item["status"] == "NOT VERIFIED" and observed is None
+            and size is None and not matched and not native
+            and native_code == "NATIVE_OBSERVATION_NOT_EXECUTED"
+        )
+    elif code == "CANDIDATE_DIGEST_MISMATCH":
+        consistent = (
+            item["status"] == "FAIL" and observed is not None
+            and size is not None and not matched and not native
+            and native_code == "NATIVE_OBSERVATION_NOT_EXECUTED"
+        )
+    elif code == "DIGEST_MATCH_NATIVE_READONLY_OBSERVED":
+        consistent = (
+            item["status"] == "NOT VERIFIED" and matched and native
+            and native_code == "OBSERVATION_ONLY_NO_HOST_AUTHORITY"
+        )
+    else:  # DIGEST_MATCH_NATIVE_EVIDENCE_PENDING
+        consistent = (
+            item["status"] == "NOT VERIFIED" and matched and not native
+        )
+    if not consistent:
         raise ValueError("contradictory receipt outcome")
     return {
         "kind": "repocache.native.candidate.paste.v1",

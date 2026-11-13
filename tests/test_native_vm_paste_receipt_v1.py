@@ -110,3 +110,36 @@ def test_duplicate_json_keys_and_malformed_utf8_are_refused():
         code, result = run(data)
         assert code == 2
         assert result["code"] == "INPUT_REFUSED"
+
+
+@pytest.mark.parametrize("mutation", [
+    {"code": "CANDIDATE_UNAVAILABLE"},
+    {"code": "CANDIDATE_DIGEST_MISMATCH"},
+    {"code": "DIGEST_MATCH_NATIVE_READONLY_OBSERVED"},
+    {"code": "CANDIDATE_INODE_REFUSED", "artifact_digest_matched": False},
+    {"native_prerequisites_observed": True},
+    {"publisher_signature_verified": True},
+    {"authorizes_nginx_reload": 1},
+])
+def test_forged_receipt_outcome_or_claim_cannot_look_like_evidence(mutation):
+    value = sample()
+    value.update(mutation)
+    exit_code, output = run(json.dumps(value).encode())
+    assert exit_code == 2
+    assert output["code"] == "INPUT_REFUSED"
+    assert output["complete_server_acceptance_passed"] is False
+
+
+def test_unavailable_candidate_has_no_digest_or_native_claim():
+    value = sample()
+    value.update(
+        code="CANDIDATE_UNAVAILABLE", expected_artifact_sha256="b" * 64,
+        observed_artifact_sha256=None, artifact_size_bytes=None,
+        artifact_digest_matched=False,
+        native_probe_code="NATIVE_OBSERVATION_NOT_EXECUTED",
+    )
+    code, output = run(json.dumps(value).encode())
+    assert code == 2
+    assert output["code"] == "CANDIDATE_UNAVAILABLE"
+    assert output["digest_matched"] is False
+    assert output["candidate_sha256"] is None

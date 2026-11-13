@@ -38,3 +38,12 @@ existing user-operated, copy/paste-first workflow must preserve any original
 security, publication and native acceptance gates.
 
 CI: `python3 -m pytest -q tests/test_native_vm_paste_receipt_v1.py`.
+
+
+The formatter also cross-checks mutually exclusive receipt outcomes:
+unavailable/unsafe files have no observed digest, a mismatched digest is
+always FAIL, and read-only native observation requires the exact expected
+non-authorizing code. Forged positive signing, installer or reload claims
+are refused even when supplied in fields that would otherwise be dropped.
+This prevents contradictory pasted evidence from appearing authoritative;
+it does not authenticate the formatter, source or caller.
