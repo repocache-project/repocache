@@ -38,7 +38,7 @@ Synthetic signed native package transport fixture for disposable CI.
 
 %install
 mkdir -p %{buildroot}/usr/share/doc/repocache-ci-rpm-probe
-printf 'CI ONLY. NEVER INSTALL.\n' > %{buildroot}/usr/share/doc/repocache-ci-rpm-probe/README
+printf 'CI ONLY. NEVER INSTALL.\\n' > %{buildroot}/usr/share/doc/repocache-ci-rpm-probe/README
 
 %files
 /usr/share/doc/repocache-ci-rpm-probe/README
