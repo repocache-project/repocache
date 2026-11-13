@@ -202,3 +202,30 @@ def test_exact_dnf_noop_requires_source_without_companion():
     assert not plan.proposal_bytes_converged(p, p.original)
     assert not plan.proposal_bytes_converged(p, p.proposed, b"unexpected")
     assert not plan.proposal_bytes_converged(object(), p.proposed)
+
+
+def test_forged_proposal_authority_flags_cannot_pass_byte_convergence():
+    from dataclasses import replace
+
+    p = compile_one("etc/apt/sources.list", APT, APT)
+    assert p.companion is not None
+    assert plan.proposal_bytes_converged(p, p.proposed, p.companion[1])
+    for field in (
+        "production_write_eligible", "native_fallback_verified",
+        "route_approval_verified",
+    ):
+        forged = replace(p, **{field: True})
+        assert not plan.proposal_bytes_converged(
+            forged, forged.proposed, forged.companion[1],
+        )
+        forged = replace(p, **{field: 0})
+        assert not plan.proposal_bytes_converged(
+            forged, forged.proposed, forged.companion[1],
+        )
+
+    rpm = compile_one("etc/yum.repos.d/alma.repo", DNF, DNF,
+                      upstream=RPM_UPSTREAM)
+    assert plan.proposal_bytes_converged(rpm, rpm.proposed)
+    assert not plan.proposal_bytes_converged(
+        replace(rpm, native_fallback_verified=True), rpm.proposed,
+    )
