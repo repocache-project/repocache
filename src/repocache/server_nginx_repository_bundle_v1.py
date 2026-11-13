@@ -80,6 +80,7 @@ def render_repository_nginx_bundle_candidate(
     # policy or automatic pressure monitoring. Refuse every unknown/disabled
     # ID; a partial or mistyped request must not silently change routes.
     if (type(cache_bypass_repository_ids) is not tuple
+            or len(cache_bypass_repository_ids) > len(active)
             or any(type(item) is not str for item in cache_bypass_repository_ids)
             or len(set(cache_bypass_repository_ids)) != len(cache_bypass_repository_ids)
             or not set(cache_bypass_repository_ids).issubset(active)):
