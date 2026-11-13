@@ -272,3 +272,17 @@ Focused regression:
 `PYTHONPATH=src python3 -m pytest -q tests/test_server_native_nginx_effective_unit_v1.py`.
 Actual booted guest evidence remains owned by #19 and the parent #27
 acceptance criteria, on the final installable candidate.
+
+
+## Recheck the NGINX MainPID process metadata (#27)
+
+The fixed read-only /proc observation now compares the observed NGINX
+MainPID process ownership UID and full mode/type as well as the process
+inode/device on the second kernel lookup. Keeping the same PID inode while
+its ownership or mode changes must fail closed, not yield a positive
+non-authorizing observation. Mocked, deterministic regression cases exercise
+both second-read changes without reading service configuration or invoking
+systemctl/reload. This narrows one stale-process window but cannot prevent
+PID reuse, independently authenticate native package ownership or prove an
+installed booted systemd/SELinux service; all host and reload gates remain
+NOT VERIFIED.
