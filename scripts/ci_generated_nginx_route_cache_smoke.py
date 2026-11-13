@@ -36,6 +36,9 @@ from repocache.server_derived_catalog_candidate_v1 import (
 # APT metadata or native package-manager acceptance evidence.
 READ_ONLY_APT_PATH = "/apt/dists/trixie/Packages.gz"
 READ_ONLY_APT_BYTES = b"DISPOSABLE-APT-INDEX-CACHE-WRITE-DENIAL\n"
+BYPASS_READY_APT_PATH = "/apt/dists/trixie/BypassReadiness"
+RECOVERY_READY_APT_PATH = "/apt/dists/trixie/RecoveryReadiness"
+READY_APT_BYTES = b"DISPOSABLE-APT-ROUTE-READINESS\n"
 
 
 @contextmanager
@@ -80,8 +83,13 @@ def trusted_fixture_origin(counts, lock):
                 self.send_header("Content-Length", "0")
                 self.end_headers()
                 return
-            item = (("application/octet-stream", READ_ONLY_APT_BYTES)
-                    if path == READ_ONLY_APT_PATH else FIXTURES.get(path))
+            probes = {
+                READ_ONLY_APT_PATH: READ_ONLY_APT_BYTES,
+                BYPASS_READY_APT_PATH: READY_APT_BYTES,
+                RECOVERY_READY_APT_PATH: READY_APT_BYTES,
+            }
+            item = (("application/octet-stream", probes[path])
+                    if path in probes else FIXTURES.get(path))
             if item is None:
                 self.send_error(404)
                 return
@@ -311,9 +319,69 @@ def main() -> None:
                         " route caches exact signed-shape object with one fetch",
                     )
 
-            # Induce actual EACCES on the disposable APT cache tree after
-            # genuine cache HITs. A previously unrequested upstream object
-            # should remain retrievable; DNF cache access must be unaffected.
+            # The baseline cache-active route may close connections under
+            # EACCES (observed on the first CI attempt). Do not claim that
+            # read-only storage is safe with proxy_cache still enabled.
+            # Instead, verify the real renderer's isolated recovery candidate
+            # with a genuine nginx -t and an explicit test-only master reload.
+            bypass = render_repository_nginx_bundle_candidate(
+                document,
+                expected_state_generation=0,
+                candidate_pins_by_repository={
+                    repo["id"]: {HOST: ["8.8.8.8"]}
+                    for repo in document["repositories"]
+                },
+                ca_bundle_path=str(origin_cert),
+                cache_bypass_repository_ids=("debian-trixie-main",),
+            )
+            require(
+                bypass["cache_bypass_recovery_candidate_repository_ids"]
+                == ["debian-trixie-main"]
+                and bypass["cache_bypass_activation_verified"] is False
+                and bypass["authorizes_nginx_activation"] is False
+                and bypass["http_upstream_fragment"]
+                == fragment["http_upstream_fragment"]
+                and "    proxy_cache off;" in bypass["server_location_fragment"]
+                and "    proxy_cache repocache_cache_almalinux_baseos;"
+                in bypass["server_location_fragment"],
+                "actual non-authorizing renderer bypasses only selected APT "
+                "cache while preserving DNF cache and all pinned upstreams",
+            )
+            bypass_locations = bypass["server_location_fragment"].replace(
+                "    proxy_cache_valid 200 60s;",
+                "    proxy_cache_valid 200 60s;\n"
+                "    add_header X-RepoCache-Smoke $upstream_cache_status always;",
+            )
+            normal_config = config.read_text(encoding="utf-8")
+            require(
+                normal_config.count(locations) == 1
+                and bypass_locations != locations,
+                "test-only reload changes exactly the generated location bundle",
+            )
+            config.write_text(
+                normal_config.replace(locations, bypass_locations),
+                encoding="utf-8",
+            )
+            run(nginx, "-t", "-e", str(root / "bypass-syntax.log"),
+                "-p", str(root), "-c", str(config))
+            run(nginx, "-s", "reload", "-e", str(root / "bypass-reload.log"),
+                "-p", str(root), "-c", str(config))
+            bypass_ready_url = (
+                base + "debian-trixie-main/dists/trixie/BypassReadiness"
+            )
+            bypass_live = False
+            for _ in range(100):
+                require(process.poll() is None, "NGINX survives bypass reload")
+                probe = request(bypass_ready_url, client_tls)
+                if probe[:3] == (200, READY_APT_BYTES, ""):
+                    bypass_live = True
+                    break
+                time.sleep(0.05)
+            require(
+                bypass_live,
+                "real NGINX master switched APT to isolated cache-off recovery",
+            )
+
             apt_cache = root / "cache" / "debian-trixie-main"
             probe_url = base + "debian-trixie-main/dists/trixie/Packages.gz"
             with lock:
@@ -323,25 +391,48 @@ def main() -> None:
                     not os.access(apt_cache, os.W_OK),
                     "rootless APT cache directory actually denies writes",
                 )
-                refused_first = request(probe_url, client_tls)
-                refused_second = request(probe_url, client_tls)
+                bypass_first = request(probe_url, client_tls)
+                bypass_second = request(probe_url, client_tls)
                 dnf_still_cached = request(
                     base + "almalinux-baseos/repodata/repomd.xml",
                     client_tls,
                 )
                 with lock:
-                    denied_origin_calls = counts[READ_ONLY_APT_PATH]
+                    bypass_calls = counts[READ_ONLY_APT_PATH]
                 require(
-                    refused_first[:3] == (200, READ_ONLY_APT_BYTES, "MISS")
-                    and refused_second[:3] == (200, READ_ONLY_APT_BYTES, "MISS")
-                    and denied_origin_calls == before_denial + 2
+                    bypass_first[:3] == (200, READ_ONLY_APT_BYTES, "")
+                    and bypass_second[:3] == (200, READ_ONLY_APT_BYTES, "")
+                    and bypass_calls == before_denial + 2
                     and dnf_still_cached[:3] == (
                         200, FIXTURES["/dnf/repodata/repomd.xml"][1], "HIT"
                     )
                     and process.poll() is None,
-                    "APT upstream stays accessible without cache writes "
-                    "and independent DNF cache still HITs",
+                    "validated cache-off candidate serves uncached APT upstream "
+                    "during EACCES and preserves independent DNF cache HIT",
                 )
+
+            # Restore the unchanged normal route via real syntax check and
+            # reload. Readiness uses a separate uncached fixture so it cannot
+            # accidentally warm the EACCES recovery object under test.
+            config.write_text(normal_config, encoding="utf-8")
+            run(nginx, "-t", "-e", str(root / "normal-restore-syntax.log"),
+                "-p", str(root), "-c", str(config))
+            run(nginx, "-s", "reload", "-e", str(root / "normal-restore.log"),
+                "-p", str(root), "-c", str(config))
+            restored_ready_url = (
+                base + "debian-trixie-main/dists/trixie/RecoveryReadiness"
+            )
+            normal_live = False
+            for _ in range(100):
+                require(process.poll() is None, "NGINX survives normal-mode reload")
+                probe = request(restored_ready_url, client_tls)
+                if probe[:2] == (200, READY_APT_BYTES) and probe[2] in (
+                    "MISS", "HIT"
+                ):
+                    normal_live = True
+                    break
+                time.sleep(0.05)
+            require(normal_live, "real NGINX master restored normal cache route")
             recovered_first = request(probe_url, client_tls)
             recovered_second = request(probe_url, client_tls)
             with lock:
@@ -351,8 +442,10 @@ def main() -> None:
                 and recovered_second[:3] == (200, READ_ONLY_APT_BYTES, "HIT")
                 and recovered_origin_calls == before_denial + 3
                 and os.access(apt_cache, os.W_OK)
+                and config.read_text(encoding="utf-8") == normal_config
                 and process.poll() is None,
-                "cache write permissions restore MISS/HIT without NGINX restart",
+                "reversible cache-off EACCES recovery restores APT MISS/HIT "
+                "without process restart, while preserving original config",
             )
             require(
                 bool(observed_sni)
