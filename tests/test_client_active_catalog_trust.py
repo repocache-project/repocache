@@ -196,3 +196,27 @@ def test_fetch_json_refuses_oversize_and_ambiguous_json(monkeypatch):
             "Duplicate catalog", "Non-finite catalog", "Catalog too large",
         ))):
             client._fetch_json(URL, max_bytes=512)
+
+
+@pytest.mark.parametrize("bad", [
+    "https://CACHE.example.invalid",
+    "https://cache.example.invalid:0443",
+    "https://cache.example.invalid:000443",
+    "https://cache.example.invalid:0x1bb",
+    "https://cache.example.invalid.:443",
+    "https://[2001:0DB8::1]",
+])
+def test_explicit_or_installed_client_server_origin_refuses_noncanonical_authority(bad):
+    with pytest.raises(client.ClientError, match="canonical HTTPS origin"):
+        client._server(bad)
+
+
+@pytest.mark.parametrize("good", [
+    "https://cache.example.invalid",
+    "https://cache.example.invalid:443",
+    "https://cache.example.invalid:18443/",
+    "https://127.0.0.1:18443",
+    "https://[2001:db8::1]:443",
+])
+def test_canonical_origin_remains_compatible_with_existing_cli_config(good):
+    assert client._server(good) == good.rstrip("/")
