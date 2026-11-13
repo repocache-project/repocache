@@ -51,6 +51,13 @@ def _reject_unreviewed_attributes(fd: int) -> None:
 
 
 
+def _fixture_ca_shape_valid(value: Any) -> bool:
+    """Bounded syntactic PEM gate before touching any fixture-root descriptor."""
+    return (type(value) is bytes and 1 <= len(value) <= 65536
+            and value.startswith(b"-----BEGIN CERTIFICATE-----\n")
+            and value.rstrip(b"\n").endswith(b"-----END CERTIFICATE-----"))
+
+
 def _check_fixture_tls_identity(
     server_context: ssl.SSLContext, *, fixture_ca_pem: bytes, hostname: str,
 ) -> None:
@@ -60,8 +67,7 @@ def _check_fixture_tls_identity(
     It does not authenticate the CA or grant installed-host privileges.
     No network, subprocess, filesystem mutations or private-key export.
     """
-    if (type(fixture_ca_pem) is not bytes
-            or not 1 <= len(fixture_ca_pem) <= 65536):
+    if not _fixture_ca_shape_valid(fixture_ca_pem):
         _deny("FIXTURE_CA_INVALID")
     try:
         client_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
@@ -131,9 +137,7 @@ def inspect_native_tls_pair_under_root(
     if (type(root_fd) is not int or root_fd < 0
             or type(owner_uid) is not int or not 0 <= owner_uid <= 2**32-2):
         _deny("ARGUMENT_INVALID")
-    if (fixture_ca_pem is not None
-            and (type(fixture_ca_pem) is not bytes
-                 or not 1 <= len(fixture_ca_pem) <= 65536)):
+    if fixture_ca_pem is not None and not _fixture_ca_shape_valid(fixture_ca_pem):
         _deny("FIXTURE_CA_INVALID")
     try:
         doc = validate_install_document(document, for_apply=True)
