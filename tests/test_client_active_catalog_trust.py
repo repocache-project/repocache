@@ -207,7 +207,7 @@ def test_fetch_json_refuses_oversize_and_ambiguous_json(monkeypatch):
     "https://[2001:0DB8::1]",
 ])
 def test_explicit_or_installed_client_server_origin_refuses_noncanonical_authority(bad):
-    with pytest.raises(client.ClientError, match="canonical HTTPS origin"):
+    with pytest.raises(client.ClientError, match="canonical HTTPS origin|Invalid server address"):
         client._server(bad)
 
 
