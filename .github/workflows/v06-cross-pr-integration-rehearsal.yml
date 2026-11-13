@@ -41,9 +41,9 @@ jobs:
     env:
       PYTHONPATH: src
       PYTHONDONTWRITEBYTECODE: '1'
-      BASE_SHA: 34213b7c8cd958dad5af91cd041288e17cb5b1e0
+      BASE_SHA: 4f8779bc3c07b9301b8e2a3e454a08b55e2b4d6b
       FORK_SHA: 675e7b49b3573b1e5ede2ca023ed55e270397d4f
-      PR64_SHA: 6781507c6b93c6e2c7abef8d620c1c6d3a11582e
+      PR64_SHA: d21cc7e11e3c045988c7381665d97e8a2009b815
       PR76_SHA: 035fb7284e415b4cd77b882931b7ac5d120bc3d6
     steps:
       # Install git before checkout: the stock distro container images
@@ -83,8 +83,8 @@ jobs:
             echo "Integration base moved; stale combined rehearsal refused"
             exit 1
           }
-          # The protected base includes #255, #250, #252, #251, #214,
-          # #115, #258, #259, #260 and #263. Do not replay merged PRs.
+          # The protected base includes all previously integrated v0.6 work,
+          # including #281 and #282. Never replay merged PRs.
           # Combine only still-unmerged #64 and #76 at exact revisions;
           # never push or treat a disposable merge as authority to activate.
           git fetch --no-tags origin \
@@ -109,9 +109,8 @@ jobs:
             echo "Dependency #249 moved; exact-SHA source rehearsal refused"
             exit 1
           }
-          # #254 and #249 were correctly branched from the prior protected
-          # base. Their own original ancestry is checked separately from the
-          # now-current integration ancestor after #265-#269.
+          # #254 has just been synchronised to this exact protected base;
+          # #249 retains its original feature ancestry, separately checked.
           git merge-base --is-ancestor "$FORK_SHA" refs/remotes/origin/pr76
           git merge --no-ff --no-edit refs/remotes/origin/pr76
           # Enforce whitespace only on this PR's owned server integration
