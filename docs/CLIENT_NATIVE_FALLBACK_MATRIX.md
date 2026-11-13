@@ -158,3 +158,35 @@ must reject the unauthenticated metadata before attempting a package
 download. The original signed InRelease is restored after the negative
 probe. This demonstrates only synthetic CI-key trust in disposable
 Debian 13 containers, not real publisher trust or production readiness.
+
+## Disposable AlmaLinux 10 signed RPM package-transfer fallback (Stage A)
+
+The AlmaLinux native-fallback CI workflow also builds a tiny noarch RPM
+containing only a README under `/usr/share/doc`, with **no package
+scriptlets**. The disposable RPM is signed using an ephemeral OpenPGP
+key created inside the same temporary container. `createrepo_c` indexes
+the signed RPM; the repository `repomd.xml` is signed again with the same
+temporary key. An isolated RPM database imports only that test public key
+so that the actual `rpm -Kv` native verifier can validate downloaded bytes.
+
+Using two temporary HTTPS loopback servers, the **native DNF5 download
+subcommand** (not `install`) requests the RPM under the compiler's
+existing `gpgcheck=1` and `repo_gpgcheck=1` settings. The test requires:
+cache preference when healthy, signed-metadata/payload download from the
+original upstream during HTTP 503 cache outage, preference restoration,
+correct total-outage failure, TLS wrong-CA refusal, tampered repository
+signature refusal, and unsigned/tampered payload download rejection.
+Each successful retrieval must be byte-for-byte SHA-256 identical to the
+original signed package and pass `rpm -Kv` against the disposable RPMDB.
+No system package is installed; the workflow runs only in the separately
+marked `almalinux:10` Docker container with a read-only repository checkout.
+
+**Acceptance limits:** Synthetic OpenPGP signing and package verification
+do not authenticate production publisher RPMs, real server catalogs,
+approved client routes, source-apply/restore, system package-manager locks,
+SELinux enforcing or actual installed-host behavior. This is a Stage-A
+native-format download/fallback test; `repocache-client repos sync --apply`
+remains deliberately disabled, issue #24 stays OPEN and final booted native
+acceptance is still required under #19. Never import a CI key into an
+installed host RPM database or treat a successful `rpm -Kv` using the
+fixture key as publisher-key acceptance.
