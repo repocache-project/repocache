@@ -66,6 +66,27 @@ def _run(argv: list[str], *, cwd: Path | None = None,
     return process.stdout
 
 
+def _rpm_signature_verified(output: str) -> bool:
+    """Require a positive trusted RPM signature, not just a valid digest.
+
+    rpm -Kv can return success for a digest-valid *unsigned* RPM. A test
+    acceptance must contain at least one signed result ending in OK, and
+    no NOKEY, BAD or failed signature status.
+    """
+    if type(output) is not str or len(output) > 8192:
+        return False
+    lower = output.lower()
+    if any(marker in lower for marker in (
+        "nokey", "not ok", "bad signature", "not signed", "no signature",
+    )):
+        return False
+    return any(
+        "signature" in line.lower()
+        and line.strip().lower().endswith((" ok", ": ok"))
+        for line in output.splitlines()
+    )
+
+
 def _signed_fixture(base: Path) -> tuple[Path, Path, bytes, Path]:
     """Build no-script RPM, sign with *ephemeral CI* key, sign generated repodata."""
     public_key = native.dnf_repository(base, signed=True)
@@ -112,7 +133,7 @@ def _signed_fixture(base: Path) -> tuple[Path, Path, bytes, Path]:
     _run(["rpm", "--dbpath", str(rpmdb), "--initdb"])
     _run(["rpm", "--dbpath", str(rpmdb), "--import", str(public_key)])
     check = _run(["rpm", "--dbpath", str(rpmdb), "-Kv", str(package)])
-    if "NOKEY" in check or "NOT OK" in check:
+    if not _rpm_signature_verified(check):
         raise RuntimeError("Signed RPM fixture is not trusted by isolated RPMDB")
     return public_key, package, signed_original, rpmdb
 
@@ -186,9 +207,7 @@ def probe() -> None:
                         verify = _run([
                             "rpm", "--dbpath", str(rpmdb), "-Kv", str(fetched),
                         ])
-                        rpm_signature_ok = (
-                            "NOKEY" not in verify and "NOT OK" not in verify
-                        )
+                        rpm_signature_ok = _rpm_signature_verified(verify)
                 urls = primary.hits + upstream.hits
                 requests_rpm = any(_RPM_NAME in hit for hit in urls)
                 if cycle in ("preferred", "fallback", "recovery"):
