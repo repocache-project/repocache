@@ -79,6 +79,8 @@ def _fake_native(monkeypatch, *, response=None, vendor=True, unsafe=None,
         )
 
 
+    monkeypatch.setattr(unit, "_observe_systemd_pid1",
+                        lambda: events.append(("pid1", "systemd")))
     monkeypatch.setattr(
         unit, "_observe_nginx_master_kernel",
         lambda pid: events.append(("kernel", pid)),
@@ -101,6 +103,8 @@ def test_exact_effective_running_unit_is_observation_only(monkeypatch):
     assert ("kernel", 1450) in events
     assert result["vendor_unit_sha256"] == "a" * 64
     assert result["effective_unit_shape_observed"] is True
+    assert result["kernel_systemd_pid1_comm_observed"] is True
+    assert ("pid1", "systemd") in events
     assert all(result[key] is False for key in (
         "distro_package_owner_verified", "real_pid1_and_nginx_process_verified",
         "host_root_and_selinux_verified", "authorizes_systemctl",
@@ -295,3 +299,66 @@ def test_kernel_master_invalid_pid_refused_before_proc_access(monkeypatch):
     ))
     with pytest.raises(EffectiveNginxUnitError, match="INVALID_MAIN_PID"):
         unit._observe_nginx_master_kernel(1)
+
+@pytest.mark.parametrize("case", [
+    "positive", "not_systemd", "foreign_pid1", "writable_pid1",
+    "missing_pid1", "missing_comm", "foreign_comm", "changed_pid1",
+])
+def test_kernel_pid1_precondition_is_readonly_and_fail_closed(monkeypatch, case):
+    events = []
+    proc = SimpleNamespace(
+        st_mode=stat.S_IFDIR | (0o777 if case == "writable_pid1" else 0o555),
+        st_uid=2000 if case == "foreign_pid1" else 0,
+        st_dev=7, st_ino=31,
+    )
+    comm = SimpleNamespace(st_mode=stat.S_IFREG | 0o444,
+                           st_uid=2000 if case == "foreign_comm" else 0)
+    def lstat(path):
+        events.append(("lstat", path))
+        assert path == "/proc/1"
+        if case == "missing_pid1":
+            raise FileNotFoundError("not present")
+        if case == "changed_pid1" and events.count(("lstat", path)) == 2:
+            return SimpleNamespace(**{**vars(proc), "st_ino": 32})
+        return proc
+    def open_comm(path, flags):
+        events.append(("open", path, flags))
+        assert path == "/proc/1/comm"
+        if case == "missing_comm":
+            raise FileNotFoundError("not present")
+        return 41
+    fake_os = SimpleNamespace(
+        lstat=lstat, open=open_comm, fstat=lambda fd: comm,
+        read=lambda fd, count: b"nginx\n" if case == "not_systemd"
+        else b"systemd\n",
+        close=lambda fd: events.append(("close", fd)),
+        O_RDONLY=0, O_NOFOLLOW=0x20000, O_NONBLOCK=0x800,
+        O_CLOEXEC=0x80000,
+    )
+    monkeypatch.setattr(unit, "os", fake_os)
+    if case == "positive":
+        unit._observe_systemd_pid1()
+        assert events.count(("lstat", "/proc/1")) == 2
+        assert ("close", 41) in events
+        assert [e for e in events if e[0] == "open"] == [
+            ("open", "/proc/1/comm", 0x20000 | 0x800 | 0x80000),
+        ]
+    else:
+        with pytest.raises(EffectiveNginxUnitError,
+                           match="PID1_IDENTITY_REFUSED|PID1_UNAVAILABLE"):
+            unit._observe_systemd_pid1()
+        assert all(e[0] in ("lstat", "open", "close") for e in events)
+        if case not in ("foreign_pid1", "writable_pid1", "missing_pid1",
+                        "missing_comm"):
+            assert ("close", 41) in events
+
+
+def test_non_systemd_pid1_never_invokes_systemctl(monkeypatch):
+    events = _fake_native(monkeypatch)
+    def refuse_pid1():
+        events.append(("pid1", "refused"))
+        raise EffectiveNginxUnitError("NATIVE_NGINX_EFFECTIVE_PID1_IDENTITY_REFUSED")
+    monkeypatch.setattr(unit, "_observe_systemd_pid1", refuse_pid1)
+    with pytest.raises(EffectiveNginxUnitError, match="PID1_IDENTITY_REFUSED"):
+        inspect_effective_native_nginx_unit("debian")
+    assert not any(item[0] == "run" for item in events)
