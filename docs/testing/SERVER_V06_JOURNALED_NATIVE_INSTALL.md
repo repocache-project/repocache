@@ -100,19 +100,37 @@ tests/test_ci_v06_journaled_cache_continuation.py
 tests/test_ci_v06_journaled_native_server_install.py`.
 The final signed, booted-VM campaign remains one consolidated release gate.
 
-## CI-only cache directory write-denial and recovery (#97)
+## CI-only NGINX cache write-denial recovery candidate (#97)
 
-The rootless, same-image NGINX HTTPS smoke now injects a real discretionary
-permission denial on the disposable APT cache directory and its child
-directories, while keeping the same NGINX master and an independent DNF
-cache running. A fresh APT index-shaped fixture must be served by upstream
-on two successive cache MISS requests. A previously cached DNF object must
-remain a HIT. After restoring the exact original permissions in a guaranteed
-cleanup path, a fresh APT request must MISS and then HIT; NGINX is not
-restarted. These assertions run in actual stock-NGINX CI containers on both
-target distros, including after the journaled package transaction in #19.
+The first CI attempt exposed an important limitation: when the normal
+`proxy_cache` route was active and the APT cache directory became
+unwritable, a request could lose its HTTP connection rather than receive
+the upstream payload. Do **not** claim that stock NGINX automatically
+preserves upstream access under EACCES. This is a confirmed negative
+observation, not accepted automatic fallback.
 
-This is an EACCES test only: ENOSPC, read-only mounts, genuine signed
-metadata, native APT/DNF source failover, trusted host service recovery,
-SELinux enforcing and real eviction remain NOT VERIFIED. This is not
-production installation or permission to apply host configuration.
+The strictly typed, non-activating `cache_bypass_repository_ids` renderer
+option proposes `proxy_cache off;` for selected, existing desired-active
+repositories only. Unknown/disabled IDs, duplicates and untrusted input
+types are refused before rendering; the other repository fragments and
+pinned TLS upstreams are unchanged. This candidate is not trusted evidence
+of runtime pressure, owner approval or installation. It cannot reload
+NGINX or publish a discovery catalog.
+
+In a disposable, unprivileged stock-NGINX container, the test explicitly
+validates this *generated* candidate with `nginx -t` and test-only reloads.
+It observes the cache-off route before injecting real EACCES on APT cache
+directories. A fresh APT fixture must then return its exact upstream bytes
+on two uncached requests and two independent upstream fetches, while an
+already populated DNF object remains a HIT. Original directory permissions
+are restored even if a test assertion fails. A real `nginx -t` and reload
+of the unchanged normal configuration then restores APT MISS/HIT with just
+one new upstream request. The same-image package-install continuation for
+#19 runs this smoke on Debian 13 and AlmaLinux 10.
+
+**Not demonstrated:** real automatic pressure detection, orchestration,
+authorization, atomic staged reload, trustworthy root or package source,
+ENOSPC, read-only mounts, SELinux enforcing, native client source fallback,
+native host recovery and eviction under load. The original #97/#19/#24
+requirements remain NOT VERIFIED until those mechanisms and acceptance
+tests pass. No real service, firewall or package-source mutation is enabled.
