@@ -243,3 +243,69 @@ def test_no_public_installer_or_arbitrary_target_arguments():
     for forbidden in ("subprocess", "systemctl", "apt-get", "dnf install",
                       "rmtree(", "shutil.rmtree", 'os.open("/",'):
         assert forbidden not in source
+
+
+
+def test_foreign_log_root_never_creates_other_cache_root(storage_root):
+    fd, root, _, _ = storage_root
+    cache, logs = paths(root)
+    logs.mkdir(mode=0o750)
+    foreign = logs / "unrelated-operator-log"
+    foreign.write_bytes(b"preserve-owned-log")
+    before = (foreign.stat().st_ino, foreign.read_bytes())
+    with pytest.raises(
+        NativeStorageBootstrapError, match="NATIVE_STORAGE_PARTIAL_OR_FOREIGN_ROOT",
+    ):
+        provision(storage_root)
+    assert not cache.exists()
+    assert not (cache.parent / MARKER).exists()
+    assert (foreign.stat().st_ino, foreign.read_bytes()) == before
+
+
+@pytest.mark.parametrize("corruption", ["invalid-json", "wrong-uid", "symlink"])
+def test_preexisting_untrusted_log_marker_refuses_before_cache_creation(
+    storage_root, corruption,
+):
+    fd, root, uid, gid = storage_root
+    cache, logs = paths(root)
+    logs.mkdir(mode=0o750)
+    info = logs.stat()
+    marker = logs.parent / MARKER
+    recorded = {
+        "schema": 1, "kind": "log",
+        "dev": info.st_dev, "ino": info.st_ino,
+        "uid": uid, "gid": gid, "mode": 0o750,
+    }
+    marker.write_text(json.dumps(recorded, sort_keys=True, separators=(",", ":")),
+                      encoding="ascii")
+    marker.chmod(0o600)
+    if corruption == "invalid-json":
+        marker.write_bytes(b"unexpected prior ownership")
+    elif corruption == "wrong-uid":
+        recorded["uid"] = uid + 1
+        marker.write_text(json.dumps(recorded, sort_keys=True, separators=(",", ":")),
+                          encoding="ascii")
+    else:
+        marker.unlink()
+        marker.symlink_to(root / "foreign-marker")
+    original = marker.lstat()
+    with pytest.raises(NativeStorageBootstrapError):
+        provision(storage_root)
+    assert not cache.exists()
+    assert not (cache.parent / MARKER).exists()
+    assert marker.lstat().st_ino == original.st_ino
+
+
+def test_existing_cache_bytes_untouched_when_log_marker_becomes_foreign(storage_root):
+    fd, root, uid, gid = storage_root
+    provision(storage_root)
+    cache, logs = paths(root)
+    retained = cache / "retain-original-artifact.rpm"
+    retained.write_bytes(b"trusted-retained-fixture")
+    before = (retained.stat().st_ino, retained.read_bytes())
+    (logs.parent / MARKER).write_bytes(b"foreign")
+    with pytest.raises(NativeStorageBootstrapError):
+        provision(storage_root)
+    assert (retained.stat().st_ino, retained.read_bytes()) == before
+    assert logs.exists()
+    assert cache.exists()
