@@ -36,3 +36,18 @@ a non-activating prerequisite for #29/#25 and final #19 acceptance, not a
 ready-to-install or release acceptance claim.
 
 Test: python -m pytest -q tests/test_server_cache_pressure_observe_v1.py
+
+
+## Linux read-only cache mount pressure signal (#97)
+
+The pinned cache-directory `fstatvfs` observation now also examines the
+Linux `ST_RDONLY` filesystem flag. A **set** read-only bit is concrete,
+negative storage evidence: the partial pressure result becomes `critical`
+with `STORAGE_WRITE_REFUSED`, even when plenty of bytes and inodes remain.
+The same fixed descriptor and ownership validation is required before the
+observation. A **clear** flag is *not* proof of writability: DAC, SELinux,
+quota, cache-worker identity and actual NGINX writes remain unknown; the
+reported `disk_writable_observed` stays `null`. Invalid kernel result flags
+fail closed to an unknown observation, not a false recovery. Tests cover
+both native flags and malformed observations. No cache deletion, host write,
+NGINX reload, actual alarm delivery or mount remediation is authorized.
