@@ -109,8 +109,17 @@ def trusted_fixture_origin(counts, lock):
                 return
             with lock:
                 counts[path] += 1
-            if path == "/apt/redirect":
-                self.send_response(302)
+            # Exercise every redirect class the actual renderer prohibits,
+            # on both APT and DNF routes; never contact the foreign host.
+            redirect_status = None
+            for kind in ("apt", "dnf"):
+                if path == "/" + kind + "/redirect":
+                    redirect_status = 302
+                for code in (301, 302, 303, 307, 308):
+                    if path == f"/{kind}/redirect-{code}":
+                        redirect_status = code
+            if redirect_status is not None:
+                self.send_response(redirect_status)
                 self.send_header("Location", "http://unapproved.example.invalid/secret")
                 self.send_header("Content-Length", "0")
                 self.end_headers()
@@ -536,6 +545,32 @@ def main() -> None:
                             client_tls)[1] == FIXTURES["/apt/accel"][1],
                 "generated pin route denies 3xx/unmanaged paths/internal redirects",
             )
+            # Actual HTTPS NGINX client behavior, not a string-only render
+            # assertion. None of 301/302/303/307/308 may reach a package
+            # client as a followable Location, be cached, or contact a
+            # foreign host; exercise independently for APT and DNF routes.
+            for repository, kind in (
+                ("debian-trixie-main", "apt"),
+                ("almalinux-baseos", "dnf"),
+            ):
+                for status in (301, 302, 303, 307, 308):
+                    route = base + repository + f"/redirect-{status}"
+                    for attempt in range(2):
+                        result = request(route, client_tls)
+                        require(
+                            result[0] == 502
+                            and not any(k.lower() == "location" for k in result[3])
+                            and b"unapproved.example.invalid" not in result[1]
+                            and result[2] != "HIT",
+                            f"actual {kind} upstream {status} fails closed "
+                            f"without redirect, Location leak or cache HIT",
+                        )
+                    with lock:
+                        requests = counts[f"/{kind}/redirect-{status}"]
+                    require(
+                        requests == 2,
+                        f"actual {kind} {status} denial not cached as a success",
+                    )
             # A candidate with invalid NGINX syntax must not replace the
             # running test-only generation or destroy cache availability.
             original_conf = config.read_bytes()

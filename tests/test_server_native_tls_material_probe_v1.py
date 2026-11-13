@@ -33,7 +33,7 @@ def fixture(tmp_path):
         os.close(fd)
 
 
-def generate(tls, name, *, dns_san=False):
+def generate(tls, name, *, dns_san=False, san_name=None):
     if OPENSSL is None:
         pytest.skip("OpenSSL not present")
     cert = tls / (name + ".crt")
@@ -42,8 +42,10 @@ def generate(tls, name, *, dns_san=False):
         OPENSSL, "req", "-x509", "-newkey", "rsa:2048", "-nodes",
         "-days", "1", "-keyout", str(key), "-out", str(cert),
         "-subj", "/CN=cache.example.invalid",
-    ] + (["-addext", "subjectAltName=DNS:cache.example.invalid"]
-         if dns_san else []), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    ] + (["-addext", "subjectAltName=DNS:" +
+          (san_name if san_name is not None else "cache.example.invalid")]
+         if dns_san or san_name is not None else []),
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
        timeout=40, check=False)
     assert result.returncode == 0
     cert.chmod(0o644)
@@ -209,7 +211,13 @@ def test_fixture_ca_input_is_bounded_and_strictly_typed_before_host_access(
         inspect_fixture_identity(fixture, bad_ca)
 
 
-def test_actual_expired_signed_leaf_rejected_by_openssl(fixture, tmp_path):
+@pytest.mark.parametrize("start_date,end_date", [
+    ("20000101000000Z", "20000102000000Z"),
+    ("20990101000000Z", "20990102000000Z"),
+])
+def test_expired_and_future_signed_leafs_refused_by_openssl(
+    fixture, tmp_path, start_date, end_date,
+):
     if OPENSSL is None:
         pytest.skip("OpenSSL not present")
     _, _, tls, _ = fixture
@@ -258,15 +266,47 @@ def test_actual_expired_signed_leaf_rejected_by_openssl(fixture, tmp_path):
     )
     run(
         "ca", "-batch", "-config", "ca.cnf",
-        "-startdate", "20000101000000Z", "-enddate", "20000102000000Z",
+        "-startdate", start_date, "-enddate", end_date,
         "-in", "leaf.csr", "-out", tls / "test.crt",
     )
     (tls / "test.key").chmod(0o600)
     (tls / "test.crt").chmod(0o644)
-    # A structurally valid cert/key can already be expired.
+    # Structurally matching cert/key may be expired or not yet valid.
     assert inspect(fixture)["openssl_matching_pair_verified"] is True
     with pytest.raises(
         NativeTLSMaterialProbeError,
         match="^TLS_MATERIAL_FIXTURE_IDENTITY_REJECTED$",
     ):
         inspect_fixture_identity(fixture, (ca / "ca.crt").read_bytes())
+
+
+
+@pytest.mark.parametrize("san_name", [
+    "cache.example.invalid",
+    "CACHE.EXAMPLE.INVALID",
+])
+def test_exact_dns_san_accepts_case_insensitive_distro_openssl_identity(
+    fixture, san_name,
+):
+    _, _, tls, _ = fixture
+    cert, _ = generate(tls, "test", san_name=san_name)
+    result = inspect_fixture_identity(fixture, cert.read_bytes())
+    assert result["fixture_ca_san_expiry_handshake_verified"] is True
+    assert result["fixture_ca_is_installed_trust_anchor"] is False
+    assert result["authorizes_nginx_reload"] is False
+
+
+@pytest.mark.parametrize("san_name", [
+    "*.example.invalid",
+    "*.EXAMPLE.INVALID",
+])
+def test_wildcard_dns_san_is_not_an_exact_listener_identity(fixture, san_name):
+    """OpenSSL hostname matching permits wildcards, fixture policy does not."""
+    _, _, tls, _ = fixture
+    cert, _ = generate(tls, "test", san_name=san_name)
+    assert inspect(fixture)["openssl_matching_pair_verified"] is True
+    with pytest.raises(
+        NativeTLSMaterialProbeError,
+        match="^TLS_MATERIAL_FIXTURE_IDENTITY_REJECTED$",
+    ):
+        inspect_fixture_identity(fixture, cert.read_bytes())
