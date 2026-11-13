@@ -60,6 +60,38 @@ def deny_cache_directory_writes(cache_root: Path):
             path.chmod(mode)
 
 
+def nginx_master_children(pid: int) -> frozenset[int]:
+    """CI-only Linux procfs snapshot; never log host process identifiers."""
+    if type(pid) is not int or pid <= 0:
+        raise AssertionError("invalid disposable NGINX process identity")
+    try:
+        raw = Path(f"/proc/{pid}/task/{pid}/children").read_text(
+            encoding="ascii"
+        ).split()
+        if (len(raw) > 64
+                or any(len(item) > 12 or not item.isdecimal() for item in raw)):
+            raise ValueError("invalid procfs children")
+        return frozenset(int(item) for item in raw)
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise AssertionError("NGINX procfs worker observation unavailable") from None
+
+
+def await_worker_generation_drained(
+    process: subprocess.Popen, former: frozenset[int]
+) -> None:
+    """Do not test post-reload behavior on an old, still-serving worker."""
+    if not former:
+        raise AssertionError("NGINX old worker generation not observed")
+    for _ in range(200):
+        if process.poll() is not None:
+            raise AssertionError("NGINX master exited while draining workers")
+        current = nginx_master_children(process.pid)
+        if current and current.isdisjoint(former):
+            return
+        time.sleep(0.05)
+    raise AssertionError("NGINX old worker generation did not drain")
+
+
 def trusted_fixture_origin(counts, lock):
     class Origin(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
@@ -364,6 +396,7 @@ def main() -> None:
             )
             run(nginx, "-t", "-e", str(root / "bypass-syntax.log"),
                 "-p", str(root), "-c", str(config))
+            original_workers = nginx_master_children(process.pid)
             run(nginx, "-s", "reload", "-e", str(root / "bypass-reload.log"),
                 "-p", str(root), "-c", str(config))
             bypass_ready_url = (
@@ -381,6 +414,8 @@ def main() -> None:
                 bypass_live,
                 "real NGINX master switched APT to isolated cache-off recovery",
             )
+            await_worker_generation_drained(process, original_workers)
+            require(True, "old cache-enabled NGINX worker generation has drained")
 
             apt_cache = root / "cache" / "debian-trixie-main"
             probe_url = base + "debian-trixie-main/dists/trixie/Packages.gz"
@@ -417,6 +452,7 @@ def main() -> None:
             config.write_text(normal_config, encoding="utf-8")
             run(nginx, "-t", "-e", str(root / "normal-restore-syntax.log"),
                 "-p", str(root), "-c", str(config))
+            bypass_workers = nginx_master_children(process.pid)
             run(nginx, "-s", "reload", "-e", str(root / "normal-restore.log"),
                 "-p", str(root), "-c", str(config))
             restored_ready_url = (
@@ -433,6 +469,8 @@ def main() -> None:
                     break
                 time.sleep(0.05)
             require(normal_live, "real NGINX master restored normal cache route")
+            await_worker_generation_drained(process, bypass_workers)
+            require(True, "old bypass NGINX worker generation has drained")
             recovered_first = request(probe_url, client_tls)
             recovered_second = request(probe_url, client_tls)
             with lock:
