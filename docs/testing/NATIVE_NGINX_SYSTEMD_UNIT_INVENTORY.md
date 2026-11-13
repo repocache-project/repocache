@@ -250,3 +250,25 @@ refuses a container. The tests also inject synthetic booted PID1/systemd
 and enforcing SELinux observations and verify all acceptance and mutation
 authority flags stay false. Positive booted VM execution and host integration
 are still NOT VERIFIED.
+
+## Additional PID 1 kernel guard for the effective-unit observer
+
+The read-only effective `nginx.service` observer now refuses to invoke
+`systemctl show` until a bounded, no-follow `/proc/1/comm` read observes
+`systemd` and checks the root-owned PID 1 directory before and after
+inspection. Missing, untrusted, replaced or non-systemd PID 1 observations
+fail closed with fixed, redacted codes. The guard introduces no writes,
+service activation, new systemctl verb, shell execution or privilege grant.
+
+`kernel_systemd_pid1_comm_observed=true` documents only this narrow kernel
+name observation. It is **not** host-root attestation: a privileged
+container/namespace can spoof process names. The existing
+`real_pid1_and_nginx_process_verified=false`,
+`host_root_and_selinux_verified=false` and all mutation-authority `false`
+fields are retained. In particular, no booted Debian 13 or AlmaLinux 10
+systemd/SELinux acceptance can be inferred from mocked CI results.
+
+Focused regression:
+`PYTHONPATH=src python3 -m pytest -q tests/test_server_native_nginx_effective_unit_v1.py`.
+Actual booted guest evidence remains owned by #19 and the parent #27
+acceptance criteria, on the final installable candidate.

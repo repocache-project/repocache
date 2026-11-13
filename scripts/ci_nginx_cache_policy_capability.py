@@ -139,24 +139,38 @@ def main() -> None:
         print("PASS: stock nginx -t validates independent inherited/overridden "
               "inactive and max_size directives", flush=True)
 
-        # min_free support is a *binary capability*, not inferred from
-        # distro identity or NGINX version strings. Test actual config.
-        add_min_free = fragment.replace(
-            " use_temp_path=off;", " min_free=8m use_temp_path=off;")
-        if add_min_free == fragment:
-            raise AssertionError("Policy candidate missing expected safe parameter")
+        # The *actual production renderer*, not a test-only string patch,
+        # proposes min_free using the contract's validated critical threshold.
+        # Positive nginx -t is still a disposable-binary observation, not a
+        # trust assertion about an installed or subsequently upgraded host.
+        min_free_bundle = render_repository_nginx_bundle_candidate(
+            original, expected_state_generation=0,
+            candidate_pins_by_repository=pins, ca_bundle_path=ca,
+            native_min_free_supported=True,
+        )
+        critical = original["deployment"]["cache_policy"]["disk_pressure"][
+            "critical_free_bytes"]
+        enhanced = min_free_bundle["http_upstream_fragment"]
+        assert enhanced.count(f" min_free={critical} ") == 2
+        assert min_free_bundle["native_min_free_candidate_emitted"] is True
+        assert min_free_bundle["native_min_free_supported_verified"] is False
+        assert min_free_bundle["authorizes_nginx_activation"] is False
+        assert " min_free=" not in fragment
         supported = checked_syntax(
-            nginx, root, add_min_free, bundle["server_location_fragment"])
+            nginx, root, enhanced,
+            min_free_bundle["server_location_fragment"],
+        )
         if supported:
-            print("PASS: stock nginx accepts min_free on this exact binary",
-                  flush=True)
+            print("PASS: stock nginx -t accepts strictly rendered critical "
+                  "min_free threshold on this actual binary", flush=True)
         else:
-            # Unsupported min_free requires explicit refusal/fallback.
-            # The production renderer must not silently assume availability.
+            # Exact binary capability unsupported. Never silently promote the
+            # enhanced candidate or claim pressure enforcement; the unchanged
+            # legacy baseline is still a distinct syntactically valid fallback.
             assert checked_syntax(
                 nginx, root, fragment, bundle["server_location_fragment"])
-            print("NOT VERIFIED: min_free unavailable; original candidate "
-                  "remains syntactically valid, no activation", flush=True)
+            print("NOT VERIFIED: min_free unsupported on this binary; "
+                  "fallback candidate unchanged; no activation", flush=True)
 
         # An invalid native value must never be accepted or deployed.
         poisoned = fragment.replace(

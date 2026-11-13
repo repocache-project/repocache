@@ -1,0 +1,53 @@
+name: Server v0.6 Native Metrics Log Rotation
+
+on:
+  pull_request:
+    paths:
+      - "src/repocache/server_native_metrics_logrotate_candidate_v1.py"
+      - "tests/test_server_native_metrics_logrotate_candidate_v1.py"
+      - "scripts/ci_native_metrics_logrotate_v1.py"
+      - ".github/workflows/server-native-metrics-logrotate.yml"
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  native-metrics-logrotate:
+    name: Native logrotate bounded archive (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: debian13
+            image: debian:trixie-slim
+          - platform: almalinux10
+            image: almalinux:10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run real distro logrotate in isolated test-only root container
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > "$RUNNER_TEMP/Dockerfile.logrotate" <<'EOF'
+          ARG BASE_IMAGE
+          FROM $BASE_IMAGE
+          RUN if command -v apt-get >/dev/null; then \
+                apt-get update -qq && DEBIAN_FRONTEND=noninteractive \
+                apt-get install -y -qq --no-install-recommends python3 logrotate; \
+              else dnf -y -q install python3 logrotate; fi
+          EOF
+          docker build --pull -f "$RUNNER_TEMP/Dockerfile.logrotate" \
+            --build-arg BASE_IMAGE=${{ matrix.image }} \
+            -t "repocache-logrotate:${{ matrix.platform }}" "$RUNNER_TEMP"
+          docker run --rm --network none --read-only --user 0:0 \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,nosuid,nodev,size=128m,mode=1777 \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/repo,readonly" \
+            -e PYTHONPATH=/repo/src -e REPOCACHE_DISPOSABLE_NATIVE_CI=1 \
+            "repocache-logrotate:${{ matrix.platform }}" \
+            python3 -B /repo/scripts/ci_native_metrics_logrotate_v1.py

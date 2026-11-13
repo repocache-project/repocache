@@ -5,7 +5,10 @@ on:
     paths:
       - '.github/workflows/server-v06-journaled-native-package.yml'
       - 'scripts/ci_v06_journaled_native_server_install.py'
+      - 'scripts/ci_v06_journaled_cache_continuation.py'
+      - 'scripts/ci_generated_nginx_route_cache_smoke.py'
       - 'tests/test_ci_v06_journaled_native_server_install.py'
+      - 'tests/test_ci_v06_journaled_cache_continuation.py'
       - 'scripts/smoke_server_native_nginx_container_install.py'
       - 'src/repocache/server_protected_namespace_bootstrap_v1.py'
       - 'src/repocache/server_native_nginx_package_journal_v1.py'
@@ -19,6 +22,8 @@ on:
     paths:
       - '.github/workflows/server-v06-journaled-native-package.yml'
       - 'scripts/ci_v06_journaled_native_server_install.py'
+      - 'scripts/ci_v06_journaled_cache_continuation.py'
+      - 'scripts/ci_generated_nginx_route_cache_smoke.py'
       - 'src/repocache/server_protected_namespace_bootstrap_v1.py'
       - 'src/repocache/server_native_nginx_package_journal_v1.py'
       - 'src/repocache/server_protected_state_store_v1.py'
@@ -57,9 +62,9 @@ jobs:
               set -eu
               if command -v apt-get >/dev/null 2>&1; then
                 apt-get update -qq
-                DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends python3 ca-certificates >/dev/null
+                DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends python3 ca-certificates openssl >/dev/null
               else
-                dnf -y -q install python3 ca-certificates >/dev/null
+                dnf -y -q install python3 ca-certificates openssl >/dev/null
               fi
               export PYTHONPATH=/workspace/src
               export REPOCACHE_NATIVE_TEST_CONTAINER=CONFIRMED_DISPOSABLE_DOCKER_ONLY
@@ -69,5 +74,16 @@ jobs:
               fi
               grep -Fq DISPOSABLE_JOURNALED_NATIVE_INSTALL_PASS /tmp/repocache-v06-journaled-result.json
               cat /tmp/repocache-v06-journaled-result.json
-              echo "PASS: real native NGINX install under retained lock; no VM GO"
+              echo "PASS: real native NGINX install under retained lock"
+              # Only after the root-owned pending journal and package result
+              # are checked, drop all groups/GID/UID for an independent
+              # generated HTTPS APT/DNF proxy/cache smoke in this SAME image.
+              # Never invoke either script on a booted host or mounted host FS.
+              if ! python3 -B scripts/ci_v06_journaled_cache_continuation.py > /tmp/repocache-v06-cache-smoke.log; then
+                echo "FAIL: rootless generated-cache continuation"
+                exit 1
+              fi
+              grep -Fq "PASS: actual generated pinned TLS/cache fragments carried 4 MISS/HIT objects" /tmp/repocache-v06-cache-smoke.log
+              grep -Fq "NOT VERIFIED: real authenticated DNS" /tmp/repocache-v06-cache-smoke.log
+              echo "PASS: same disposable Debian/Alma image completed journaled native install and rootless generated HTTPS cache HIT/MISS; no VM GO"
             '
