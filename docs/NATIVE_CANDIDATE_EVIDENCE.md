@@ -73,3 +73,18 @@ containers cannot become a booted-native PASS.
 This runbook is a **preparatory** deliverable, not the full VM script or an
 early request for maintainer VM effort. It neither extends the milestone
 scope nor closes #19, #25, #24, #76 or #88.
+
+
+## Contradictory native observations fail closed (#19)
+
+The source-only candidate receipt now accepts a positive read-only native
+prerequisite observation **only** when the fixed probe simultaneously reports
+`READ_ONLY_PREREQUISITES_OBSERVED`, the exact non-authorizing code
+`OBSERVATION_ONLY_NO_HOST_AUTHORITY`, and both required native-shape Booleans.
+A contradictory refusal code (for example, a container or failed systemd
+probe) cannot become an apparent positive merely because an untrusted caller
+set the other fields to true. Negative regression tests cover this case.
+Even the matching code comes from a caller-provided probe, is not a signed
+host attestation and **never** changes the overarching `NOT VERIFIED`
+release status or any authorization field. Booted VM, owner signing and
+package-manager acceptance remain mandatory and separate.
