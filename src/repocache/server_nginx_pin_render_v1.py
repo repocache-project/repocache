@@ -29,12 +29,15 @@ def render_pinned_upstream_fragments(
     repository_id: str,
     candidate_pins_by_host: dict[str, list[str]],
     ca_bundle_path: str,
+    native_min_free_supported: bool = False,
 ) -> dict[str, Any]:
     """Build minimal stock-NGINX HTTP/server fragments without I/O.
 
     Caller supplied IPs and repository state are NOT authenticated. Rendering
     is not proof of trustworthy DNS answers, safe activation or real traffic.
     """
+    if type(native_min_free_supported) is not bool:
+        raise PinnedNginxError("native min_free capability: invalid")
     if (type(repository_id) is not str or len(repository_id) > 48
             or ID.fullmatch(repository_id) is None):
         raise PinnedNginxError("repository_id: invalid")
@@ -104,10 +107,18 @@ def render_pinned_upstream_fragments(
         doc["deployment"]["paths"]["cache_root"] + "/" + repository_id
     )
     cache_zone = "repocache_cache_" + repository_id.replace("-", "_")
+    # Native 'min_free' is emitted ONLY on an explicitly selected candidate
+    # for a binary that the caller separately probes with nginx -t.
+    # This bool is caller data, not proof of OS/runtime capability or any
+    # authorization to activate the candidate.
+    min_free = (
+        f" min_free={doc['deployment']['cache_policy']['disk_pressure']['critical_free_bytes']}"
+        if native_min_free_supported else ""
+    )
     upstream = [
         f"proxy_cache_path {cache_directory} levels=1:2 "
         f"keys_zone={cache_zone}:1m inactive={inactive_seconds}s "
-        f"max_size={max_size_bytes} use_temp_path=off;",
+        f"max_size={max_size_bytes}{min_free} use_temp_path=off;",
         f"upstream {group} {{",
     ]
     for ip in addresses:
@@ -158,6 +169,8 @@ def render_pinned_upstream_fragments(
         "http_upstream_fragment": "\n".join(upstream) + "\n",
         "server_location_fragment": "\n".join(location) + "\n",
         "pin_count": len(addresses),
+        "native_min_free_candidate_emitted": native_min_free_supported,
+        "native_min_free_supported_verified": False,
         "requires_nginx_t_and_activation": True,
         "trusted_state_provenance_verified": False,
         "runtime_destination_enforcement_verified": False,
