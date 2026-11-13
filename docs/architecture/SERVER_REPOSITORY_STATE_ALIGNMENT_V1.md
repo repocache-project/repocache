@@ -475,3 +475,16 @@ is mutated. This compatibility fixture does **not** import, duplicate or
 adopt #251's unmerged changes. Once #28's independently accepted renderer
 is integrated, run the same tests on the resulting actual branch; current
 CI only certifies the renderer at the tested source SHA.
+
+
+## Client-compatible unambiguous derived catalog (#28/#24)
+
+An approved NGINX repository identity can legitimately distinguish an APT
+repository from a DNF repository while both use the same HTTPS upstream
+base URL. The client schema 1 mapping does **not** support two different
+cache targets for one upstream URL. The source-only active-only catalog
+preview now refuses such duplicates before emitting an unusable client
+catalog, rather than treating an internally valid NGINX route set as proof
+of client compatibility. This retains unique-cache-route checks and
+non-authorizing output; the root-controlled installed publication, active
+runtime NGINX exposure and real APT/DNF integration are still required.
