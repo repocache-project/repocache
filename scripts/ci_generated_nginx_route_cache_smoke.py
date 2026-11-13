@@ -7,10 +7,12 @@ This does NOT permit loopback pins in production or grant host activation.
 from __future__ import annotations
 
 import collections
+from contextlib import contextmanager
 import json
 import os
 import shutil
 import ssl
+import stat
 import subprocess
 import sys
 import tempfile
@@ -28,6 +30,31 @@ from repocache.server_nginx_repository_bundle_v1 import (
 from repocache.server_derived_catalog_candidate_v1 import (
     preview_derived_catalog_from_nginx_dump,
 )
+
+
+# A previously unrequested, disposable metadata-shaped object, not signed
+# APT metadata or native package-manager acceptance evidence.
+READ_ONLY_APT_PATH = "/apt/dists/trixie/Packages.gz"
+READ_ONLY_APT_BYTES = b"DISPOSABLE-APT-INDEX-CACHE-WRITE-DENIAL\n"
+
+
+@contextmanager
+def deny_cache_directory_writes(cache_root: Path):
+    """Inject test-only cache EACCES; restore original modes on every exit."""
+    directories = [cache_root, *sorted(
+        (p for p in cache_root.rglob("*") if p.is_dir()),
+        key=lambda path: (len(path.parts), str(path)),
+    )]
+    previous_modes = [
+        (path, stat.S_IMODE(path.stat().st_mode)) for path in directories
+    ]
+    try:
+        for path, mode in previous_modes:
+            path.chmod(mode & ~0o222)
+        yield
+    finally:
+        for path, mode in reversed(previous_modes):
+            path.chmod(mode)
 
 
 def trusted_fixture_origin(counts, lock):
@@ -53,7 +80,8 @@ def trusted_fixture_origin(counts, lock):
                 self.send_header("Content-Length", "0")
                 self.end_headers()
                 return
-            item = FIXTURES.get(path)
+            item = (("application/octet-stream", READ_ONLY_APT_BYTES)
+                    if path == READ_ONLY_APT_PATH else FIXTURES.get(path))
             if item is None:
                 self.send_error(404)
                 return
@@ -282,6 +310,50 @@ def main() -> None:
                         "generated TLS-pinned " + prefix +
                         " route caches exact signed-shape object with one fetch",
                     )
+
+            # Induce actual EACCES on the disposable APT cache tree after
+            # genuine cache HITs. A previously unrequested upstream object
+            # should remain retrievable; DNF cache access must be unaffected.
+            apt_cache = root / "cache" / "debian-trixie-main"
+            probe_url = base + "debian-trixie-main/dists/trixie/Packages.gz"
+            with lock:
+                before_denial = counts[READ_ONLY_APT_PATH]
+            with deny_cache_directory_writes(apt_cache):
+                require(
+                    not os.access(apt_cache, os.W_OK),
+                    "rootless APT cache directory actually denies writes",
+                )
+                refused_first = request(probe_url, client_tls)
+                refused_second = request(probe_url, client_tls)
+                dnf_still_cached = request(
+                    base + "almalinux-baseos/repodata/repomd.xml",
+                    client_tls,
+                )
+                with lock:
+                    denied_origin_calls = counts[READ_ONLY_APT_PATH]
+                require(
+                    refused_first[:3] == (200, READ_ONLY_APT_BYTES, "MISS")
+                    and refused_second[:3] == (200, READ_ONLY_APT_BYTES, "MISS")
+                    and denied_origin_calls == before_denial + 2
+                    and dnf_still_cached[:3] == (
+                        200, FIXTURES["/dnf/repodata/repomd.xml"][1], "HIT"
+                    )
+                    and process.poll() is None,
+                    "APT upstream stays accessible without cache writes "
+                    "and independent DNF cache still HITs",
+                )
+            recovered_first = request(probe_url, client_tls)
+            recovered_second = request(probe_url, client_tls)
+            with lock:
+                recovered_origin_calls = counts[READ_ONLY_APT_PATH]
+            require(
+                recovered_first[:3] == (200, READ_ONLY_APT_BYTES, "MISS")
+                and recovered_second[:3] == (200, READ_ONLY_APT_BYTES, "HIT")
+                and recovered_origin_calls == before_denial + 3
+                and os.access(apt_cache, os.W_OK)
+                and process.poll() is None,
+                "cache write permissions restore MISS/HIT without NGINX restart",
+            )
             require(
                 bool(observed_sni)
                 and all(sni == HOST for sni in observed_sni),
