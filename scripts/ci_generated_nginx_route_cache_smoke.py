@@ -7,10 +7,12 @@ This does NOT permit loopback pins in production or grant host activation.
 from __future__ import annotations
 
 import collections
+from contextlib import contextmanager
 import json
 import os
 import shutil
 import ssl
+import stat
 import subprocess
 import sys
 import tempfile
@@ -28,6 +30,66 @@ from repocache.server_nginx_repository_bundle_v1 import (
 from repocache.server_derived_catalog_candidate_v1 import (
     preview_derived_catalog_from_nginx_dump,
 )
+
+
+# A previously unrequested, disposable metadata-shaped object, not signed
+# APT metadata or native package-manager acceptance evidence.
+READ_ONLY_APT_PATH = "/apt/dists/trixie/Packages.gz"
+READ_ONLY_APT_BYTES = b"DISPOSABLE-APT-INDEX-CACHE-WRITE-DENIAL\n"
+BYPASS_READY_APT_PATH = "/apt/dists/trixie/BypassReadiness"
+RECOVERY_READY_APT_PATH = "/apt/dists/trixie/RecoveryReadiness"
+READY_APT_BYTES = b"DISPOSABLE-APT-ROUTE-READINESS\n"
+
+
+@contextmanager
+def deny_cache_directory_writes(cache_root: Path):
+    """Inject test-only cache EACCES; restore original modes on every exit."""
+    directories = [cache_root, *sorted(
+        (p for p in cache_root.rglob("*") if p.is_dir()),
+        key=lambda path: (len(path.parts), str(path)),
+    )]
+    previous_modes = [
+        (path, stat.S_IMODE(path.stat().st_mode)) for path in directories
+    ]
+    try:
+        for path, mode in previous_modes:
+            path.chmod(mode & ~0o222)
+        yield
+    finally:
+        for path, mode in reversed(previous_modes):
+            path.chmod(mode)
+
+
+def nginx_master_children(pid: int) -> frozenset[int]:
+    """CI-only Linux procfs snapshot; never log host process identifiers."""
+    if type(pid) is not int or pid <= 0:
+        raise AssertionError("invalid disposable NGINX process identity")
+    try:
+        raw = Path(f"/proc/{pid}/task/{pid}/children").read_text(
+            encoding="ascii"
+        ).split()
+        if (len(raw) > 64
+                or any(len(item) > 12 or not item.isdecimal() for item in raw)):
+            raise ValueError("invalid procfs children")
+        return frozenset(int(item) for item in raw)
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise AssertionError("NGINX procfs worker observation unavailable") from None
+
+
+def await_worker_generation_drained(
+    process: subprocess.Popen, former: frozenset[int]
+) -> None:
+    """Do not test post-reload behavior on an old, still-serving worker."""
+    if not former:
+        raise AssertionError("NGINX old worker generation not observed")
+    for _ in range(200):
+        if process.poll() is not None:
+            raise AssertionError("NGINX master exited while draining workers")
+        current = nginx_master_children(process.pid)
+        if current and current.isdisjoint(former):
+            return
+        time.sleep(0.05)
+    raise AssertionError("NGINX old worker generation did not drain")
 
 
 def trusted_fixture_origin(counts, lock):
@@ -53,7 +115,13 @@ def trusted_fixture_origin(counts, lock):
                 self.send_header("Content-Length", "0")
                 self.end_headers()
                 return
-            item = FIXTURES.get(path)
+            probes = {
+                READ_ONLY_APT_PATH: READ_ONLY_APT_BYTES,
+                BYPASS_READY_APT_PATH: READY_APT_BYTES,
+                RECOVERY_READY_APT_PATH: READY_APT_BYTES,
+            }
+            item = (("application/octet-stream", probes[path])
+                    if path in probes else FIXTURES.get(path))
             if item is None:
                 self.send_error(404)
                 return
@@ -282,6 +350,160 @@ def main() -> None:
                         "generated TLS-pinned " + prefix +
                         " route caches exact signed-shape object with one fetch",
                     )
+
+            # The baseline cache-active route may close connections under
+            # EACCES (observed on the first CI attempt). Do not claim that
+            # read-only storage is safe with proxy_cache still enabled.
+            # Instead, verify the real renderer's isolated recovery candidate
+            # with a genuine nginx -t and an explicit test-only master reload.
+            bypass = render_repository_nginx_bundle_candidate(
+                document,
+                expected_state_generation=0,
+                candidate_pins_by_repository={
+                    repo["id"]: {HOST: ["8.8.8.8"]}
+                    for repo in document["repositories"]
+                },
+                ca_bundle_path=str(origin_cert),
+                cache_bypass_repository_ids=("debian-trixie-main",),
+            )
+            require(
+                bypass["cache_bypass_recovery_candidate_repository_ids"]
+                == ["debian-trixie-main"]
+                and bypass["cache_bypass_activation_verified"] is False
+                and bypass["authorizes_nginx_activation"] is False
+                and bypass["http_upstream_fragment"]
+                == fragment["http_upstream_fragment"]
+                and "    proxy_cache off;" in bypass["server_location_fragment"]
+                and "    proxy_cache repocache_cache_almalinux_baseos;"
+                in bypass["server_location_fragment"],
+                "actual non-authorizing renderer bypasses only selected APT "
+                "cache while preserving DNF cache and all pinned upstreams",
+            )
+            bypass_locations = bypass["server_location_fragment"].replace(
+                "    proxy_cache_valid 200 60s;",
+                "    proxy_cache_valid 200 60s;\n"
+                "    add_header X-RepoCache-Smoke $upstream_cache_status always;",
+            )
+            normal_config = config.read_text(encoding="utf-8")
+            require(
+                normal_config.count(locations) == 1
+                and bypass_locations != locations,
+                "test-only reload changes exactly the generated location bundle",
+            )
+            config.write_text(
+                normal_config.replace(locations, bypass_locations),
+                encoding="utf-8",
+            )
+            run(nginx, "-t", "-e", str(root / "bypass-syntax.log"),
+                "-p", str(root), "-c", str(config))
+            original_workers = nginx_master_children(process.pid)
+            run(nginx, "-s", "reload", "-e", str(root / "bypass-reload.log"),
+                "-p", str(root), "-c", str(config))
+            bypass_ready_url = (
+                base + "debian-trixie-main/dists/trixie/BypassReadiness"
+            )
+            bypass_live = False
+            for _ in range(100):
+                require(process.poll() is None, "NGINX survives bypass reload")
+                probe = request(bypass_ready_url, client_tls)
+                if probe[:3] == (200, READY_APT_BYTES, ""):
+                    bypass_live = True
+                    break
+                time.sleep(0.05)
+            require(
+                bypass_live,
+                "real NGINX master switched APT to isolated cache-off recovery",
+            )
+            await_worker_generation_drained(process, original_workers)
+            require(True, "old cache-enabled NGINX worker generation has drained")
+
+            apt_cache = root / "cache" / "debian-trixie-main"
+            probe_url = base + "debian-trixie-main/dists/trixie/Packages.gz"
+            with lock:
+                before_denial = counts[READ_ONLY_APT_PATH]
+            with deny_cache_directory_writes(apt_cache):
+                require(
+                    not os.access(apt_cache, os.W_OK),
+                    "rootless APT cache directory actually denies writes",
+                )
+                bypass_first = request(probe_url, client_tls)
+                bypass_second = request(probe_url, client_tls)
+                dnf_still_cached = request(
+                    base + "almalinux-baseos/repodata/repomd.xml",
+                    client_tls,
+                )
+                with lock:
+                    bypass_calls = counts[READ_ONLY_APT_PATH]
+                require(
+                    bypass_first[:3] == (200, READ_ONLY_APT_BYTES, "")
+                    and bypass_second[:3] == (200, READ_ONLY_APT_BYTES, "")
+                    and bypass_calls == before_denial + 2
+                    and dnf_still_cached[:3] == (
+                        200, FIXTURES["/dnf/repodata/repomd.xml"][1], "HIT"
+                    )
+                    and process.poll() is None,
+                    "validated cache-off candidate serves uncached APT upstream "
+                    "during EACCES and preserves independent DNF cache HIT",
+                )
+
+            # Restore the unchanged normal route via real syntax check and
+            # reload. Readiness uses a separate uncached fixture so it cannot
+            # accidentally warm the EACCES recovery object under test.
+            config.write_text(normal_config, encoding="utf-8")
+            run(nginx, "-t", "-e", str(root / "normal-restore-syntax.log"),
+                "-p", str(root), "-c", str(config))
+            bypass_workers = nginx_master_children(process.pid)
+            run(nginx, "-s", "reload", "-e", str(root / "normal-restore.log"),
+                "-p", str(root), "-c", str(config))
+            restored_ready_url = (
+                base + "debian-trixie-main/dists/trixie/RecoveryReadiness"
+            )
+            normal_live = False
+            for _ in range(100):
+                require(process.poll() is None, "NGINX survives normal-mode reload")
+                probe = request(restored_ready_url, client_tls)
+                if probe[:2] == (200, READY_APT_BYTES) and probe[2] in (
+                    "MISS", "HIT"
+                ):
+                    normal_live = True
+                    break
+                time.sleep(0.05)
+            require(normal_live, "real NGINX master restored normal cache route")
+            await_worker_generation_drained(process, bypass_workers)
+            require(True, "old bypass NGINX worker generation has drained")
+            recovered_first = request(probe_url, client_tls)
+            recovered_second = request(probe_url, client_tls)
+            with lock:
+                recovered_origin_calls = counts[READ_ONLY_APT_PATH]
+            recovery_valid = (
+                recovered_first[:3] == (200, READ_ONLY_APT_BYTES, "MISS")
+                and recovered_second[:3] == (200, READ_ONLY_APT_BYTES, "HIT")
+                and recovered_origin_calls == before_denial + 3
+                and os.access(apt_cache, os.W_OK)
+                and config.read_text(encoding="utf-8") == normal_config
+                and process.poll() is None
+            )
+            if not recovery_valid:
+                # Only static HTTP status, cache state and a bounded fixture
+                # request count are logged. Never print payload, key, headers,
+                # request URL or arbitrary NGINX logs.
+                raise AssertionError(
+                    "cache recovery: "
+                    f"first_status={recovered_first[0]} "
+                    f"first_cache={recovered_first[2]!r} "
+                    f"first_fixture={recovered_first[1] == READ_ONLY_APT_BYTES} "
+                    f"second_status={recovered_second[0]} "
+                    f"second_cache={recovered_second[2]!r} "
+                    f"second_fixture={recovered_second[1] == READ_ONLY_APT_BYTES} "
+                    f"origin_delta={recovered_origin_calls - before_denial} "
+                    f"permissions_restored={os.access(apt_cache, os.W_OK)} "
+                    f"config_restored={config.read_text(encoding='utf-8') == normal_config} "
+                    f"nginx_alive={process.poll() is None}"
+                )
+            require(
+                True, "reversible cache-off EACCES recovery restores APT MISS/HIT "
+                "without process restart, while preserving original config",
+            )
             require(
                 bool(observed_sni)
                 and all(sni == HOST for sni in observed_sni),
