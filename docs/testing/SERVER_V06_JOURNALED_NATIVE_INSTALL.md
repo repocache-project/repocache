@@ -99,3 +99,20 @@ PASS marker and complete successfully. Scoped unit regressions:
 tests/test_ci_v06_journaled_cache_continuation.py
 tests/test_ci_v06_journaled_native_server_install.py`.
 The final signed, booted-VM campaign remains one consolidated release gate.
+
+## CI-only cache directory write-denial and recovery (#97)
+
+The rootless, same-image NGINX HTTPS smoke now injects a real discretionary
+permission denial on the disposable APT cache directory and its child
+directories, while keeping the same NGINX master and an independent DNF
+cache running. A fresh APT index-shaped fixture must be served by upstream
+on two successive cache MISS requests. A previously cached DNF object must
+remain a HIT. After restoring the exact original permissions in a guaranteed
+cleanup path, a fresh APT request must MISS and then HIT; NGINX is not
+restarted. These assertions run in actual stock-NGINX CI containers on both
+target distros, including after the journaled package transaction in #19.
+
+This is an EACCES test only: ENOSPC, read-only mounts, genuine signed
+metadata, native APT/DNF source failover, trusted host service recovery,
+SELinux enforcing and real eviction remain NOT VERIFIED. This is not
+production installation or permission to apply host configuration.
