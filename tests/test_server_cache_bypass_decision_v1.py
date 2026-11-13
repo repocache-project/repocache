@@ -240,7 +240,7 @@ def test_invalid_previous_bypass_state_refused_before_pressure_decision(bad):
 def test_invalid_document_pins_telemetry_and_alarm_fail_closed(bad):
     doc, pins, critical, _ = fixture()
     with pytest.raises(CachePressureBypassError, match="^CACHE_BYPASS_CANDIDATE_INVALID$"):
-        proposed(doc, pins, free_bytes=critical, **bad)
+        proposed(doc, pins, **{"free_bytes": critical, **bad})
 
 
 def test_repeatable_pure_plan_no_host_or_network_mutation(monkeypatch):
