@@ -62,3 +62,23 @@ def test_synthetic_rpm_has_no_execution_install_or_scriptlet_sections():
         assert forbidden not in spec
     assert "BuildArch: noarch" in spec
     assert rpm_probe._RPM_NAME.endswith(".noarch.rpm")
+
+
+
+@pytest.mark.parametrize("rpm_output", [
+    "", "foo.rpm: digests OK\n", "foo.rpm: Header SHA256 digest: OK\n",
+    "foo.rpm: signatures NOKEY\n", "foo.rpm: signatures NOT OK\n",
+    "foo.rpm: BAD signature\n", "foo.rpm: no signature\n",
+    1234,
+])
+def test_native_verification_cannot_accept_unsigned_or_untrusted_rpm(rpm_output):
+    assert not rpm_probe._rpm_signature_verified(rpm_output)
+
+
+@pytest.mark.parametrize("signed_output", [
+    "foo.rpm: digests signatures OK\n",
+    "foo.rpm:\n    Header V4 RSA/SHA256 Signature, key ID 12345678: OK\n"
+    "    Payload SHA256 digest: OK\n",
+])
+def test_native_verification_requires_real_signature_ok(signed_output):
+    assert rpm_probe._rpm_signature_verified(signed_output)
