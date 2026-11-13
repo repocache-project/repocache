@@ -66,6 +66,10 @@ def run() -> None:
         root = Path(temp)
         log = root / "metrics.jsonl"
         conf = root / "nginx.conf"
+        # Rootless NGINX must use private writable temp directories rather
+        # than native distro package defaults under /var/lib/nginx.
+        for dirname in ("client_body", "proxy", "fastcgi", "uwsgi", "scgi"):
+            (root / dirname).mkdir(mode=0o700)
         port = get_port()
         # Test-only substitution of the fixed production destination into a
         # private disposable path; production never accepts a path override.
@@ -78,7 +82,12 @@ def run() -> None:
             "worker_processes 1;\n"
             "events { worker_connections 64; }\n"
             "http {\n"
-            "access_log off;\n"
+            + "".join(
+                f"{dirname}_temp_path {root / dirname};\n"
+                for dirname in ("client_body", "proxy", "fastcgi",
+                                "uwsgi", "scgi")
+            )
+            + "access_log off;\n"
             + candidate["http_log_format_fragment"] + "\n"
             f"server {{ listen 127.0.0.1:{port};\n"
             f"location ^~ {_ROUTE} {{\n"
