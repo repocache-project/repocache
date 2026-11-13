@@ -50,8 +50,12 @@ def test_explicit_opt_in_only_for_active_repositories_and_no_credentials():
     )
     for forbidden in ("$request_uri", "$uri", "$remote_addr", "$http_cookie",
                       "$http_authorization", "$args", "$query_string",
-                      "$http_user_agent", "$request", "Authorization"):
+                      "$http_user_agent", "Authorization"):
         assert forbidden not in combined
+    # Reject the full raw NGINX $request variable, not the approved
+    # $request_time latency measurement (whose name shares that prefix).
+    import re
+    assert re.search(r"\$request(?![A-Za-z0-9_])", combined) is None
     for name in ("audit_logging_inheritance_verified", "nginx_syntax_verified",
                  "active_exposure_verified", "managed_log_ownership_verified",
                  "authorizes_nginx_activation", "authorizes_catalog_publication"):
