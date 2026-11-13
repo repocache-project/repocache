@@ -50,18 +50,91 @@ def _reject_unreviewed_attributes(fd: int) -> None:
         _deny("XATTR_OR_SELINUX_UNVERIFIED")
 
 
+
+def _check_fixture_tls_identity(
+    server_context: ssl.SSLContext, *, fixture_ca_pem: bytes, hostname: str,
+) -> None:
+    """Validate a local TLS handshake against a caller-chosen test CA.
+
+    This proves fixture OpenSSL chain, DNS SAN and validity semantics ONLY.
+    It does not authenticate the CA or grant installed-host privileges.
+    No network, subprocess, filesystem mutations or private-key export.
+    """
+    if (type(fixture_ca_pem) is not bytes
+            or not 1 <= len(fixture_ca_pem) <= 65536):
+        _deny("FIXTURE_CA_INVALID")
+    try:
+        client_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        client_context.minimum_version = ssl.TLSVersion.TLSv1_2
+        client_context.check_hostname = True
+        # Require a DNS SAN: historical CN fallback is not sufficient.
+        client_context.hostname_checks_common_name = False
+        client_context.load_verify_locations(
+            cadata=fixture_ca_pem.decode("ascii", "strict")
+        )
+        client_in, client_out = ssl.MemoryBIO(), ssl.MemoryBIO()
+        server_in, server_out = ssl.MemoryBIO(), ssl.MemoryBIO()
+        client = client_context.wrap_bio(
+            client_in, client_out, server_side=False, server_hostname=hostname,
+        )
+        server = server_context.wrap_bio(
+            server_in, server_out, server_side=True,
+        )
+        client_done = server_done = False
+        total_bytes = 0
+        for _ in range(48):
+            progressed = False
+            for endpoint, is_client in ((client, True), (server, False)):
+                if client_done if is_client else server_done:
+                    continue
+                try:
+                    endpoint.do_handshake()
+                except (ssl.SSLWantReadError, ssl.SSLWantWriteError):
+                    pass
+                else:
+                    progressed = True
+                    if is_client:
+                        client_done = True
+                    else:
+                        server_done = True
+            for output, incoming in (
+                (client_out, server_in),
+                (server_out, client_in),
+            ):
+                chunk = output.read(65536)
+                if chunk:
+                    total_bytes += len(chunk)
+                    if total_bytes > 262144:
+                        raise ValueError("oversized TLS fixture transcript")
+                    incoming.write(chunk)
+                    progressed = True
+            if client_done and server_done:
+                return
+            if not progressed:
+                break
+    except (ssl.SSLError, OSError, UnicodeError, TypeError, ValueError):
+        pass
+    _deny("FIXTURE_IDENTITY_REJECTED")
+
+
 def inspect_native_tls_pair_under_root(
     root_fd: int, *, owner_uid: int, document: dict[str, Any],
+    fixture_ca_pem: bytes | None = None,
 ) -> dict[str, Any]:
     """Open/verify fixed-subtree cert+key FDs, then load pair via OpenSSL.
 
     /proc/self/fd paths reference already pinned descriptors, not a second
     read of untrusted source paths. Host root/UID provenance, SAN/chain/expiry
-    and enforcing SELinux are explicitly outside this private fixture seam.
+    and enforcing SELinux are outside the default private fixture seam.
+    An optional caller-chosen fixture CA does NOT establish installed trust.
     """
     if (type(root_fd) is not int or root_fd < 0
             or type(owner_uid) is not int or not 0 <= owner_uid <= 2**32-2):
         _deny("ARGUMENT_INVALID")
+    if (fixture_ca_pem is not None
+            and (type(fixture_ca_pem) is not bytes
+                 or not 1 <= len(fixture_ca_pem) <= 65536)):
+        _deny("FIXTURE_CA_INVALID")
     try:
         doc = validate_install_document(document, for_apply=True)
         tls = doc["deployment"]["tls"]
@@ -121,6 +194,11 @@ def inspect_native_tls_pair_under_root(
                 certfile="/proc/self/fd/" + str(leaf_fds[0]),
                 keyfile="/proc/self/fd/" + str(leaf_fds[1]),
             )
+            if fixture_ca_pem is not None:
+                _check_fixture_tls_identity(
+                    context, fixture_ca_pem=fixture_ca_pem,
+                    hostname=doc["deployment"]["listen"]["hostname"],
+                )
             for (name, snapshot), fd in zip(leaf_snapshots, leaf_fds):
                 if (_identity(os.fstat(fd)) != snapshot
                         or _identity(os.stat(name, dir_fd=current,
@@ -141,6 +219,8 @@ def inspect_native_tls_pair_under_root(
         "schema_version": 1,
         "status": "PINNED_NATIVE_TLS_PAIR_FIXTURE_ONLY",
         "openssl_matching_pair_verified": True,
+        "fixture_ca_san_expiry_handshake_verified": fixture_ca_pem is not None,
+        "fixture_ca_is_installed_trust_anchor": False,
         "certificate_chain_verified": False,
         "certificate_hostname_verified": False,
         "certificate_expiry_verified": False,
