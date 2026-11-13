@@ -71,7 +71,8 @@ def test_exact_digest_mismatch_remains_failure():
     value = sample()
     value.update(status="FAIL", code="CANDIDATE_DIGEST_MISMATCH",
                  observed_artifact_sha256="c" * 64,
-                 artifact_digest_matched=False)
+                 artifact_digest_matched=False,
+                 native_probe_code="NATIVE_OBSERVATION_NOT_EXECUTED")
     code, result = run(json.dumps(value).encode())
     assert code == 1
     assert result["status"] == "FAIL"
