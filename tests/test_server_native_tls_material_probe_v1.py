@@ -33,7 +33,7 @@ def fixture(tmp_path):
         os.close(fd)
 
 
-def generate(tls, name):
+def generate(tls, name, *, dns_san=False):
     if OPENSSL is None:
         pytest.skip("OpenSSL not present")
     cert = tls / (name + ".crt")
@@ -42,7 +42,8 @@ def generate(tls, name):
         OPENSSL, "req", "-x509", "-newkey", "rsa:2048", "-nodes",
         "-days", "1", "-keyout", str(key), "-out", str(cert),
         "-subj", "/CN=cache.example.invalid",
-    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    ] + (["-addext", "subjectAltName=DNS:cache.example.invalid"]
+         if dns_san else []), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
        timeout=40, check=False)
     assert result.returncode == 0
     cert.chmod(0o644)
@@ -133,3 +134,139 @@ def test_invalid_owner_uid_refused(fixture, invalid):
         inspect_native_tls_pair_under_root(
             fd, owner_uid=invalid, document=doc,
         )
+
+
+
+def inspect_fixture_identity(fixture, ca_pem):
+    fd, _, _, doc = fixture
+    return inspect_native_tls_pair_under_root(
+        fd, owner_uid=os.geteuid(), document=doc,
+        fixture_ca_pem=ca_pem,
+    )
+
+
+def test_real_in_memory_tls_ca_san_and_validity_match_without_network(fixture):
+    _, _, tls, _ = fixture
+    cert, _ = generate(tls, "test", dns_san=True)
+    result = inspect_fixture_identity(fixture, cert.read_bytes())
+    assert result["fixture_ca_san_expiry_handshake_verified"] is True
+    assert result["fixture_ca_is_installed_trust_anchor"] is False
+    assert result["certificate_chain_verified"] is False
+    assert result["certificate_hostname_verified"] is False
+    assert result["certificate_expiry_verified"] is False
+    assert result["authorizes_nginx_reload"] is False
+    assert result["authorizes_firewall_change"] is False
+    assert inspect(fixture)["fixture_ca_san_expiry_handshake_verified"] is False
+
+
+def test_real_tls_handshake_refuses_wrong_hostname(fixture):
+    _, _, tls, doc = fixture
+    cert, _ = generate(tls, "test", dns_san=True)
+    doc["deployment"]["listen"]["hostname"] = "wrong.example.invalid"
+    with pytest.raises(
+        NativeTLSMaterialProbeError,
+        match="^TLS_MATERIAL_FIXTURE_IDENTITY_REJECTED$",
+    ):
+        inspect_fixture_identity(fixture, cert.read_bytes())
+
+
+def test_real_tls_handshake_refuses_untrusted_fixture_issuer(fixture):
+    _, _, tls, _ = fixture
+    generate(tls, "test", dns_san=True)
+    unrelated_cert, _ = generate(tls, "unrelated", dns_san=True)
+    with pytest.raises(
+        NativeTLSMaterialProbeError,
+        match="^TLS_MATERIAL_FIXTURE_IDENTITY_REJECTED$",
+    ):
+        inspect_fixture_identity(fixture, unrelated_cert.read_bytes())
+
+
+def test_common_name_alone_is_not_a_valid_tls_identity(fixture):
+    _, _, tls, _ = fixture
+    cert, _ = generate(tls, "test")
+    with pytest.raises(
+        NativeTLSMaterialProbeError,
+        match="^TLS_MATERIAL_FIXTURE_IDENTITY_REJECTED$",
+    ):
+        inspect_fixture_identity(fixture, cert.read_bytes())
+
+
+@pytest.mark.parametrize("bad_ca", [
+    "", "-----BEGIN CERTIFICATE-----", b"", b"invalid-pem", b"x" * 65537,
+    True, 1, [],
+])
+def test_fixture_ca_input_is_bounded_and_strictly_typed_before_host_access(
+    fixture, bad_ca, monkeypatch,
+):
+    from repocache import server_native_tls_material_probe_v1 as tls_probe
+    monkeypatch.setattr(
+        tls_probe, "_directory",
+        lambda *_: pytest.fail("bad CA reached a privileged FD"),
+    )
+    with pytest.raises(
+        NativeTLSMaterialProbeError, match="^TLS_MATERIAL_FIXTURE_CA_INVALID$"
+    ):
+        inspect_fixture_identity(fixture, bad_ca)
+
+
+def test_actual_expired_signed_leaf_rejected_by_openssl(fixture, tmp_path):
+    if OPENSSL is None:
+        pytest.skip("OpenSSL not present")
+    _, _, tls, _ = fixture
+    ca = tmp_path / "fixture-ca"
+    ca.mkdir()
+    (ca / "newcerts").mkdir()
+    (ca / "index.txt").write_text("", encoding="ascii")
+    (ca / "serial").write_text("1000\n", encoding="ascii")
+    config = ca / "ca.cnf"
+    config.write_text(
+        "[ ca ]\n"
+        "default_ca = CA_default\n"
+        "[ CA_default ]\n"
+        "database = index.txt\n"
+        "serial = serial\n"
+        "new_certs_dir = newcerts\n"
+        "private_key = ca.key\n"
+        "certificate = ca.crt\n"
+        "default_md = sha256\n"
+        "policy = policy_any\n"
+        "x509_extensions = usr_cert\n"
+        "default_days = 1\n"
+        "[ policy_any ]\n"
+        "commonName = supplied\n"
+        "[ usr_cert ]\n"
+        "basicConstraints = critical,CA:FALSE\n"
+        "subjectAltName = DNS:cache.example.invalid\n",
+        encoding="ascii",
+    )
+
+    def run(*args):
+        subprocess.run(
+            [OPENSSL, *map(str, args)], cwd=ca, check=True, timeout=40,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+
+    run(
+        "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+        "-subj", "/CN=Disposable CI Fixture CA",
+        "-keyout", "ca.key", "-out", "ca.crt",
+    )
+    run(
+        "req", "-new", "-newkey", "rsa:2048", "-nodes",
+        "-subj", "/CN=cache.example.invalid",
+        "-keyout", tls / "test.key", "-out", "leaf.csr",
+    )
+    run(
+        "ca", "-batch", "-config", "ca.cnf",
+        "-startdate", "20000101000000Z", "-enddate", "20000102000000Z",
+        "-in", "leaf.csr", "-out", tls / "test.crt",
+    )
+    (tls / "test.key").chmod(0o600)
+    (tls / "test.crt").chmod(0o644)
+    # A structurally valid cert/key can already be expired.
+    assert inspect(fixture)["openssl_matching_pair_verified"] is True
+    with pytest.raises(
+        NativeTLSMaterialProbeError,
+        match="^TLS_MATERIAL_FIXTURE_IDENTITY_REJECTED$",
+    ):
+        inspect_fixture_identity(fixture, (ca / "ca.crt").read_bytes())
