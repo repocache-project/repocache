@@ -37,3 +37,29 @@ or the production clock. The public production fields
 `certificate_expiry_verified` deliberately remain false, even when
 `fixture_ca_san_expiry_handshake_verified` is true. The original #30
 native deployment and #19 VM acceptance criteria remain NOT VERIFIED.
+
+## Exact DNS SAN, not wildcard hostname coverage (Stage A, #30)
+
+A successful OpenSSL `check_hostname` handshake normally accepts a
+wildcard DNS SAN such as `*.example.invalid` for a matching host.
+The narrower REPOCACHE **fixture identity** contract requires an actual
+DNS-type Subject Alternative Name **equal to the canonical validated
+listener hostname**, compared case-insensitively. After the verified
+in-memory TLS handshake, the checker inspects the authenticated peer
+certificate's SAN tuple and refuses wildcard-only or CN-only identities
+with its existing redacted error code. It never disables OpenSSL chain,
+hostname or validity checks.
+
+Real distro OpenSSL regression fixtures cover exact and upper-case DNS SANs,
+wildcards that OpenSSL might otherwise accept, an expired signed certificate
+and a correctly signed **not-yet-valid** certificate. A structurally valid
+key/certificate pair cannot be treated as valid for a listener when
+certificate validity has not begun.
+
+This remains an opt-in, caller-chosen disposable CA test, not a new
+installed-host certificate policy: an administrator may have legitimate
+reasons to deploy a wildcard using a separately authorised real TLS trust
+contract. No public CLI/production trust selector, OS CA installation,
+firewall change or NGINX reload is enabled. Real operator issuer approval,
+installed host clock/trust, systemd/SELinux and VM acceptance stay
+NOT VERIFIED under #30/#19.

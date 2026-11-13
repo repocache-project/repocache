@@ -115,6 +115,21 @@ def _check_fixture_tls_identity(
                     incoming.write(chunk)
                     progressed = True
             if client_done and server_done:
+                # OpenSSL's host matcher can accept RFC-permitted wildcard
+                # DNS SANs. This *fixture* contract promises an exact
+                # validated listener DNS name, not merely wildcard coverage.
+                peer = client.getpeercert()
+                if type(peer) is not dict:
+                    raise ValueError("fixture peer identity unavailable")
+                names = peer.get("subjectAltName")
+                if (type(names) is not tuple or not any(
+                    type(entry) is tuple and len(entry) == 2
+                    and entry[0] == "DNS"
+                    and type(entry[1]) is str
+                    and entry[1].lower() == hostname.lower()
+                    for entry in names
+                )):
+                    raise ValueError("exact fixture DNS SAN mismatch")
                 return
             if not progressed:
                 break
