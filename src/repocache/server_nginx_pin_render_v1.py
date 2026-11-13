@@ -30,6 +30,7 @@ def render_pinned_upstream_fragments(
     candidate_pins_by_host: dict[str, list[str]],
     ca_bundle_path: str,
     native_min_free_supported: bool = False,
+    cache_bypass_for_recovery: bool = False,
 ) -> dict[str, Any]:
     """Build minimal stock-NGINX HTTP/server fragments without I/O.
 
@@ -38,6 +39,8 @@ def render_pinned_upstream_fragments(
     """
     if type(native_min_free_supported) is not bool:
         raise PinnedNginxError("native min_free capability: invalid")
+    if type(cache_bypass_for_recovery) is not bool:
+        raise PinnedNginxError("cache bypass recovery: invalid")
     if (type(repository_id) is not str or len(repository_id) > 48
             or ID.fullmatch(repository_id) is None):
         raise PinnedNginxError("repository_id: invalid")
@@ -129,7 +132,7 @@ def render_pinned_upstream_fragments(
     location = [
         f"location ^~ {route} {{",
         "    limit_except GET HEAD { deny all; }",
-        f"    proxy_cache {cache_zone};",
+        f"    proxy_cache {'off' if cache_bypass_for_recovery else cache_zone};",
         "    proxy_cache_methods GET HEAD;",
         "    proxy_cache_lock on;",
         "    proxy_buffering on;",
@@ -170,6 +173,7 @@ def render_pinned_upstream_fragments(
         "server_location_fragment": "\n".join(location) + "\n",
         "pin_count": len(addresses),
         "native_min_free_candidate_emitted": native_min_free_supported,
+        "cache_bypass_recovery_candidate_emitted": cache_bypass_for_recovery,
         "native_min_free_supported_verified": False,
         "requires_nginx_t_and_activation": True,
         "trusted_state_provenance_verified": False,

@@ -31,6 +31,7 @@ def render_repository_nginx_bundle_candidate(
     candidate_pins_by_repository: dict[str, dict[str, list[str]]],
     ca_bundle_path: str,
     native_min_free_supported: bool = False,
+    cache_bypass_repository_ids: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Compose only desired-active, fully identified v1 repository fragments.
 
@@ -75,6 +76,15 @@ def render_repository_nginx_bundle_candidate(
             or len(candidate_pins_by_repository) != len(active)
             or set(candidate_pins_by_repository) != set(active)):
         raise NginxRepositoryBundleError("NGINX_BUNDLE_PIN_SET_INCOMPLETE")
+    # This pure candidate requests per-repository *read bypass*, not installed
+    # policy or automatic pressure monitoring. Refuse every unknown/disabled
+    # ID; a partial or mistyped request must not silently change routes.
+    if (type(cache_bypass_repository_ids) is not tuple
+            or len(cache_bypass_repository_ids) > len(active)
+            or any(type(item) is not str for item in cache_bypass_repository_ids)
+            or len(set(cache_bypass_repository_ids)) != len(cache_bypass_repository_ids)
+            or not set(cache_bypass_repository_ids).issubset(active)):
+        raise NginxRepositoryBundleError("NGINX_BUNDLE_BYPASS_IDS_INVALID")
 
     upstreams: list[str] = []
     locations: list[str] = []
@@ -91,6 +101,9 @@ def render_repository_nginx_bundle_candidate(
                 candidate_pins_by_host=candidate_pins_by_repository[repository_id],
                 ca_bundle_path=ca_bundle_path,
                 native_min_free_supported=native_min_free_supported,
+                cache_bypass_for_recovery=(
+                    repository_id in cache_bypass_repository_ids
+                ),
             )
         except (ValueError, TypeError):
             raise NginxRepositoryBundleError("NGINX_BUNDLE_UNSAFE_CANDIDATE") from None
@@ -113,6 +126,8 @@ def render_repository_nginx_bundle_candidate(
         "server_location_fragment": server_fragment,
         "pin_count": pin_count,
         "native_min_free_candidate_emitted": native_min_free_supported and bool(active),
+        "cache_bypass_recovery_candidate_repository_ids": sorted(cache_bypass_repository_ids),
+        "cache_bypass_activation_verified": False,
         "native_min_free_supported_verified": False,
         "requires_nginx_t_and_activation": True,
         "trusted_state_provenance_verified": False,
