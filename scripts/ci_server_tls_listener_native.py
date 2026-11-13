@@ -42,10 +42,18 @@ def main():
         d["deployment"]["tls"]["private_key_file"]=str(key)
         result=render_native_tls_listener_candidate(d)
         assert not result["authorizes_nginx_activation"]
+        # Stock distro NGINX default temp paths are root-owned. Pin all
+        # private scratch paths to the disposable rootless namespace.
+        for dirname in ("client_body", "proxy", "fastcgi", "uwsgi", "scgi"):
+            (root / dirname).mkdir(mode=0o700)
+        temp_paths = "".join(
+            f"{dirname}_temp_path {root / dirname};\n"
+            for dirname in ("client_body", "proxy", "fastcgi", "uwsgi", "scgi")
+        )
         config=(f"pid {root/'nginx.pid'};\n"
                 f"error_log {root/'error.log'} notice;\n"
                 "worker_processes 1;\nevents { worker_connections 32; }\n"
-                "http { server {\n" + result["server_context_fragment"]
+                "http {\n" + temp_paths + "server {\n" + result["server_context_fragment"]
                 + 'location = /__test { return 200 "repocache-https"; }\n'
                 + "}\n}\n")
         conf=root/"nginx.conf"
