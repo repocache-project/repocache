@@ -77,6 +77,7 @@ def test_empty_bypass_keeps_legacy_config_identical():
     None, False, True, 1, "", [], ["debian-trixie-main"],
     ("debian-trixie-main", "debian-trixie-main"),
     ("not-an-active-repository",), (1,),
+    ("debian-trixie-main",) * 100_000,
 ])
 def test_invalid_recovery_ids_are_refused_before_candidate_render(bad):
     document, pins = source()
