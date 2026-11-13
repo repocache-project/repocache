@@ -116,8 +116,8 @@ def test_proven_hard_failure_proposes_bypass_despite_missing_other_metrics(
     doc, pins, _, _ = fixture()
     result = proposed(
         doc, pins, free_bytes=None,
-        measurements_complete=False, free_inodes=None,
-        disk_writable=None, **observed,
+        **{"measurements_complete": False, "free_inodes": None,
+           "disk_writable": None, **observed},
     )
     assert result["alarm_candidate"]["reason_code"] == reason
     assert not result["alarm_candidate"]["measurements_complete"]
