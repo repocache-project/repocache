@@ -246,7 +246,12 @@ def propose_automatic_repository_id(
 
     # Hash the canonical identity rather than an input-supplied display name.
     # Tombstones prevent reuse, even when the same upstream is added later.
-    for nonce in range(256):
+    # A fixed 256-attempt cap could falsely exhaust a valid all-time ledger
+    # with 256 retired candidates. Try at most N+1 distinct deterministic
+    # nonces for N reserved IDs: bounded by the validated 10,000-entry ledger
+    # and enough to find a free candidate absent a cryptographic collision.
+    # This remains a CALLER SNAPSHOT ONLY, not an authoritative reservation.
+    for nonce in range(len(reservations) + 1):
         digest = hashlib.sha256(
             (canonical + "#" + str(nonce)).encode("utf-8")
         ).hexdigest()
