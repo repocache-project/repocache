@@ -437,14 +437,33 @@ def main() -> None:
             recovered_second = request(probe_url, client_tls)
             with lock:
                 recovered_origin_calls = counts[READ_ONLY_APT_PATH]
-            require(
+            recovery_valid = (
                 recovered_first[:3] == (200, READ_ONLY_APT_BYTES, "MISS")
                 and recovered_second[:3] == (200, READ_ONLY_APT_BYTES, "HIT")
                 and recovered_origin_calls == before_denial + 3
                 and os.access(apt_cache, os.W_OK)
                 and config.read_text(encoding="utf-8") == normal_config
-                and process.poll() is None,
-                "reversible cache-off EACCES recovery restores APT MISS/HIT "
+                and process.poll() is None
+            )
+            if not recovery_valid:
+                # Only static HTTP status, cache state and a bounded fixture
+                # request count are logged. Never print payload, key, headers,
+                # request URL or arbitrary NGINX logs.
+                raise AssertionError(
+                    "cache recovery: "
+                    f"first_status={recovered_first[0]} "
+                    f"first_cache={recovered_first[2]!r} "
+                    f"first_fixture={recovered_first[1] == READ_ONLY_APT_BYTES} "
+                    f"second_status={recovered_second[0]} "
+                    f"second_cache={recovered_second[2]!r} "
+                    f"second_fixture={recovered_second[1] == READ_ONLY_APT_BYTES} "
+                    f"origin_delta={recovered_origin_calls - before_denial} "
+                    f"permissions_restored={os.access(apt_cache, os.W_OK)} "
+                    f"config_restored={config.read_text(encoding='utf-8') == normal_config} "
+                    f"nginx_alive={process.poll() is None}"
+                )
+            require(
+                True, "reversible cache-off EACCES recovery restores APT MISS/HIT "
                 "without process restart, while preserving original config",
             )
             require(
