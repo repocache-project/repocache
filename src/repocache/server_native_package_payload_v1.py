@@ -97,6 +97,13 @@ def _artifacts(directory: Path, extension: str) -> tuple[Path, ...] | None:
         if not directory.is_dir() or directory.is_symlink():
             return None
         root = os.stat(directory)
+        # The extraction/download root itself must be private and owned by
+        # the executing user. Checking only the children left a writable
+        # root able to acquire injected new payloads during inventory.
+        if (not stat.S_ISDIR(root.st_mode)
+                or root.st_uid != os.geteuid()
+                or root.st_mode & 0o022):
+            return None
         found: list[Path] = []
         total = 0
         for item in directory.rglob("*"):
