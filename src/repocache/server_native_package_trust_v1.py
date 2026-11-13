@@ -103,7 +103,8 @@ def _trusted_key(path: str) -> bool:
             if (not stat.S_ISREG(info.st_mode)
                     or type(info.st_size) is not int
                     or not 1 <= info.st_size <= 1024 * 1024
-                    or getattr(info, "st_nlink", None) != 1):
+                    or type(getattr(info, "st_nlink", None)) is not int
+                    or info.st_nlink != 1):
                 return False
         elif not stat.S_ISDIR(info.st_mode):
             return False
