@@ -52,3 +52,50 @@ also pass. Failed native repository signatures must remain FAIL/NOT VERIFIED;
 do not override package-manager trust policy to make CI green.
 
 Regressions: \`python3 -m pytest -q tests/test_ci_v06_journaled_native_server_install.py\`.
+
+## Same-image rootless HTTPS cache continuation (#19, Stage A)
+
+The two-distro workflow now chains a separate generated HTTPS route/cache
+smoke **after** the existing fresh native NGINX package transaction has
+completed. The root-owned, bounded journaled-install JSON report is checked
+before the continuation. The test verifies that the previous disposable
+package transaction, native NGINX syntax, held state lock, durable pending
+marker and repeated-install refusal were observed. An incomplete report,
+non-Docker environment, booted systemd PID 1, unsupported userspace or
+untrusted native executable fails closed.
+
+Only in the disposable GitHub Actions container, the continuation then
+drops supplementary groups, GID and UID to 65534, checks the new effective
+UID and execs the existing unprivileged generated-route smoke with a fixed
+Python entrypoint and sanitized environment. It does not offer an installed
+entrypoint, sudo wrapper, operator-controlled command, privilege broker,
+package operation or service activation. OpenSSL is installed as a **CI
+fixture prerequisite**, distinct from the native journaled NGINX operation.
+
+The downstream smoke runs stock NGINX with independently generated candidate
+routing and temporary self-signed TLS fixtures; its APT/DNF-shaped metadata
+and package bytes show an actual cache MISS then HIT, restricted route and
+HTTP/TLS negative tests, and disposable reload/rollback. Numeric pin
+remapping to loopback is **test-only after public-IP validation**.
+The same fresh distro userspace therefore exercises both the native
+package-install and rootless data-plane tests without changing production
+renderer rules. The source checkout is mounted read-only.
+
+**This is still not a complete server or VM installation proof**:
+the root-owned native package journal intentionally remains pending,
+the unprivileged cache process is *not* the installed systemd service,
+the catalogue is not published, no signed upstream package or owner-signed
+application is installed, and no real SELinux enforcement, TLS ownership,
+authenticated root worker, source fallback, persistent host repair or
+power-loss recovery is proven. Do not call this Stage B PASS or instruct the
+maintainer to install v0.6.0 on a VM based on it.
+
+Evidence owner: [#19](https://github.com/repocache-project/repocache/issues/19).
+Inspect the exact source HEAD of
+`.github/workflows/server-v06-journaled-native-package.yml` and its
+Debian 13 + AlmaLinux 10 job logs. Both jobs must print the fixed same-image
+PASS marker and complete successfully. Scoped unit regressions:
+`PYTHONPATH=src python3 -m pytest -q
+tests/test_ci_v06_journaled_cache_continuation.py
+tests/test_ci_v06_journaled_native_server_install.py`.
+The final signed, booted-VM campaign remains one consolidated release gate.
