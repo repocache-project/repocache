@@ -173,6 +173,13 @@ def inspect_native_tls_pair_under_root(
         _deny("DOCUMENT_INVALID")
 
     try:
+        # This API is strictly a detached-fixture tool. A caller-controlled
+        # descriptor must never silently turn it into a reader of live
+        # operator-owned TLS private keys from the real host root.
+        native = os.stat("/", follow_symlinks=False)
+        supplied = os.fstat(root_fd)
+        if (native.st_dev, native.st_ino) == (supplied.st_dev, supplied.st_ino):
+            _deny("LIVE_ROOT_FORBIDDEN")
         with ExitStack() as stack:
             root = _directory(root_fd, owner_uid)
             current = root_fd
