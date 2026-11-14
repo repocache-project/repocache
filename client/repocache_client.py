@@ -914,8 +914,9 @@ def preview_native_client_catalog_route(
                 "/__repocache/repos/" + repository_id + "/"
             ) is None):
         raise ClientError("Native catalog repository ID is invalid")
-    if type(upstream) is not str:
-        raise ClientError("Native catalog upstream is invalid")
+    if (type(server) is not str or len(server) > 2048
+            or type(upstream) is not str or len(upstream) > 4096):
+        raise ClientError("Native catalog origin or upstream is invalid")
     try:
         origin = _server(server)
         if (not upstream.startswith("https://")
@@ -937,7 +938,9 @@ def preview_native_client_catalog_route(
         if (type(mapping) is not dict
                 or set(mapping) != {"upstream", "cache"}
                 or type(mapping["upstream"]) is not str
-                or type(mapping["cache"]) is not str):
+                or type(mapping["cache"]) is not str
+                or len(mapping["upstream"]) > 4096
+                or len(mapping["cache"]) > 4096):
             raise ClientError("Native catalog mapping is invalid")
         source, cache = mapping["upstream"], mapping["cache"]
         try:
