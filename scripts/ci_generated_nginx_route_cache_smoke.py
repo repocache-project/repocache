@@ -7,6 +7,8 @@ This does NOT permit loopback pins in production or grant host activation.
 from __future__ import annotations
 
 import collections
+import copy
+import hashlib
 from contextlib import contextmanager
 import json
 import os
@@ -698,6 +700,154 @@ def main() -> None:
                 and config.read_bytes() == original_conf
                 and process.poll() is None,
                 "rollback restores exact config and existing TLS/cache HIT without refetch",
+            )
+
+            # Normal repository removal MUST withdraw its *live* NGINX
+            # route without deleting retained cache objects or interrupting
+            # independent APT access. This is a disposable, nonroot fixture:
+            # a production state/catalog transaction is NOT implemented here.
+            dnf_url = base + "almalinux-baseos/repodata/repomd.xml"
+            apt_url = base + "debian-trixie-main/dists/trixie/InRelease"
+            retained_root = root / "cache" / "almalinux-baseos"
+            def retained_snapshot():
+                return {
+                    str(item.relative_to(retained_root)): (
+                        hashlib.sha256(item.read_bytes()).hexdigest(),
+                        item.stat().st_ino,
+                    )
+                    for item in retained_root.rglob("*") if item.is_file()
+                }
+            retained_before = retained_snapshot()
+            require(
+                bool(retained_before)
+                and request(dnf_url, client_tls)[:3] ==
+                    (200, FIXTURES["/dnf/repodata/repomd.xml"][1], "HIT"),
+                "native DNF cache holds real on-disk objects before removal",
+            )
+            removed = copy.deepcopy(document)
+            removed["repositories"] = [
+                repo for repo in removed["repositories"]
+                if repo["id"] != "almalinux-baseos"
+            ]
+            surviving_pins = {"debian-trixie-main": {HOST: ["8.8.8.8"]}}
+            withdrawal = render_repository_nginx_bundle_candidate(
+                removed, expected_state_generation=0,
+                candidate_pins_by_repository=surviving_pins,
+                ca_bundle_path=str(origin_cert),
+            )
+            require(
+                withdrawal["proposed_repository_ids"] == ["debian-trixie-main"]
+                and not withdrawal["authorizes_nginx_activation"]
+                and not withdrawal["authorizes_catalog_publication"]
+                and withdrawal["http_upstream_fragment"].count(
+                    "proxy_cache_path "
+                ) == 1,
+                "normal removal candidate omits exactly the DNF cache zone",
+            )
+            withdrawn_upstream = withdrawal["http_upstream_fragment"].replace(
+                "server 8.8.8.8:443;",
+                f"server 127.0.0.1:{origin_port};",
+            )
+            withdrawn_locations = withdrawal["server_location_fragment"].replace(
+                "    proxy_cache_valid 200 60s;",
+                "    proxy_cache_valid 200 60s;\n"
+                "    add_header X-RepoCache-Smoke $upstream_cache_status always;",
+            )
+            normal_text = original_conf.decode("utf-8")
+            require(
+                normal_text.count(upstream) == 1
+                and normal_text.count(locations) == 1,
+                "removal fixture identifies exact original generated fragments",
+            )
+            withdrawn_text = normal_text.replace(
+                upstream, withdrawn_upstream, 1,
+            ).replace(locations, withdrawn_locations, 1)
+            require(
+                withdrawn_text != normal_text
+                and "repocache_cache_almalinux_baseos" not in withdrawn_text
+                and "location ^~ /__repocache/repos/almalinux-baseos/" not
+                    in withdrawn_text,
+                "removed DNF repository has no remaining generated exposure",
+            )
+            config.write_text(withdrawn_text, encoding="utf-8")
+            run(nginx, "-t", "-e", str(root / "remove-syntax.log"),
+                "-p", str(root), "-c", str(config))
+
+            # The separately generated public-pin -T file verifies the
+            # read-only active-only discovery projection. Neither this
+            # temporary -T text nor the live fixture publishes a catalog.
+            removed_catalog_conf = root / "removed-catalog-candidate.conf"
+            removed_catalog_conf.write_text(
+                withdrawn_text.replace(
+                    f"server 127.0.0.1:{origin_port};",
+                    "server 8.8.8.8:443;",
+                ).replace(
+                    "    add_header X-RepoCache-Smoke $upstream_cache_status always;\n",
+                    "",
+                ), encoding="utf-8",
+            )
+            removed_dump = subprocess.run(
+                [nginx, "-T", "-e", str(root / "removed-catalog-syntax.log"),
+                 "-p", str(root), "-c", str(removed_catalog_conf)],
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+            require(
+                removed_dump.returncode == 0,
+                "stock nginx -T validates reduced candidate before live reload",
+            )
+            projected = preview_derived_catalog_from_nginx_dump(
+                removed, candidate_pins_by_repository=surviving_pins,
+                ca_bundle_path=str(origin_cert),
+                nginx_dump_text=removed_dump.stdout,
+                nginx_t_exit_code=removed_dump.returncode,
+            )
+            require(
+                len(projected["candidate_catalog"]["repositories"]) == 1
+                and projected["desired_active_repository_ids"]
+                    == ["debian-trixie-main"]
+                and projected["authorizes_catalog_publication"] is False
+                and projected["actual_active_exposure_verified"] is False,
+                "derived catalog candidate withdraws removed DNF entry",
+            )
+            removal_workers = nginx_master_children(process.pid)
+            run(nginx, "-s", "reload", "-e", str(root / "remove-reload.log"),
+                "-p", str(root), "-c", str(config))
+            await_worker_generation_drained(process, removal_workers)
+            refused = request(dnf_url, client_tls)
+            continued = request(apt_url, client_tls)
+            require(
+                refused[0] == 404
+                and continued[:3] == (
+                    200, FIXTURES["/apt/dists/trixie/InRelease"][1], "HIT",
+                ) and retained_snapshot() == retained_before
+                and process.poll() is None,
+                "real NGINX route removal returns 404; APT stays HIT and "
+                "all DNF cache bytes/inodes survive",
+            )
+
+            # Restore the exact original configuration through another
+            # tested reload. Retained on-disk cache bytes are not proof
+            # that NGINX will immediately reload its former in-memory keys.
+            config.write_bytes(original_conf)
+            run(nginx, "-t", "-e", str(root / "remove-restore-syntax.log"),
+                "-p", str(root), "-c", str(config))
+            removed_workers = nginx_master_children(process.pid)
+            run(nginx, "-s", "reload", "-e", str(root / "remove-restore.log"),
+                "-p", str(root), "-c", str(config))
+            await_worker_generation_drained(process, removed_workers)
+            readded_first = request(dnf_url, client_tls)
+            readded_second = request(dnf_url, client_tls)
+            require(
+                readded_first[:2] == (
+                    200, FIXTURES["/dnf/repodata/repomd.xml"][1],
+                ) and readded_second[:3] == (
+                    200, FIXTURES["/dnf/repodata/repomd.xml"][1], "HIT",
+                ) and request(apt_url, client_tls)[:3] == (
+                    200, FIXTURES["/apt/dists/trixie/InRelease"][1], "HIT",
+                ) and config.read_bytes() == original_conf
+                and process.poll() is None,
+                "re-add restores verified DNF bytes/HIT and unchanged APT "
+                "availability under the exact prior configuration",
             )
         finally:
             process.terminate()
