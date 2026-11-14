@@ -50,6 +50,11 @@ def render_native_tls_listener_candidate(document: dict[str, Any]
             f"ssl_certificate_key {key};\n"
             "ssl_protocols TLSv1.2 TLSv1.3;\n"
             "ssl_session_tickets off;\n"
+            # A valid HTTP Host cannot rescue absent/foreign TLS SNI.
+            # Strict DNS name matching refuses domain-fronting requests
+            # before any managed cache route is evaluated.
+            f'if ($ssl_server_name !~* "^{re.escape(hostname)}$") '
+            "{ return 421; }\n"
             "server_tokens off;\n"
         )
         if len(fragment.encode("ascii")) > _MAX_BYTES:
