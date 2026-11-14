@@ -45,6 +45,11 @@ def _config(scratch: Path, *, min_free: bool) -> bytes:
         f"error_log {scratch}/error.log crit;\n"
         "events { worker_connections 16; }\n"
         "http {\n"
+        "access_log off;\n"
+        f"client_body_temp_path {scratch}/client_temp;\n"
+        f"fastcgi_temp_path {scratch}/fastcgi_temp;\n"
+        f"uwsgi_temp_path {scratch}/uwsgi_temp;\n"
+        f"scgi_temp_path {scratch}/scgi_temp;\n"
         f"proxy_temp_path {scratch}/temp;\n"
         f"proxy_cache_path {cache} levels=1:2 keys_zone=probe_zone:1m "
         f"inactive=60s max_size=4m{extra} use_temp_path=off;\n"
@@ -150,7 +155,8 @@ def probe_disposable_native_min_free() -> dict[str, Any]:
             scratch = Path(directory)
             if _SAFE_TMP.fullmatch(str(scratch)) is None:
                 _deny("SCRATCH_PATH_INVALID")
-            for part in ("cache", "temp"):
+            for part in ("cache", "temp", "client_temp", "fastcgi_temp",
+                         "uwsgi_temp", "scgi_temp"):
                 (scratch / part).mkdir(mode=0o700)
             config = scratch / "nginx.conf"
             config.write_bytes(_config(scratch, min_free=False))

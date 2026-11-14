@@ -20,6 +20,10 @@ class DisposableMinFreeProbeTests(unittest.TestCase):
         self.assertEqual(b, a.replace(b"max_size=4m use_temp_path",
                                       b"max_size=4m min_free=1m use_temp_path"))
         self.assertIn(b"proxy_cache_path ", b)
+        for directive in (b"access_log off;", b"client_body_temp_path",
+                          b"fastcgi_temp_path", b"uwsgi_temp_path",
+                          b"scgi_temp_path", b"proxy_temp_path"):
+            self.assertIn(directive, b)
         self.assertNotIn(b"include ", b)
 
     def test_unsafe_paths_and_untyped_flag_rejected(self):
