@@ -16,11 +16,28 @@ class NativeVMReadOnlyError(ValueError):
     """Fixed error codes only: no host text, paths or private data."""
 
 
+_READ_LIMITS = {
+    "/etc/os-release": 8192,
+    "/proc/1/comm": 64,
+    "/sys/fs/selinux/enforce": 32,
+}
+
+
 def _read_fixed(path: str, size: int) -> bytes:
-    """Read bounded fixed OS/proc/sysfs paths; never accept a caller path."""
+    """Read only the fixed booted-VM observations, with kernel leaf pinning.
+
+    /etc/os-release is a permitted distribution symlink on supported OSes;
+    procfs/sysfs leaves must never follow an unexpected symlink.
+    """
+    if (type(path) is not str or type(size) is not int
+            or _READ_LIMITS.get(path) != size):
+        raise NativeVMReadOnlyError("FIXED_READ_UNSAFE")
+    flags = (os.O_RDONLY | os.O_NONBLOCK |
+             getattr(os, "O_CLOEXEC", 0))
+    if path != "/etc/os-release":
+        flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK |
-                     getattr(os, "O_CLOEXEC", 0))
+        fd = os.open(path, flags)
     except OSError:
         raise NativeVMReadOnlyError("FIXED_READ_UNAVAILABLE") from None
     try:
