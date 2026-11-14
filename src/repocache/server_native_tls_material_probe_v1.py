@@ -219,6 +219,10 @@ def inspect_native_tls_pair_under_root(
             context.load_cert_chain(
                 certfile="/proc/self/fd/" + str(leaf_fds[0]),
                 keyfile="/proc/self/fd/" + str(leaf_fds[1]),
+                # Without an explicit password, OpenSSL can prompt on the
+                # native terminal for an encrypted operator key. A fixture
+                # probe must never block, ask for secrets or guess a PIN.
+                password=b"",
             )
             if fixture_ca_pem is not None:
                 _check_fixture_tls_identity(
