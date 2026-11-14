@@ -532,7 +532,7 @@ def test_publish_readback_requires_immutable_same_assets_after_one_write(monkeyp
         release.publish("v0.5.0", 100, publication.fingerprint(release, record))
     assert caught.value.code == "POST_PUBLISH_UNVERIFIED"
     assert calls == [["gh", "release", "edit", "v0.5.0", "--repo",
-                      "teixemf/repocache", "--draft=false"]]
+                      "repocache-project/repocache", "--draft=false"]]
 
 
 def test_authenticated_ci_record_must_match_local_release_id_and_hashes(monkeypatch):
@@ -1008,3 +1008,134 @@ def test_unrecognized_signer_path_option_never_echoes_path(monkeypatch, tmp_path
     payload = json.loads(capsys.readouterr().out)
     assert rc == 2 and payload["error"]["code"] == "INVALID_ARGUMENT"
     assert marker not in json.dumps(payload)
+
+
+@pytest.mark.parametrize("remote", (
+    "https://github.com/repocache-project/repocache.git",
+    "https://github.com/repocache-project/repocache",
+    "git@github.com:repocache-project/repocache.git",
+))
+def test_workstation_checkout_accepts_only_canonical_origin(monkeypatch, tmp_path, remote):
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts/offline_sign_release.py").write_text("fixture", encoding="utf-8")
+
+    def fake(argv, **_kwargs):
+        if argv == ["git", "rev-parse", "--show-toplevel"]:
+            return str(tmp_path).encode()
+        if argv == ["git", "-C", str(tmp_path), "remote", "get-url", "origin"]:
+            return remote.encode()
+        raise AssertionError("Unexpected subprocess")
+
+    monkeypatch.setattr(release, "command", fake)
+    assert release.root_path() == tmp_path
+
+
+@pytest.mark.parametrize("remote", (
+    "https://github.com/teixemf/repocache.git",
+    "https://github.com/teixemf/repocache",
+    "git@github.com:teixemf/repocache.git",
+    "https://github.com/attacker/repocache.git",
+))
+def test_workstation_checkout_refuses_legacy_or_foreign_origin(monkeypatch, tmp_path, remote):
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts/offline_sign_release.py").write_text("fixture", encoding="utf-8")
+
+    def fake(argv, **_kwargs):
+        if argv == ["git", "rev-parse", "--show-toplevel"]:
+            return str(tmp_path).encode()
+        if argv == ["git", "-C", str(tmp_path), "remote", "get-url", "origin"]:
+            return remote.encode()
+        raise AssertionError("Unexpected subprocess")
+
+    monkeypatch.setattr(release, "command", fake)
+    with pytest.raises(release.OperatorError) as caught:
+        release.root_path()
+    assert caught.value.code == "UNTRUSTED_REPOSITORY"
+
+
+def test_release_operator_uses_canonical_repository_for_all_remote_operations(monkeypatch):
+    from repocache_release import publication
+
+    assert release.REPO == publication.REPOSITORY == "repocache-project/repocache"
+    assert publication.API == "https://api.github.com/repos/repocache-project/repocache"
+    assert release.OWNER == publication.APPROVED_OPERATOR == "teixemf"
+
+    def no_network(*_args, **_kwargs):
+        raise AssertionError("A refused endpoint must not spawn any subprocess")
+
+    monkeypatch.setattr(release, "command", no_network)
+    for endpoint in (
+        "repos/teixemf/repocache/actions/runs/1",
+        "repos/other-owner/repocache/actions/runs/1",
+        "repos/repocache-project/repocache-fake/actions/runs/1",
+    ):
+        with pytest.raises(release.OperatorError) as caught:
+            release.gh_json(endpoint)
+        assert caught.value.code == "INVALID_ENDPOINT"
+
+
+def test_canonical_release_run_requires_individual_authorized_actor(monkeypatch):
+    """Organization repository identity never implies a publisher actor grant."""
+    version = "v0.6.0"
+    commit = "b" * 40
+    called = []
+
+    def remote(actor):
+        def fake(endpoint):
+            called.append(endpoint)
+            assert endpoint.startswith("repos/repocache-project/repocache/")
+            if "/git/ref/tags/" in endpoint:
+                return {"ref": "refs/tags/" + version,
+                        "object": {"type": "commit", "sha": commit}}
+            if "/commits/" in endpoint:
+                return {"sha": commit}
+            if "/compare/" in endpoint:
+                return {"status": "ahead", "base_commit": {"sha": commit}}
+            if "/runs?" in endpoint:
+                return {"total_count": 1, "workflow_runs": [{
+                    "head_sha": commit, "head_branch": version,
+                    "event": "workflow_dispatch", "status": "completed",
+                    "conclusion": "success", "actor": {"login": actor},
+                    "id": 101, "run_attempt": 1,
+                }]}
+            if "/jobs?" in endpoint:
+                return {"total_count": 5, "jobs": [
+                    {"name": str(n), "status": "completed", "conclusion": "success"}
+                    for n in range(5)
+                ]}
+            raise AssertionError("Unexpected GitHub endpoint")
+        return fake
+
+    monkeypatch.setattr(release, "gh_json", remote("teixemf"))
+    assert release.approved_build(version) == (commit, 101, 1)
+    assert len(called) == 5
+    called.clear()
+    for actor in ("repocache-project", "unapproved-actor"):
+        monkeypatch.setattr(release, "gh_json", remote(actor))
+        with pytest.raises(release.OperatorError) as caught:
+            release.approved_build(version)
+        assert caught.value.code == "BUILD_NOT_VERIFIED"
+    assert all(endpoint.startswith("repos/repocache-project/repocache/")
+               for endpoint in called)
+
+
+def test_canonical_release_token_does_not_authorize_organization_actor(monkeypatch):
+    """No GitHub secret or remote write: exercise exact actor authorization."""
+    from repocache_release import publication
+
+    def command_for(actor):
+        def fake(argv, **_kwargs):
+            if argv == ["gh", "auth", "token"]:
+                return b"nonsecret-test-token"
+            if argv == ["gh", "api", "user"]:
+                return json.dumps({"login": actor}).encode("ascii")
+            raise AssertionError("Unexpected command")
+        return fake
+
+    monkeypatch.setattr(release, "command", command_for("teixemf"))
+    assert publication.token(release) == "nonsecret-test-token"
+    for actor in ("repocache-project", "unapproved-actor"):
+        monkeypatch.setattr(release, "command", command_for(actor))
+        with pytest.raises(release.OperatorError) as caught:
+            publication.token(release)
+        assert caught.value.code == "AUTHORIZATION_REQUIRED"

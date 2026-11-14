@@ -406,7 +406,7 @@ def test_gh_json_refuses_excessively_nested_remote_json(monkeypatch):
     payload = b"[" * 12000 + b"0" + b"]" * 12000
     monkeypatch.setattr(release, "command", lambda argv, **kwargs: payload)
     with pytest.raises(release.OperatorError) as caught:
-        release.gh_json("repos/teixemf/repocache/actions/runs/123")
+        release.gh_json("repos/repocache-project/repocache/actions/runs/123")
     assert caught.value.code == "INVALID_RESPONSE"
 
 
@@ -420,14 +420,14 @@ def test_gh_json_maps_decoder_recursion_to_invalid_response(monkeypatch):
 
     monkeypatch.setattr(release.json, "loads", recurse)
     with pytest.raises(release.OperatorError) as caught:
-        release.gh_json("repos/teixemf/repocache/actions/runs/123")
+        release.gh_json("repos/repocache-project/repocache/actions/runs/123")
     assert caught.value.code == "INVALID_RESPONSE"
 
 
 # The release operator runs Git/GitHub/OpenSSL locally. Tests intercept the
 # allowed command before spawn and execute a Python fixture instead: no GitHub
 # token, network, private key, signature, stage or publication is used.
-_COMMAND_FIXTURE = ["gh", "api", "repos/teixemf/repocache/actions/runs/1"]
+_COMMAND_FIXTURE = ["gh", "api", "repos/repocache-project/repocache/actions/runs/1"]
 
 
 def _local_command_fixture(monkeypatch, script):
