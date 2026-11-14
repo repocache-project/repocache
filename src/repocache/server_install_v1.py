@@ -347,12 +347,12 @@ def validate_install_document(document: Any, *, for_apply: bool = False) -> dict
     # Keep schema errors outside the ipaddress conversion's ValueError
     # handler. InstallInputError is itself a ValueError, and swallowing it
     # would collapse unsafe multicast/mapped-address diagnostics.
-    if str(ip) != address:
-        _reject("deployment.listen.bind_address: noncanonical IP")
     if (ip.is_multicast
             or (isinstance(ip, ipaddress.IPv6Address)
                 and ip.ipv4_mapped is not None)):
         _reject("deployment.listen.bind_address: unsafe bind IP")
+    if str(ip) != address:
+        _reject("deployment.listen.bind_address: noncanonical IP")
     _host(listen["hostname"], "deployment.listen.hostname")
     _integer(listen["https_port"], "deployment.listen.https_port", 1, 65535)
 
