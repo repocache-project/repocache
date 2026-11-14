@@ -24,6 +24,7 @@ def test_canonical_default_https_and_operator_key_reference():
     assert x["server_context_fragment"] == (
         "listen 127.0.0.1:443 ssl;\n"
         "server_name cache.example.invalid;\n"
+        "if ($host != cache.example.invalid) { return 421; }\n"
         "ssl_certificate /etc/repocache/tls/example-chain.pem;\n"
         "ssl_certificate_key /etc/repocache/tls/example-key.pem;\n"
         "ssl_protocols TLSv1.2 TLSv1.3;\n"
@@ -92,3 +93,16 @@ def test_does_not_read_secrets_or_modify_files():
     assert "os.open(" not in text
     assert "read_bytes(" not in text
     assert "systemctl" not in text
+
+
+def test_listener_is_statically_bound_to_the_exact_approved_http_host():
+    d = doc()
+    d["deployment"]["listen"]["hostname"] = "mirror.example.invalid"
+    rendered = render_native_tls_listener_candidate(d)
+    lines = rendered["server_context_fragment"].splitlines()
+    assert "server_name mirror.example.invalid;" in lines
+    assert "if ($host != mirror.example.invalid) { return 421; }" in lines
+    assert lines.index("if ($host != mirror.example.invalid) { return 421; }") < (
+        lines.index("ssl_certificate /etc/repocache/tls/example-chain.pem;")
+    )
+    assert rendered["authorizes_nginx_activation"] is False
