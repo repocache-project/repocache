@@ -42,7 +42,7 @@ def test_ipv6_address_bracketed_not_double_quoted():
     d=doc()
     d["deployment"]["listen"]["bind_address"]="::1"
     result=render_native_tls_listener_candidate(d)
-    assert "listen [::1]:443 ssl;" in result["server_context_fragment"]
+    assert "listen [::1]:443 ssl ipv6only=on;" in result["server_context_fragment"]
 
 
 @pytest.mark.parametrize("bad",[
@@ -106,3 +106,16 @@ def test_listener_is_statically_bound_to_the_exact_approved_http_host():
         lines.index("ssl_certificate /etc/repocache/tls/example-chain.pem;")
     )
     assert rendered["authorizes_nginx_activation"] is False
+
+
+def test_ipv6_wildcard_has_explicit_v6_only_socket_and_ipv4_does_not():
+    d = doc()
+    d["deployment"]["listen"]["bind_address"] = "::"
+    output = render_native_tls_listener_candidate(d)
+    assert "listen [::]:443 ssl ipv6only=on;" in output["server_context_fragment"]
+    assert output["authorizes_firewall_change"] is False
+    assert output["authorizes_nginx_activation"] is False
+    d["deployment"]["listen"]["bind_address"] = "0.0.0.0"
+    other = render_native_tls_listener_candidate(d)["server_context_fragment"]
+    assert "listen 0.0.0.0:443 ssl;" in other
+    assert "ipv6only" not in other
