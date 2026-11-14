@@ -34,3 +34,23 @@ source writes #24, and authentic owner-signed candidate #76/#88.
 A green CI job for this diagnostic is **not GO for VM installation**. Do not
 attempt production installation or repocache-client repos sync --apply based
 on this tool alone.
+
+## Actual Linux TCP port conflict observation (Stage A)
+
+The Debian 13 and AlmaLinux 10 read-only preflight CI also creates temporary
+**loopback** TCP listeners inside its disposable network namespace and reads
+the genuine `/proc/net/tcp` and, where the kernel supports it,
+`/proc/net/tcp6` tables. The preflight must report
+`HTTPS_PORT_ALREADY_LISTENING` as a **FAIL** on every occupied port.
+Repeating the observation must not change the listener or NGINX,
+persistent cache, log or protected-state path metadata. A second real
+IPv4 listening socket confirms the report does not depend on a single
+hard-coded fixture port. IPv6 is explicitly **SKIPPED**, not PASS, if
+the disposable namespace lacks working IPv6 loopback.
+
+The sockets are created **only by the test**. The production preflight
+performs no bind, connect or filesystem write, and these container results
+are only momentary kernel-network snapshots. They do not reserve a future
+deployment port, prove real host-root authority or replace final native
+systemd/SELinux, firewall, NGINX ownership and #27 package availability
+checks. The original #26/#19 operational gates remain NOT VERIFIED.
