@@ -110,6 +110,18 @@ def test_v06_candidate_archive_is_complete_deterministic_and_bounded(
                    and m.mtime == 0 and not m.pax_headers
                    for m in archive)
     assert first.stat().st_size < upgrade.MAX_ARCHIVE
+    # Round trip through the real strict extraction/parser boundary, rather
+    # than trusting the builder's own inventory declaration.
+    staging = tmp_path / "verified-stage"
+    staging.mkdir()
+    extracted, policy = upgrade._extract_verified(
+        first.read_bytes(), "0.6.0", staging,
+        {"version": "0.0.0"}, system={"ID": "debian", "VERSION_ID": "13"},
+    )
+    assert policy["version"] == "0.6.0"
+    assert (extracted / "src/repocache/server_install_v1.py").read_bytes() == (
+        source / "src/repocache/server_install_v1.py"
+    ).read_bytes()
 
 
 def test_missing_added_server_module_rejected_before_partial_candidate(
