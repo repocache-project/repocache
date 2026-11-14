@@ -30,7 +30,8 @@ def _deny(code: str) -> None:
 
 def _config(scratch: Path, *, min_free: bool) -> bytes:
     """Fixed NGINX syntax-only configuration, not an install candidate."""
-    if (type(scratch) is not Path or _SAFE_TMP.fullmatch(str(scratch)) is None
+    if (type(scratch) is not type(Path('/tmp'))
+            or _SAFE_TMP.fullmatch(str(scratch)) is None
             or type(min_free) is not bool):
         _deny("ARGUMENT_INVALID")
     cache = scratch / "cache"
