@@ -25,12 +25,14 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-REPO = "teixemf/repocache"
+# v0.6.0 is the first operational release; bind all new signed source and
+# publisher identities to the canonical organization repository.
+REPO = "repocache-project/repocache"
+PUBLISHER_REPO = REPO
 API = "https://api.github.com/repos/" + REPO
 ROOT = Path(__file__).resolve().parents[1]
 KEY = ROOT / "keys/repocache-2026-10.pem"
 FINGERPRINT = "7bbf4b840f762a610da648869564a5b77669f24191d0c5c7af04c14c043dc0fb"
-PREVIOUS = "v0.4.0"
 SUFFIXES = ("", ".sha256", ".wheelhouse.tar.gz", ".wheelhouse.tar.gz.sha256",
             ".manifest.json", ".manifest.json.sig",
             ".provenance.json", ".provenance.json.sig")
@@ -73,9 +75,10 @@ def sha(data: bytes) -> str:
 
 def normal(tag: str, commit: str, release_id: int, run_id: int, attempt: int):
     # This initial gate is intentionally reviewed for one upgrade baseline:
-    # actual public v0.4.0 -> signed v0.5.0. Refuse later versions until a
-    # reviewed PR changes BOTH this trust policy and the public baseline.
-    require(tag == "v0.5.0",
+    # First clean-install-only owner-signed v0.6.0, with exactly the approved
+    # offline eight-asset schema-1 profile. Never adopt an older source, an
+    # unreviewed upgrade baseline or online/source-only dependency profile.
+    require(tag == "v0.6.0",
             "Unreviewed candidate: prior public release baseline must be updated")
     require(COMMIT.fullmatch(commit) is not None
             and type(release_id) is int and release_id > 0
@@ -253,7 +256,7 @@ def authenticate(tag: str, commit: str, run_id: int, attempt: int,
                                   "issued_at", "expires_at"},
             "Malformed signed publisher manifest")
     require(manifest["schema"] == 1 and manifest["key_id"] == "repocache-2026-10"
-            and manifest["repository"] == REPO
+            and manifest["repository"] == PUBLISHER_REPO
             and manifest["channel"] == "stable"
             and manifest["version"] == tag[1:] and manifest["commit"] == commit
             and manifest["archive"] == base
@@ -309,9 +312,9 @@ def authenticate(tag: str, commit: str, run_id: int, attempt: int,
     require(policy.get("schema") == 1 and policy.get("version") == tag[1:]
             and {"id": "debian", "major": "13"} in policy.get("targets", [])
             and {"id": "almalinux", "major": "10"} in policy.get("targets", [])
-            and isinstance(policy.get("compatible_from"), list)
-            and "0.4.0" in policy["compatible_from"],
-            "Signed candidate does not permit prior real public v0.4.0 upgrade")
+            and policy.get("compatible_from") == []
+            and policy.get("downgrade_from") == [],
+            "First operational candidate must refuse prior-version upgrade or downgrade")
     import tomllib
     require(tomllib.loads(data["pyproject.toml"].decode())["project"]["version"] == tag[1:]
             and ('__version__ = "' + tag[1:] + '"').encode()
@@ -326,7 +329,7 @@ def authenticate(tag: str, commit: str, run_id: int, attempt: int,
                 and build.get("workflow_sha256") ==
                 sha(file_at_commit(".github/workflows/release.yml", commit, token)),
                 "Signed source workflow or dependency locks differ from Git tag")
-    print("PASS: genuine owner-signed draft, compatibility, provenance and all 8 asset hashes")
+    print("PASS: owner-signed first-install draft, provenance and eight immutable asset hashes")
     return {"schema": 1, "repository": REPO, "tag": tag, "commit": commit,
             "build_run_id": run_id, "build_run_attempt": attempt, "assets": assets}
 
@@ -432,8 +435,8 @@ def guard(report: dict, token: str) -> None:
     jobs = api("/actions/runs/" + str(id_ci) + "/jobs?per_page=100", token)
     seen = {j["name"]: j for j in jobs.get("jobs", [])}
     required = ("Signed draft publisher and asset identity",
-                "Upgrade signed candidate (debian13)",
-                "Upgrade signed candidate (almalinux10)",
+                "Clean install signed candidate (debian13)",
+                "Clean install signed candidate (almalinux10)",
                 "Freeze final candidate acceptance evidence")
     require(len(seen) == jobs.get("total_count") == len(required) and
             all(seen.get(name, {}).get("status") == "completed"

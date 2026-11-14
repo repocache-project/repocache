@@ -407,7 +407,7 @@ def test_signed_schema_two_profile_is_refused_by_exact_cli_before_install(
     now = int(time.time())
     metadata = {
         "schema": 2, "key_id": "ci-ephemeral",
-        "repository": "teixemf/repocache", "channel": "stable",
+        "repository": "repocache-project/repocache", "channel": "stable",
         "version": version, "commit": "a" * 40,
         "archive": name, "archive_sha256": hashlib.sha256(payload).hexdigest(),
         "policy_sha256": "b" * 64,

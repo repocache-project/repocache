@@ -1,7 +1,7 @@
 """Fail-closed regression cases for #76 read-only signed draft gate.
 
 These are synthetic metadata/transport tests ONLY. They do not demonstrate a
-real owner-signed v0.5.0 candidate or a successful prepublication upgrade.
+real owner-signed v0.6.0 candidate or a successful prepublication upgrade.
 """
 from __future__ import annotations
 
@@ -20,9 +20,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import draft_release_gate as gate  # noqa: E402
 
 
-TAG = "v0.5.0"
+TAG = "v0.6.0"
 SHA = "a" * 40
-BASE = "repocache-v0.5.0.tar.gz"
+BASE = "repocache-v0.6.0.tar.gz"
 
 
 def assets():
@@ -52,8 +52,8 @@ def record():
             "assets": assets()}
 
 
-@pytest.mark.parametrize("tag", ("v0.4.0", "v0.3.1", "v0.5.1", "v0.6.0", "v0.5.0-rc1",
-                                 "../v0.5.0", "v0.5.0/x", "v00.5.0"))
+@pytest.mark.parametrize("tag", ("v0.4.0", "v0.3.1", "v0.5.0", "v0.6.1", "v0.6.0-rc1",
+                                 "../v0.6.0", "v0.6.0/x", "v00.6.0"))
 def test_reject_non_candidate_tag(tag):
     with pytest.raises(gate.Refused):
         gate.normal(tag, SHA, 42, 99, 1)
@@ -270,4 +270,20 @@ def test_disposable_native_harness_syntax_compiles():
 
 
 def test_reviewed_v050_identity_is_accepted():
-    gate.normal("v0.5.0", SHA, 42, 99, 1)
+    gate.normal("v0.6.0", SHA, 42, 99, 1)
+
+def test_v060_uses_transferred_origin_and_legacy_signed_publisher():
+    import sign_release
+    # Native presigning CI intentionally runs without installing the app;
+    # use source imports without importing from the global Python environment.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+    from repocache import releases
+
+    assert gate.REPO == releases.REPOSITORY == "repocache-project/repocache"
+    assert gate.API == "https://api.github.com/repos/" + gate.REPO
+    assert gate.PUBLISHER_REPO == sign_release.PUBLISHER_REPO
+    assert gate.PUBLISHER_REPO == "repocache-project/repocache"
+    assert not hasattr(gate, "PREVIOUS")
+    gate.normal("v0.6.0", SHA, 42, 99, 1)
+    with pytest.raises(gate.Refused, match="Unreviewed candidate"):
+        gate.normal("v0.5.0", SHA, 42, 99, 1)

@@ -285,9 +285,9 @@ def test_owner_signer_requires_exact_git_tracked_module_set_before_github(
 
 
 @pytest.mark.parametrize("mutation", ["added", "removed", "duplicate"])
-def test_immutable_v04_inventory_drift_refused_before_candidate_read(
+def test_reviewed_source_loader_inventory_mismatch_refused_before_candidate_read(
         tmp_path, monkeypatch, mutation):
-    """Never unlock an owner key for an archive rejected by the old updater."""
+    """Never sign an archive outside the reviewed source-loader contract."""
     monkeypatch.syspath_prepend(str(REPO / "scripts"))
     checker = importlib.import_module("verify_release_candidate")
     builder = importlib.import_module("build_release")
@@ -299,7 +299,7 @@ def test_immutable_v04_inventory_drift_refused_before_candidate_read(
     else:
         changed = original + (original[0],)
     monkeypatch.setattr(builder, "FILES", changed)
-    # No candidate files exist; the independent immutable-layout gate must
-    # reject the source contract *before* trying to read or rebuild assets.
-    with pytest.raises(ValueError, match="immutable v0.4.0 updater"):
+    # No candidate files exist; the reviewed current-loader source contract
+    # must reject drift *before* trying to read or rebuild assets.
+    with pytest.raises(ValueError, match="reviewed runtime extractor"):
         checker.verify(tmp_path / "no-candidate")

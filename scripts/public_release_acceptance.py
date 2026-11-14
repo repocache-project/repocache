@@ -18,9 +18,12 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+# v0.4.0 publisher signatures permanently bind the original repository name.
+# The transferred GitHub Release and its assets have a *different* URL origin.
 REPO = "teixemf/repocache"
-API = "https://api.github.com/repos/" + REPO
-DOWNLOAD = "https://github.com/" + REPO + "/releases/download/"
+API_REPO = "repocache-project/repocache"
+API = "https://api.github.com/repos/" + API_REPO
+DOWNLOAD = "https://github.com/" + API_REPO + "/releases/download/"
 ROOT = Path(__file__).resolve().parents[1]
 TARGETS = ROOT / "scripts/public_release_targets.json"
 ALLOWED_HOSTS = frozenset((
@@ -110,7 +113,7 @@ def assert_public_release(tag: str, pinned: dict) -> None:
             and release.get("prerelease") is False
             and release.get("immutable") is True
             and isinstance(release.get("published_at"), str)
-            and release.get("html_url") == "https://github.com/" + REPO + "/releases/tag/" + tag,
+            and release.get("html_url") == "https://github.com/" + API_REPO + "/releases/tag/" + tag,
             "Wrong, draft, mutable or unapproved public release")
     assets = release.get("assets")
     require(isinstance(assets, list) and

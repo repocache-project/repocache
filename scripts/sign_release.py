@@ -17,6 +17,12 @@ import tempfile
 import time
 from pathlib import Path
 
+# New first-operational release: no upgrade compatibility with public v0.4.0.
+# Bind the signed schema-1 eight-asset manifest to the canonical repository;
+# historical v0.4.0 bytes and their original signature remain immutable.
+PUBLISHER_REPO = "repocache-project/repocache"
+
+
 def sign(bundle: Path, key: Path, key_id: str, commit: str,
          issued_at: int, expires_at: int, wheelhouse_sha256: str | None = None,
          *, passphrase: bytes | None = None):
@@ -50,7 +56,7 @@ def sign(bundle: Path, key: Path, key_id: str, commit: str,
             raise ValueError("Cannot read release policy")
         policy_digest = hashlib.sha256(content.read(policy_member.size + 1)).hexdigest()
     document = {
-        "schema": 1, "key_id": key_id, "repository": "teixemf/repocache",
+        "schema": 1, "key_id": key_id, "repository": PUBLISHER_REPO,
         "channel": "stable", "version": version, "commit": commit,
         "archive": bundle.name,
         "archive_sha256": hashlib.sha256(bundle.read_bytes()).hexdigest(),

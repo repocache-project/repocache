@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Exact owner-approved signed draft tag (e.g. v0.5.0)
+        description: Exact owner-approved signed draft tag (e.g. v0.6.0)
         type: string
         required: true
       commit:
@@ -75,7 +75,7 @@ jobs:
           retention-days: 3
 
   native:
-    name: Upgrade signed candidate (${{ matrix.platform }})
+    name: Clean install signed candidate (${{ matrix.platform }})
     needs: draft-auth
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
@@ -96,12 +96,6 @@ jobs:
         with:
           name: authenticated-draft-candidate
           path: ${{ runner.temp }}/candidate-handoff
-      - name: Download and authenticate real previous public stable v0.4.0
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          python3 scripts/public_release_acceptance.py fetch \
-            --tag v0.4.0 --dest "$RUNNER_TEMP/public-baseline"
       - name: Prepare clean native OS container
         env:
           BASE_IMAGE: ${{ matrix.image }}
@@ -124,7 +118,7 @@ jobs:
           docker build --pull --build-arg "BASE_IMAGE=$BASE_IMAGE" \
             -t "repocache-candidate:${{ matrix.platform }}" \
             -f "$RUNNER_TEMP/Dockerfile.repocache-candidate" "$RUNNER_TEMP"
-      - name: Exercise signed v0.4.0 to draft candidate upgrade and recovery
+      - name: Exercise signed v0.6.0 clean install and repair/recovery
         env:
           RC_TAG: ${{ inputs.tag }}
           RC_COMMIT: ${{ inputs.commit }}
@@ -136,7 +130,6 @@ jobs:
           set -Eeuo pipefail
           docker run --rm --network bridge --user 0:0 \
             --mount "type=bind,source=$GITHUB_WORKSPACE,target=/repo,readonly" \
-            --mount "type=bind,source=$RUNNER_TEMP/public-baseline,target=/artifacts,readonly" \
             --mount "type=bind,source=$RUNNER_TEMP/candidate-handoff/assets,target=/candidate,readonly" \
             --mount "type=bind,source=$RUNNER_TEMP/candidate-handoff,target=/candidate-inventory,readonly" \
             "repocache-candidate:${{ matrix.platform }}" \
