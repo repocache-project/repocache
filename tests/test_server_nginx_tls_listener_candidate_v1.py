@@ -101,8 +101,9 @@ def test_listener_is_statically_bound_to_the_exact_approved_http_host():
     rendered = render_native_tls_listener_candidate(d)
     lines = rendered["server_context_fragment"].splitlines()
     assert "server_name mirror.example.invalid;" in lines
-    assert "if ($http_host !~* \"^mirror\\.example\\.invalid(:443)?$\") { return 421; }" in lines
-    assert "if ($http_host !~* \"^mirror\\.example\\.invalid(:443)?$\") { return 421; }" in lines
-        lines.index("ssl_certificate /etc/repocache/tls/example-chain.pem;")
+    expected = 'if ($http_host !~* "^mirror\\.example\\.invalid(:443)?$") { return 421; }'
+    assert expected in lines
+    assert lines.index(expected) < lines.index(
+        "ssl_certificate /etc/repocache/tls/example-chain.pem;"
     )
     assert rendered["authorizes_nginx_activation"] is False
