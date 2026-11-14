@@ -107,3 +107,20 @@ negative collision test proves that cert/key references cannot be the
 same path and performs no file or host write. Real filesystem ancestry,
 ownership, TLS trust and effective native host activation still require
 independent preflight and explicit operator approval.
+
+
+## Real TLS protocol downgrade refusal on both supported NGINX builds (#30)
+
+The existing Debian 13 and AlmaLinux 10 native rootless HTTPS test now
+uses two deliberately legacy-capable disposable OpenSSL clients, pinning
+their TLS protocol versions to 1.0 and 1.1 and relaxing only the test-side
+cipher security level. Actual NGINX must reject each TLS handshake rather
+than returning the protected repository fixture. The already verified
+TLS 1.2/1.3 and trusted hostname/CA positive and negative tests remain.
+
+This is a *wire handshake regression* against each stock distro NGINX
+in disposable containers. It is not proof that an installed operator
+certificate, SNI/host authority, SELinux policy, systemd service or
+privileged reload is correctly configured on a booted target. The generated
+`ssl_protocols TLSv1.2 TLSv1.3` fragment still requires trusted native
+activation under #30/#19.
