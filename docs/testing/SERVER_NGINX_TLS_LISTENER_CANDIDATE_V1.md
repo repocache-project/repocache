@@ -98,3 +98,8 @@ normal/wildcard contract. The non-activating source renderer never opens a
 socket or modifies the host; live dual-stack/SELinux/firewall verification
 on Debian 13 and AlmaLinux 10 remains NOT VERIFIED until installed #30/#19
 acceptance. Native userland TLS smoke continues testing IPv4.
+
+The combined HTTPS candidate also retains the separately tested exact TLS SNI,
+raw HTTP Host, and absolute request-target gates (#347/#346). A guarded
+IPv6-only socket cannot bypass authority validation, and neither this render
+nor a rootless fixture establishes native host/firewall exposure.

@@ -63,3 +63,23 @@ contract. No public CLI/production trust selector, OS CA installation,
 firewall change or NGINX reload is enabled. Real operator issuer approval,
 installed host clock/trust, systemd/SELinux and VM acceptance stay
 NOT VERIFIED under #30/#19.
+
+
+## Root directory extended-attribute trust gate (#30)
+
+The pinned fixture TLS preflight previously enforced xattr/SELinux/ACL
+refusal on each descended directory and credential inode but omitted the
+**supplied root directory itself**. A hostile fixture root could carry an
+unreviewed ACL or security label while all nested file modes appeared safe.
+
+The checker now fails closed if the root FD has any unreviewed xattr before
+descending into the TLS subtree. Tests inject a forged root attribute to
+prove **no private-key directory is entered** and exercise an actual Linux
+`user.*` attribute on a disposable root, followed by a positive check
+after the fixture-only attribute is removed. Host labels are never
+silently normalised, relabelled or written by the production checker.
+
+The caller still supplies this detached root and UID; this is a negative
+fixture security boundary, NOT a trusted installed-root or SELinux
+enforcing validation. Original #30/#19 booted-host TLS authority and
+safe NGINX/firewall activation remain NOT VERIFIED.
