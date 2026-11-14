@@ -48,6 +48,11 @@ def render_native_tls_listener_candidate(document: dict[str, Any]
             # cannot silently access an approved repository route.
             f'if ($http_host !~* "^{re.escape(hostname)}(:{port})?$") '
             "{ return 421; }\n"
+            # NGINX $host prefers an absolute request-target authority
+            # over Host. Both checks are required: $http_host forbids a
+            # missing/foreign Host, while $host forbids absolute-form
+            # request-target domain-fronting with an approved Host.
+            f"if ($host != {hostname}) {{ return 421; }}\n"
             f"ssl_certificate {cert};\n"
             f"ssl_certificate_key {key};\n"
             "ssl_protocols TLSv1.2 TLSv1.3;\n"
