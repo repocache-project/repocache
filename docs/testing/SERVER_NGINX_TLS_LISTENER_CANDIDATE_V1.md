@@ -103,3 +103,22 @@ The combined HTTPS candidate also retains the separately tested exact TLS SNI,
 raw HTTP Host, and absolute request-target gates (#347/#346). A guarded
 IPv6-only socket cannot bypass authority validation, and neither this render
 nor a rootless fixture establishes native host/firewall exposure.
+
+## Real rootless IPv6-only socket verification (#30)
+
+The two-distro GitHub Actions workflow
+`server-tls-ipv6-only-native.yml` installs stock NGINX in disposable,
+offline, rootless, read-only distro containers and launches an isolated
+generated `listen [::]:18445 ssl ipv6only=on` candidate using a synthetic
+one-day certificate. The test requires actual IPv6 loopback support, checks
+stock `nginx -t`, performs a trusted TLS handshake to `::1`, and verifies
+that a direct IPv4 TCP connection to `127.0.0.1` on the **same port** is
+refused. It also tests absent or foreign TLS SNI and foreign HTTP Host
+over IPv6; HTTP 421 must contain no protected test payload.
+
+Unavailable IPv6 is a CI failure, not silently counted as PASS. The
+namespace exposes no host port and cannot write production TLS material.
+These results show real packaged NGINX socket behavior inside CI, **not**
+installed booted Debian/AlmaLinux hosts, AlmaLinux SELinux enforcing,
+trusted production key custody, an operator-approved firewall or an
+authorized REPOCACHE service activation. Those remain NOT VERIFIED.
