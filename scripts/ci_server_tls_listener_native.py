@@ -82,6 +82,19 @@ def main():
                     time.sleep(0.05)
             assert payload and b"200 OK" in payload
             print("PASS: trusted synthetic certificate and canonical hostname over real TLS",flush=True)
+            # The certificate and SNI can be valid while a client presents a
+            # different HTTP Host. Never serve managed routes to that authority.
+            with socket.create_connection(("127.0.0.1",PORT),timeout=3) as raw:
+                with context.wrap_socket(raw,server_hostname=HOST) as sock:
+                    sock.sendall(
+                        b"GET /__test HTTP/1.1\r\n"
+                        b"Host: unrelated.example.invalid\r\n"
+                        b"Connection: close\r\n\r\n"
+                    )
+                    mismatch=sock.recv(4096)
+            assert b"421 Misdirected Request" in mismatch, "FOREIGN_HTTP_HOST_ADMITTED"
+            assert b"repocache-https" not in mismatch, "HOST_BOUNDARY_BODY_LEAK"
+            print("PASS: valid TLS SNI refuses foreign HTTP Host with 421", flush=True)
             try:
                 handshake("wrong.example.invalid",context)
             except ssl.SSLCertVerificationError:
