@@ -204,6 +204,33 @@ def test_exact_dnf_noop_requires_source_without_companion():
     assert not plan.proposal_bytes_converged(object(), p.proposed)
 
 
+@pytest.mark.parametrize("authority", [
+    "CACHE.example.org", "cache.example.org.",
+    "cache..example.org", "-cache.example.org", "cache-.example.org",
+    "cache_example.org", "cache.example.org:0443",
+    "0x7f000001", "127.1", "999.999.999.999",
+    "127.000.000.001", "[2001:0db8::1]",
+])
+def test_noncanonical_https_fallback_authority_refused(authority):
+    with pytest.raises(plan.FallbackRefused):
+        compile_one("etc/apt/sources.list", APT, APT,
+                    cache="https://" + authority + "/repo/")
+
+
+def test_literal_loopback_test_endpoints_remain_canonical_without_write_authority():
+    # Native APT/DNF disposable TLS harness uses loopback numeric endpoints.
+    for source, original, upstream in (
+        ("etc/apt/sources.list", APT, UPSTREAM),
+        ("etc/yum.repos.d/alma.repo", DNF, RPM_UPSTREAM),
+    ):
+        p = compile_one(source, original, original,
+                        upstream=upstream,
+                        cache="https://127.0.0.1:18443/repo/")
+        assert p.route_sha256 == sha(b"https://127.0.0.1:18443/repo/")
+        assert p.production_write_eligible is False
+        assert p.route_approval_verified is False
+
+
 def test_forged_proposal_authority_flags_cannot_pass_byte_convergence():
     from dataclasses import replace
 
