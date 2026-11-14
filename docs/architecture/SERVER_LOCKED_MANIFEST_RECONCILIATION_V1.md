@@ -1,6 +1,68 @@
 # Locked protected-manifest versus live NGINX include observation v1
 
-**Tracking:** primary issue #31 / milestone v0.6.0; related #18, #25, #27 and #95. **Dependency fulfilled:** [PR #222](https://github.com/teixemf/repocache/pull/222) was independently authorized and merged into protected `main` as `955360fb7686f632d7d0090994008e10159f23b3`, providing the protected state schema and recovery implementation. Under the adopted release workflow, this PR targets the protected `integration/v0.6.0` branch (baseline `a1739a42cf5baac78bb3f8beb2bd02ee362447e9`), which already contains the #222 storage core. It remains OPEN and Ready for review, **not merged**, and separately requires exact-HEAD CI and explicit maintainer authorization before integration. Synthetic tests do not verify production installation.
+**Integration reconciliation (2026-11-14):** The approved private, fixture-only state-v2 storage core was integrated independently through PR #308 on the protected `integration/v0.6.0` branch. This Draft #237 now contains only the remaining non-installed native transaction, fixed-operation control entrypoint, integration tests and associated review documentation. No fixture storage duplicate is reintroduced in this PR diff. The native privileged activation and security boundary remains blocked by the independent #64 security review and specific maintainer authorization; no native-host acceptance is implied.
+
+## Adopted initial persistent-state contract for v0.6.0 (maintainer decision: 2026-11-09)
+
+**Status: ARCHITECTURE APPROVED, IMPLEMENTATION/INTEGRATION STILL DRAFT.**
+The maintainer explicitly approved adopting the *existing* state-v2 schema
+for the first operational v0.6.0 server in the trusted project conversation.
+The scope and provenance are recorded in
+[#31's dated decision](https://github.com/repocache-project/repocache/issues/31#issuecomment-6752360136).
+This adoption supersedes historical "unadopted / proposed format" planning
+language **for the schema only**; earlier dated notes describing source status
+at the time remain as an audit trail. It is NOT a grant of root, migration,
+systemd, NGINX or release/publishing authority, and it does not make the
+existing private v2 fixture APIs production entry points.
+
+**Initial contract (clean v0.6.0 installation only):**
+
+- Closed \`state_schema_version: 2\`, first durable generation **1** after an
+  independently authorized generation-0 bootstrap. The seven top-level
+  fields are \`state_schema_version\`, \`state_generation\`,
+  \`configuration_base64\`, \`configuration_sha256\`,
+  \`repository_records\`, \`id_reservations\`, \`approval_reference\`.
+- \`configuration_base64\` is the **strict canonical complete install-v1
+  document bytes**, with exact SHA-256. The install document generation
+  must equal the state generation. An approval reference binds the exact
+  configuration digest and the expected preceding generation, but neither
+  the source string nor decision hash **proves operator approval**.
+- **At most 500 present** repositories, each with an immutable canonical
+  identity digest and desired state. Stored observed state remains
+  **not-activated** until a separately verified publication/exposure
+  protocol exists; desired-active does not mean published or approved.
+- **At most 10,000 all-time ID reservations**. Every present repository
+  has exactly one matching allocated record; removed IDs remain retired
+  forever, cannot change identity, be resurrected, silently disappear or
+  be allocated to someone else. On history saturation, refuse new
+  allocations without pruning old history.
+- Strict generation CAS, idempotent unchanged-operation behavior and
+  owner-pinned Linux path/FD, exclusive flock, bounded journal, stage,
+  fsync and recoverable previous bytes. No implicit conversion of old
+  v1 state or other foreign data. Detection of any legacy v1 state,
+  journal/stage or ambiguous v1/v2 coexistence **refuses without
+  mutation**; no v0.4.0→v0.6.0 upgrade is supported. Safe same-version
+  reinstallation/repair/recovery remains a separate mandatory gate.
+- The fixture implementation's existing names \`proposed\` and its
+  historical \`PROPOSED_UNTRUSTED_V2_CONTRACT_ONLY\` report label are kept
+  temporarily for API/test compatibility. **They do not downgrade schema
+  approval or upgrade fixture privilege.** No production installer,
+  helper, CLI or service is allowed to call private \`_under_root\` writers
+  without a separately vetted, authenticated current-host-root
+  transaction and corresponding native evidence.
+
+Security/operational blockers are unchanged: verified host namespace,
+mount topology, ownership, ACL/xattr/SELinux, actual operator rights, a
+single held lock through NGINX managed include staging/full-context
+\`nginx -t\`, controlled reload/known-good compensation and atomic,
+active-only client catalog publication, signed APT/DNF correctness and
+owner-VM booted Debian 13/AlmaLinux 10 tests. Container passes do not
+qualify as native systemd or SELinux acceptance. Protected integration
+is still subject to every original criterion and required checks.
+
+---
+
+**Tracking:** primary issue #31 / milestone v0.6.0; related #18, #25, #27, #28 and #95. **Dependency fulfilled:** [PR #222](https://github.com/repocache-project/repocache/pull/222) was independently authorized and merged into protected `main` as `955360fb7686f632d7d0090994008e10159f23b3`, providing the protected state schema and recovery implementation. Under the adopted release workflow, this PR targets the protected `integration/v0.6.0` branch (baseline `a1739a42cf5baac78bb3f8beb2bd02ee362447e9`), which already contains the #222 storage core. PR #224 subsequently merged into integration/v0.6.0 as ac13ba3847420560685c2156681fb2379af73d36 on 2026-11-03; the previous OPEN status was historical. Synthetic tests do not verify production installation.
 
 ## Fixed-purpose read-only contract
 
@@ -30,3 +92,1248 @@ UID 0 in a user namespace, chroot or container and '/' in a non-host mount names
 Focused: python -m pytest -q tests/test_server_locked_manifest_reconcile_v1.py
 
 Fixtures exercise Linux directory-FD traversal and flock, no-op and stale-generation behavior, foreign include refusal, symlink/hardlink/FIFO rejection, pending journal/orphan-stage refusal, metadata match/mismatch for every manifest field, and absence of network/process calls. A synthetic positive UID-0 manifest comparison is verified by a pure helper; it is NOT a real privileged NGINX include approval or native root-owned installation demonstration. Exact-HEAD CI must be executed and inspected before any PASS claim. No merge, signing, tagging, publication, deployment or protected operation is authorized.
+
+
+## Locked candidate pre-staging gate — incremental #31 work
+
+The new read-only preview_current_namespace_locked_candidate function validates
+bounded (at most 256 KiB), strict UTF-8, NUL-free candidate bytes against the
+actual managed include under the same exclusive protected-state lock. It
+refuses foreign includes, manifest/inode drift, stale generations, symlinks,
+unsafe directories, pending journals and orphan state stages. It reobserves
+live include content/inode while still locked, rejecting changes between
+observations, including same-inode content drift that directory metadata
+alone cannot detect. This narrows detectable races, but does not defeat
+hostile root writers or make results valid after the lock is released. Its redacted
+candidate_action is WOULD_CREATE, UNCHANGED or WOULD_REPLACE. No candidate
+bytes, digest, identity lease or operator credentials are returned. Existing
+write, NGINX validation/reload/exposure and catalog authority flags remain
+FALSE; effective root UID in a container is not trusted host-root authority.
+
+This joins the earlier untrusted caller-snapshot candidate preview (#216) to
+the real locked live-inode observation (#224). It does NOT stage files, execute
+full-context native nginx -t, activate NGINX, commit a manifest or roll back.
+After the lock is released, the preview MUST NOT be reused as write authority.
+A future reviewed privileged transaction must recheck under the same lock
+held across durable staging, native NGINX validation, reload and journalled
+rollback. APT/DNF package-manager and systemd operations are not atomically
+reversible through rename; separate compensating recovery is still required.
+External TLS, cache, logs, metrics, configuration and client sources are
+untouched.
+
+Focused tests: python -m pytest -q tests/test_server_locked_manifest_reconcile_v1.py
+
+
+## Read-only protected-state crash recovery preview — #31 increment
+
+The private _preview_recovery_under_root classifies the existing #222
+protected-state journal while holding the exclusive descriptor-pinned lock.
+It is an isolated-fixture-only diagnostic, NOT a CLI, a public privileged
+recovery API or a mutation/approval capability. Fixed owner-checked journal,
+stage, rollback and state bytes are re-read under the lock before returning.
+
+- CLEAN: no pending journal, stage or rollback.
+- DISCARD_UNPUBLISHED_JOURNAL: an owned unpublished temporary journal exists.
+- ROLLBACK_PENDING_STATE: a published journal matches the old/new state
+  digest boundary; a separate explicitly invoked recovery is required.
+- Any unowned/malformed file, state drift, conflicting temp, unexpected
+  orphan stage/rollback or detectable concurrent change: refuse without
+  touching the filesystem.
+
+This classification does not guarantee that subsequent recovery will
+succeed. The output contains no journal content, file bytes or secrets;
+recovery_executed, authorizes_state_mutation, authorizes_nginx_reload and
+authorizes_catalog_publication always remain FALSE. The existing #222
+fixture-only mutation API stays separate and is exercised in tests solely
+to prove that simulated recovery can return the state to CLEAN.
+
+This journal covers only inert protected JSON state, NOT native NGINX
+configuration, full-context nginx -t, reload, TLS, service availability,
+package upgrades or active repository discovery. It does not establish
+operator approval, host-root, mount/ACL/SELinux provenance or production
+readiness. All five original #31 operational criteria remain NOT VERIFIED.
+
+## Integration-lane reconciliation (2026-11-04)
+
+The protected integration/v0.6.0 branch advanced through the accepted
+inert native NGINX packaging/prepackage boundary (#27, PR #229, commit
+d03192f96ad1ee03623acd674813363340922cb4) and bounded DNS plus inert
+NGINX candidate preparation (#28, PR #227, commit
+2388476f94f2f4c620d760c5acdcba4c5d2e6f4d). The #31 feature branch
+is merged forward with both exact integration commits and retains only its
+original three-file feature delta. No privileged native activation or
+installer implementation is inferred from these preparatory merges.
+
+The related #95/#214 work has identified an unresolved architectural
+boundary: install-v1 supports up to 500 repositories while inert protected
+state-v1 stores up to 32, without stable removal tombstones or active-service
+observed-state semantics. The stored configuration digest and approval
+reference are not by themselves authenticated configuration or operator
+authorization. Do not connect this fixture-only preview to a real
+privileged writer or NGINX apply until versioned state/config/approval and
+activation ownership are jointly reviewed with #95 and #28.
+
+
+## Current-namespace root-anchored read-only recovery diagnosis — #31
+
+`inspect_current_namespace_locked_recovery()` is a narrow read-only
+diagnostic entry point, extending the existing root-anchored manifest
+inspection pattern without adding a recovery command, privileged writer or
+NGINX service control. It accepts no caller-supplied root FD, UID or path.
+It requires effective UID 0 before opening any host path, opens only the
+current process mount namespace's literal `/` with the existing no-follow
+directory flags, checks that root identity before and after the protected
+journal inspection, and always closes its root descriptor on return/error.
+
+The existing private `_preview_recovery_under_root` independently acquires
+the state lock and rejects untrusted/malformed journal and state inputs.
+The public wrapper reports a `current_namespace_root_path_verified` boolean
+only for the observed root of this mount namespace, not for the host root.
+A transient report is not a lease or approval for any later mutation.
+
+Tests cover early nonroot refusal with no host path open, actual opened
+root identity checked twice, no recovery or mutation authorization, fake
+caller-controlled root substitution refusal, and descriptor cleanup on a
+synthetic error. These tests do not validate genuine root-managed files,
+host mount topology, ACL/xattr/SELinux enforcing, operator provenance or
+actual recovery of a native NGINX installation. There is still no CLI
+registration, writable recovery helper, staging, `nginx -t`, reload or
+catalog writer. The five original #31 operational acceptance criteria
+remain NOT VERIFIED; no application or service activation is authorized.
+
+
+## Proposed v2 persistence bridge — review-only architecture for #31 ↔ #95 ↔ #28
+
+**Status: PROPOSED / NOT ADOPTED / NOT PERSISTED / NOT ACTIVATABLE.**
+The existing protected state-v1 schema, 32-item limit, lock/journal and
+fixture-only writer **remain byte-for-byte unchanged**. This branch adds a
+standalone *pure* proposed v2 snapshot/transition checker,
+`preview_proposed_v2_state_transition(...)`. It refuses all mutation,
+NGINX reload, active-catalog publication, cache cleanup and authentication
+claims. It does not read any real root-owned files, grant approval, migrate
+a v1 host or implement the native installation lifecycle.
+
+### Closed proposed snapshot contract
+
+- `state_schema_version=2` (unrecognised and refused by current v1 writer).
+  State generation is strictly 1..signed 64-bit max, with expected-generation
+  CAS for the proposed next generation. Bootstrap from no prior snapshot
+  requires expected generation zero. A v1-to-v2 conversion is **not**
+  automatically authorised and requires a separately reviewed migration.
+- `configuration_base64`: canonical ASCII-escaped, sorted/compact JSON
+  encoding of the complete strictly validated install-v1 document. Decoded
+  payload max 1 MiB, no duplicate keys, strict UTF-8, exact canonical
+  re-encoding, including full deployment and repo policy/TLS reference
+  data (never private TLS key bytes). Document expected generation equals
+  the proposed stored generation. The full configuration bytes are retained
+  so crash recovery need not trust an unavailable external digest alone.
+  `configuration_sha256` must hash those exact canonical decoded bytes.
+- `repository_records`: zero to 500 unique, explicit durable IDs with the
+  existing shared #95 canonical source/layout identity SHA-256, desired
+  active/disabled state and **only** observed `not-activated` (no synthetic
+  claim of verified live exposure). These records must match the entire
+  validated document exactly, without adopting a partial repository list.
+- `id_reservations`: at most 10,000 bounded, uniquely identified and
+  unique-identity entries with `allocated` or `retired`. Allocated IDs
+  exactly match present repositories. Between full successive snapshots,
+  *every* historic reservation must survive unchanged in identity; an
+  allocated item may become retired but retired items may never return to
+  allocated. The 10,000-record bound is the existing #95 pure planner bound;
+  exhaustion **fails closed** pending a separately authorised migration.
+  The ledger cannot silently discard history to make room. No removal ever
+  authorises deleting cached packages or force-cleanup.
+- `approval_reference`: closed source (`operator` or `audited-request`),
+  decision digest, exact configuration digest and expected previous generation.
+  These are **cross-consistency references, not authenticated approvals**.
+  The future privileged interface must authenticate operator identity,
+  operator intent and applicable decision scope independently under its own
+  OS-root-owned transaction lock, rather than interpreting this JSON
+  as trusted input.
+
+The pure checker validates bounds, the precise next-generation CAS,
+configuration byte/digest binding, repository and reservation set equality,
+immutable historical ID/identity and retirement continuity. It returns
+**no decoded configuration bytes, approval digest or identity lease** and
+reports authority flags FALSE. A caller-supplied prior snapshot is
+untrusted: the checker cannot prove that it includes the entire historically
+reserved set. Its `reservation_history_authoritative=false` is not
+weakened by a passing check. Existing #95 PR #214 remains the owner of
+declarative reconciliation and already-merged #28 owns NGINX candidate
+generation; no duplicate implementation is added here.
+
+### v0.6.0 first-operational-release compatibility boundary
+
+The maintainer explicitly confirmed on 2026-11-07 (issue #31) that v0.6.0
+is the first operational deployment and **does not upgrade public v0.4.0
+or any older server installation**. Automatic v1→v2 migration is therefore
+**NOT APPLICABLE** to this first-deployment acceptance path; it is not a
+reason to weaken provenance checks or delete old bytes. Encountering any
+foreign or legacy v1 protected state, pending transaction or non-owned NGINX
+configuration must fail closed without mutation. The earlier lossless
+migration discussion remains useful future design analysis, not an approved
+migration requirement or permission to overwrite legacy data.
+
+The applicable #31 release gates remain clean native install, idempotent
+same-version reinstall/repair and configuration update, preservation of
+TLS/cache/metrics/logs, executable NGINX syntax/reload rollback, safe
+interruption/retry and foreign-state refusal on booted Debian 13 and
+AlmaLinux 10. All host acceptance remains **NOT VERIFIED**; existing
+fixture/container PASS results cannot satisfy those gates.
+
+### Required native persistence and activation boundary (NOT IMPLEMENTED)
+
+1. Define and review a new actual persisted v2 format and crash-safe
+   journal/recovery plus explicit v1 migration/refusal policy. Verify that
+   configured full bytes, immutable reservations and active-status evidence
+   fit the protected storage and recovery bounds before any public writer.
+2. A constrained privileged helper must acquire its own authenticated
+   host-root descriptor and OS-owned lock, independently validate signed
+   release/operator decision, pin exact v2 bytes and actual NGINX inode,
+   check filesystem/mount/ACL/SELinux provenance, and enforce real
+   expected-generation CAS. An untrusted v2 preview is not a write token.
+3. Prepare only verified owned managed include files, stage complete NGINX
+   context, execute packaged `nginx -t`, use controlled reload with
+   durable known-good state and rollback across reload failure.
+   Package-manager/systemd effects need separately documented compensation.
+4. Publish only verified **actually exposed** enabled repositories into
+   the versioned derived active-only catalog, atomically after validation.
+   On partial failure preserve/restage known-good host state, catalog and
+   cache, refusing foreign configuration and inconsistent exposure.
+
+Applicable #31 operational tests (Debian 13 and AlmaLinux 10 real install,
+same-version repeat install/repair with TLS/cache/history retention,
+staging/syntax/reload rollback and interrupted recovery) remain
+**NOT VERIFIED**. Public pre-v0.6.0 upgrade is **NOT APPLICABLE**.
+Original #95 and #28 operational acceptance remains NOT VERIFIED. The
+proposed bridge is testable coordination work, not adoption of a new
+protected-state format or approval of a native writer.
+
+
+## Proposed v2 fixture-only durability and rollback rehearsal
+
+**Status: PROTOTYPE / UNADOPTED / NOT A HOST WRITER.** The separate
+`server_proposed_state_v2_store.py` contains only private
+`_commit_proposed_v2_under_root` and `_recover_proposed_v2_under_root`
+functions intended for disposable Linux-FD fixtures. They are **not** in the
+CLI, application startup, a privileged service, a production installer, or
+a signed-release path. Their caller-supplied FD/UID does **not** establish
+host-root or administrator authorization.
+
+The private v2 prototype uses the *existing preprovisioned v1 state lock*,
+still requiring the existing owner/mode/pinned-ancestry checks. No new lock
+is provisioned. All v2 files are distinct fixed names under the same
+protected fixture directory: `state-v2.json`, `.state-v2.pending-tmp`,
+`.state-v2.pending`, `.state-v2.stage` and `.state-v2.rollback`. The v2
+snapshot ceiling is **4 MiB**, including a complete <=1 MiB validated
+canonical configuration payload encoded as Base64 and up to 10,000 retained
+ID reservations. The v2 journal ceiling is **6 MiB**, sufficient for an
+encoded former 4 MiB state plus bounded metadata; hitting either limit
+fails closed. These sizes and filenames are **proposed fixture contracts**,
+not approved operational or migration compatibility promises.
+
+Under the exclusive lock the prototype rejects **any v1 state** with
+`LEGACY_MIGRATION_REQUIRED`, and rejects pending v1 transactions/stages
+with `LEGACY_RECOVERY_REQUIRED`; it never imports, renames, deletes or
+adopts v1 data. It refuses pending, orphaned, symlinked, hardlinked, unsafe,
+noncanonical, malformed or conflicting v2 files. A complete and frozen
+candidate must satisfy the exact proposed v2 generation CAS,
+canonical-config/digest/identity/retired-ID rules against **the actual
+previous fixture bytes**, rather than a caller-provided prior snapshot.
+An effective no-change install with only generation metadata differing
+returns `NO_CHANGE_INERT_V2` without replacing the state inode.
+
+For a changed candidate, the prototype fsyncs and publishes a fixed-name
+previous-state journal before writing and fsyncing a new temporary stage,
+then atomically renames the new state. It never runs `nginx -t`, reload,
+package installation or catalog publishing. Explicit rollback under the
+same lock checks the published journal hashes, rejects unexpected current
+state drift and restores *exact* previous bytes (or initial absence).
+Interrupted journal creation, staged writes, replacements, a failed
+rollback rename and repeated recoveries are exercised with fault injection
+on disposable local directories. The unit tests additionally cover 500
+present repositories, a 10,000-entry reservation history, stale CAS,
+unchanged state, unsafe symlinks, exclusive-lock contention, and refusal
+of any v1-to-v2 migration. This is **not** proof of native power-loss
+durability, fsync guarantees on every target filesystem, actual production
+root ownership, TLS/cache preservation or systemd/SELinux correctness.
+
+**Explicit architecture gate:** Before any real v2 adoption, an approved
+maintainer-reviewed migration/versioning contract must define what to do
+with existing v1 state/manifest/journal and require a trusted host-root
+operator-authentication path, ACL/xattr/mount/SELinux checks, complete
+NGINX syntax/reload/known-good service rollback and active-only atomic
+catalog consistency. The suggested private fixture mechanism may need
+revision after that review. All original #31 operational acceptance
+criteria remain **NOT VERIFIED** and no production use or protected
+operation is authorized.
+
+
+### Reciprocal v1/v2 coexistence refusal
+
+The original v1 store now explicitly refuses **any** of the five fixed v2
+snapshot/journal/stage/rollback names under its existing owner-pinned state
+lock before accepting a v1 read, commit or recovery. It checks names
+without following symlinks and also refuses dangling foreign v2 symlinks.
+This closes the inverse conflict in which a v1 fixture writer could
+otherwise initialise a new v1 state next to an already present v2 fixture
+snapshot, or recover a v1 journal while v2 is interrupted. The proposed
+v2 prototype reciprocally refuses any v1 current or pending state.
+
+This safety interlock **does not** migrate v1 data, activate v2, change v1
+schema fields, authenticate administrators, adopt foreign paths, or
+introduce a public privileged writer. A versioned migration remains an
+independent acceptance/approval blocker.
+
+
+### Cross-process crash recovery in Debian 13 and AlmaLinux 10 containers
+
+The new path-filtered, read-only `Server Protected State Crash Recovery
+(Distro Containers)` workflow runs the original v1 tests, locked
+manifest inspector tests and proposed v2 fixture tests under native
+userspace/Python packages in Debian 13 and AlmaLinux 10 containers.
+
+In eight cases (first install and update at four durable boundaries),
+a Linux child process exits with `os._exit(73)` immediately after the
+fsynced journal-temp, published journal, state stage, or state rename.
+No Python finally/unlock is executed. A separate second process must
+acquire the released exclusive lock and recover exactly the previous
+state bytes or initial absence, and a new transaction must then work.
+
+This is stronger evidence than same-process exception injection but
+still only isolated Linux fixture/container testing. It does not prove
+a booted native host, systemd/SELinux, a genuine power cut, actual
+NGINX syntax/reload, TLS/cache/metrics retention, foreign live host
+ownership or signed administrator approval. Full #31 operational
+acceptance remains NOT VERIFIED.
+
+
+### Locked persisted configuration → existing #28 NGINX candidate
+
+The private `_preview_persisted_v2_nginx_candidate_under_root`
+reads and verifies the exact proposed v2 snapshot/digest and generation
+**under the existing protected state lock**. Pending journals, legacy v1
+state, stale generations, untrusted/oversized pin maps, invalid DNS/IP
+pins and state drift refuse the whole preview. It decodes only the
+validated canonical install-v1 bytes from the actual locked fixture
+state, passes the full document to the **already merged #28 renderer**
+and re-reads the persisted bytes before returning. There is no duplicate
+#95 lifecycle planner or second NGINX route/approval source.
+
+The output is **still candidate-only**, with host-root, authenticated
+operator, actual NGINX include manifest, NGINX syntax, observed exposure,
+activation and catalog-publication authority all FALSE. It is neither
+an on-host CLI nor an operator permission token.
+
+The two-distro fixture workflow installs **distro-packaged NGINX**
+inside its disposable container and executes a separate `nginx -t`
+against a generated temporary config containing the persisted
+two-layout (APT and DNF) candidate. No running NGINX service is
+reloaded, no real managed include/certificate is replaced, and no
+catalog is published. Native booted systemd/SELinux, authenticated
+activation, actual service rollback and original #31 acceptance
+remain NOT VERIFIED.
+
+### Disposable live NGINX reload and compensation probe (#31)
+
+A new focused test in `tests/test_server_proposed_state_v2_store.py`
+starts an **actual distro-packaged NGINX master and workers** in a disposable
+temporary prefix, using only a Linux Unix-domain listening socket. It stages
+the existing #28 renderer's full APT+DNF candidate along with a private
+health endpoint, checks `nginx -t`, and probes actual HTTP responses through
+the socket. The test then:
+
+1. Stages an invalid directive and confirms `nginx -t` rejects it while the
+   previously running worker still serves the known-good health response.
+   Only the temporary file is restored; the invalid config is never reloaded.
+2. Stages a different syntactically valid health response, reloads that
+   isolated NGINX master, and observes the changed live response.
+3. Simulates a subsequent failed activation gate, restores the *exact* old
+   temporary config bytes, revalidates, reloads, and confirms that the live
+   response returns to the known-good state.
+4. Asserts that fixture v2 state bytes, journal, and stage remain unchanged
+   and terminates the disposable NGINX process even after an assertion error.
+
+This adds an executed **service-process** rollback rehearsal when the
+distro-container workflow passes, beyond the prior syntax-only check.
+It does **not** implement a privileged installer, host transaction journal,
+managed include swap, real systemd reload, SELinux enforcing, catalog
+publication, or power-loss recovery. The temporary process can be rolled
+back even though there is not yet an *approved durable transaction* linking
+the actual include, persisted v2 state, live exposure, and catalog. The five
+original #31 operational criteria still require booted native host evidence.
+
+### Read-only v1 migration blockers under the existing shared lock
+
+The private `_preview_v1_migration_blockers_under_root` is a fixture-only
+locked diagnosis for an already-existing v1 snapshot. It requires a valid
+v1 state, refuses pending v1 journals, orphan stages, conflicting v2 names
+(including symlinks), and concurrent lock acquisition. It reads the
+protected v1 state twice and returns only a redacted generation, repository
+count and manifest count alongside permanently FALSE config-history,
+operator, host-root, NGINX, migration, activation and catalog authority
+indicators. There is no caller-provided configuration or migration token.
+
+Even a clean v1 state with zero repositories cannot prove a lossless
+migration: persisted v1 has no recoverable canonical configuration bytes
+or all-time historical ID ledger. This diagnostic deliberately reports
+`LEGACY_V1_MIGRATION_BLOCKED` and never writes either version. Executed
+fixture tests can verify refusal/nonmutation and lock behavior, but only
+a separately approved schema and host transaction can implement actual
+migration. This PR does not adopt the proposed v2 persistence format.
+
+### Read-only proposed v2 recovery journal preview
+
+Private `_preview_proposed_v2_recovery_under_root` reuses #31's fixed
+state-directory exclusive FD lock and rejects concurrent writers, malformed
+snapshots, unsafe files, conflicting legacy v1 state, orphan stage/rollback,
+journal-temp collisions and journal/state digest drift. It reads only the
+proposed v2 fixture files; it neither invokes recovery nor alters live
+NGINX, publishes catalog state, provisions a root helper or deletes bytes.
+
+The bounded report distinguishes a clean state, an unpublished journal
+temporary inode, a durable journal before the state replace, and an
+interrupted post-replace journal. It discloses no repository details,
+configuration bytes, digest, root path or key material. All authorization,
+host-service recovery and catalogue/NGINX flags remain FALSE. In particular
+a report of an interrupted transaction is **not** an authorization to run
+the private recovery function, which itself is still fixture-only.
+
+Tests cover the four fault points on both initial and existing v2 snapshots,
+verify byte-for-byte nonmutation, refusal of modified state/orphan stages and
+lock contention, and ensure the diagnostic calls no mutating filesystem
+operation. CI distro-container results do not prove native systemd/SELinux
+safety, power-loss durability or an accepted v1→v2 migration. The v2 format
+remains proposed and does not become a shipped persisted-state contract.
+
+### Current namespace v1 migration refusal diagnostic
+
+The internal `inspect_current_namespace_v1_migration_blockers()` entry
+uses the same read-only, fixed `/` descriptor and pre/post root-inode
+identity checks as existing protected-state diagnostics. It requires effective
+UID 0, takes no caller-selected path, UID, root FD, configuration or journal,
+and closes the descriptor on both success and failure. It delegates to the
+existing exclusive-lock v1 preflight; a pending journal, unsafe filesystem
+entry, divergent state or v2 coexistence remains a refusal, not an automatic
+repair or migration. The output is only a redacted blocker report with all
+migration/NGINX/catalog and operator/host-root authorization fields false.
+
+This function is **not** wired into the CLI, installer, sudo/polkit or a
+privileged helper. A container-root namespace is not native host-root proof.
+It neither migrates v1 nor advances the five original #31 host acceptance
+criteria. Its regression tests cover unprivileged denial before filesystem
+access, pinned current-root identity, substituted descriptor refusal and
+descriptor cleanup on failure.
+
+### Legacy-state refusal and privileged authority: unresolved gates
+
+**No migration is executed or enabled by this PR.** The v1 snapshot stores a
+configuration digest but not independently recoverable canonical config
+bytes, and has no all-time ID/tombstone ledger. An operator-supplied document,
+approval-reference digest, or #95 preview cannot reconstruct missing
+historical authority. With any v1 state/pending files present, the private
+v2 prototype deliberately fails closed; with any v2 files present, the
+v1 reader/writer/recovery also fail closed. This coexistence guard prevents
+unreviewed writes but is not itself an upgrade algorithm.
+
+An eventual reviewed migration would need independently verifiable source
+for the exact canonical v1 configuration and full historical ID reservations;
+a maintainer-approved policy for legacy data without sufficient provenance;
+and a durable journal protocol that explicitly handles crash windows where
+both version filenames may coexist. It must not erase v1 to make v2 import
+appear successful, invent identities or silently reuse retired IDs. Under the approved first-operational-v0.6.0 scope, this future migration
+is **NOT APPLICABLE**. The only safe current behavior when legacy v1 state
+is encountered is **refusal without mutation**, not automatic bootstrap,
+import, cleanup, or upgrade.
+
+A privileged entry must independently authenticate the administrator's
+exact operation, generation, canonical config bytes and decision provenance,
+then revalidate the **actual host** OS root, mount namespace, mount topology,
+owned directories and include, ACLs, xattrs and SELinux label/policy under
+the same locked transaction. Root EUID in a container or a stored
+`decision_sha256` is not adequate. The #95 next-generation preview and
+#28 rendered candidate are untrusted planning inputs, not write authority.
+The privileged transaction must keep its lock through native packaged
+full-context `nginx -t`, staged activation, verified live exposure, and
+compensating rollback. Cache, certificates, monitoring history, global
+NGINX configuration and client sources must remain untouched by default.
+If any original criterion lacks native evidence, acceptance remains
+**NOT VERIFIED**, independently of green synthetic CI.
+
+### Unpublished proposed-v2 journal provenance guard
+
+Before an unpublished `.state-v2.pending-tmp` can be classified as an
+abandoned fixture transaction or discarded by explicit private recovery, its
+bounded journal record must validate **and** its embedded previous-state bytes
+must match the exact currently persisted state under the exclusive lock.
+Malformed temporary journals and mismatched previous-state records fail
+closed without deleting the journal or replacing the state. This applies to
+both an interrupted first bootstrap (previous state absent) and an interrupted
+same-version update. The new tests inject the crash at
+`journal_tmp_durable`, substitute a different valid v2 snapshot and verify
+that both preview and recovery refuse with `STATE_DRIFT`, preserving bytes.
+
+These checks do not authenticate a host administrator, prove host-root
+provenance, or authorize the fixture recovery function for production. The
+native NGINX/systemd/SELinux and original applicable #31 acceptance gates
+remain **NOT VERIFIED** until separately executed on booted target systems.
+
+### Published proposed-v2 journal stage/rollback preservation
+
+When a published private fixture v2 journal is present, recovery now
+validates any staged **or already replaced** next-state bytes against the
+journal's next-state digest **and** the pure proposed-v2
+generation/identity/retired-reservation transition checker. A changed stage,
+or a digest-matched stage/replacement paired with an invalid next-generation
+transition, fails closed before recovery modifies any file. A pre-existing rollback file must contain the *exact*
+validated previous-state bytes; a mismatch is refused and preserved rather
+than deleted and rebuilt. A correctly written rollback file remaining after
+an interrupted rename can still be retried.
+
+Read-only preview and private recovery use the same refusal conditions.
+Tests inject crashes after the fsynced stage and after replacement, mutate
+stage, replaced-state or rollback bytes, and verify refusal and byte-for-byte preservation;
+they also construct a journal digest that matches a structurally valid but
+semantically invalid next-generation snapshot. Those fixtures do not
+establish production filesystem ownership, an authenticated operator,
+actual NGINX service exposure or a recovery authorization token. A damaged
+rollback requires explicit operator investigation instead of silent
+deletion. Booted native acceptance remains NOT VERIFIED.
+
+
+### Disposable end-to-end lifecycle → v2 journal → live NGINX rehearsal
+
+The #31-specific \`test_v2_lifecycle_nginx_live_sandbox\` connects the
+*already merged* #95 explicit repository-change planner, the existing
+private proposed-v2 Linux-FD fixture journal, the persisted-v2 locked
+#28 NGINX renderer, and a **real but isolated, non-systemd NGINX master**
+on a test-owned Unix socket. It tests a disabled add, enable, interrupted
+disable/recovery/retry, normal disable and remove. It uses the same
+canonical configuration bytes and historical reservations checked by the
+fixture store, verifies generation CAS, durable retired-ID records,
+stale/reused-ID refusal, active-route fragment inclusion/withdrawal,
+packaged \`nginx -t\`, actual sandbox worker reload and response, and
+test-owned retained cache bytes. Failure is injected at
+\`stage_durable\`: the read-only renderer refuses a pending journal,
+the existing NGINX worker stays live, explicit private recovery
+preserves exact known-good state, and the intended operation can be
+retried without double-applying the generation.
+
+**Limit of this evidence:** state commits and process reloads are two
+separate, manually sequenced *test* actions, not one trusted atomic
+production transaction. This test **does not** authenticate the operator,
+run privileged Linux production services, establish host-root/mount
+ancestry/SELinux ownership, expose a real external cache route, validate
+signed APT/DNF payload integrity, publish an active-only catalog or
+prove power-loss recovery. The health endpoint proves only the local
+isolated NGINX worker's response. The proposed v2 format is still
+unadopted. Actual host service+state/catalog atomicity remains
+NOT VERIFIED pending the reviewed #31/#27/#28/#95 integration design,
+root authorization and booted-host tests. The companion #28 PR #251
+separately exercises real disposable HTTP cache HIT with TLS.
+
+
+### Proposed-v2 precommit NGINX candidate under the existing fixture lock
+
+\`_preview_proposed_v2_nginx_before_commit_under_root\` closes an
+important *source-level* ordering gap: the older read-only
+\`_preview_persisted_v2_nginx_candidate_under_root\` can only render
+**after** a v2 state has been durably committed. The new fixture-only
+preflight accepts a bounded proposed-v2 snapshot, explicit prior generation
+and complete pinned DNS answers, freezes untrusted inputs **before** the
+exclusive protected-state lock, refuses legacy state, pending journals,
+stale generations, non-monotonic/historically conflicting reservations and
+unsafe/extra/missing IP pins, and renders an uncommitted next-generation
+NGINX candidate from the *same* canonical proposed configuration bytes
+that the private writer would persist.
+
+For an idempotent v2 no-op, the renderer instead uses the **actually
+persisted previous generation**, mirroring the private writer's no-op
+behavior. It rechecks the protected predecessor bytes before returning,
+including detecting an out-of-band writer ignoring the advisory flock.
+Nothing is created, staged, committed, reloaded or published. The caller
+must not treat the report as a lease: its lock has already been released.
+\`authorizes_state_commit\`, NGINX, catalog and cleanup flags are all
+false; synthetic approval references and proposed-v2 data never become
+trusted operator provenance.
+
+Debian 13 and AlmaLinux 10 disposable-package CI exercises the
+precommit candidate with \`nginx -t\`; other regressions verify
+bootstrap, parity with postcommit pinned output, final generation/no-op,
+invalid and private pins, stale/absent predecessor, old v1 coexistence,
+lock contention, interrupted journal recovery, and detection of a
+non-cooperating file writer without performing any recovery or mutation.
+This is a prerequisite for a future *single, authenticated native
+transaction*, not evidence that state commit, NGINX activation and
+atomic active-only discovery already form such a transaction.
+Booted systemd/SELinux acceptance stays NOT VERIFIED.
+
+
+### Lifecycle fixture: explicit validation before every durable revision
+
+The end-to-end sandbox lifecycle regression now uses
+\`_preview_proposed_v2_nginx_before_commit_under_root\` on *each*
+candidate, validates the derived candidate via distro-packaged
+\`nginx -t\` in a **separate disposable temporary config**, checks that
+neither the stored v2 predecessor nor the currently served NGINX
+configuration changed, and only then invokes the private fixture
+commit. After commit it compares the locked persisted renderer's
+complete upstream/location fragments and pin count to the precommit
+result before explicitly reloading the isolated NGINX worker.
+
+An injected interruption during disable requires explicit recovery;
+the recovered predecessor is checked and **the old precommit result is
+discarded and regenerated** before retrying. This deliberately tests
+the ordering required by the future host transaction without adding
+an installer, privileged service, authorization token, actual atomic
+catalog, or production commit/reload control. It is not a substitute
+for genuine booted systemd/SELinux, owner approval or live cache HIT.
+
+### Same-lock v2 NGINX-candidate preflight + private state commit (fixture only)
+
+The private `_commit_preflighted_proposed_v2_under_root` now narrows the
+previous preflight-to-state-commit window. It freezes the complete untrusted
+v2 snapshot and pin dictionary **before** locking, then takes the existing
+protected fixture FD lock **once**. While held it rejects legacy/pending
+state and stale generations, validates the canonical transition against the
+*actual persisted predecessor*, renders the already owned #28 candidate
+via the same source, rechecks predecessor bytes and passes that exact
+expected previous state to the shared journalled commit body.
+
+The previous private writer's locked journal/stage/fsync/rename and recovery
+semantics remain unchanged. A no-op leaves the inode untouched and renders
+the persisted generation. The helper refuses unsafe/incomplete pins,
+concurrent/out-of-band state replacement, another held lock and interrupted
+transactions **before new state writes**. Fault-injection tests still require
+explicit, conservative rollback following a durable journal interruption.
+Both the original writer and the new combined entry use the same
+`_commit_locked_proposed_v2` implementation rather than diverging
+between two protected-state commit semantics.
+
+**Important security boundary:** this locks *only a disposable state-v2
+fixture*. It does **not** execute full-context `nginx -t`, validate root
+provenance/ACL/mount/SELinux, authenticate an administrator, stage a managed
+NGINX include, reload systemd, attest actual exposure or atomically
+publish an active-only catalog. The generated fragments and committed
+fixture state may therefore differ from the live service. Every returned
+service/catalog/host/privileged authorization flag remains FALSE, even
+after a fixture state write. Do not expose the private helper through
+CLI/systemd/Polkit or treat a successful result as production acceptance.
+Actual orchestration still requires the separately approved privileged
+root-owned transaction and integration with #27/#28/#95; the newer NGINX
+cache-root syntax guard remains owned by existing #28 PR #251 until merged.
+
+The new focused tests cover clean bootstrap, changed active candidate
+parity, no-op idempotency, stale generation, unsafe pins, concurrent lock,
+out-of-band writer drift and interrupted-journal recovery. Genuine
+booted systemd + enforcing SELinux acceptance on Debian 13 and AlmaLinux 10
+is **NOT VERIFIED** and remains scheduled after the v0.6.0 code gates.
+
+### Candidate syntax validation hook while holding the fixture lock
+
+The private same-lock precommit API can now receive a **test-only**
+`validate_nginx_candidate` callback. It receives an independently detached
+JSON-compatible copy of the already rendered #28 candidate **after** the
+canonical v2 predecessor/transition and pin checks, but **before** any new
+journal, stage or state write. The existing state predecessor comparison runs
+**again after** this callback, so a non-cooperating writer that changes state
+during a slow syntax test is refused without replacing the changed bytes.
+
+The callback is not a privileged or production validation API: the caller
+supplies it, its implementation and environment are untrusted, and a callback
+may perform arbitrary test fixture effects. No production host helper may
+accept a validator, executable path, config path or service unit from callers.
+A callback exception is mapped to a fixed redacted
+`NGINX_FIXTURE_VALIDATION_REFUSED` error; no state journal is created. The
+detached argument prevents accidental mutation of the candidate returned to
+the test harness. Even with callback success the
+`nginx_syntax_verified`, `authorizes_nginx_reload` and
+`authorizes_catalog_publication` flags remain **false**; the new
+`fixture_validation_callback_executed` field reports only invocation.
+
+Executed evidence must still distinguish synthetic lock/validator tests from
+actual packaged NGINX syntax and from root-authenticated host activation.
+The next implementation boundary is a fixed-operation, root-owned entrypoint
+with independently verified administrative OS authorization and host
+provenance, plus validated NGINX include ownership, systemd unit, TLS/cache
+paths, full-context syntax, reload, observed exposure, same-lock state/catalog
+commit and durable known-good compensation. This new callback alone satisfies
+none of those operational acceptance requirements.
+
+### Deliberate refusal of live-root fixture writes
+
+The private proposed-v2 fixture commit, same-lock preflight commit and
+rollback entrypoints now reject a descriptor whose device/inode identity
+matches the actual `/` of the invoking process. This is a **negative
+accidental-misuse guard**: the private fixture API must not be silently reused
+by the future root-owned host helper to mutate the actual namespace root.
+Invalid root descriptors also fail closed before opening state or taking locks.
+
+An FD that differs from `/` does **not** establish that it is a trusted test
+sandbox; bind mounts, alternate namespaces and privileges still require
+independent scrutiny. The private Linux fixture code remains non-authorizing.
+A future production transaction must use a separately reviewed, fixed-path
+root-owned host entrypoint with real administrative authentication and
+complete native recovery/NGINX/catalog acceptance; this guard does not
+implement such an entrypoint or prove host-root provenance.
+
+### Strict fixture syntax-check callback result
+
+A successful validation callback must return **exactly `None`**. Any
+other result (including `False`, `True`, a numeric subprocess status or a
+dictionary) and all ordinary exceptions are treated as a fixed redacted
+`NGINX_FIXTURE_VALIDATION_REFUSED` failure **before** creating a state
+journal. This prevents a caller accidentally discarding a failed subprocess
+result. The callback remains test-only and cannot be supplied to production
+root/systemd/Polkit code; no success result is an activation permission.
+
+### Fixture post-replace barrier: preserve recovery journal until activation checks
+
+The private same-lock v2 preflight/commit helper now also accepts an optional
+**fixture-only** `verify_fixture_activation` callback. Its order is:
+
+1. Independently validate the canonical v2 transition/pins and render #28
+   candidate under the protected fixture lock; run any optional syntax
+   validator **before** creating the durable v2 journal.
+2. Create and fsync the existing bounded v2 journal/stage, replace state and
+   fsync the state directory. At this point the **old v2 bytes remain durably
+   recorded** in the still-present journal.
+3. Run the optional detached fixture activation verifier **while holding the
+   same lock**, before deleting the journal. A non-`None` return, exception,
+   changed/foreign state or changed journal refuses finalization. The pending
+   journal remains available for explicit, conservative recovery; future
+   transitions refuse `RECOVERY_REQUIRED` until reconciled.
+4. On exact successful verification, re-read and compare state/journal, then
+   remove the verified journal. A pure no-op skips the activation hook and
+   preserves the inode.
+
+The hook models the **durability barrier**, not NGINX/repository operation.
+A caller-supplied test callback is **not trusted code** and must never be
+connected to the actual host, systemd, production NGINX, signing, privileged
+catalog or live service user. Source reports retain
+`operator_authorization_verified=False`,
+`trusted_host_root_verified=False`, `nginx_syntax_verified=False`,
+`active_exposure_verified=False`, `authorizes_nginx_reload=False` and
+`authorizes_catalog_publication=False`, even if a fixture callback returns
+`None`. `fixture_activation_barrier_executed` reports test invocation only.
+
+**Crucial remaining gap:** the state-only journal does NOT contain the
+managed NGINX include, active catalog or native package/service rollback.
+Consequently a crash or callback failure after a *real* reload could leave
+the service and state divergent; the code intentionally refuses further
+fixture writes rather than claiming to recover an external service. A
+production transaction still needs a separately designed durable
+**multi-resource** journal, verified prior include/catalog bytes,
+a fixed validated NGINX reload and exposure probe, compensating reload and
+a consistent active-only catalog publication record. Native systemd and
+AlmaLinux SELinux evidence remain NOT VERIFIED. Do not merge or deploy this
+fixture as a production transaction.
+
+### Ordered NGINX/catalog compensation in the same fixture v2 lock
+
+A private, non-installed `server_fixture_activation_flow_v1` module now
+rehearses the **ordered** test-only side effects while the previously added
+v2 post-replace barrier keeps the state WAL durable and the owner-pinned
+exclusive lock held:
+
+1. Receive a detached **already independently rendered** candidate and
+   reject malformed candidate status, duplicate/unordered IDs and false
+   claim of NGINX/catalog authority.
+2. Atomically stage the disposable managed NGINX candidate; run real native
+   packaged `nginx -t` on the test-only complete config; invoke a test-only
+   reload; verify the actual running test master responds with the new
+   `/__test_health` marker.
+3. Only after that observed disposable service transition, atomically
+   publish a **fixture-only** candidate catalog to the sandbox and verify its
+   enabled-ID set. No production client discovery is emitted.
+4. A failure at *any* stage (including after publication) invokes one
+   compensating test callback. Tests restore the previous NGINX config, reload
+   the previous worker and restore the exact previous synthetic catalog.
+   The state WAL is **still pending**, so a subsequent explicit v2 fixture
+   recovery restores the previous persisted state under the protected lock.
+5. Successful verification finalizes the state WAL; all reported root,
+   NGINX, catalog and external authority flags remain **false**. The callback
+   return contract is exactly `None`; any other value, exception or failed
+   compensation refuses with a fixed non-secret diagnostic.
+
+The new tests execute the actual stock NGINX master in temporary Unix socket
+trees on Debian 13 and AlmaLinux 10. They cover both the successful
+stage/validate/reload/observe/publish sequence and a post-publication error
+requiring real NGINX reload compensation, catalog restoration and state
+journal rollback. Negative tests exercise failure at every ordered phase,
+invalid callback results, compensation failure and malformed candidate
+refusal.
+
+**Strict limit:** these are arbitrary **test-supplied** callbacks and
+temporary paths. They are never exposed to unprivileged callers or a root
+daemon; a generic callback must never be accepted by a privileged operation.
+The observed marker is not genuine APT/DNF repository data or native service
+acceptance. Exception-time compensation cannot run after abrupt process
+termination/power loss, and the fixture WAL does not yet protect NGINX include
+or catalog bytes. There is still **no durable multi-resource host journal**,
+root-owned installed worker, independently verified host/SELinux/ACL/paths,
+native systemd control, real TLS exposure or verified client catalog. All
+original operational acceptance remains **NOT VERIFIED**; native VMs remain
+pending after substantive implementation/integration, not waived.
+
+
+### Experimental durable **three-resource** v2 undo journal (fixture shadow only)
+
+The new private `server_fixture_multi_resource_wal_v1.py` records a
+**fsynced, persistent, byte-exact undo journal** for three fixed-name
+resources held under the *same owner-pinned state-directory flock*: canonical
+v2 state, a shadow managed NGINX include and a shadow derived catalog. A
+fourth small protected sidecar binds the three hashes to the last completed
+fixture generation, preventing unmanifested prior fixture files from being
+silently adopted. All names are fixed and are accessed with Linux descriptor
+relative `O_NOFOLLOW`, owner/mode/link/size checks; no path, unit, command,
+executable or operation name is supplied by a caller. Stages and journals are
+created exclusively and fsynced before atomic replace, and each directory
+replacement is separately fsynced.
+
+**Important scope:** the shadow files
+`.fixture-managed-nginx.conf`, `.fixture-derived-catalog.json` and
+`.fixture-active-manifest.json` live **inside the protected fixture state
+directory**, NOT under installed `/etc/nginx` or a publicly served discovery
+directory. They are mode `0600`, deliberately **not an NGINX include or
+discoverable client catalog**. An exact active-ID list in this fixture input
+is a *synthetic candidate assertion*, not proof of observed live exposure.
+This module and its `_under_root` methods are private and explicitly
+refuse the process's live namespace root descriptor, and even a supplied
+alternative root FD is not proof of a trusted fixture or host-root context.
+
+The deterministic transaction writes the full prior bytes and the *next
+hashes* of all four fixed resources into a bounded JSON WAL. The log is
+first fsynced to an exclusive temp inode, atomically published and directory
+fsynced **before** the first shadow include write. Protected data
+is replaced in order: shadow include, state, shadow catalog, owner-hash
+manifest. After an optional fixture-only verifier, the four exact next bytes
+and journal inode are checked again and only then is the WAL removed.
+A fault injected at journal-temp, published-journal or any of the four
+replacement phases leaves observable durable evidence. State-only v1/v2
+private operations now detect either an in-flight WAL **or a successfully
+committed multi-resource owner marker**, and refuse state-only writes,
+read-only recovery previews and state-only rollback. An interrupted WAL
+requires **specific** multi-resource fixture recovery; a clean completed
+multi-resource ownership domain requires a **multi-resource** future write
+rather than a state-only update that would leave published routes/cat
+stale. Multi-resource commits themselves ignore only the committed owner
+sidecar, not native state-only journals.
+
+Even without any pending WAL, a clean-recovery observation validates the
+full protected prior-state/include/catalog owner-hash sidecar. A missing
+journal is never permission to report `CLEAN` if an externally altered
+include/catalog/state could still be present. Both the candidate catalog
+and the retained prior catalog must be strictly canonical JSON with no
+duplicate keys, nonfinite values or ambiguous encodings, and the exact
+sorted active-ID set must match the complete validated v2 state. Even a
+rebound owner-manifest digest cannot turn a malformed prior catalog into
+an accepted clean generation. Negative tests verify refusal without
+creating or deleting any protected state or journal bytes.
+
+Recovery obtains the *same* pinned FD lock. It validates journal format,
+exact old-byte digests, prior protected fixture ownership manifest, and
+checks that **each** current file has either the exact old or known next
+digest. When the state has reached its proposed next bytes, the recovery
+independently validates the **complete v2 transition** (canonical schema,
+generation and retired-ID continuity) before restoring any file. A forged
+new-state digest cannot bless invalid v2 bytes. A non-cooperating/foreign
+writer, symlink substitution, unowned
+bootstrap artifact, malformed digest, ambiguous journal or unknown temporary
+stage is refused without deleting an unexpected file. Recovery invalidates
+the owner manifest first, restores the old catalog and shadow NGINX and v2
+state, then clears the verified WAL. Explicit recovery may be retried after
+another interruption; a fully recovered state remains inert/idempotent.
+
+The fixture tests cover both initial and repeat transactions, all six
+injected crash phases, **real separate-PID fork/os._exit process deaths** at
+each of the six WAL phases, complete prior-byte replay by a different
+process, a second interruption during rollback followed by a successful
+retry, tampered canonical/noncanonical/oversize journals, repeat recovery,
+foreign state/include/catalog/manifest modifications, symlink to unrelated
+data, strict active-ID exactness, unmanifested foreign include refusal,
+same-version no-op and live-namespace-root refusal. The ordinary state-v2
+writer, recovery **and read-only recovery preview** all refuse an in-flight
+multi-resource transaction; they never misreport an interrupted combined
+state/catalog/include deployment as clean.
+
+**This is not the final privileged writer**: it does not make any change to
+real NGINX or a public catalog; does not install packages or run systemd;
+does not prove a real reload, application availability, host-root provenance,
+operator authorization, mount/ACL/xattr/SELinux labels or signed artifact
+trust. It currently accepts explicitly test-supplied shadow bytes and
+callbacks, which are never a privilege boundary. It has not solved the
+v0.6.0 multi-filesystem crash/recovery boundary; an eventual production
+root-owned engine must independently derive signed, approved exact NGINX
+and active-only catalog bytes under a fixed trusted OS lock, pin real
+/etc/nginx and catalog path ancestry, preserve known-good active service
+across process death, reconcile exposure, compensate failed systemd reload,
+and reject externally owned hosts. Never use this fixture module as a
+privileged generic write API. Native booted Debian 13 and AlmaLinux 10
+systemd/SELinux operational acceptance and original #31/#95 criteria remain
+**NOT VERIFIED**.
+
+
+### Cross-PR exact-head integration rehearsal (no protected merge)
+
+The optional `.github/workflows/v06-cross-pr-integration-rehearsal.yml`
+checks out the **existing #31 PR #237** head and fetches **only** the
+other already-open canonical integration PR branches #252 (#27), #251
+(#28), #254 (#64) and #214 (#95), comparing their live SHAs against
+**explicit pinned exact commits**. If a dependency branch advances,
+the rehearsal refuses a stale result instead of accidentally testing
+unknown code. All PR heads must descend from the same verified protected
+`integration/v0.6.0` base. It creates a **local throwaway Git branch and
+local merge commits** inside each disposable Debian 13 and AlmaLinux 10
+Actions container, with `contents:read`, `persist-credentials:false`,
+no push permissions and no protected target changes. It then runs combined
+state-journal/NGINX/credentialed-socket/native-unit/derived-client-catalog
+and lifecycle tests against the **actual combined source tree**, rather
+than extrapolating cross-feature compatibility from individual green PRs.
+
+A local merge/test success remains only **integration rehearsal PASS**,
+not a protected integration merge, issue/VM/release acceptance, a live
+root worker, or evidence that the parent original criteria are satisfied.
+If any dependency SHA, base or file overlap fails, update the existing
+owners' PRs and re-pin this test after inspecting the changed diff;
+never silently fetch/mix arbitrary PR heads or bypass protected CI.
+
+
+### Five-PR combined actual-nginx + protected shadow WAL acceptance rehearsal
+
+The same [cross-PR ephemeral combined workflow](../../.github/workflows/v06-cross-pr-integration-rehearsal.yml)
+now executes `scripts/ci_v06_cross_pr_multi_wal_contract.py` **after**
+locally merging exact pinned open #27/#28/#64/#95 branches with this #31 PR
+in a throwaway Debian13 or AlmaLinux10 container. It does not push any
+combined changes back to GitHub. It reuses the existing #95 declarative
+lifecycle planner to enable, disable and remove a supported existing
+repository; obtains the #28 generated pinned NGINX fragments; runs a
+**real packaged `nginx -T`** against a disposable full config; checks
+#251's closed client-schema-compatible derived *catalog candidate*; then
+atomically updates the #31 multi-resource shadow journal, shadow NGINX
+bytes, state-v2 and synthetic catalog in the same descriptor-held fixture
+lock. Each resulting catalog is checked against the exact desired-active
+repository IDs and retains explicit `actual_active_exposure_verified=False`
+and `authorizes_catalog_publication=False`.
+
+For an enable transition, a **forked writer really calls `os._exit(41)`**
+after replacing the shadow NGINX/state/catalog and before the manifest
+finalization. The parent independently reacquires the state lock, validates
+the durable WAL and restores the previous exact four-resource byte set,
+then retries the identical enable transition and continues to disable
+and remove under the same ownership manifest. The test confirms original
+tombstones remain retired, that the final journal is clean and that every
+step remains *non-authorizing*. It is a stronger *composition test*
+across the current concurrent PRs than separate per-file unit tests.
+
+**Crucial limits:** The native NGINX process in this rehearsal performs
+`-T` syntax inspection, **not** an installed managed-service reload.
+There is no live APT/DNF traffic, active exposure probe, root-owned
+privileged dispatcher, distributed package/host signature acceptance,
+public catalog publication, or crash-safe multi-filesystem transaction.
+The shadow NGINX/catalog are private test files only. Passing this workflow
+does not adopt any unmerged PR, authenticate a candidate's approval
+reference, qualify native systemd/SELinux or unblock protected integration.
+
+
+### Interlock with non-atomic native NGINX package effects (#27)
+
+The v2 state-only and multi-resource fixture writers, state-only
+read-only recovery preview and both recovery entrypoints now check the
+**same exact native package-effects marker filenames** owned by the
+existing #27 `server_native_nginx_package_journal_v1` contract:
+`.native-nginx-v1.pending` and
+`.native-nginx-v1.pending-tmp`. They are checked under the existing
+owner-pinned state lock with the native journal's bounded metadata rules,
+including refusal of symlinks, unowned files and abnormal permissions.
+
+Either marker causes the fixed
+`NATIVE_PACKAGE_EFFECTS_RECONCILIATION_REQUIRED` refusal before v2
+state/include/catalog data is created, read as authoritative, rewritten
+or recovered. This prevents an incomplete APT/DNF NGINX package change
+from being silently treated as a coherent v0.6.0-managed installation.
+It also ensures a pending *separate* multi-resource WAL cannot be
+rolled back across an unresolved native package transaction.
+
+The tests cover both native marker states during v2 bootstrap and while
+a multi-resource WAL is pending. Test-only marker removal follows an
+explicit reconciliation step; **no code automatically deletes a native
+package marker or claims native package rollback.** Real APT/DNF side
+effects, installed systemd service identity and actual SELinux policy
+remain independently NOT VERIFIED. This is a fail-closed prerequisite,
+not production NGINX installation or an installer API.
+
+
+## Exact #27 native NGINX master cross-PR rehearsal
+
+The exact-five-PR disposable merge workflow now additionally executes the
+#252 root-owned packaged NGINX master /proc identity smoke after the
+#31/#95/#28 state, lifecycle and active-only candidate tests. The process
+uses an isolated temporary configuration with no listening port, and is
+terminated/reaped by the CI driver. The new #252 source verifies the kernel
+executable inode matches the installed /usr/sbin/nginx inode before reporting
+a **read-only necessary condition**. The combined workflow pins PR #252's
+exact head, refusing changed dependency refs. This is never a production
+transaction, unit reload, activated catalog, host-root attestation or
+booted systemd/SELinux test; issue #31 AC1-AC5 remain NOT VERIFIED.
+
+
+## Fixture WAL pre-publication separation (not host authorization)
+
+The private multi-resource shadow transaction now exposes an **optional
+fixture-only** pre-publication verification seam. While the same owner-pinned
+exclusive FD lock and durable WAL remain held, the candidate NGINX include
+and v2 state are written first; the prior catalog and owner manifest are
+still byte-identical and must remain so until the verification callback
+returns exactly None. Immediately after the callback, the journal and all
+four fixed resources are re-read to detect out-of-band fixture drift; only
+then is the inert candidate catalog replaced, followed by the new owner
+manifest and existing post-publication check. A failure at the barrier
+preserves the WAL and previous published catalog; a separate replay can
+restore exact known-good shadow bytes. The combined five-PR CI rehearsal
+exercises this order on enable/disable/remove, including fork/PID crash.
+
+**Important:** The callback is supplied by disposable tests only. Without
+it the fixture WAL remains intentionally inert and makes **no** actual
+exposure-verification claim. Even when it runs, synthetic exposure cannot
+make an untrusted desired-active state an authorized public catalog. The
+simulated catalog lives under an isolated fake root; actual NGINX service
+reload, trusted host-root administrator provenance, mounted cache ownership,
+SELinux and atomic production publication are still missing. The original
+#31 operational AC1–AC5 remain NOT VERIFIED.
+
+The five-PR CI exercise also reruns the **actual installed distro packaged
+NGINX -T** and the derived client-catalog candidate comparison *inside*
+this same-lock prepublication callback. This guards against reusing the
+initial candidate preview as an implicit commit lease. It still does not
+prove the NGINX service running on a booted host or that routes are exposed.
+
+
+## Combined #64 fixed NGINX syntax gate, 2026-11-10
+
+The five-PR read-only integration rehearsal now pins the existing #64
+root-control PR's separate fixed-command syntax-only prerequisite. In both
+throwaway distro containers it runs the genuine packaged
+`/usr/sbin/nginx -t -c /etc/nginx/nginx.conf` and a deliberately invalid
+config test, then restores the original container config bytes. The combined
+pytest selection includes #64's denied-authorization, fixed-argv and drift
+tests alongside #31's staged multi-resource fixture WAL. This does not
+connect a real root socket worker to these operations: a valid kernel peer
+still receives `ROOT_TRANSACTION_NOT_IMPLEMENTED`. Syntax-only output
+cannot grant NGINX service reload, resource publication or root writes.
+
+## Whole-state v2 digest plus generation under the retained lock (no authority)
+
+The private read-only server_proposed_v2_locked_digest_v1 precondition
+compares a canonical committed v2 snapshot to a caller-asserted SHA-256
+of the *entire state file*, not just the configuration. Under the same
+owner-pinned exclusive state FD lock it checks the expected generation,
+old v1/native-package markers, pending WAL, canonical v2 bytes, inode
+metadata and an immediate second read. It detects even a noncooperating
+root actor substituting an identically encoded inode while flock is held.
+The fixed current-namespace wrapper accepts no caller root path, UID or FD
+and requires root for *read-only* inspection. A hash equality check is
+neither a signature nor authenticated operator intent; it never grants
+host write, reload or catalog publication, and expires on lock release.
+
+Tests cover valid fixture read, stale hash/generation, malformed claims,
+absent state, interrupted WAL, foreign legacy state, same-byte inode
+substitution and root refusal. Real booted native host, signed installed
+worker, operator approval, NGINX reload and postpublication acceptance
+remain NOT VERIFIED. The original issue #31 host criteria are unchanged.
+
+
+## Protected integration reconciliation after first five queued PRs (2026-11-10)
+
+The reviewed Merge Queue integrated the narrow, non-activating CI/test
+prerequisites #255 (TLS smoke), #250 (pure pressure preview), #252 (native
+NGINX unit inventory), #251 (real isolated cache/derived catalog) and #214
+(pure repository lifecycle planner), in that exact order, onto the
+protected v0.6.0 integration branch. The existing #237 PR preserves its
+previous 13-path state-v2/locked-journal changes by an explicit two-parent,
+non-protected branch reconciliation against that exact integration commit.
+The combined ephemeral rehearsal therefore reads these accepted source
+files directly from the protected base and pins **only the still-unmerged
+#254 root-control sibling**, including its independent pinned-TLS-pair
+negative tests. The approved v2 schema, original issue criteria, test-only
+origin substitutions and all no-activation/NOT VERIFIED flags remain
+unchanged. Merging this preparatory branch into the protected target is
+still disallowed until its own original full acceptance gates pass.
+
+
+## Post-queue native cache fixture isolation (2026-11-10)
+
+After the accepted #251 NGINX renderer introduced per-repository
+`proxy_cache_path`, first-reconciled #31 CI correctly detected five
+fixture failures on each distro and in ordinary unprivileged GitHub
+Python runners. The original legacy test documents hard-coded a fixed
+cache root which is not guaranteed to exist, and the stock NGINX parser
+attempted to create children under its missing parent. The first
+container-only workflow workaround fixed the distro job but could not
+address unprivileged general Python runners. It has been superseded.
+
+The durable regression fix is now **per-test isolation**: each of the
+affected real NGINX syntax/reload tests creates a dedicated disposable
+`tmp_path/managed-cache` directory and rebases its test-only canonical
+install-v1 configuration *before* constructing the canonical state-v2
+digest and generation. No source cache path, schema, production
+renderer, runtime root or privileged service behavior is changed.
+The workflow no longer creates `/var/cache/nginx/repocache-managed`.
+Tests check real native `nginx -t`, live isolated NGINX reload and
+WAL/catalog compensation without writing outside their test root.
+All original host-root and SELinux/rollback acceptance remains
+NOT VERIFIED; the corrected tests must PASS again at the new exact HEAD.
+
+## Same-lock deterministic NGINX/catalog binding prerequisite
+
+The private read-only `server_proposed_v2_locked_catalog_binding_v1`
+preview is the next prerequisite for an authentic root-owned transaction.
+It accepts a fixture root descriptor, exact state-v2 generation and full
+state-file SHA-256, bounded pinned numeric upstream observations and an
+UNTRUSTED claimed nginx -T dump/exit code. All processing is protected by
+one owner-pinned exclusive v2 FD lock; it rejects legacy/pending journals,
+invalid full-state SHA, stale generation and replaced state inodes.
+The canonical v2 configuration is parsed and rendered through the already
+accepted strict #28 NGINX generator. The active-only #28 catalog candidate
+is independently regenerated from that *same* configuration and pin set.
+The preview enforces the exact rendered managed fragment and active ID set
+inside the claimed dump, derives deterministic bounded client-schema
+catalog bytes and exposes only their SHA-256 plus the candidate mapping.
+It rechecks the state, metadata and pending journal before unlocking.
+
+CRITICAL: nginx -T and its exit code are *caller claims* in this fixture.
+This gate does not execute nginx, verify kernel-local effective exposure,
+validate signed installed code or authorize a human operation. Even a
+matching digest, dump, generation and catalog cannot grant host write,
+reload or publication; the observation expires when the lock is released.
+The actual systemd-root worker remains ALWAYS-DENY and uninstalled.
+No production /etc, /var, cache, service or client source is changed.
+Tests exercise active-only outputs, exact bytes, stale CAS/digest, foreign
+route/duplicate/missing fragment, malformed pins, pending WAL, same-byte
+inode substitution and actual root-descriptor refusal. The real signed
+installed host transaction and booted-VM gates are still NOT VERIFIED.
+
+
+## Same-lock root-owned candidate / persisted v2 CAS binding (non-activating)
+
+The existing #31 development branch now includes #64's exact source revision
+in its non-protected two-parent history, preserving independent PR #254 for
+separate review and eventual first merge. The private
+`server_root_control_v2_candidate_binding_v1` module acquires the #31
+protected exclusive descriptor lock, refuses legacy or pending journals,
+reads actual canonical predecessor state under lock, independently reads
+the fixed root-owned administrator candidate (with a second read before
+unlock), compares precise predecessor generation and whole-file digest,
+validates the entire #31 v2 snapshot transition, including permanent
+historic ID reservations, and rechecks state bytes/inode before returning.
+
+The returned report is an **inert preview only**. Even while the state
+lock is held during inspection, it is released before return. A future
+trusted installed root broker must independently authenticate the operator,
+package/code and host provenance, and maintain this SAME lock throughout
+all file staging, NGINX syntax/reload/exposure verification, durable
+cross-resource compensation and active-only catalog publication. The
+operator-supplied approval-reference hash, fixed root-owned candidate bytes
+and local UID checks do not independently prove approval. The root worker
+continues to reply `ROOT_TRANSACTION_NOT_IMPLEMENTED`; no host activation.
+Only bounded Linux fixture and disposable container CI acceptance is claimed.
+
+
+## Native fixed-path v2 WAL/reload/catalog transaction engine (source implementation)
+
+The protected development branch implements a new \`server_native_v2_transaction_v1\`
+source module rather than extending the test-only shadow WAL. It performs
+actual descriptor-relative, root-owned mutations in fixed OS-root paths.
+The only mutable resources are:
+
+- \`/var/lib/repocache/server/state-v2.json\` (0600)
+- \`/etc/nginx/conf.d/repocache-managed.conf\` (0644)
+- \`/var/lib/repocache/public/catalog.json\` (0644; intended for fixed
+  \`/.well-known/repocache/catalog.json\` NGINX alias)
+- \`/var/lib/repocache/server/.state-v2-native.manifest\` (0600)
+
+Directories, the owner-pinned legacy \`.state-v1.lock\` and the independently
+prepared root-owned canonical administrative candidate must already exist.
+No write endpoint accepts operator-selected paths, binaries, units,
+environment, shell strings or callbacks. An isolated root FD is permitted
+only through a private fixture test seam, and explicitly refused if its
+inode equals the current namespace \`/\`.
+
+The transaction acquires the SAME #31 exclusive FD lock, checks complete
+prior ownership or refuses every foreign bootstrap file, validates the
+candidate's canonical state-v2 generation, whole-file CAS and permanent ID
+history, derives static HTTPS upstream destination pins through native DNS
+then uses #28's strict renderer to build the entire managed NGINX server.
+The generated server includes a fixed generation-tagged local HTTPS health
+endpoint and a fixed public client catalog alias. It protects old bytes
+and all four desired resource digests in root-owned durable
+\`.state-v2-native.pending\` **before** any resource replacement.
+
+The ordered path is: stage and fsync managed include and state on their
+own filesystems; validate the actual fixed installed \`nginx -t\`; run
+\`/usr/bin/systemctl reload nginx.service\` with fixed argv/env/timeout;
+confirm the intended native NGINX unit and a verified-TLS health response
+bearing the exact generation; inspect private, bounded installed
+\`/usr/sbin/nginx -T\` and check generated active route/catalog identity;
+publish catalog only after those observations; atomically publish the
+root-owned ownership manifest; verify exact new resource bytes and remove
+the durable WAL last.
+
+Any normal operation error attempts same-lock compensation: revoke the
+catalog, restore exact known previous include, validate and reload old
+NGINX, restore state/manifest, then remove WAL only after confirmed
+rollback. SIGKILL, crash, failed compensation, malformed WAL, changed or
+foreign resources, unsafe symlinks/hardlinks, unexpected stages and older
+state leave a durable blocker for the separate fixed \`RECOVER_V2\` path.
+A preparatory journal temp is discarded only if all old resources remain
+unchanged. Cache, logs, metrics, client sources and TLS files are never
+mutated by this engine. The initial release explicitly refuses migrations
+from older state formats.
+
+**Acceptance distinction:** The source engine is not installed, the signed
+worker/unit provenance and native SELinux/ACL policy are not yet implemented
+and it is NOT dispatched from the authenticated socket. The checked-in
+systemd unit remains a non-installed example. The distro CI runs this actual
+filesystem engine only against disposable root-owned fake directories,
+with native service/TLS effects replaced by test doubles; those tests do
+not prove PID1/systemd, mounted host paths, enforcing SELinux, native
+operator consent, real signed package installation or live network
+operation. All original #31/#64 production and booted-VM acceptance
+remain **NOT VERIFIED** until the final v0.6.0 VM campaign, as directed by
+the maintainer. Do not merge or advertise native host support until the
+applicable security and issue-specific review gates pass.
+
+
+## Actual fixed authenticated native entrypoint and operator socket client
+
+The distinct source module \`server_native_root_control_entrypoint_v1\`
+closes the #64/#31 execution seam previously absent in the inert prototype:
+it obtains exactly one kernel-credentialed AF_UNIX SOCK_SEQPACKET request
+from the fixed systemd socket, checks the root/PID1 prerequisites and
+kernel-authorized \`repocache-admin\` group and independently validates the
+supported distro from root-owned OS metadata. It dispatches ONLY
+\`APPLY_V2\` or \`RECOVER_V2\` to the fixed native transaction engine, no
+caller-selected command, script, path, unit, environment or executable.
+The response is canonical and redacted; success is sent only after the
+transaction returns committed/recovered, with no private NGINX/TLS/state.
+The existing #254 \`server_root_control_worker_v1\` intentionally remains
+an inert test of the protocol; a separately signed root-owned installed
+entrypoint must use this distinct runtime implementation after acceptance.
+
+The fixed \`server_native_root_control_client_v1\` sends only those two
+exact messages, verifies the kernel root peer and rejects noncanonical
+or contradictory success, untrusted or oversized replies, and denied
+operations. An operation whose acknowledgment is lost has an UNKNOWN
+outcome and must be reconciled under the persistent state/WAL; automatic
+resubmission or interpreting transport failure as rollback is prohibited.
+CLI \`--yes\` alone never constitutes OS-level privilege. This is source
+implementation, not an installed systemd unit or package approval.
+
+The #31 multi-resource engine additionally opens and cryptographically
+checks the full root-owned certificate/private key *pair* by pinned Linux
+descriptors before changing the managed NGINX config. After reload it
+requires both a verified-TLS generation health reply and the exact
+published active-only catalog bytes over the fixed HTTPS discovery path.
+Compensation after a failed apply restores the prior catalog and NGINX,
+then validates the prior active generation before clearing the durable
+recovery journal. Neither a green CI nor source mock is evidence of
+installed SELinux policy, exact signed worker provenance or VM success.

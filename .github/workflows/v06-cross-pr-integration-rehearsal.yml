@@ -1,0 +1,162 @@
+name: v0.6.0 Cross-PR Integration Rehearsal (Read Only)
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/v06-cross-pr-integration-rehearsal.yml'
+      - 'src/repocache/server_proposed_state_v2_store.py'
+      - 'src/repocache/server_proposed_v2_locked_digest_v1.py'
+      - 'src/repocache/server_proposed_v2_locked_catalog_binding_v1.py'
+      - 'src/repocache/server_fixture_multi_resource_wal_v1.py'
+      - 'src/repocache/server_native_v2_transaction_v1.py'
+      - 'src/repocache/server_native_root_control_entrypoint_v1.py'
+      - 'tests/test_server_native_root_control_entrypoint_v1.py'
+      - 'src/repocache/server_native_root_control_client_v1.py'
+      - 'tests/test_server_native_root_control_client_v1.py'
+      - 'tests/test_server_native_v2_transaction_v1.py'
+      - 'tests/test_server_proposed_state_v2_store.py'
+      - 'scripts/ci_v06_cross_pr_lifecycle_contract.py'
+      - 'scripts/ci_v06_cross_pr_multi_wal_contract.py'
+      - 'scripts/ci_native_nginx_process_inode_smoke.py'
+      - 'docs/architecture/SERVER_LOCKED_MANIFEST_RECONCILIATION_V1.md'
+
+permissions:
+  contents: read
+
+jobs:
+  ephemeral-combined:
+    name: Exact-sha ephemeral combined prerequisites (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: debian13
+            image: debian:trixie-slim
+          - platform: almalinux10
+            image: almalinux:10
+    container:
+      image: ${{ matrix.image }}
+    env:
+      PYTHONPATH: src
+      PYTHONDONTWRITEBYTECODE: '1'
+      BASE_SHA: 8492edfc6fbedd8e8fc23186ef5b2f0fc40c09cf
+      FORK_SHA: 675e7b49b3573b1e5ede2ca023ed55e270397d4f
+      PR64_SHA: d21cc7e11e3c045988c7381665d97e8a2009b815
+      PR76_SHA: 3966fac76d410b585e6e642bfb23cd9f2348adcb
+    steps:
+      # Install git before checkout: the stock distro container images
+      # lack git, so checkout would otherwise fall back to an archive with
+      # no .git and invalidate the read-only exact-SHA merge rehearsal.
+      - name: Install native distro test dependencies in disposable container
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [ '${{ matrix.platform }}' = 'debian13' ]; then
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq
+            apt-get install -y -qq --no-install-recommends               git python3 python3-pytest nginx openssl ca-certificates
+          else
+            dnf -y -q --enablerepo=crb install               git python3 python3-pytest nginx openssl ca-certificates
+          fi
+          python3 --version
+          nginx -v
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Locally combine exact reviewed PR refs without any remote push
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          # checkout writes as the runner uid; distro containers execute as
+          # root. Trust only Actions' single exact workspace, not '*' or any
+          # operator-supplied or repository-controlled path.
+          test "$GITHUB_WORKSPACE" = "/__w/repocache/repocache"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          # A SHA checkout lacks the integration base ref even with full history.
+          # Fetch one read-only canonical branch and pin its exact revision.
+          git fetch --no-tags origin +refs/heads/integration/v0.6.0:refs/remotes/origin/integration/v0.6.0
+          test "$(git rev-parse refs/remotes/origin/integration/v0.6.0)" = "$BASE_SHA" || {
+            echo "Integration base moved; stale combined rehearsal refused"
+            exit 1
+          }
+          # The protected base includes all previously integrated v0.6 work,
+          # including #281 and #282. Never replay merged PRs.
+          # Combine only still-unmerged #64 and #76 at exact revisions;
+          # never push or treat a disposable merge as authority to activate.
+          git fetch --no-tags origin \
+            +refs/heads/feat/64-fixed-credentialed-native-control-v1:refs/remotes/origin/pr64
+          observed="$(git rev-parse refs/remotes/origin/pr64)"
+          test "$observed" = "$PR64_SHA" || {
+            echo "Dependency PR #254 moved; update exact SHA before rehearsal"
+            exit 1
+          }
+          # Recheck the dependency's reviewed ancestry and the exact
+          # current protected base before any disposable source merging.
+          git merge-base --is-ancestor d53782ed01e1f85686f10279fd3c7eea6d7f6720 "$observed"
+          git merge-base --is-ancestor "$FORK_SHA" "$observed"
+          git merge-base --is-ancestor "$BASE_SHA" HEAD
+          git config user.email "read-only-rehearsal@repocache.invalid"
+          git config user.name "REPOCACHE disposable CI"
+          git switch -c local-v06-rehearsal
+          git merge --no-ff --no-edit refs/remotes/origin/pr64
+          git fetch --no-tags origin \
+            +refs/heads/fix/76-repository-transfer-v06-candidate-20261107:refs/remotes/origin/pr76
+          test "$(git rev-parse refs/remotes/origin/pr76)" = "$PR76_SHA" || {
+            echo "Dependency #249 moved; exact-SHA source rehearsal refused"
+            exit 1
+          }
+          # #254 and #249 are still independent unmerged PRs with exact
+          # pinned revisions. Their ephemeral merge grants no host authority.
+          git merge-base --is-ancestor "$FORK_SHA" refs/remotes/origin/pr76
+          git merge --no-ff --no-edit refs/remotes/origin/pr76
+          # Enforce whitespace only on this PR's owned server integration
+          # surface. Other exact-SHA sibling PRs run their independent CI;
+          # intentional Markdown hard-break spaces must not be falsely
+          # classified as cross-branch integration conflicts.
+          git diff --check "$BASE_SHA"..HEAD -- \
+            '.github/workflows/v06-cross-pr-integration-rehearsal.yml' \
+            'src/repocache/server_*' \
+            'tests/test_server_*' \
+            'scripts/ci_v06_cross_pr_*'
+          test -z "$(git status --porcelain)"
+          echo "PASS: exact-SHA disposable test: current protected v0.6 base plus draft #237 #254 #249"
+          echo "NOT VERIFIED: protected integration merge, host-root, systemd, SELinux, release"
+      - name: Run combined state, NGINX, catalog, systemd and lifecycle tests
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          # #28's native proxy_cache_path requires its root to exist before
+          # nginx -t; older #31 test fixtures predate this dependency.
+          # Create only that fixed root in THIS throwaway container. Neither
+          # production nor the test runner host filesystem is touched.
+          test ! -e /var/cache/nginx/repocache-managed
+          test ! -L /var/cache/nginx/repocache-managed
+          install -d -m 0700 /var/cache/nginx/repocache-managed
+          python3 -B -m pytest -q -rs             tests/test_server_proposed_state_v2_store.py             tests/test_server_locked_manifest_reconcile_v1.py             tests/test_server_root_control_protocol_v1.py             tests/test_server_root_control_host_preflight_v1.py             tests/test_server_root_control_worker_v1.py             tests/test_server_root_control_client_v1.py             tests/test_server_root_control_native_syntax_v1.py             tests/test_server_root_control_pinned_tls_pair_v1.py             tests/test_server_root_control_full_context_v1.py             tests/test_server_root_control_pre_reload_v1.py             tests/test_server_root_control_fixed_candidate_v1.py             tests/test_server_root_control_v2_candidate_binding_v1.py             tests/test_server_native_v2_transaction_v1.py             tests/test_server_native_root_control_entrypoint_v1.py             tests/test_server_native_root_control_client_v1.py             tests/test_server_native_nginx_service_unit_v1.py             tests/test_server_native_nginx_effective_unit_v1.py             tests/test_server_nginx_pin_render_v1.py             tests/test_server_nginx_repository_bundle_v1.py             tests/test_server_derived_catalog_candidate_v1.py             tests/test_server_derived_catalog_client_contract_v1.py             tests/test_server_repository_reconcile_v1.py
+          python3 -B scripts/ci_v06_cross_pr_lifecycle_contract.py
+          python3 -B scripts/ci_v06_cross_pr_multi_wal_contract.py
+          # A small focused cross-PR client/release compatibility set covers
+          # explicit HTTPS server selection, read-only package source helper,
+          # installer argument safety and signed-release provenance parser.
+          # The owners' full independent CI still governs original criteria.
+          python3 -B -m pytest -q -rs \
+            tests/test_client.py \
+            tests/test_client_source_helper_preview.py \
+            tests/test_client_install_contract.py \
+            tests/test_release_provenance.py \
+            tests/test_public_release_acceptance.py
+          # Fixed package-root syntax inspection is only exercised in this
+          # disposable CI container. The root worker remains non-activating.
+          REPOCACHE_NATIVE_TEST_CONTAINER=CONFIRMED_DISPOSABLE_DOCKER_ONLY \
+            python3 -B scripts/smoke_server_fixed_nginx_syntax.py
+          # The exact #27 PR now proves the running packaged NGINX binary
+          # inode in a listener-free child of THIS disposable container.
+          # It cannot claim systemd, SELinux or host-root acceptance.
+          REPOCACHE_NATIVE_TEST_CONTAINER=CONFIRMED_DISPOSABLE_DOCKER_ONLY \
+            python3 -B scripts/ci_native_nginx_process_inode_smoke.py
+          # Never modify protected branches, merge on GitHub, install a root
+          # worker, start systemd, approve a catalog or publish a release.
