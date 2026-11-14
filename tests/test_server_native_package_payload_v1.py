@@ -293,3 +293,29 @@ def test_foreign_download_root_owner_refuses_even_safe_children(tmp_path, monkey
 
     monkeypatch.setattr(stage.os, "stat", suspicious_root)
     assert stage._artifacts(directory, ".deb") is None
+
+
+@pytest.mark.parametrize("distribution", ["debian", "almalinux"])
+@pytest.mark.parametrize("duplicate", [True, False])
+def test_native_download_inventory_requires_unique_package_names(
+    tmp_path, monkeypatch, distribution, duplicate,
+):
+    """Multiple versions/architectures of one package are not one safe set."""
+    first = tmp_path / ("first.deb" if distribution == "debian" else "first.rpm")
+    second = tmp_path / ("second.deb" if distribution == "debian" else "second.rpm")
+    first.write_bytes(b"fixture-a")
+    second.write_bytes(b"fixture-b")
+    def fake_run(argv, *, work, runner):
+        if argv[0] == "/usr/bin/dpkg-deb" or "-qp" in argv:
+            name = "nginx" if duplicate or str(first) in argv else "nginx-core"
+            return name + "\n", ""
+        if argv[0] == "/usr/bin/rpmkeys":
+            return "fixture.rpm: digests signatures OK\n", ""
+        return "", ""
+    monkeypatch.setattr(stage, "_run", fake_run)
+    files = (first, second)
+    result = (stage._verify_deb(files, work=tmp_path, runner=object())
+              if distribution == "debian" else
+              stage._verify_rpm(files, work=tmp_path, runner=object()))
+    assert result == ("NATIVE_PAYLOAD_SET_UNSAFE" if duplicate else
+                      "NATIVE_PAYLOADS_VERIFIED_IN_SCRATCH")
