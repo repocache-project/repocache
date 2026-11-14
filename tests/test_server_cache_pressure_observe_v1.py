@@ -150,3 +150,48 @@ def test_fixed_path_not_external_or_mutating():
     assert "os.remove(" not in source
     assert "os.chmod(" not in source
     assert "_CACHE_LEAF = \"repocache-managed\"" in source
+
+
+def test_readonly_cache_mount_is_immediate_critical_even_with_free_bytes(cache_tree, monkeypatch):
+    fd, _, _ = cache_tree
+    monkeypatch.setattr(obs.os, "fstatvfs", lambda _fd: SimpleNamespace(
+        f_frsize=4096, f_bavail=100000, f_favail=200,
+        f_flag=getattr(os, "ST_RDONLY", 1),
+    ))
+    report = sample(fd)
+    assert report["status"] == "READ_ONLY_CACHE_PRESSURE_PARTIAL"
+    assert report["pressure_level"] == "critical"
+    assert report["reason_code"] == "STORAGE_WRITE_REFUSED"
+    assert report["disk_writable_observed"] is False
+    assert report["free_bytes_observed"] == 4096 * 100000
+    assert report["cache_root_ownership_observed"] is True
+    assert report["measurements_complete"] is False
+    assert not report["authorizes_cache_cleanup"]
+
+
+def test_clear_mount_readonly_flag_never_claims_nginx_writable(cache_tree, monkeypatch):
+    fd, _, _ = cache_tree
+    monkeypatch.setattr(obs.os, "fstatvfs", lambda _fd: SimpleNamespace(
+        f_frsize=4096, f_bavail=100000, f_favail=200,
+        f_flag=0,
+    ))
+    report = sample(fd)
+    assert report["pressure_level"] == "unknown"
+    assert report["disk_writable_observed"] is None
+    assert report["reason_code"] == "OBSERVATION_INCOMPLETE"
+
+
+@pytest.mark.parametrize("bad_flag", [True, "readonly", -1, 1.5])
+def test_untrusted_statvfs_mount_flags_do_not_manufacture_healthy_result(
+    cache_tree, monkeypatch, bad_flag,
+):
+    fd, _, _ = cache_tree
+    monkeypatch.setattr(obs.os, "fstatvfs", lambda _fd: SimpleNamespace(
+        f_frsize=4096, f_bavail=100000, f_favail=200,
+        f_flag=bad_flag,
+    ))
+    report = sample(fd)
+    assert report["observation_code"] == "CACHE_ROOT_OR_CAPACITY_UNVERIFIED"
+    assert report["pressure_level"] == "unknown"
+    assert report["disk_writable_observed"] is None
+    assert not report["authorizes_cache_cleanup"]
