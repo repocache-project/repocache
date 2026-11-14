@@ -271,3 +271,20 @@ def test_default_bounded_dns_timeout_refuses_candidate_without_host_details(monk
     with pytest.raises(UpstreamRotationError, match="^DNS lookup: failed$") as caught:
         refresh(resolver=None)
     assert "private resolver" not in str(caught.value)
+
+
+@pytest.mark.parametrize("record", [
+    (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (None, 443)),
+    (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (42, 443)),
+    (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (b"8.8.8.8", 443)),
+    (socket.AF_INET, True, socket.IPPROTO_TCP, "", ("8.8.8.8", 443)),
+    (socket.AF_INET, socket.SOCK_STREAM, 6.0, "", ("8.8.8.8", 443)),
+    (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, None, ("8.8.8.8", 443)),
+    (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "",
+     ("8.8.8.8", 443, "unexpected")),
+])
+def test_malformed_dns_socket_record_is_redacted_and_never_returns_candidate(record):
+    with pytest.raises(
+        UpstreamRotationError, match="^DNS lookup: (unsupported answer|mismatched socket answer)$"
+    ):
+        refresh(resolver=lambda *_args, **_kwargs: [record])
