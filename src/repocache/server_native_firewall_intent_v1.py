@@ -46,6 +46,12 @@ def preview_native_firewall_intent(
         if (isinstance(address, ipaddress.IPv6Address)
                 and address.ipv4_mapped is not None):
             raise ValueError("IPv4-mapped IPv6 listener ambiguous")
+        # Class-E and limited-broadcast IPv4 addresses are not a
+        # meaningful TCP exposure target for an installed HTTPS listener.
+        # A firewall review must not present them as a specific unicast.
+        if (isinstance(address, ipaddress.IPv4Address)
+                and address.is_reserved):
+            raise ValueError("reserved IPv4 listener refused")
         if str(address) != listen["bind_address"]:
             raise ValueError("noncanonical IP")
     except (ValueError, TypeError, KeyError, RecursionError, OverflowError):

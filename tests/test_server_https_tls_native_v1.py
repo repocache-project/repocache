@@ -158,6 +158,24 @@ def test_disposable_real_tls_server_validates_client_trust_and_hostname(
         assert success is not None
         assert b" 200 " in success.split(b"\r\n", 1)[0]
         assert success.endswith(_REPLY)
+        # Even when a fixture client deliberately lowers its OpenSSL
+        # cipher security level, the actual stock NGINX HTTPS server must
+        # never negotiate TLS 1.0 or 1.1 or return protected content.
+        for legacy in (ssl.TLSVersion.TLSv1, ssl.TLSVersion.TLSv1_1):
+            forced = ssl.create_default_context(cafile=str(cert))
+            forced.minimum_version = legacy
+            forced.maximum_version = legacy
+            forced.set_ciphers("DEFAULT:@SECLEVEL=0")
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as old:
+                old.settimeout(3)
+                old.connect(str(tmp_path / "tls.sock"))
+                with pytest.raises(ssl.SSLError):
+                    with forced.wrap_socket(old, server_hostname=_HOST) as session:
+                        session.sendall(
+                            b"GET /__test_health HTTP/1.1\r\n"
+                            b"Host: cache.example.invalid\r\n\r\n"
+                        )
+                        pytest.fail("LEGACY_TLS_REACHED_PROTECTED_ENDPOINT")
         with pytest.raises(ssl.SSLCertVerificationError):
             _query_ssl(
                 tmp_path / "tls.sock", cert,
