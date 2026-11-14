@@ -137,7 +137,8 @@ def test_foreign_owned_log_root_marker_refused_before_write(owned):
                                     {"inject_fault": "bad"}])
 def test_bad_inputs_do_not_mutate(owned, wrong):
     _, fd, uid, gid = owned
-    args = dict(owner_uid=uid, owner_gid=gid, **wrong)
+    args = dict(owner_uid=uid, owner_gid=gid)
+    args.update(wrong)
     with pytest.raises(NativeMetricsBootstrapError, match="ARGUMENT_INVALID"):
         bootstrap_private_metrics_file_under_root(fd, **args)
     assert not paths(owned)[0].exists()
