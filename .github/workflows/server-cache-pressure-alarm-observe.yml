@@ -1,0 +1,54 @@
+name: Cache pressure real statvfs to conservative alarms (distro)
+
+on:
+  pull_request:
+    paths:
+      - 'src/repocache/server_cache_pressure_alarm_observe_v1.py'
+      - 'tests/test_server_cache_pressure_alarm_observe_v1.py'
+      - '.github/workflows/server-cache-pressure-alarm-observe.yml'
+      - 'docs/testing/SERVER_CACHE_PRESSURE_ALARM_OBSERVE_V1.md'
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  pressure-alarm:
+    name: Native filesystem pressure alarm (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: debian13
+            image: debian:trixie-slim
+          - platform: almalinux10
+            image: almalinux:10
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - name: Install native Python and pytest
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [ '${{ matrix.platform }}' = debian13 ]; then
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq
+            apt-get install -y -qq --no-install-recommends python3 python3-pytest util-linux
+          else
+            dnf -y -q --enablerepo=crb install python3 python3-pytest util-linux
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Assert real FS observations never claim verified NORMAL or host authority
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          setpriv --reuid 65534 --regid 65534 --clear-groups \
+            env PYTHONPATH="$GITHUB_WORKSPACE/src" PYTHONDONTWRITEBYTECODE=1 \
+            python3 -B -m pytest -q -p no:cacheprovider \
+              tests/test_server_cache_pressure_alarm_observe_v1.py
+          echo 'PASS: real statvfs + conservative incomplete-metric alarm'
+          echo 'NOT VERIFIED: installed cache manager and operator alert'
