@@ -23,6 +23,39 @@ _READ_LIMITS = {
 }
 
 
+
+def _trusted_os_release_reference() -> None:
+    """Allow the distro's fixed /usr/lib fallback, never an arbitrary link.
+
+    os-release may legitimately be a symlink on Debian/AlmaLinux. Inspect
+    every fixed directory and leaf before opening; this is still an
+    observation, not proof that the host or OS signature is authenticated.
+    """
+    try:
+        for name in ("/", "/etc", "/usr", "/usr/lib"):
+            entry = os.lstat(name)
+            if (not stat.S_ISDIR(entry.st_mode) or entry.st_uid != 0
+                    or entry.st_gid != 0 or stat.S_IMODE(entry.st_mode) & 0o022):
+                raise ValueError("untrusted os-release ancestor")
+        reference = os.lstat("/etc/os-release")
+        if stat.S_ISLNK(reference.st_mode):
+            if (reference.st_uid != 0 or reference.st_gid != 0
+                    or os.readlink("/etc/os-release") not in (
+                        "../usr/lib/os-release", "/usr/lib/os-release",
+                    )):
+                raise ValueError("untrusted os-release link")
+            leaf = os.lstat("/usr/lib/os-release")
+        else:
+            leaf = reference
+        if (not stat.S_ISREG(leaf.st_mode) or leaf.st_uid != 0
+                or leaf.st_gid != 0 or leaf.st_nlink != 1
+                or stat.S_IMODE(leaf.st_mode) & 0o022
+                or not 1 <= leaf.st_size <= _READ_LIMITS["/etc/os-release"]):
+            raise ValueError("untrusted os-release file")
+    except (OSError, ValueError, TypeError, OverflowError):
+        raise NativeVMReadOnlyError("FIXED_READ_UNSAFE") from None
+
+
 def _read_fixed(path: str, size: int) -> bytes:
     """Read only the fixed booted-VM observations, with kernel leaf pinning.
 
@@ -32,6 +65,8 @@ def _read_fixed(path: str, size: int) -> bytes:
     if (type(path) is not str or type(size) is not int
             or _READ_LIMITS.get(path) != size):
         raise NativeVMReadOnlyError("FIXED_READ_UNSAFE")
+    if path == "/etc/os-release":
+        _trusted_os_release_reference()
     flags = (os.O_RDONLY | os.O_NONBLOCK |
              getattr(os, "O_CLOEXEC", 0))
     if path != "/etc/os-release":
