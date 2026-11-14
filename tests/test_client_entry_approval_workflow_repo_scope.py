@@ -11,7 +11,7 @@ def test_native_approval_fixture_avoids_optional_alma_extras_mirror():
     workflow = WORKFLOW.read_text(encoding="utf-8")
     # The test uses only AlmaLinux's official Python build dependency. Its
     # optional extras mirror must not participate in metadata refresh here.
-    assert "dnf --disable-repo=extras install -y python3" in workflow
+    assert "dnf --disablerepo=extras install -y python3" in workflow
     assert "dnf install -y python3" not in workflow
     # The change must not turn off distribution package trust or the two
     # real native source-approval/rollback smoke entry points.
