@@ -1,0 +1,59 @@
+name: NGINX live metrics and real logrotate integration (disposable)
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/ci_native_nginx_metrics_live_rotation_v1.py'
+      - '.github/workflows/server-native-nginx-metrics-live-rotation.yml'
+      - 'docs/testing/SERVER_NATIVE_NGINX_METRICS_LIVE_ROTATION_V1.md'
+      - 'src/repocache/server_nginx_metrics_candidate_v1.py'
+      - 'src/repocache/server_native_metrics_logrotate_candidate_v1.py'
+      - 'src/repocache/core.py'
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  real-nginx-logrotate:
+    name: Live NGINX reopen and metrics archive (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: debian13
+            image: debian:trixie-slim
+          - platform: almalinux10
+            image: almalinux:10
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - name: Install distro-packaged runtime and rootless switch tool
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [ '${{ matrix.platform }}' = debian13 ]; then
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq
+            apt-get install -y -qq --no-install-recommends \
+              nginx logrotate python3 util-linux ca-certificates
+          else
+            dnf -y -q --enablerepo=crb install \
+              nginx logrotate python3 util-linux ca-certificates
+          fi
+          test -x /usr/sbin/nginx
+          test -x /usr/sbin/logrotate
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Exercise real nonroot NGINX and stock logrotate with private logs
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -f /.dockerenv
+          setpriv --reuid 65534 --regid 65534 --clear-groups \
+            env PYTHONPATH="$GITHUB_WORKSPACE/src" PYTHONDONTWRITEBYTECODE=1 \
+              REPOCACHE_DISPOSABLE_NGINX_ROTATION_CI=1 \
+            python3 -B scripts/ci_native_nginx_metrics_live_rotation_v1.py
