@@ -21,6 +21,10 @@ from repocache.server_install_v1 import validate_os_identity
 from repocache.server_native_nginx_local_boundary_v1 import (
     inspect_native_nginx_local_boundary,
 )
+from repocache.server_native_package_effects_observe_v1 import (
+    NativeEffectsReconciliationError,
+    inspect_current_namespace_native_package_effects,
+)
 from repocache.server_native_nginx_package_journal_v1 import (
     NATIVE_PENDING_NAME, NATIVE_TMP_NAME, NativePackageJournalError,
     _prepare_native_journal_under_root,
@@ -216,6 +220,21 @@ def run() -> dict[str, Any]:
                 _deny("NATIVE_PACKAGE_REENTRY_UNVERIFIED")
         else:
             _deny("NATIVE_PACKAGE_REENTRY_NOT_BLOCKED")
+        _STAGE = "PENDING_RECONCILIATION"
+        try:
+            effects = inspect_current_namespace_native_package_effects(
+                distribution=distribution,
+            )
+        except NativeEffectsReconciliationError:
+            _deny("NATIVE_PACKAGE_POSTEFFECTS_JOURNAL_UNVERIFIED")
+        if (effects["status"] != "NATIVE_PACKAGE_EFFECTS_PENDING_RECONCILIATION"
+                or effects["distribution"] != distribution
+                or not effects["journal_identity_verified"]
+                or not effects["pending_native_effects_block_reentry"]
+                or effects["native_package_effects_reconciled"]
+                or effects["authorizes_native_marker_removal"]
+                or effects["authorizes_host_mutation"]):
+            _deny("NATIVE_PACKAGE_POSTEFFECTS_JOURNAL_UNVERIFIED")
         _STAGE = "COMPLETE"
         return {
             "schema_version": 1,
@@ -227,6 +246,8 @@ def run() -> dict[str, Any]:
             "real_exclusive_lock_held_during_subprocesses": True,
             "pending_journal_survived_package_effects": True,
             "repeated_install_refused_without_reconciliation": True,
+            "actual_pending_journal_identity_observed_after_install": True,
+            "pending_native_effects_remain_unreconciled": True,
             "installed_server_ready": False,
             "host_root_provenance_verified": False,
             "systemd_pid1_verified": False,
