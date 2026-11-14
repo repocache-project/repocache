@@ -24,7 +24,7 @@ _READ_LIMITS = {
 
 
 
-def _trusted_os_release_reference() -> None:
+def _trusted_os_release_reference() -> str:
     """Allow the distro's fixed /usr/lib fallback, never an arbitrary link.
 
     os-release may legitimately be a symlink on Debian/AlmaLinux. Inspect
@@ -44,14 +44,17 @@ def _trusted_os_release_reference() -> None:
                         "../usr/lib/os-release", "/usr/lib/os-release",
                     )):
                 raise ValueError("untrusted os-release link")
-            leaf = os.lstat("/usr/lib/os-release")
+            selected = "/usr/lib/os-release"
+            leaf = os.lstat(selected)
         else:
+            selected = "/etc/os-release"
             leaf = reference
         if (not stat.S_ISREG(leaf.st_mode) or leaf.st_uid != 0
                 or leaf.st_gid != 0 or leaf.st_nlink != 1
                 or stat.S_IMODE(leaf.st_mode) & 0o022
                 or not 1 <= leaf.st_size <= _READ_LIMITS["/etc/os-release"]):
             raise ValueError("untrusted os-release file")
+        return selected
     except (OSError, ValueError, TypeError, OverflowError):
         raise NativeVMReadOnlyError("FIXED_READ_UNSAFE") from None
 
@@ -65,14 +68,13 @@ def _read_fixed(path: str, size: int) -> bytes:
     if (type(path) is not str or type(size) is not int
             or _READ_LIMITS.get(path) != size):
         raise NativeVMReadOnlyError("FIXED_READ_UNSAFE")
-    if path == "/etc/os-release":
-        _trusted_os_release_reference()
+    selected = (_trusted_os_release_reference()
+                if path == "/etc/os-release" else path)
     flags = (os.O_RDONLY | os.O_NONBLOCK |
              getattr(os, "O_CLOEXEC", 0))
-    if path != "/etc/os-release":
-        flags |= getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(path, flags)
+        fd = os.open(selected, flags)
     except OSError:
         raise NativeVMReadOnlyError("FIXED_READ_UNAVAILABLE") from None
     try:
