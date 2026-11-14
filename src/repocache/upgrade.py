@@ -45,6 +45,100 @@ RELEASE_FILES = frozenset((
 ))
 
 
+# Exact candidate-only v0.6.0 source inventory. All these files also appear
+# in scripts/build_release.py; their equality is enforced by regression tests.
+# v0.4.0/v0.5.0 use the frozen historical source-member contract above.
+V06_EXTRA_FILES = frozenset((
+    "client/entry_approval_plan_sandbox.py",
+    "client/entry_atomic_sandbox.py",
+    "client/entry_candidate_sandbox.py",
+    "client/entry_transaction_stage_sandbox.py",
+    "client/managed_registry_sandbox.py",
+    "client/native_fallback_plan.py",
+    "client/native_package_lock_observation.py",
+    "client/recoverable_fallback_pair_lab.py",
+    "client/root_source_boundary.py",
+    "client/source_entry_boundaries.py",
+    "client/source_helper_preview.py",
+    "client/source_metadata_lab.py",
+    "client/source_preflight.py",
+    "client/source_structure_subset.py",
+    "client/transaction_atomic_lab.py",
+    "client/transaction_metadata_sandbox.py",
+    "client/transaction_stage.py",
+    "docs/examples/server-install-v1.json",
+    "scripts/collect_native_candidate_evidence.py",
+    "scripts/format_native_vm_paste_receipt.py",
+    "scripts/inspect_native_vm_nginx_prerequisites.py",
+    "scripts/server_v06_preflight.py",
+    "src/repocache/intake.py",
+    "src/repocache/intake_service.py",
+    "src/repocache/native_acceptance_evidence_v1.py",
+    "src/repocache/server_bounded_dns_v1.py",
+    "src/repocache/server_cache_bypass_decision_v1.py",
+    "src/repocache/server_cache_pressure_alarm_observe_v1.py",
+    "src/repocache/server_cache_pressure_alarm_v1.py",
+    "src/repocache/server_cache_pressure_observe_v1.py",
+    "src/repocache/server_cache_pressure_policy_v1.py",
+    "src/repocache/server_derived_catalog_candidate_v1.py",
+    "src/repocache/server_dns_refresh_schedule_v1.py",
+    "src/repocache/server_fixture_activation_flow_v1.py",
+    "src/repocache/server_fixture_multi_resource_wal_v1.py",
+    "src/repocache/server_host_checks_v1.py",
+    "src/repocache/server_install_v1.py",
+    "src/repocache/server_locked_manifest_reconcile_v1.py",
+    "src/repocache/server_managed_include_fd_v1.py",
+    "src/repocache/server_managed_include_v1.py",
+    "src/repocache/server_native_metrics_file_bootstrap_v1.py",
+    "src/repocache/server_native_metrics_logrotate_candidate_v1.py",
+    "src/repocache/server_native_min_free_syntax_probe_v1.py",
+    "src/repocache/server_native_nginx_effective_unit_v1.py",
+    "src/repocache/server_native_nginx_local_boundary_v1.py",
+    "src/repocache/server_native_nginx_ownership_v1.py",
+    "src/repocache/server_native_nginx_package_journal_v1.py",
+    "src/repocache/server_native_nginx_prepackage_state_v1.py",
+    "src/repocache/server_native_nginx_service_unit_v1.py",
+    "src/repocache/server_native_package_effects_observe_v1.py",
+    "src/repocache/server_native_package_payload_v1.py",
+    "src/repocache/server_native_package_plan_v1.py",
+    "src/repocache/server_native_package_trust_v1.py",
+    "src/repocache/server_native_repository_cache_v1.py",
+    "src/repocache/server_native_storage_bootstrap_v1.py",
+    "src/repocache/server_native_tls_material_probe_v1.py",
+    "src/repocache/server_native_vm_readonly_v1.py",
+    "src/repocache/server_nginx_metrics_bundle_join_v1.py",
+    "src/repocache/server_nginx_metrics_candidate_v1.py",
+    "src/repocache/server_nginx_pin_render_v1.py",
+    "src/repocache/server_nginx_repository_bundle_v1.py",
+    "src/repocache/server_nginx_tls_listener_candidate_v1.py",
+    "src/repocache/server_preflight_guidance_v1.py",
+    "src/repocache/server_preflight_v1.py",
+    "src/repocache/server_proposed_state_v2_store.py",
+    "src/repocache/server_proposed_v2_locked_catalog_binding_v1.py",
+    "src/repocache/server_proposed_v2_locked_digest_v1.py",
+    "src/repocache/server_protected_namespace_bootstrap_v1.py",
+    "src/repocache/server_protected_state_inspect_v1.py",
+    "src/repocache/server_protected_state_store_v1.py",
+    "src/repocache/server_repository_plan_v1.py",
+    "src/repocache/server_repository_reconcile_v1.py",
+    "src/repocache/server_stock_nginx_package_owner_v1.py",
+    "src/repocache/server_upstream_address_preflight_v1.py",
+    "src/repocache/server_upstream_rotation_v1.py",
+    "src/repocache/submission_admin.py",
+    "src/repocache/submission_db_worker.py",
+    "src/repocache/submission_decisions.py",
+    "src/repocache/submission_keys.py",
+    "src/repocache/submission_recovery.py",
+    "src/repocache/submissions.py",
+))
+
+
+def release_files_for_version(version: str) -> frozenset[str]:
+    if version == "0.6.0":
+        return RELEASE_FILES | V06_EXTRA_FILES
+    return RELEASE_FILES
+
+
 class UpgradeError(updater.UpdateError):
     """Upgrade declined or failed without exposing URLs or credentials."""
 
@@ -277,6 +371,7 @@ def _extract_verified(data: bytes, version: str, directory: Path,
     """Only extract an exact set of regular source files, without tar.extractall."""
     if len(data) > MAX_ARCHIVE:
         raise UpgradeError("Release archive exceeds compressed size limit")
+    expected_files = release_files_for_version(version)
     prefix = "repocache-v" + version + "/"
     source = directory / ("repocache-v" + version)
     try:
@@ -291,13 +386,13 @@ def _extract_verified(data: bytes, version: str, directory: Path,
             for item in tar:
                 path = item.name
                 if (not item.isfile() or item.pax_headers or not path.startswith(prefix)
-                        or path[len(prefix):] not in RELEASE_FILES
+                        or path[len(prefix):] not in expected_files
                         or path in found or item.size < 0
                         or item.mode & 0o7000):
                     raise UpgradeError("Unsafe or unexpected release archive layout")
                 found.add(path)
                 unpacked += item.size
-                if len(found) > len(RELEASE_FILES) or unpacked > MAX_UNPACKED:
+                if len(found) > len(expected_files) or unpacked > MAX_UNPACKED:
                     raise UpgradeError("Release archive exceeds extraction limits")
                 relative = path[len(prefix):]
                 stream = tar.extractfile(item)
@@ -311,7 +406,7 @@ def _extract_verified(data: bytes, version: str, directory: Path,
                     "scripts/bootstrap-rootless.sh", "scripts/repocache-launcher.sh")
                     else 0o644)
                 _write_staged_member(source, relative, contents, permission)
-        if found != {prefix + name for name in RELEASE_FILES}:
+        if found != {prefix + name for name in expected_files}:
             raise UpgradeError("Incomplete or unexpected release archive")
         raw = (source / "release-policy.json").read_bytes()
         if (signed_policy_sha256 is not None
