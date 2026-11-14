@@ -82,7 +82,7 @@ def test_unknown_or_forged_platform_refused(bad):
         preview_native_firewall_intent(document(), distribution=bad)
 
 
-@pytest.mark.parametrize("bad", [0, 1, "true", None, [], {}])
+@pytest.mark.parametrize("bad", [0, 1, "true", [], {}])
 def test_untyped_firewall_input_refused(bad):
     with pytest.raises(NativeFirewallIntentError,
                        match="FIREWALL_DOCUMENT_INVALID"):

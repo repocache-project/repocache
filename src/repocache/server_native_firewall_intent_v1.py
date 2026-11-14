@@ -43,6 +43,9 @@ def preview_native_firewall_intent(
             raise ValueError("invalid port")
         # The server install schema already validates a canonical textual
         # literal; repeat the closed semantic checks for this output.
+        if (isinstance(address, ipaddress.IPv6Address)
+                and address.ipv4_mapped is not None):
+            raise ValueError("IPv4-mapped IPv6 listener ambiguous")
         if str(address) != listen["bind_address"]:
             raise ValueError("noncanonical IP")
     except (ValueError, TypeError, KeyError, RecursionError, OverflowError):
