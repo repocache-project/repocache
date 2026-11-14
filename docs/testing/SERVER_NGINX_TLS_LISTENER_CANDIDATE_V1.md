@@ -49,3 +49,19 @@ userspace smoke. Production certificate/host ownership, root-controlled
 configuration, activation, actual DNS and SELinux/systemd remain NOT VERIFIED.
 The future full server integration must also verify that *every* active
 listener and virtual host uses the same fail-closed routing boundary.
+
+
+## Explicit IPv6-only listeners (#30)
+
+For an administrator-selected IPv6 bind, the deterministic NGINX listener
+candidate now appends `ipv6only=on` to its IPv6 `listen [address]:port ssl`
+directive. This guards the otherwise platform-dependent possibility that a
+wildcard IPv6 socket also receives IPv4 connections. IPv4 listener candidates
+are unchanged, and selecting two address families still requires explicit
+administrator intent, owned firewall state and native listener checks.
+
+Unit regressions cover IPv6 loopback and wildcard and preserve the IPv4
+normal/wildcard contract. The non-activating source renderer never opens a
+socket or modifies the host; live dual-stack/SELinux/firewall verification
+on Debian 13 and AlmaLinux 10 remains NOT VERIFIED until installed #30/#19
+acceptance. Native userland TLS smoke continues testing IPv4.
