@@ -41,6 +41,9 @@ from repocache.server_native_nginx_effective_unit_v1 import (
 from repocache.server_nginx_repository_bundle_v1 import (
     render_repository_nginx_bundle_candidate,
 )
+from repocache.server_nginx_tls_listener_candidate_v1 import (
+    NativeTLSListenerCandidateError, render_native_tls_listener_candidate,
+)
 from repocache.server_derived_catalog_candidate_v1 import (
     preview_derived_catalog_from_nginx_dump,
 )
@@ -767,23 +770,22 @@ def _render_using_pins(document: dict, next_generation: int,
                        distribution: str, pins: dict, bundle: dict
                        ) -> tuple[bytes, bytes, dict, dict]:
     """Pure deterministic rendering; pins resolved exactly once per apply."""
-    cfg = document["deployment"]
-    listen, tls = cfg["listen"], cfg["tls"]
-    names = (listen["hostname"], listen["bind_address"],
-             tls["certificate_file"], tls["private_key_file"])
-    if any(type(s) is not str or re.fullmatch(r"[A-Za-z0-9_.:/+-]+", s) is None
-           for s in names):
-        _deny("NGINX_TOKEN_UNSAFE")
-    address = listen["bind_address"]
-    bind = "[" + address + "]" if ":" in address else address
+    # Reuse the approved strict listener for actual v2 NGINX state.
+    # The manual include previously omitted explicit TLS protocol restrictions,
+    # session ticket refusal and hidden NGINX version headers.
+    try:
+        tls = render_native_tls_listener_candidate(document)
+    except (NativeTLSListenerCandidateError, ValueError, TypeError):
+        _deny("NGINX_TLS_CANDIDATE_INVALID")
+    if (tls.get("status") != "NATIVE_TLS_LISTENER_CANDIDATE_ONLY"
+            or tls.get("authorizes_nginx_activation") is not False
+            or tls.get("authorizes_firewall_change") is not False):
+        _deny("NGINX_TLS_CANDIDATE_UNTRUSTED")
     include = (
         "# REPOCACHE managed v2\n"
         + bundle["http_upstream_fragment"]
         + "\nserver {\n"
-        + f"    listen {bind}:{listen['https_port']} ssl;\n"
-        + f"    server_name {listen['hostname']};\n"
-        + f"    ssl_certificate {tls['certificate_file']};\n"
-        + f"    ssl_certificate_key {tls['private_key_file']};\n"
+        + tls["server_context_fragment"]
         + f"    location = {_HEALTH} {{\n"
         + '        default_type text/plain;\n'
         + f'        add_header X-Repocache-Generation "{next_generation}" always;\n'
