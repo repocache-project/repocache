@@ -131,3 +131,21 @@ def test_actual_linux_statvfs_counter_feeds_non_authorizing_policy(tmp_path):
     for field in ("last_state_authenticated","metrics_source_authenticated",
                   "authorizes_cache_delete","authorizes_operator_alert_publish"):
         assert observed[field] is False
+
+
+def test_alarm_sequence_refuses_unreplayable_terminal_state():
+    from repocache.server_cache_pressure_policy_v1 import MAX_INT
+
+    penultimate = {
+        "schema_version": 1, "sequence": MAX_INT - 2,
+        "alarm_level": "normal", "telemetry_stale": False,
+    }
+    last = event(1500, penultimate)
+    assert last["next_state"]["sequence"] == MAX_INT - 1
+    assert last["event_codes"] == []
+    with pytest.raises(CachePressureAlarmError,
+                       match="^CACHE_ALARM_SEQUENCE_EXHAUSTED$"):
+        event(1500, last["next_state"])
+    with pytest.raises(CachePressureAlarmError,
+                       match="^CACHE_ALARM_PREVIOUS_STATE_INVALID$"):
+        event(1500, {**penultimate, "sequence": MAX_INT})

@@ -59,3 +59,15 @@ verify ENOSPC, read-only mounts, delayed manager eviction, stuck workers,
 TLS/source fallback, native Debian 13 and SELinux enforcing AlmaLinux 10.
 These requirements are NOT VERIFIED; #97 and #19 remain open. A standalone
 CLI/control plane must not consume this candidate as a trusted capability.
+
+
+## Bounded, replayable alarm sequence (#97)
+
+A non-activating pressure-alarm candidate must never emit a next_state whose
+sequence counter is invalid as the next call's previous state. The signed
+64-bit upper boundary is finite: sequence `MAX_INT - 2` may emit
+`MAX_INT - 1`, but that terminal state deliberately refuses further
+increment with static `CACHE_ALARM_SEQUENCE_EXHAUSTED` rather than emitting
+an unreplayable `MAX_INT`. This is fail-closed source-only behavior, not
+an operator reset instruction or durable state authorization. Persisted
+sequence rollover and real alarm delivery remain #97/#31 operational gates.
