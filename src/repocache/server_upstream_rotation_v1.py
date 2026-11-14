@@ -124,7 +124,7 @@ def propose_automatic_upstream_refresh(
         addresses: set[str] = set()
         for item in records:
             if (type(item) is not tuple or len(item) != 5
-                    or type(item[0]) is bool
+                    or type(item[0]) is bool or not isinstance(item[0], int)
                     or item[0] not in (socket.AF_INET, socket.AF_INET6)
                     or type(item[1]) is bool or not isinstance(item[1], int)
                     or type(item[2]) is bool or not isinstance(item[2], int)
