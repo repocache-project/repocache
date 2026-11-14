@@ -96,6 +96,42 @@ def main():
             else:
                 raise AssertionError("UNTRUSTED_CERTIFICATE_ADMITTED")
             print("PASS: untrusted signing authority refused",flush=True)
+            # Exercise exact NGINX negotiation, not only default SSL settings.
+            for version in (ssl.TLSVersion.TLSv1_2, ssl.TLSVersion.TLSv1_3):
+                pinned=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                pinned.minimum_version=version
+                pinned.maximum_version=version
+                pinned.check_hostname=True
+                pinned.verify_mode=ssl.CERT_REQUIRED
+                pinned.load_verify_locations(cafile=str(cert))
+                with socket.create_connection(("127.0.0.1",PORT),timeout=3) as raw:
+                    with pinned.wrap_socket(raw,server_hostname=HOST) as session:
+                        assert session.version()==(
+                            "TLSv1.2" if version==ssl.TLSVersion.TLSv1_2
+                            else "TLSv1.3"
+                        ), "TLS_VERSION_MISMATCH"
+                        session.sendall(
+                            b"GET /__test HTTP/1.1\r\n"
+                            b"Host: cache.example.invalid\r\n"
+                            b"Connection: close\r\n\r\n"
+                        )
+                        assert b"200 OK" in session.recv(4096)
+                print("PASS: trusted synthetic TLS exact protocol "
+                      + ("1.2" if version==ssl.TLSVersion.TLSv1_2 else "1.3"),
+                      flush=True)
+            # Plain HTTP must never return the protected endpoint body.
+            with socket.create_connection(("127.0.0.1",PORT),timeout=3) as raw:
+                raw.sendall(
+                    b"GET /__test HTTP/1.1\r\n"
+                    b"Host: cache.example.invalid\r\nConnection: close\r\n\r\n"
+                )
+                raw.settimeout(3)
+                plaintext=raw.recv(1024)
+                assert b"200 OK" not in plaintext
+                assert b"repocache-https" not in plaintext
+                assert b"PRIVATE KEY" not in plaintext
+            print("PASS: plaintext HTTP denied at HTTPS-only listener",
+                  flush=True)
         finally:
             proc.terminate()
             try: proc.wait(timeout=6)
