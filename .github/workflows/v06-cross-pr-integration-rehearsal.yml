@@ -41,7 +41,7 @@ jobs:
     env:
       PYTHONPATH: src
       PYTHONDONTWRITEBYTECODE: '1'
-      BASE_SHA: 4f8779bc3c07b9301b8e2a3e454a08b55e2b4d6b
+      BASE_SHA: 9617a6e8f87546384884641cc5df6382535e27bb
       FORK_SHA: 675e7b49b3573b1e5ede2ca023ed55e270397d4f
       PR64_SHA: d21cc7e11e3c045988c7381665d97e8a2009b815
       PR76_SHA: 035fb7284e415b4cd77b882931b7ac5d120bc3d6
@@ -109,8 +109,8 @@ jobs:
             echo "Dependency #249 moved; exact-SHA source rehearsal refused"
             exit 1
           }
-          # #254 has just been synchronised to this exact protected base;
-          # #249 retains its original feature ancestry, separately checked.
+          # #254 and #249 are still independent unmerged PRs with exact
+          # pinned revisions. Their ephemeral merge grants no host authority.
           git merge-base --is-ancestor "$FORK_SHA" refs/remotes/origin/pr76
           git merge --no-ff --no-edit refs/remotes/origin/pr76
           # Enforce whitespace only on this PR's owned server integration
