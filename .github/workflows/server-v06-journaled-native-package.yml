@@ -5,6 +5,7 @@ on:
     paths:
       - '.github/workflows/server-v06-journaled-native-package.yml'
       - 'scripts/ci_v06_journaled_native_server_install.py'
+      - 'src/repocache/server_native_package_effects_observe_v1.py'
       - 'scripts/ci_v06_journaled_cache_continuation.py'
       - 'scripts/ci_generated_nginx_route_cache_smoke.py'
       - 'tests/test_ci_v06_journaled_native_server_install.py'
@@ -22,6 +23,7 @@ on:
     paths:
       - '.github/workflows/server-v06-journaled-native-package.yml'
       - 'scripts/ci_v06_journaled_native_server_install.py'
+      - 'src/repocache/server_native_package_effects_observe_v1.py'
       - 'scripts/ci_v06_journaled_cache_continuation.py'
       - 'scripts/ci_generated_nginx_route_cache_smoke.py'
       - 'src/repocache/server_protected_namespace_bootstrap_v1.py'
@@ -73,6 +75,7 @@ jobs:
                 exit 1
               fi
               grep -Fq DISPOSABLE_JOURNALED_NATIVE_INSTALL_PASS /tmp/repocache-v06-journaled-result.json
+              grep -Fq actual_pending_journal_identity_observed_after_install /tmp/repocache-v06-journaled-result.json
               cat /tmp/repocache-v06-journaled-result.json
               echo "PASS: real native NGINX install under retained lock"
               # Only after the root-owned pending journal and package result
