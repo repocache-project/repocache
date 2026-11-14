@@ -42,6 +42,10 @@ def render_native_tls_listener_candidate(document: dict[str, Any]
         fragment = (
             f"listen {address}:{port} ssl;\n"
             f"server_name {hostname};\n"
+            # HTTP Host (or :authority) must match the authenticated
+            # candidate DNS name, even on a shared IP/default server.
+            # This rejects cross-vhost requests before any repo location.
+            f"if ($host != {hostname}) {{ return 421; }}\n"
             f"ssl_certificate {cert};\n"
             f"ssl_certificate_key {key};\n"
             "ssl_protocols TLSv1.2 TLSv1.3;\n"
