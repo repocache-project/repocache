@@ -49,3 +49,37 @@ userspace smoke. Production certificate/host ownership, root-controlled
 configuration, activation, actual DNS and SELinux/systemd remain NOT VERIFIED.
 The future full server integration must also verify that *every* active
 listener and virtual host uses the same fail-closed routing boundary.
+
+## Required wire authority, not NGINX fallback hostname
+
+The earlier candidate compared the NGINX \`$host\` variable. A real disposable
+NGINX reproduction showed a critical difference: for HTTP/1.0 without a
+Host header, \`$host\` falls back to \`server_name\` and the protected
+endpoint was served with **200**, despite the intended authority boundary.
+
+The candidate now checks the actual \`$http_host\` value with an anchored,
+case-insensitive regular expression built from the escaped validated DNS
+name. It allows only that hostname and, optionally, the **exact configured
+HTTPS port**. A missing Host, a foreign name, or a foreign port returns
+HTTP **421** before repository locations execute. IPv4/IPv6 listener binds
+and genuine TLS SNI remain independently validated. Disposable stock
+NGINX on Debian 13 and AlmaLinux 10 exercises no-Host HTTP/1.0, mismatched
+ports and canonical Host with explicit port. No host activation authority
+is inferred from this candidate or test.
+
+
+### Absolute-form HTTP request-target authority
+
+A second disposable stock NGINX reproduction demonstrated that
+`GET https://foreign.example.invalid/... HTTP/1.1` with the *approved*
+Host header reached the protected NGINX route (HTTP 200) when only
+`$http_host` was checked. This is because NGINX `$host` takes authority
+from an absolute-form request target in preference to the Host field.
+
+The candidate therefore retains **two complementary guards**:
+`$http_host` enforces a supplied approved Host and optional exact port,
+and `$host` rejects a divergent absolute-form request-target authority.
+Real Debian 13/AlmaLinux 10 native NGINX tests include the foreign
+absolute URL under valid TLS SNI and canonical Host, requiring HTTP 421
+with no protected payload. Neither guard is an authorization to
+install/reload NGINX or publish the catalog.

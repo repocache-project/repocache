@@ -125,6 +125,38 @@ def main():
             assert b"421 Misdirected Request" in mismatch, "FOREIGN_HTTP_HOST_ADMITTED"
             assert b"repocache-https" not in mismatch, "HOST_BOUNDARY_BODY_LEAK"
             print("PASS: valid TLS SNI refuses foreign HTTP Host with 421", flush=True)
+            # NGINX $host silently falls back to server_name if no Host
+            # was sent; test the actual wire authority, not just a foreign
+            # supplied header. Matching explicit port is allowed; foreign
+            # port must be denied without serving repository content.
+            for request, accepted in (
+                (b"GET /__test HTTP/1.0\r\n\r\n", False),
+                (b"GET /__test HTTP/1.1\r\nHost: cache.example.invalid:9999\r\nConnection: close\r\n\r\n", False),
+                (b"GET /__test HTTP/1.1\r\nHost: CACHE.EXAMPLE.INVALID:" + str(PORT).encode("ascii") + b"\r\nConnection: close\r\n\r\n", True),
+            ):
+                with socket.create_connection(("127.0.0.1",PORT),timeout=3) as raw:
+                    with context.wrap_socket(raw,server_hostname=HOST) as sock:
+                        sock.sendall(request)
+                        reply=sock.recv(4096)
+                assert (b"200 OK" in reply) is accepted, "WIRE_AUTHORITY_BOUNDARY_MISMATCH"
+                assert (b"421 Misdirected Request" in reply) is not accepted, "WIRE_AUTHORITY_REFUSAL_MISMATCH"
+                if not accepted:
+                    assert b"repocache-https" not in reply, "WIRE_AUTHORITY_BODY_LEAK"
+            print("PASS: absent Host and foreign port refused; canonical Host port admitted", flush=True)
+            # A request-line absolute URI takes precedence in NGINX $host.
+            # An approved wire Host must not authorize a foreign request
+            # target, even when the TLS SNI was valid.
+            with socket.create_connection(("127.0.0.1",PORT),timeout=3) as raw:
+                with context.wrap_socket(raw,server_hostname=HOST) as sock:
+                    sock.sendall(
+                        b"GET https://foreign.example.invalid/__test HTTP/1.1\r\n"
+                        b"Host: cache.example.invalid\r\n"
+                        b"Connection: close\r\n\r\n"
+                    )
+                    denied=sock.recv(4096)
+            assert b"421 Misdirected Request" in denied, "ABSOLUTE_URI_FOREIGN_AUTHORITY_ADMITTED"
+            assert b"repocache-https" not in denied, "ABSOLUTE_URI_BODY_LEAK"
+            print("PASS: foreign absolute URI denied despite approved HTTP Host", flush=True)
             # An unapproved source URL must never become a route, even
             # with two explicitly active APT/DNF repository candidates.
             with socket.create_connection(("127.0.0.1",PORT),timeout=3) as raw:
