@@ -238,3 +238,22 @@ Authenticated protected-state commits, durable retired IDs, cross-resource
 journal and atomic active-only catalog publication, native systemd/SELinux,
 live operator approval and signed APT/DNF payload acceptance remain
 **NOT VERIFIED**. A passing container test is not release/VM GO.
+
+## Future global cache policy inheritance verified in stock NGINX (#97)
+
+The disposable Debian 13 / AlmaLinux 10 cache-policy CI fixture now
+renders **two successive policy snapshots** from the actual version-1
+repository bundle renderer. After a global inactive and capacity change,
+the APT repository keeps only its overridden inactivity; it inherits
+the new global capacity. The DNF repository keeps only its overridden
+capacity; it inherits the new global inactivity. CI parses both rendered
+cache zones, refuses duplicate or malformed zone lines, checks input
+immutability and validates the **updated** NGINX configuration with
+the actual stock `nginx -t` on each distribution.
+
+This proves deterministic candidate inheritance and native syntax
+compatibility, not active live cache-manager migration, instantaneous
+capacity enforcement, safe production NGINX reload, authenticated
+ownership or disk-pressure eviction. Those parts of #97/#19 remain
+NOT VERIFIED; no running host or production cache is modified.
+
