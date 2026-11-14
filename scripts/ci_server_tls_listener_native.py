@@ -143,6 +143,20 @@ def main():
                 if not accepted:
                     assert b"repocache-https" not in reply, "WIRE_AUTHORITY_BODY_LEAK"
             print("PASS: absent Host and foreign port refused; canonical Host port admitted", flush=True)
+            # A request-line absolute URI takes precedence in NGINX $host.
+            # An approved wire Host must not authorize a foreign request
+            # target, even when the TLS SNI was valid.
+            with socket.create_connection(("127.0.0.1",PORT),timeout=3) as raw:
+                with context.wrap_socket(raw,server_hostname=HOST) as sock:
+                    sock.sendall(
+                        b"GET https://foreign.example.invalid/__test HTTP/1.1\r\n"
+                        b"Host: cache.example.invalid\r\n"
+                        b"Connection: close\r\n\r\n"
+                    )
+                    denied=sock.recv(4096)
+            assert b"421 Misdirected Request" in denied, "ABSOLUTE_URI_FOREIGN_AUTHORITY_ADMITTED"
+            assert b"repocache-https" not in denied, "ABSOLUTE_URI_BODY_LEAK"
+            print("PASS: foreign absolute URI denied despite approved HTTP Host", flush=True)
             # An unapproved source URL must never become a route, even
             # with two explicitly active APT/DNF repository candidates.
             with socket.create_connection(("127.0.0.1",PORT),timeout=3) as raw:
