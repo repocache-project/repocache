@@ -28,3 +28,28 @@ This PR does **not** install the root worker, change current production
 resolution, authenticate DNSSEC, publish a route or authorize any NGINX
 reload. Final booted Debian13/AlmaLinux10 systemd/SELinux and #64 security
 review remain NOT VERIFIED.
+
+
+## Root caller without an explicit credential drop is now refused
+
+Previously, the paired nonroot UID/GID was optional even if the caller was
+UID 0. An inadvertent call from a future privileged native transaction
+could therefore spawn a fixed, bounded Python resolver with **root
+credentials**. The candidate resolver now refuses this case **before**
+creating any process, returning the static `DNS worker: unprivileged
+identity required` error.
+
+Unprivileged callers retain the original no-extra-identity API, while
+root callers must explicitly provide both a nonzero UID and GID. In both
+cases the resolver still uses its fixed isolated program, sanitized
+environment, no shell, closed descriptors and timeout. Native kernel
+tests of the explicit UID/GID drop are preserved; mocked subprocess
+tests now explicitly model a nonroot caller, and a genuine root execution
+with no drop is never performed by the test suite.
+
+This change enforces a **negative privilege boundary only**. It does not
+choose an installed service account, authenticate a caller/response,
+install a scheduler, or authorize NGINX/catalog activation. The future
+#31 installed transaction still requires a trusted dedicated identity
+under the protected state lock, and final #19 native systemd/SELinux
+acceptance remains NOT VERIFIED.

@@ -70,6 +70,11 @@ def bounded_getaddrinfo(
     if (run_as_uid is None) != (run_as_gid is None):
         raise socket.gaierror("DNS worker: invalid identity")
     child_identity: dict[str, Any] = {}
+    # A privileged native caller must supply an explicit non-root child
+    # identity. Without this gate, the optional drop-privilege API could
+    # accidentally launch the fixed DNS worker with root credentials.
+    if run_as_uid is None and os.geteuid() == 0:
+        raise socket.gaierror("DNS worker: unprivileged identity required")
     if run_as_uid is not None:
         if (builtins.type(run_as_uid) is not int
                 or builtins.type(run_as_gid) is not int
