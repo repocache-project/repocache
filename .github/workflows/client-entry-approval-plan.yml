@@ -37,7 +37,11 @@ jobs:
                 apt-get update -qq
                 apt-get install -y --no-install-recommends python3 >/dev/null
               else
-                dnf install -y python3 >/dev/null
+                # Python comes from the standard AlmaLinux base repositories.
+                # The optional extras mirror has returned malformed metadata;
+                # do not let it block this disposable source-approval test.
+                # Never turn off RPM signature or TLS verification.
+                dnf --disable-repo=extras install -y python3 >/dev/null
               fi
               python3 scripts/smoke_client_entry_approval_plan.py
               python3 scripts/smoke_client_entry_stage.py
