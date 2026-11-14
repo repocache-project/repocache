@@ -39,8 +39,12 @@ def render_native_tls_listener_candidate(document: dict[str, Any]
                 or not hostname.isascii()):
             raise ValueError("unsafe NGINX SSL directive token")
         address = f"[{addr}]" if addr.version == 6 else str(addr)
+        # On a wildcard IPv6 listener, the kernel's dual-stack default
+        # must not silently expose IPv4 addresses without separate operator
+        # selection. Keep the IPv4 and IPv6 bind contracts independent.
+        v6_only = " ipv6only=on" if addr.version == 6 else ""
         fragment = (
-            f"listen {address}:{port} ssl;\n"
+            f"listen {address}:{port} ssl{v6_only};\n"
             f"server_name {hostname};\n"
             # HTTP Host (or :authority) must match the authenticated
             # candidate DNS name, even on a shared IP/default server.
