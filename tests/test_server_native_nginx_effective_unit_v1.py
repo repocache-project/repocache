@@ -38,7 +38,7 @@ def _response(**changes):
 
 
 def _fake_native(monkeypatch, *, response=None, vendor=True, unsafe=None,
-                 returncode=0, failure=None):
+                 returncode=0, failure=None, recheck_response=None):
     events = []
     monkeypatch.setattr(
         unit, "inspect_native_nginx_unit",
@@ -74,6 +74,9 @@ def _fake_native(monkeypatch, *, response=None, vendor=True, unsafe=None,
             raise subprocess.TimeoutExpired("systemctl", 5)
         return SimpleNamespace(
             returncode=returncode, stdout=(
+                recheck_response if len([event for event in events
+                                          if event[0] == "run"]) == 2
+                and recheck_response is not None else
                 _response() if response is None else response
             ), stderr="",
         )
@@ -111,7 +114,7 @@ def test_exact_effective_running_unit_is_observation_only(monkeypatch):
         "authorizes_nginx_reload", "authorizes_nginx_install",
     ))
     assert [e for e in events if e[0] == "run"] == [
-        ("run", unit._FIXED_ARGS),
+        ("run", unit._FIXED_ARGS), ("run", unit._FIXED_ARGS),
     ]
 
 
@@ -366,3 +369,20 @@ def test_non_systemd_pid1_never_invokes_systemctl(monkeypatch):
     with pytest.raises(EffectiveNginxUnitError, match="PID1_IDENTITY_REFUSED"):
         inspect_effective_native_nginx_unit("debian")
     assert not any(item[0] == "run" for item in events)
+
+
+@pytest.mark.parametrize("recheck", [
+    _response(MainPID="1451"),
+    _response(DropInPaths="/run/systemd/system/nginx.service.d/foreign.conf"),
+    _response(ActiveState="inactive"),
+    _response(NeedDaemonReload="yes"),
+])
+def test_native_nginx_unit_change_during_kernel_probe_refuses_observation(
+    monkeypatch, recheck,
+):
+    events = _fake_native(monkeypatch, recheck_response=recheck)
+    with pytest.raises(EffectiveNginxUnitError,
+                       match="SYSTEMCTL_UNIT_CHANGED|FOREIGN_OR_INACTIVE_UNIT"):
+        inspect_effective_native_nginx_unit("debian")
+    assert [event[0] for event in events].count("run") == 2
+    assert ("kernel", 1450) in events
