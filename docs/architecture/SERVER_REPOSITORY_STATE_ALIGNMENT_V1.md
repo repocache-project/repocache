@@ -499,3 +499,16 @@ lock to reserve an ID atomically, handle theoretically colliding hashes,
 validate generation and NGINX ownership and publish only actually exposed
 approved repositories. Issue #95 remains OPEN; no production authorisation
 or native VM readiness is implied.
+
+
+## Client-compatible unambiguous derived catalog (#28/#24)
+
+An approved NGINX repository identity can legitimately distinguish an APT
+repository from a DNF repository while both use the same HTTPS upstream
+base URL. The client schema 1 mapping does **not** support two different
+cache targets for one upstream URL. The source-only active-only catalog
+preview now refuses such duplicates before emitting an unusable client
+catalog, rather than treating an internally valid NGINX route set as proof
+of client compatibility. This retains unique-cache-route checks and
+non-authorizing output; the root-controlled installed publication, active
+runtime NGINX exposure and real APT/DNF integration are still required.
