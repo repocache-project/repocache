@@ -75,3 +75,17 @@ upstream fallback must be verified separately on actual clients.
 The bounded, purely functional `server_nginx_pin_render_v1.render_pinned_upstream_fragments` returns a proposed `http{}` upstream block and separate `server{}` route and redirect-denial locations. Both are **inactive strings**, not a trusted install document or deployed include. The input CA file reference and upstream URL path must be NGINX-directive-safe (no semicolons, whitespace, percent escaping, variables or shell syntax), in addition to the strict installation schema. Redirect responses (301/302/303/307/308) are intercepted and mapped to 502; `proxy_redirect off` alone would not have prevented a client from following an unapproved redirect. Additionally, `proxy_ignore_headers X-Accel-Redirect` prevents an upstream from triggering internal NGINX location redirection; `proxy_hide_header X-Accel-Redirect` prevents this control header from leaking to a client. Both are distinct controls and are tested with a separate internal location. Only GET and HEAD are forwarded. TLS hostname/SNI comes from the approved upstream hostname, while the NGINX server group contains only numeric pinned IPs. No generic HTTP proxy is exposed.
 
 Integration must validate that the final managed NGINX configuration uses **only** these destinations; must not combine the fragments with dynamic host-based fallback. The CA bundle must be an existing, correctly owned, verified operating-system trust store; the path string alone is not evidence. The isolated integration checks observed SNI, rejection of both trusted-but-wrong-hostname and untrusted-CA certificates, all five denied HTTP 3xx redirect statuses, and attempts TLS over IPv6 loopback when the disposable runner supports it; the real public-IP network path and native systemd/SELinux remain unverified. Separately configure robust metadata/artifact freshness, APT/DNF signed metadata and cache correctness through the full #28/#95 engine. Do not install this fragment in a production listener until full native TLS tests, ownership, transaction rollback and catalog consistency are demonstrated.
+
+
+## Direct refresh uses a bounded DNS worker (#28)
+
+The direct `propose_automatic_upstream_refresh(..., resolver=None)` path now
+uses the same short-lived, isolated, timeout-bounded Python DNS resolver as
+the scheduled refresh path. Previously this direct entry could invoke libc
+`socket.getaddrinfo` without a time limit, blocking the controlling process
+indefinitely if system DNS stalled. An explicitly injected test resolver
+remains available for deterministic Stage-A tests only. A timeout refuses
+all pin changes with a fixed, redacted error; it never falls back to an
+unchecked hostname, alters the old pins, reloads NGINX or publishes a
+catalog. The future privileged scheduler and its cumulative cycle budget
+remain separate requirements; no automatic running timer is installed.

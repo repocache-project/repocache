@@ -251,3 +251,45 @@ def test_ci_diagnostics_never_log_scratch_paths(monkeypatch, capsys):
     assert "operator-secret" not in diagnostics
     assert "untrusted native output" not in diagnostics
     assert diagnostics.count("ci_native_manager_stage") == 3
+
+
+def test_download_directory_itself_must_be_owned_and_non_writable_to_others(
+    tmp_path, monkeypatch,
+):
+    directory = tmp_path / "payloads"
+    directory.mkdir(mode=0o700)
+    artifact = directory / "nginx_1_amd64.deb"
+    artifact.write_bytes(b"fixture bytes, not an executable package")
+    assert stage._artifacts(directory, ".deb") == (artifact,)
+    directory.chmod(0o777)
+    try:
+        assert stage._artifacts(directory, ".deb") is None
+    finally:
+        directory.chmod(0o700)
+    directory.chmod(0o770)
+    try:
+        assert stage._artifacts(directory, ".deb") is None
+    finally:
+        directory.chmod(0o700)
+    assert stage._artifacts(directory, ".deb") == (artifact,)
+
+
+def test_foreign_download_root_owner_refuses_even_safe_children(tmp_path, monkeypatch):
+    directory = tmp_path / "payloads"
+    directory.mkdir(mode=0o700)
+    artifact = directory / "nginx_1_amd64.deb"
+    artifact.write_bytes(b"fixture")
+    original_stat = stage.os.stat
+
+    def suspicious_root(path, *args, **kwargs):
+        record = original_stat(path, *args, **kwargs)
+        if path == directory:
+            return SimpleNamespace(
+                st_mode=record.st_mode,
+                st_uid=os.geteuid() + 1,
+                st_dev=record.st_dev,
+            )
+        return record
+
+    monkeypatch.setattr(stage.os, "stat", suspicious_root)
+    assert stage._artifacts(directory, ".deb") is None

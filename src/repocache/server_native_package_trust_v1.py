@@ -100,7 +100,11 @@ def _trusted_key(path: str) -> bool:
         if info.st_uid != 0 or info.st_mode & 0o022:
             return False
         if segment == Path(path).parts[-1] and current == Path(path):
-            if not stat.S_ISREG(info.st_mode) or not info.st_size:
+            if (not stat.S_ISREG(info.st_mode)
+                    or type(info.st_size) is not int
+                    or not 1 <= info.st_size <= 1024 * 1024
+                    or type(getattr(info, "st_nlink", None)) is not int
+                    or info.st_nlink != 1):
                 return False
         elif not stat.S_ISDIR(info.st_mode):
             return False

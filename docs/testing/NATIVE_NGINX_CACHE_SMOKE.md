@@ -156,3 +156,41 @@ only after the validated actual service state is exposed, with documented
 recovery and no second approval database. Issue #95/#31 operational
 acceptance remains NOT VERIFIED; these are executable integration
 prerequisites only.
+
+## Real upstream redirect-status denial matrix (Stage A, #28)
+
+The disposable generated-pins HTTPS smoke now drives the **actual packaged
+NGINX** on both Debian 13 and AlmaLinux 10 through a full redirect matrix:
+301, 302, 303, 307 and 308 from each APT and DNF upstream route. For
+every code, two requests must both produce HTTP **502** through the
+project-generated NGINX location; the response must never contain a
+followable Location header, foreign-host string or successful cache HIT.
+The synthetic origin must observe both attempts, proving that redirect
+denial was not accidentally cached as a successful repository artifact.
+
+All traffic stays inside the disposable no-network container. The malicious
+Location points to a reserved `.invalid` name; no real foreign endpoint is
+contacted. The pre-existing X-Accel-Redirect suppression, HTTPS SNI,
+signed-shape metadata/DEB/RPM HIT/MISS, failed nginx -t preservation, live
+temporary reload, rollback and EACCES cache-off recovery tests are retained.
+
+This validates Stage-A response handling in native NGINX userland. It
+does **not** authenticate real OS publisher metadata, operator approval,
+host namespace, installed TLS CA, production socket, systemd, SELinux or
+the automatic activation/rollback authority that remains NOT VERIFIED for
+#28, #27 and #19. No installed exposure or VM GO is implied.
+
+
+## Real HEAD/GET cache parity on both supported native NGINX binaries (#28)
+
+The generated-fragment HTTPS smoke additionally performs an actual client
+`HEAD` against each *already warm* APT and DNF metadata/package object on
+Debian 13 and AlmaLinux 10 distro-packaged NGINX. It requires 200, no
+response body, the correct cached Content-Length, NGINX `HIT`, no extra
+upstream retrieval, and an unchanged subsequent `GET` body/cache HIT.
+This guards against a regression where package-manager HEAD queries corrupt
+or bypass a previously cached signed-shape artefact. All responses are
+fixture bytes, not real publisher-signed metadata, and the traffic uses
+fixed test-only loopback TLS and a non-root isolated process. Production
+operator ownership, actual signed APT/DNF retrieval and booted VM remain
+NOT VERIFIED until the consolidated #19 campaign.

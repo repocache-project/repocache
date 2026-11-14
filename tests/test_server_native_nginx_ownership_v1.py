@@ -207,3 +207,32 @@ def test_constructed_results_cannot_invent_authority():
                 "debian", "NATIVE_CANDIDATE_OBSERVED", True, True))
     with pytest.raises(ValueError):
         ownership.FreshNginxFootprintV1("ubuntu", "FRESH_NGINX_FOOTPRINT_NOT_OBSERVED")
+
+
+@pytest.mark.parametrize("marker", [
+    "/usr/local/lib/systemd/system/nginx.service",
+    "/usr/local/lib/systemd/system/nginx.socket",
+    "/usr/local/lib/systemd/system/nginx.service.d",
+    "/etc/systemd/system/nginx.socket.d",
+    "/run/systemd/system/nginx.service.d",
+    "/run/systemd/system/nginx.socket",
+    "/run/systemd/system/nginx.socket.d",
+])
+def test_custom_systemd_nginx_units_refuse_fresh_install_even_without_binary(
+    marker, monkeypatch,
+):
+    def probe(path):
+        if path == marker:
+            return SimpleNamespace(st_mode=stat.S_IFLNK | 0o777)
+        raise FileNotFoundError(path)
+
+    monkeypatch.setattr(ownership, "inspect_native_nginx_metadata",
+                        lambda **kw: pytest.fail("foreign systemd service touched network"))
+    out = ownership.prepare_fresh_native_nginx(
+        os_release=DEBIAN, python_version=(3, 13),
+        document=document(), lstat=probe,
+    )
+    assert out.footprint.code == "EXISTING_NGINX_OWNERSHIP_UNPROVEN"
+    assert out.metadata is None
+    assert out.to_dict()["authorizes_package_transaction"] is False
+    assert marker not in json.dumps(out.to_dict())

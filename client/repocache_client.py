@@ -58,6 +58,21 @@ def _server(value: str) -> str:
                 or all(numeric.fullmatch(label) for label in labels)
                 or any(not dns_label.fullmatch(label) for label in labels)):
             raise ClientError("Server must be a canonical HTTPS origin")
+    # urlsplit().hostname normalizes case and brackets. Require the bytes
+    # selected by an operator or installed client config to be the same
+    # canonical TLS authority subsequently used for catalog provenance.
+    try:
+        ip = ipaddress.ip_address(hostname)
+    except ValueError:
+        normalized_host = hostname.lower()
+    else:
+        normalized_host = str(ip)
+    authority = ("[" + normalized_host + "]"
+                 if ":" in normalized_host else normalized_host)
+    if port is not None:
+        authority += ":" + str(port)
+    if p.netloc != authority:
+        raise ClientError("Server must be a canonical HTTPS origin")
     return value.rstrip("/")
 
 
