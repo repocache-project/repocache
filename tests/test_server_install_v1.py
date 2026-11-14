@@ -556,3 +556,27 @@ def test_review_parser_calls_preconversion_integer_callback(monkeypatch):
                        match="integer token exceeds signed 64-bit range"):
         validator.parse_install_bytes(payload)
     assert tokens == [1000]  # Must fail if json.loads silently switches to int.
+
+
+@pytest.mark.parametrize("oversized", [
+    "ID=debian\\nVERSION_ID=13\\n" + "X=" + "z" * (16 * 1024),
+    "ID=debian\\nVERSION_ID=13\\n" + "PRETTY_NAME=" + "é" * 9000,
+])
+def test_oversized_direct_os_release_input_is_refused_before_parsing(oversized):
+    """A direct string caller must respect the same 16 KiB native reader cap."""
+    from repocache.server_install_v1 import MAX_OS_IDENTITY_BYTES
+    assert len(oversized.encode("utf-8")) > MAX_OS_IDENTITY_BYTES
+    with pytest.raises(InstallInputError, match="os-release: input exceeds"):
+        validate_os_identity(oversized, (3, 13))
+
+
+def test_invalid_unicode_os_release_identity_is_redacted_and_rejected():
+    payload = "ID=debian\\nVERSION_ID=13\\nSECRET=" + "\\ud800"
+    with pytest.raises(InstallInputError, match="os-release: invalid Unicode") as error:
+        validate_os_identity(payload, (3, 13))
+    assert "SECRET=" not in str(error.value)
+
+
+def test_normal_utf8_descriptive_os_release_fields_are_accepted():
+    payload = "ID=debian\\nVERSION_ID=13\\nPRETTY_NAME=Debian verão\\n"
+    assert validate_os_identity(payload, (3, 13)) == "debian"
