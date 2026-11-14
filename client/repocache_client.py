@@ -892,7 +892,7 @@ if __name__ == "__main__":
 
 
 _NATIVE_CACHE_PATH = re.compile(
-    r"/__repocache/repos/([a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?)/\Z",
+    r"/__repocache/repos/([a-z][a-z0-9-]{0,47})/\Z",
     re.ASCII,
 )
 
