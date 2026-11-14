@@ -24,7 +24,7 @@ def test_canonical_default_https_and_operator_key_reference():
     assert x["server_context_fragment"] == (
         "listen 127.0.0.1:443 ssl;\n"
         "server_name cache.example.invalid;\n"
-        "if ($host != cache.example.invalid) { return 421; }\n"
+        "if ($http_host !~* "^\cache\.example\.invalid(:443)?$") { return 421; }\n"
         "ssl_certificate /etc/repocache/tls/example-chain.pem;\n"
         "ssl_certificate_key /etc/repocache/tls/example-key.pem;\n"
         "ssl_protocols TLSv1.2 TLSv1.3;\n"
@@ -101,8 +101,8 @@ def test_listener_is_statically_bound_to_the_exact_approved_http_host():
     rendered = render_native_tls_listener_candidate(d)
     lines = rendered["server_context_fragment"].splitlines()
     assert "server_name mirror.example.invalid;" in lines
-    assert "if ($host != mirror.example.invalid) { return 421; }" in lines
-    assert lines.index("if ($host != mirror.example.invalid) { return 421; }") < (
+    assert "if ($http_host !~* "^mirror\.example\.invalid(:443)?$") { return 421; }" in lines
+    assert lines.index("if ($http_host !~* "^mirror\.example\.invalid(:443)?$") { return 421; }") < (
         lines.index("ssl_certificate /etc/repocache/tls/example-chain.pem;")
     )
     assert rendered["authorizes_nginx_activation"] is False
