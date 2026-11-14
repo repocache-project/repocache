@@ -175,6 +175,10 @@ def inspect_native_tls_pair_under_root(
     try:
         with ExitStack() as stack:
             root = _directory(root_fd, owner_uid)
+            # Treat a fixture root with an unreviewed ACL/xattr/SELinux
+            # label like every child directory: ownership/mode alone is
+            # insufficient to trust credential access.
+            _reject_unreviewed_attributes(root_fd)
             current = root_fd
             chain = []
             for segment in _PARENT:
