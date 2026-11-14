@@ -121,3 +121,45 @@ def test_repeated_read_only_execution_is_deterministic(
     first = capsys.readouterr().out
     assert entry.run(["--document", str(document)]) == 3
     assert capsys.readouterr().out == first
+
+
+def test_document_parent_symlink_refused_before_host_observation(
+    entry, document, tmp_path, monkeypatch, capsys,
+):
+    """A safe leaf through a symlinked parent is not a pinned document."""
+    parent = tmp_path / "linked-parent"
+    parent.symlink_to(document.parent, target_is_directory=True)
+    monkeypatch.setattr(entry, "inspect_deployment_host",
+                        lambda *_args, **_kw: pytest.fail("host probe reached"))
+    assert entry.run(["--document", str(parent / document.name)]) == 2
+    out = json.loads(capsys.readouterr().out)
+    assert out["error"]["code"] == "INVALID_INPUT_OR_HOST_OBSERVATION"
+
+
+@pytest.mark.parametrize("unsafe", (
+    "/tmp//untrusted.json",
+    "/tmp/./untrusted.json",
+    "/tmp/../untrusted.json",
+    "/" + "long" * 1100,
+    "/tmp/" + "a" * 256,
+))
+def test_unbounded_or_noncanonical_document_path_refused(
+    entry, unsafe, monkeypatch, capsys,
+):
+    monkeypatch.setattr(entry, "inspect_deployment_host",
+                        lambda *_args, **_kw: pytest.fail("unsafe probe"))
+    assert entry.run(["--document", unsafe]) == 2
+    assert json.loads(capsys.readouterr().out)["authorizes_installation"] is False
+
+
+def test_read_only_document_descriptor_does_not_leak(
+    entry, document, monkeypatch, capsys,
+):
+    monkeypatch.setattr(entry, "inspect_deployment_host",
+                        lambda *_args, **_kw: _report())
+    # Linux gives an exact count of the process's open descriptors.
+    before = set(os.listdir("/proc/self/fd"))
+    for _ in range(5):
+        assert entry.run(["--document", str(document)]) == 3
+        capsys.readouterr()
+    assert set(os.listdir("/proc/self/fd")) == before
