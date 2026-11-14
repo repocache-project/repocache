@@ -22,6 +22,8 @@ DNF = "https://rpm.example.invalid/almalinux/10/"
 ID_APT = "debian-main"
 ID_DNF = "almalinux-baseos"
 
+_UNSET = object()
+
 
 def catalog():
     return {
@@ -35,9 +37,9 @@ def catalog():
     }
 
 
-def preview(doc=None, *, source=APT, ident=ID_APT, server=SERVER):
+def preview(doc=_UNSET, *, source=APT, ident=ID_APT, server=SERVER):
     return client.preview_native_client_catalog_route(
-        server, catalog() if doc is None else doc,
+        server, catalog() if doc is _UNSET else doc,
         upstream=source, repository_id=ident,
     )
 
