@@ -119,3 +119,28 @@ def test_only_semantic_data_no_shell_or_firewall_effect():
                       "firewall-cmd --", "nft add rule", "iptables -A"):
         assert forbidden not in source
     assert "authorizes_firewall_change" in source
+
+
+@pytest.mark.parametrize("distribution", ["debian13", "almalinux10"])
+@pytest.mark.parametrize("address", ["240.0.0.1", "255.255.255.255"])
+@pytest.mark.parametrize("requested", [False, True])
+def test_reserved_ipv4_never_yields_reviewable_firewall_exposure(
+    distribution, address, requested,
+):
+    data = document(modify=requested, address=address)
+    before = deepcopy(data)
+    with pytest.raises(NativeFirewallIntentError,
+                       match="^FIREWALL_DOCUMENT_INVALID$"):
+        preview_native_firewall_intent(data, distribution=distribution)
+    assert data == before
+
+
+@pytest.mark.parametrize("distribution", ["debian13", "almalinux10"])
+def test_valid_explicit_specific_unicast_remains_no_host_authority(distribution):
+    data = document(modify=True, address="192.0.2.15", port=8443)
+    report = preview_native_firewall_intent(data, distribution=distribution)
+    assert report["status"] == "FIREWALL_REVIEW_ONLY"
+    assert report["listen_address"] == "192.0.2.15"
+    assert report["https_port"] == 8443
+    assert report["firewall_change_review_required"] is True
+    assert report["authorizes_firewall_change"] is False
