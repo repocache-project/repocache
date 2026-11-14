@@ -38,6 +38,10 @@ jobs:
                 dnf install -y python3 >/dev/null
               fi
               python3 scripts/smoke_client_helper_preview.py
+              # Execute genuine kernel locks under root only inside this
+              # disposable Debian/Alma container. The bind-mounted source
+              # tree remains read-only; the smoke creates only /tmp fixtures.
+              PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/smoke_client_native_held_package_locks.py
               if command -v apt-get >/dev/null 2>&1; then
                 python3 scripts/smoke_client_root_source_boundary.py apt
                 python3 scripts/smoke_client_recoverable_pair.py apt

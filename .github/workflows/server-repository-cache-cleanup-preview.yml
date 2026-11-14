@@ -1,0 +1,57 @@
+name: Repository cache force-cleanup read-only preview (distro fixture)
+
+on:
+  pull_request:
+    paths:
+      - 'src/repocache/server_repository_cache_cleanup_preview_v1.py'
+      - 'tests/test_server_repository_cache_cleanup_preview_v1.py'
+      - '.github/workflows/server-repository-cache-cleanup-preview.yml'
+      - 'docs/testing/SERVER_REPOSITORY_CACHE_CLEANUP_PREVIEW_V1.md'
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  cache-cleanup-preflight:
+    name: Cache cleanup read-only preflight (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: debian13
+            image: debian:trixie-slim
+          - platform: almalinux10
+            image: almalinux:10
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - name: Install packaged Python, pytest and rootless switch utility
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [ '${{ matrix.platform }}' = debian13 ]; then
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq
+            apt-get install -y -qq --no-install-recommends \
+              python3 python3-pytest util-linux
+          else
+            dnf -y -q --enablerepo=crb install \
+              python3 python3-pytest util-linux
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Execute descriptor, ownership and hostile-cache refusals as nobody
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -f /.dockerenv
+          setpriv --reuid 65534 --regid 65534 --clear-groups \
+            env PYTHONPATH="$GITHUB_WORKSPACE/src" PYTHONDONTWRITEBYTECODE=1 \
+            python3 -B -m pytest -q -p no:cacheprovider \
+              tests/test_server_repository_cache_cleanup_preview_v1.py
+          echo "PASS: read-only fixture-owned NGINX cache preview; no cache removal"
+          echo "NOT VERIFIED: host NGINX quiescence, root install, SELinux or authorization"
