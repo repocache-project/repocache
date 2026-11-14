@@ -11,8 +11,8 @@ metadata parser error on the optional AlmaLinux `extras` repository.
 The failure was not a failed REPOCACHE client transaction.
 
 The fixture needs only `python3` from the distribution's base package
-repositories. It now uses the native DNF5 invocation
-`dnf --disable-repo=extras install -y python3` **for that one isolated
+repositories. It now uses the native DNF-compatible invocation
+`dnf --disablerepo=extras install -y python3` **for that one isolated
 dependency installation**. The official base and AppStream repositories
 remain available. DNF RPM signature checks, HTTPS verification and the
 full original two smoke scripts are unchanged. The Debian APT branch and
