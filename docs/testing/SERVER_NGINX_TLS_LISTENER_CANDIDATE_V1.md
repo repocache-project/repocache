@@ -49,3 +49,20 @@ userspace smoke. Production certificate/host ownership, root-controlled
 configuration, activation, actual DNS and SELinux/systemd remain NOT VERIFIED.
 The future full server integration must also verify that *every* active
 listener and virtual host uses the same fail-closed routing boundary.
+
+## Required wire authority, not NGINX fallback hostname
+
+The earlier candidate compared the NGINX \`$host\` variable. A real disposable
+NGINX reproduction showed a critical difference: for HTTP/1.0 without a
+Host header, \`$host\` falls back to \`server_name\` and the protected
+endpoint was served with **200**, despite the intended authority boundary.
+
+The candidate now checks the actual \`$http_host\` value with an anchored,
+case-insensitive regular expression built from the escaped validated DNS
+name. It allows only that hostname and, optionally, the **exact configured
+HTTPS port**. A missing Host, a foreign name, or a foreign port returns
+HTTP **421** before repository locations execute. IPv4/IPv6 listener binds
+and genuine TLS SNI remain independently validated. Disposable stock
+NGINX on Debian 13 and AlmaLinux 10 exercises no-Host HTTP/1.0, mismatched
+ports and canonical Host with explicit port. No host activation authority
+is inferred from this candidate or test.
