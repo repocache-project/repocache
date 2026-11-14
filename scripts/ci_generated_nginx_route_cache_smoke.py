@@ -360,6 +360,23 @@ def main() -> None:
                         " route caches exact signed-shape object with one fetch",
                     )
 
+                    # APT/DNF metadata discovery may issue HEAD before GET.
+                    # On a warm GET cache, a native NGINX HEAD must not
+                    # transfer a body, request another upstream object, or
+                    # corrupt the subsequent verified GET representation.
+                    head = request(url, client_tls, method="HEAD")
+                    after_head = request(url, client_tls)
+                    with lock:
+                        calls_after_head = counts["/" + prefix + "/" + name]
+                    require(
+                        head[:3] == (200, b"", "HIT")
+                        and head[3].get("Content-Length") == str(len(payload))
+                        and after_head[:3] == (200, payload, "HIT")
+                        and calls_after_head == 1,
+                        "stock NGINX " + prefix + " HEAD/GET cache parity "
+                        "retains exact body, length and one upstream GET",
+                    )
+
             # The baseline cache-active route may close connections under
             # EACCES (observed on the first CI attempt). Do not claim that
             # read-only storage is safe with proxy_cache still enabled.
