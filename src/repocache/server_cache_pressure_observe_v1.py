@@ -26,20 +26,29 @@ def _valid_uid(uid: Any) -> bool:
     return type(uid) is int and 0 <= uid <= 2**32 - 2
 
 
-def _capacity(fd: int) -> tuple[int, int]:
-    """Read free bytes and inodes from the *opened* inode, never a path."""
+def _capacity(fd: int) -> tuple[int, int, bool]:
+    """Read free bytes, inodes and the read-only mount bit from a pinned FD.
+
+    A cleared ST_RDONLY bit never proves a writable cache (DAC, SELinux,
+    quotas and NGINX worker permissions remain unchecked). A set bit
+    independently proves that writes cannot succeed on this mount.
+    """
     info = os.fstatvfs(fd)
     values = (info.f_frsize, info.f_bavail, info.f_favail)
+    flags = getattr(info, "f_flag", None)
     if (any(type(v) is not int or v < 0 for v in values)
             or not 0 < info.f_frsize <= MAX_INT
             or info.f_bavail > MAX_INT // info.f_frsize
-            or info.f_favail > MAX_INT):
+            or info.f_favail > MAX_INT
+            or (flags is not None and (type(flags) is not int or flags < 0))):
         raise ValueError("CACHE_CAPACITY_UNVERIFIED")
-    return info.f_bavail * info.f_frsize, info.f_favail
+    readonly = (flags is not None
+                and bool(flags & getattr(os, "ST_RDONLY", 1)))
+    return info.f_bavail * info.f_frsize, info.f_favail, readonly
 
 
 def _observe_under_root(root_fd: int, *, root_uid: int, cache_uid: int
-                        ) -> tuple[int, int]:
+                        ) -> tuple[int, int, bool]:
     """Testable read-only seam; caller FD/UIDs do not authenticate host root.
 
     A future installed probe must obtain the real host root descriptor,
@@ -67,7 +76,7 @@ def _observe_under_root(root_fd: int, *, root_uid: int, cache_uid: int
                 or leaf.st_dev != os.fstat(parent_fd).st_dev
                 or _identity(leaf_before) != _identity(leaf)):
             raise ValueError("CACHE_ROOT_UNTRUSTED")
-        free_bytes, free_inodes = _capacity(leaf_fd)
+        free_bytes, free_inodes, readonly = _capacity(leaf_fd)
         if (_identity(os.fstat(leaf_fd)) != _identity(leaf)
                 or _identity(os.stat(
                     _CACHE_LEAF, dir_fd=parent_fd, follow_symlinks=False,
@@ -76,7 +85,7 @@ def _observe_under_root(root_fd: int, *, root_uid: int, cache_uid: int
                    != parent_before):
             raise ValueError("CACHE_ROOT_CHANGED")
         _recheck(recorded, root_uid)
-    return free_bytes, free_inodes
+    return free_bytes, free_inodes, readonly
 
 
 def observe_cache_pressure_under_root(
@@ -105,7 +114,7 @@ def observe_cache_pressure_under_root(
         disk_writable=None,
     )
     try:
-        free_bytes, free_inodes = _observe_under_root(
+        free_bytes, free_inodes, readonly = _observe_under_root(
             root_fd, root_uid=root_uid, cache_uid=cache_uid,
         )
     except (OSError, ValueError):
@@ -124,7 +133,7 @@ def observe_cache_pressure_under_root(
         recovery_margin_bytes=recovery_margin_bytes,
         previous_level=previous_level,
         measurements_complete=False,
-        disk_writable=None,
+        disk_writable=False if readonly else None,
     )
     if free_inodes == 0:
         observed["pressure_level"] = "critical"

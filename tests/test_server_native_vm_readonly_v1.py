@@ -144,3 +144,56 @@ def test_sysfs_virtual_attribute_size_does_not_mask_enforcing_status(monkeypatch
     ))
     assert vm._read_fixed("/sys/fs/selinux/enforce", 32) == b"1\\n"
     assert events == [83]
+
+
+def test_vm_fixed_reader_refuses_any_unapproved_path_or_size_before_open(monkeypatch):
+    monkeypatch.setattr(vm.os, "open",
+                        lambda *_a, **_kw: pytest.fail("unexpected file opened"))
+    for path, size in (
+        ("/etc/shadow", 8192), ("/etc/os-release", 16384),
+        ("/proc/self/comm", 64), ("/proc/1/comm", 65536),
+        ("/sys/fs/selinux/enforce", 8192),
+    ):
+        with pytest.raises(vm.NativeVMReadOnlyError, match="^FIXED_READ_UNSAFE$"):
+            vm._read_fixed(path, size)
+
+
+def test_vm_kernel_observation_uses_nofollow_and_distribution_release_is_compatible(monkeypatch):
+    called = []
+    flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    assert nofollow != 0, "Linux nofollow is a required native primitive"
+
+    def fake_open(path, mode):
+        called.append((path, mode))
+        return 38
+
+    monkeypatch.setattr(vm, "os", SimpleNamespace(
+        O_RDONLY=os.O_RDONLY, O_NONBLOCK=os.O_NONBLOCK,
+        O_NOFOLLOW=nofollow, O_CLOEXEC=getattr(os, "O_CLOEXEC", 0),
+        open=fake_open,
+        fstat=lambda _fd: SimpleNamespace(st_mode=stat.S_IFREG | 0o444,
+                                          st_size=4096),
+        read=lambda _fd, _n: b"1\n",
+        close=lambda _fd: None,
+    ))
+    assert vm._read_fixed("/sys/fs/selinux/enforce", 32) == b"1\n"
+    assert vm._read_fixed("/proc/1/comm", 64) == b"1\n"
+    assert vm._read_fixed("/etc/os-release", 8192) == b"1\n"
+    assert called == [
+        ("/sys/fs/selinux/enforce", flags | nofollow),
+        ("/proc/1/comm", flags | nofollow),
+        ("/etc/os-release", flags),
+    ]
+
+
+def test_vm_kernel_leaf_symlink_refusal_redacts_path(monkeypatch):
+    def fake_open(path, flags):
+        if flags & getattr(os, "O_NOFOLLOW", 0):
+            raise OSError("synthetic symlink to /private/token")
+        pytest.fail("kernel leaf was opened without nofollow")
+
+    monkeypatch.setattr(vm.os, "open", fake_open)
+    with pytest.raises(vm.NativeVMReadOnlyError, match="^FIXED_READ_UNAVAILABLE$") as exc:
+        vm._read_fixed("/proc/1/comm", 64)
+    assert "private" not in str(exc.value)

@@ -234,3 +234,40 @@ def test_explicit_https_port_is_resolved_without_silent_443_fallback():
 def test_dns_sockaddr_must_match_approved_tcp_family_port_and_scope(sockaddr_record):
     with pytest.raises(UpstreamRotationError, match="mismatch"):
         refresh(resolver=lambda *_args, **_kwargs: [sockaddr_record])
+
+
+def test_default_refresh_uses_killable_bounded_dns_not_blocking_libc(monkeypatch):
+    from repocache import server_upstream_rotation_v1 as rotation
+
+    called = []
+    def bounded(host, port, **kwargs):
+        called.append((host, port, kwargs))
+        return answer(host, port, **kwargs)
+
+    monkeypatch.setattr(rotation, "bounded_getaddrinfo", bounded)
+    monkeypatch.setattr(socket, "getaddrinfo",
+                        lambda *_a, **_kw: pytest.fail("unbounded libc resolver used"))
+    result = refresh(resolver=None)
+    assert result["candidate_pins_by_host"][HOST] == [
+        "2001:4860:4860::8888", "8.8.8.8",
+    ]
+    assert len(called) == 1
+    assert called[0][0:2] == (HOST, 443)
+    assert called[0][2] == {
+        "family": socket.AF_UNSPEC,
+        "type": socket.SOCK_STREAM,
+        "proto": socket.IPPROTO_TCP,
+    }
+    assert not result["authorizes_nginx_activation"]
+
+
+def test_default_bounded_dns_timeout_refuses_candidate_without_host_details(monkeypatch):
+    from repocache import server_upstream_rotation_v1 as rotation
+
+    def timeout(*_args, **_kwargs):
+        raise socket.gaierror("internal DNS hostname/private resolver failure")
+
+    monkeypatch.setattr(rotation, "bounded_getaddrinfo", timeout)
+    with pytest.raises(UpstreamRotationError, match="^DNS lookup: failed$") as caught:
+        refresh(resolver=None)
+    assert "private resolver" not in str(caught.value)

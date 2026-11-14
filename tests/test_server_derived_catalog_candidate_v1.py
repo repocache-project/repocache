@@ -193,3 +193,26 @@ def test_preview_never_writes_or_launches_commands(monkeypatch):
     monkeypatch.setattr(os, "system", forbidden)
     monkeypatch.setattr(os, "replace", forbidden)
     assert preview(doc())["authorizes_catalog_publication"] is False
+
+
+def test_different_managed_repository_kinds_cannot_emit_duplicate_client_origin():
+    value = doc()
+    # The repository identity includes the kind/layout, so the server may
+    # regard these as separate managed repositories while the v1 client
+    # cannot choose between two cache routes for one upstream URL.
+    value["repositories"][1]["upstream"] = copy.deepcopy(
+        value["repositories"][0]["upstream"]
+    )
+    with pytest.raises(DerivedCatalogCandidateError,
+                       match="CATALOG_CANDIDATE_CLIENT_MAPPING_AMBIGUOUS"):
+        preview(value)
+
+
+def test_valid_distinct_client_mappings_are_stable_across_repeated_derivation():
+    value = doc()
+    first = preview(value)
+    second = preview(copy.deepcopy(value))
+    assert first["candidate_catalog"] == second["candidate_catalog"]
+    assert len({row["upstream"] for row in first["candidate_catalog"]["repositories"]}) == 2
+    assert len({row["cache"] for row in first["candidate_catalog"]["repositories"]}) == 2
+    assert not first["authorizes_catalog_publication"]

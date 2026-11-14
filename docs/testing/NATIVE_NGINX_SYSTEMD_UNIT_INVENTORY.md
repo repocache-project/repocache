@@ -272,3 +272,17 @@ Focused regression:
 `PYTHONPATH=src python3 -m pytest -q tests/test_server_native_nginx_effective_unit_v1.py`.
 Actual booted guest evidence remains owned by #19 and the parent #27
 acceptance criteria, on the final installable candidate.
+
+
+## Read-only VM probe leaf confinement (#27/#19)
+
+The optional booted-VM preflight's fixed-path reader now refuses any path or
+size other than the three explicitly defined kernel/OS observations, **before
+opening a descriptor**. The fixed procfs and SELinux sysfs leaves are opened
+with Linux `O_NOFOLLOW` so a substituted symlink cannot be followed; errors
+remain fixed/redacted. The standard distribution `/etc/os-release` symlink
+remains allowed because Debian/AlmaLinux may point it to the OS-provided
+release identity. These checks are narrower than signed package/host trust:
+no file contents or paths enter public evidence and no root install authority
+is gained. PID1 namespaces, NGINX, SELinux and signed installed release
+acceptance still need the real booted-VM campaign.
