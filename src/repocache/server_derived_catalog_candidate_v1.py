@@ -111,6 +111,12 @@ def preview_derived_catalog_from_nginx_dump(
             "upstream": repo["upstream"]["base_url"],
             "cache": origin + _PREFIX + identifier + "/",
         })
+    # The shipped client schema rejects duplicate upstream/cache mappings.
+    # A valid managed repository identity does not automatically imply a
+    # client-unambiguous source URL (APT/DNF may share one origin URL).
+    if (len({row["upstream"] for row in mapped}) != len(mapped)
+            or len({row["cache"] for row in mapped}) != len(mapped)):
+        _deny("CLIENT_MAPPING_AMBIGUOUS")
     mapped.sort(key=lambda item: (item["upstream"], item["cache"]))
     catalog = {"schema": 1, "repositories": mapped}
     if len(json.dumps(catalog, sort_keys=True).encode("utf-8")) > _MAX_CATALOG:

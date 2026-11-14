@@ -14,10 +14,10 @@ from __future__ import annotations
 
 import ipaddress
 import socket
-import ipaddress
 from urllib.parse import urlsplit
 from typing import Any, Callable
 
+from repocache.server_bounded_dns_v1 import bounded_getaddrinfo
 from repocache.server_install_v1 import ID, MAX_INT, validate_install_document
 from repocache.server_upstream_address_preflight_v1 import (
     UpstreamAddressError,
@@ -61,6 +61,8 @@ def propose_automatic_upstream_refresh(
 ) -> dict[str, Any]:
     """Resolve approved hosts and propose a full, immutable-generation IP set.
 
+    With no injected resolver the DNS lookup uses the existing isolated,
+    timeout-bounded child. A blocked libc resolver cannot stall this path.
     Every address returned by getaddrinfo must be globally routable; one
     private/special answer refuses the *whole* refresh. No partial candidate
     or fallback to hostname-based NGINX resolution is emitted on failure.
@@ -101,7 +103,7 @@ def propose_automatic_upstream_refresh(
     else:
         previous = None
 
-    lookup = socket.getaddrinfo if resolver is None else resolver
+    lookup = bounded_getaddrinfo if resolver is None else resolver
     if not callable(lookup):
         raise UpstreamRotationError("resolver: invalid")
     candidate: dict[str, list[str]] = {}
