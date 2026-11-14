@@ -139,6 +139,40 @@ def test_first_install_commits_real_three_resource_paths(filesystem, monkeypatch
     assert_no_pending(filesystem)
 
 
+def test_native_v2_uses_the_existing_strict_tls_renderer(filesystem):
+    """Installed candidate may not silently drop required TLS directives."""
+    stage(filesystem, snapshot(count=1))
+    assert apply(filesystem)["status"] == "NATIVE_V2_COMMITTED"
+    include = filesystem[2].read_bytes()
+    assert include.count(b"listen 127.0.0.1:443 ssl;") == 1
+    assert include.count(b"ssl_certificate_key ") == 1
+    assert include.count(b"ssl_protocols TLSv1.2 TLSv1.3;") == 1
+    assert include.count(b"ssl_session_tickets off;") == 1
+    assert include.count(b"server_tokens off;") == 1
+    assert b"X-Repocache-Generation" in include
+    assert b"/.well-known/repocache/catalog.json" in include
+    assert_no_pending(filesystem)
+
+
+def test_native_v2_refuses_untrusted_tls_renderer_authority(filesystem, monkeypatch):
+    """No WAL, live include or catalog on a contradictory TLS authority."""
+    stage(filesystem, snapshot(count=1))
+    monkeypatch.setattr(native, "render_native_tls_listener_candidate",
+                        lambda _doc: {
+                            "status": "NATIVE_TLS_LISTENER_CANDIDATE_ONLY",
+                            "authorizes_nginx_activation": True,
+                            "authorizes_firewall_change": False,
+                            "server_context_fragment": "server_tokens off;\n",
+                        })
+    with pytest.raises(native.NativeV2TransactionError,
+                       match="NATIVE_V2_NGINX_TLS_CANDIDATE_UNTRUSTED"):
+        apply(filesystem)
+    assert not filesystem[2].exists()
+    assert not filesystem[3].exists()
+    assert not (filesystem[1] / V2_STATE).exists()
+    assert_no_pending(filesystem)
+
+
 @pytest.mark.parametrize("step", ["syntax", "reload", "exposure", "dump", "catalog"])
 def test_failed_native_phase_rolls_back_previous_bytes(filesystem, monkeypatch,
                                                        step):
