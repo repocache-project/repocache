@@ -7,7 +7,6 @@ This does NOT permit loopback pins in production or grant host activation.
 from __future__ import annotations
 
 import collections
-import copy
 import hashlib
 from contextlib import contextmanager
 import json
@@ -28,6 +27,9 @@ from ci_native_nginx_cache_smoke import (
 )
 from repocache.server_nginx_repository_bundle_v1 import (
     render_repository_nginx_bundle_candidate,
+)
+from repocache.server_repository_plan_v1 import (
+    plan_batch_repository_removals,
 )
 from repocache.server_derived_catalog_candidate_v1 import (
     preview_derived_catalog_from_nginx_dump,
@@ -724,11 +726,19 @@ def main() -> None:
                     (200, FIXTURES["/dnf/repodata/repomd.xml"][1], "HIT"),
                 "native DNF cache holds real on-disk objects before removal",
             )
-            removed = copy.deepcopy(document)
-            removed["repositories"] = [
-                repo for repo in removed["repositories"]
-                if repo["id"] != "almalinux-baseos"
-            ]
+            removal_plan = plan_batch_repository_removals(
+                document, current_generation=0,
+                repository_ids=("almalinux-baseos",),
+            )
+            require(
+                removal_plan["status"] == "BATCH_REMOVE_PLAN_ONLY"
+                and removal_plan["retired_ids_proposed"] == ["almalinux-baseos"]
+                and removal_plan["cache_retained"] is True
+                and removal_plan["authorizes_state_write"] is False
+                and removal_plan["authorizes_cache_purge"] is False,
+                "reviewed batch removal planner retains cache and grants no write",
+            )
+            removed = removal_plan["candidate_document"]
             surviving_pins = {"debian-trixie-main": {HOST: ["8.8.8.8"]}}
             withdrawal = render_repository_nginx_bundle_candidate(
                 removed, expected_state_generation=0,
