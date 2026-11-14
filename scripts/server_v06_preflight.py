@@ -28,26 +28,52 @@ class SafeParser(argparse.ArgumentParser):
 
 def read_document(path: str) -> dict:
     """Read only a stable, single-link, absolute regular JSON document."""
-    if (type(path) is not str or not path.startswith("/") or "\x00" in path
-            or any(part == ".." for part in path.split("/"))):
+    # Anchored dir-fd walk: O_NOFOLLOW on the leaf alone does not prevent
+    # an attacker from substituting a symlinked parent or reparenting a path.
+    # Do not accept relative, traversal or unbounded path/segment encodings.
+    if (type(path) is not str or not path.startswith("/")
+            or len(path) > 4096 or "\x00" in path or "//" in path):
         raise ValueError("INVALID_DOCUMENT")
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK |
-                 getattr(os, "O_CLOEXEC", 0))
+    parts = path.split("/")[1:]
+    if (len(parts) < 1 or len(parts) > 128
+            or any(not part or part in (".", "..") or len(part) > 255
+                   for part in parts)):
+        raise ValueError("INVALID_DOCUMENT")
+    directory = os.open("/", os.O_RDONLY | os.O_DIRECTORY |
+                        os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
     try:
-        before = os.fstat(fd)
-        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
-                or not 0 < before.st_size <= MAX_DOCUMENT_BYTES):
-            raise ValueError("INVALID_DOCUMENT")
-        raw = os.read(fd, MAX_DOCUMENT_BYTES + 1)
-        after = os.fstat(fd)
-        if (len(raw) != before.st_size
-                or (before.st_dev, before.st_ino, before.st_size,
-                    before.st_mtime_ns, before.st_ctime_ns) !=
-                   (after.st_dev, after.st_ino, after.st_size,
-                    after.st_mtime_ns, after.st_ctime_ns)):
-            raise ValueError("INVALID_DOCUMENT")
+        for segment in parts[:-1]:
+            child = os.open(segment, os.O_RDONLY | os.O_DIRECTORY |
+                            os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                            dir_fd=directory)
+            os.close(directory)
+            directory = child
+        name = parts[-1]
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK |
+                     getattr(os, "O_CLOEXEC", 0), dir_fd=directory)
+        try:
+            before = os.fstat(fd)
+            named = os.stat(name, dir_fd=directory, follow_symlinks=False)
+            if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                    or not 0 < before.st_size <= MAX_DOCUMENT_BYTES
+                    or (before.st_dev, before.st_ino) !=
+                       (named.st_dev, named.st_ino)):
+                raise ValueError("INVALID_DOCUMENT")
+            raw = os.read(fd, MAX_DOCUMENT_BYTES + 1)
+            after = os.fstat(fd)
+            named = os.stat(name, dir_fd=directory, follow_symlinks=False)
+            identity = lambda x: (
+                x.st_dev, x.st_ino, x.st_size, x.st_mtime_ns,
+                x.st_ctime_ns, x.st_mode, x.st_uid, x.st_gid,
+            )
+            if (len(raw) != before.st_size or identity(before) != identity(after)
+                    or (after.st_dev, after.st_ino)
+                       != (named.st_dev, named.st_ino)):
+                raise ValueError("INVALID_DOCUMENT")
+        finally:
+            os.close(fd)
     finally:
-        os.close(fd)
+        os.close(directory)
     return parse_install_bytes(raw, for_apply=False)
 
 
