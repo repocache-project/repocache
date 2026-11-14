@@ -789,6 +789,12 @@ def run(argv: list[str] | None = None, root: Path = Path("/")) -> int:
         repos_action.choices["repos"].print_help()
         return 0
     try:
+        # A disabled privileged apply must fail without reading local source
+        # state, installed config, DNS or a remote catalog. Operator consent
+        # alone cannot cross the absent root-helper trust boundary.
+        if args.command in {"repos", "repo"} and getattr(args, "action", None) == "sync":
+            if args.apply:
+                raise ClientError("Applying changes is disabled until reviewed")
         # An explicit origin does not consult a possibly malformed installed
         # config. Without --server, trust only the bounded root-owned file.
         selected_server = (args.server if args.server is not None
@@ -858,8 +864,6 @@ def run(argv: list[str] | None = None, root: Path = Path("/")) -> int:
                 return 0
             raise ClientError("Remote submission is not enabled; use --output FILE")
         if args.action == "sync":
-            if args.apply:
-                raise ClientError("Applying changes is disabled until reviewed")
             selected = _select_repositories(repos, args.repo)
             catalog = _catalog(server)
             plan = _sync_plan(selected, catalog)
