@@ -99,6 +99,7 @@ V06_EXTRA_FILES = (
     "src/repocache/server_protected_namespace_bootstrap_v1.py",
     "src/repocache/server_protected_state_inspect_v1.py",
     "src/repocache/server_protected_state_store_v1.py",
+    "src/repocache/server_repository_cache_cleanup_preview_v1.py",
     "src/repocache/server_repository_plan_v1.py",
     "src/repocache/server_repository_reconcile_v1.py",
     "src/repocache/server_stock_nginx_package_owner_v1.py",
