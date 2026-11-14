@@ -12,6 +12,9 @@ import re
 from typing import Any
 
 from repocache.server_install_v1 import MAX_INT, _path, validate_install_document
+from repocache.server_nginx_tls_listener_candidate_v1 import (
+    NativeTLSListenerCandidateError, render_native_tls_listener_candidate,
+)
 from repocache.server_nginx_pin_render_v1 import (
     PinnedNginxError,
     render_pinned_upstream_fragments,
@@ -135,4 +138,81 @@ def render_repository_nginx_bundle_candidate(
         "active_exposure_verified": False,
         "authorizes_nginx_activation": False,
         "authorizes_catalog_publication": False,
+    }
+
+
+
+def render_repository_https_server_candidate(
+    document: dict[str, Any],
+    *,
+    expected_state_generation: int,
+    candidate_pins_by_repository: dict[str, dict[str, list[str]]],
+    ca_bundle_path: str,
+    native_min_free_supported: bool = False,
+    cache_bypass_repository_ids: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """Compose a COMPLETE HTTPS server block and its http{} dependencies.
+
+    This joins two already reviewed candidate-only renderers. A positive
+    output is *not* a trusted root-owned include, signed operator approval,
+    live service, authenticated TLS identity, firewall permission or catalog.
+    A future #31/#64 writer must verify those independently under one lock.
+    All-or-nothing assembly ensures the TLS and repository fragments share
+    the exact same validated document and expected generation.
+    """
+    try:
+        validated = validate_install_document(document, for_apply=True)
+        bundle = render_repository_nginx_bundle_candidate(
+            validated,
+            expected_state_generation=expected_state_generation,
+            candidate_pins_by_repository=candidate_pins_by_repository,
+            ca_bundle_path=ca_bundle_path,
+            native_min_free_supported=native_min_free_supported,
+            cache_bypass_repository_ids=cache_bypass_repository_ids,
+        )
+        tls = render_native_tls_listener_candidate(validated)
+    except (NginxRepositoryBundleError, NativeTLSListenerCandidateError,
+            ValueError, TypeError, RecursionError):
+        raise NginxRepositoryBundleError(
+            "NGINX_HTTPS_BUNDLE_INPUT_INVALID"
+        ) from None
+    if (bundle["status"] != "MULTI_REPOSITORY_RENDER_CANDIDATE_ONLY"
+            or tls["status"] != "NATIVE_TLS_LISTENER_CANDIDATE_ONLY"
+            or bundle["authorizes_nginx_activation"] is not False
+            or bundle["authorizes_catalog_publication"] is not False
+            or tls["authorizes_nginx_activation"] is not False
+            or tls["authorizes_firewall_change"] is not False):
+        raise NginxRepositoryBundleError("NGINX_HTTPS_BUNDLE_UNSAFE_RESULT")
+
+    http = bundle["http_upstream_fragment"]
+    server = (
+        "server {\n"
+        + tls["server_context_fragment"]
+        + bundle["server_location_fragment"]
+        + "}\n"
+    )
+    if (len(http.encode("utf-8")) + len(server.encode("utf-8"))
+            > _MAX_BUNDLE_BYTES + 4096):
+        raise NginxRepositoryBundleError("NGINX_HTTPS_BUNDLE_SIZE_EXCEEDED")
+    # No default_server, wildcard listener, catch-all proxy, resolver or
+    # separate catalog is generated. The caller supplies only configuration
+    # fragments in the correct stock NGINX http{} directive context.
+    return {
+        "schema_version": 1,
+        "status": "HTTPS_REPOSITORY_SERVER_CANDIDATE_ONLY",
+        "expected_state_generation": expected_state_generation,
+        "proposed_repository_ids": bundle["proposed_repository_ids"],
+        "http_context_fragment": http,
+        "server_block_fragment": server,
+        "pin_count": bundle["pin_count"],
+        "cache_bypass_recovery_candidate_repository_ids":
+            bundle["cache_bypass_recovery_candidate_repository_ids"],
+        "firewall_mutation_requested": tls["firewall_mutation_requested"],
+        "tls_material_or_hostname_verified": False,
+        "native_nginx_syntax_verified": False,
+        "installed_nginx_or_operator_authority_verified": False,
+        "active_route_exposure_verified": False,
+        "authorizes_nginx_activation": False,
+        "authorizes_catalog_publication": False,
+        "authorizes_firewall_change": False,
     }
