@@ -792,8 +792,9 @@ def run(argv: list[str] | None = None, root: Path = Path("/")) -> int:
         # A disabled privileged apply must fail without reading local source
         # state, installed config, DNS or a remote catalog. Operator consent
         # alone cannot cross the absent root-helper trust boundary.
-        if args.action == "sync" and args.apply:
-            raise ClientError("Applying changes is disabled until reviewed")
+        if args.command in {"repos", "repo"} and getattr(args, "action", None) == "sync":
+            if args.apply:
+                raise ClientError("Applying changes is disabled until reviewed")
         # An explicit origin does not consult a possibly malformed installed
         # config. Without --server, trust only the bounded root-owned file.
         selected_server = (args.server if args.server is not None
