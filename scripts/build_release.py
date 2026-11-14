@@ -68,6 +68,7 @@ V06_EXTRA_FILES = (
     "src/repocache/server_locked_manifest_reconcile_v1.py",
     "src/repocache/server_managed_include_fd_v1.py",
     "src/repocache/server_managed_include_v1.py",
+    "src/repocache/server_native_firewall_intent_v1.py",
     "src/repocache/server_native_metrics_file_bootstrap_v1.py",
     "src/repocache/server_native_metrics_logrotate_candidate_v1.py",
     "src/repocache/server_native_min_free_syntax_probe_v1.py",
