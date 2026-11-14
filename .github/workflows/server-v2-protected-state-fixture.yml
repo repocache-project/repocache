@@ -1,0 +1,93 @@
+name: Server v2 Protected State Storage (Distro Fixtures)
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/server-v2-protected-state-fixture.yml'
+      - 'src/repocache/server_proposed_state_v2_store.py'
+      - 'src/repocache/server_fixture_activation_flow_v1.py'
+      - 'src/repocache/server_fixture_multi_resource_wal_v1.py'
+      - 'src/repocache/server_proposed_v2_locked_digest_v1.py'
+      - 'src/repocache/server_proposed_v2_locked_catalog_binding_v1.py'
+      - 'src/repocache/server_locked_manifest_reconcile_v1.py'
+      - 'src/repocache/server_protected_state_store_v1.py'
+      - 'tests/test_server_locked_manifest_reconcile_v1.py'
+      - 'tests/test_server_proposed_state_v2_store.py'
+      - 'docs/architecture/SERVER_STATE_V2_STORAGE_STAGE_A.md'
+  push:
+    branches: [main, 'integration/**']
+    paths:
+      - '.github/workflows/server-v2-protected-state-fixture.yml'
+      - 'src/repocache/server_proposed_state_v2_store.py'
+      - 'src/repocache/server_fixture_multi_resource_wal_v1.py'
+      - 'src/repocache/server_locked_manifest_reconcile_v1.py'
+      - 'src/repocache/server_protected_state_store_v1.py'
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  v2-native-fixture:
+    name: V2 inode journal and recovery (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: debian13
+            image: debian:trixie-slim
+          - platform: almalinux10
+            image: almalinux:10
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install distro system Python, pytest and NGINX in disposable container
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [ '${{ matrix.platform }}' = 'debian13' ]; then
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq
+            apt-get install -y -qq --no-install-recommends \
+              python3 python3-pytest nginx openssl ca-certificates
+          else
+            dnf -y -q --enablerepo=crb install \
+              python3 python3-pytest nginx openssl ca-certificates
+          fi
+          python3 --version
+          nginx -v
+      - name: Actual Linux inode, WAL crash and read-only reconciliation tests
+        shell: bash
+        env:
+          PYTHONPATH: src
+          PYTHONDONTWRITEBYTECODE: '1'
+          EXPECTED_PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -Eeuo pipefail
+          python3 -B - <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+          from repocache.server_install_v1 import validate_os_identity
+          supported = {
+              "debian13": ("debian", (3, 13)),
+              "almalinux10": ("almalinux", (3, 12)),
+          }
+          distribution, version = supported[os.environ["EXPECTED_PLATFORM"]]
+          assert sys.version_info[:2] == version
+          assert validate_os_identity(
+              Path("/etc/os-release").read_text(encoding="utf-8"),
+              sys.version_info[:2],
+          ) == distribution
+          print("PASS: exact supported userspace; private fixture-only tests")
+          PY
+          python3 -B -m pytest -q -rs \
+            tests/test_server_proposed_state_v2_store.py \
+            tests/test_server_locked_manifest_reconcile_v1.py \
+            tests/test_server_protected_state_store_v1.py
+          echo "NOT VERIFIED: installed root worker, host systemd/SELinux, release"

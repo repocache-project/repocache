@@ -5,9 +5,11 @@ on:
     paths:
       - '.github/workflows/server-native-storage-bootstrap.yml'
       - 'src/repocache/server_native_storage_bootstrap_v1.py'
+      - 'src/repocache/server_native_repository_cache_v1.py'
       - 'src/repocache/server_cache_pressure_observe_v1.py'
       - 'src/repocache/server_protected_state_inspect_v1.py'
       - 'tests/test_server_native_storage_bootstrap_v1.py'
+      - 'tests/test_server_native_repository_cache_v1.py'
       - 'scripts/ci_native_server_storage_bootstrap.py'
       - 'docs/testing/SERVER_NATIVE_STORAGE_BOOTSTRAP.md'
   push:
@@ -15,7 +17,9 @@ on:
     paths:
       - '.github/workflows/server-native-storage-bootstrap.yml'
       - 'src/repocache/server_native_storage_bootstrap_v1.py'
+      - 'src/repocache/server_native_repository_cache_v1.py'
       - 'tests/test_server_native_storage_bootstrap_v1.py'
+      - 'tests/test_server_native_repository_cache_v1.py'
       - 'scripts/ci_native_server_storage_bootstrap.py'
   merge_group:
 
@@ -64,5 +68,6 @@ jobs:
         run: |
           set -Eeuo pipefail
           python3 -B -m pytest -q -rs tests/test_server_native_storage_bootstrap_v1.py
+          python3 -B -m pytest -q -rs tests/test_server_native_repository_cache_v1.py
           python3 -B scripts/ci_native_server_storage_bootstrap.py
           # No booted PID1/systemd or SELinux enforcing acceptance.

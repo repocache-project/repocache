@@ -5,6 +5,8 @@ on:
     paths:
       - '.github/workflows/server-native-package-effects-lock.yml'
       - 'src/repocache/server_native_nginx_package_journal_v1.py'
+      - 'src/repocache/server_native_package_effects_observe_v1.py'
+      - 'tests/test_server_native_package_effects_observe_v1.py'
       - 'tests/test_server_native_nginx_package_journal_v1.py'
       - 'src/repocache/server_protected_state_store_v1.py'
       - 'docs/architecture/SERVER_NATIVE_PACKAGE_EFFECTS_LOCK_SCOPE_V1.md'
@@ -13,6 +15,8 @@ on:
     paths:
       - '.github/workflows/server-native-package-effects-lock.yml'
       - 'src/repocache/server_native_nginx_package_journal_v1.py'
+      - 'src/repocache/server_native_package_effects_observe_v1.py'
+      - 'tests/test_server_native_package_effects_observe_v1.py'
       - 'tests/test_server_native_nginx_package_journal_v1.py'
   merge_group:
 
@@ -78,5 +82,6 @@ jobs:
           PY
           python3 -B -m pytest -q -rs \
             tests/test_server_native_nginx_package_journal_v1.py \
+            tests/test_server_native_package_effects_observe_v1.py \
             tests/test_server_protected_state_store_v1.py
           # No package install, systemd, host-root or SELinux authority.

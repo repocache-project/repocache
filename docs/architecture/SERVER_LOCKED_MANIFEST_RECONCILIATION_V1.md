@@ -1,5 +1,7 @@
 # Locked protected-manifest versus live NGINX include observation v1
 
+**Integration reconciliation (2026-11-14):** The approved private, fixture-only state-v2 storage core was integrated independently through PR #308 on the protected `integration/v0.6.0` branch. This Draft #237 now contains only the remaining non-installed native transaction, fixed-operation control entrypoint, integration tests and associated review documentation. No fixture storage duplicate is reintroduced in this PR diff. The native privileged activation and security boundary remains blocked by the independent #64 security review and specific maintainer authorization; no native-host acceptance is implied.
+
 ## Adopted initial persistent-state contract for v0.6.0 (maintainer decision: 2026-11-09)
 
 **Status: ARCHITECTURE APPROVED, IMPLEMENTATION/INTEGRATION STILL DRAFT.**

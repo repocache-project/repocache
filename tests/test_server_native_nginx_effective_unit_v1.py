@@ -212,7 +212,7 @@ def test_negative_results_do_not_echo_untrusted_systemctl_text(monkeypatch):
     "wrong_binary_inode", "foreign_binary", "foreign_process",
     "wrong_comm", "changed_pid_inode", "changed_exe_inode",
     "missing_proc", "symlink_binary", "nonexecutable_binary",
-    "replaced_binary",
+    "replaced_binary", "changed_pid_owner", "changed_pid_mode",
 ])
 def test_kernel_nginx_master_identity_fails_closed(monkeypatch, field):
     """Only read kernel fixed-name observations; no process action."""
@@ -246,6 +246,10 @@ def test_kernel_nginx_master_identity_fails_closed(monkeypatch, field):
                 return SimpleNamespace(**{**vars(process), "st_uid": 2000})
             if field == "changed_pid_inode" and count["process"] == 2:
                 return SimpleNamespace(**{**vars(process), "st_ino": 1451})
+            if field == "changed_pid_owner" and count["process"] == 2:
+                return SimpleNamespace(**{**vars(process), "st_uid": 2000})
+            if field == "changed_pid_mode" and count["process"] == 2:
+                return SimpleNamespace(**{**vars(process), "st_mode": stat.S_IFDIR | 0o777})
             return process
         if path == "/proc/1450/exe":
             count["exe"] += 1

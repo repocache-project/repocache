@@ -50,6 +50,9 @@ def evaluate_cache_pressure_alarm(
     free space and prior state are *untrusted inputs* for CI/planning only.
     """
     sequence, prev_level, stale_before = _prior(previous)
+    # A successor must itself remain a valid, replayable prior state.
+    if sequence >= MAX_INT - 1:
+        raise CachePressureAlarmError("CACHE_ALARM_SEQUENCE_EXHAUSTED")
     if free_inodes is not None and (
         type(free_inodes) is not int or not 0 <= free_inodes <= MAX_INT
     ):

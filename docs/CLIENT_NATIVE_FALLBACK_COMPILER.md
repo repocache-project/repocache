@@ -93,3 +93,19 @@ The root writer must independently obtain a durable exclusive lock, prove
 actual native manager exclusion at the commit boundary and fail closed
 on races. Test evidence: `tests/test_client_native_package_lock_observation.py`.
 
+
+
+## Forged proposal authority flags are not convergence evidence (#24)
+
+The byte-level no-op/convergence helper now also requires each of the three
+pure compiler authority fields to be **exactly Boolean False**. A caller can
+construct or replace a frozen dataclass with forged positive approval,
+production-write or native-fallback flags; even byte-identical source and APT
+companion data must not cause such a proposal to pass this helper. Negative
+regression tests cover APT/DNF and non-Boolean lookalikes.
+
+This is defense in depth, **not** authentication: a genuine proposal with all
+False flags still proves only local bytes. No actual signed catalog, kernel
+file ownership, operator intent, SELinux/native fallback, root writer or
+`repos sync --apply` authority is supplied; the #24 operational criteria
+remain NOT VERIFIED.
