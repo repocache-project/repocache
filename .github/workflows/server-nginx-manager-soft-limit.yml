@@ -1,0 +1,51 @@
+name: Stock NGINX cache manager real capacity reclaim
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/ci_nginx_manager_soft_limit_v1.py'
+      - '.github/workflows/server-nginx-manager-soft-limit.yml'
+      - 'docs/testing/SERVER_NGINX_MANAGER_SOFT_LIMIT_V1.md'
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  native-manager:
+    name: Native real cache-manager capacity reclaim (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: debian13
+            image: debian:trixie-slim
+          - platform: almalinux10
+            image: almalinux:10
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - name: Install stock NGINX, Python and switch utility
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [ '${{ matrix.platform }}' = debian13 ]; then
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq
+            apt-get install -y -qq --no-install-recommends nginx python3 util-linux
+          else
+            dnf -y -q --enablerepo=crb install nginx python3 util-linux
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Measure nonroot NGINX manager with real cache writes and purge
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -f /.dockerenv
+          setpriv --reuid 65534 --regid 65534 --clear-groups \
+            env PYTHONDONTWRITEBYTECODE=1 REPOCACHE_DISPOSABLE_NGINX_PRESSURE=1 \
+            python3 -B scripts/ci_nginx_manager_soft_limit_v1.py

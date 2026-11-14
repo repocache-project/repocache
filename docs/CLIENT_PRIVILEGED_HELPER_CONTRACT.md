@@ -106,3 +106,14 @@ or fallback validation, ownership authority or real source-write permission.
 No privileged helper is installed and repos sync --apply remains disabled.
 Systemd and enforcing SELinux host tests remain reserved for final v0.6.0
 native validation as requested by the maintainer.
+
+
+## Fail-before-I/O disabled apply boundary (v0.6 Stage A)
+
+Until an authenticated, installed, root-owned client writer is independently
+reviewed, `repocache-client repos sync --apply` is always rejected **before**
+local source discovery, OS inspection, installed-server configuration loading,
+catalog retrieval, network access or changes. The refusal preserves the
+existing CLI error code and JSON contract and does **not** imply that
+`--apply` is implemented. An unprivileged consent flag never grants root
+authority; the complete original #24 installed-native acceptance remains open.
