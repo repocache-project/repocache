@@ -1,8 +1,9 @@
 # Stock NGINX package owner observation (v0.6.0 Stage A)
 
 **Primary issue #27.** This narrow, read-only capability verifies that
-the fixed /usr/sbin/nginx binary corresponds to the expected operating
-system package name on Debian 13 and AlmaLinux 10. It improves early
+the fixed /usr/sbin/nginx binary corresponds to the expected *payload-owning* operating
+system package name (Debian `nginx`; AlmaLinux `nginx-core`, which the
+native `nginx` metapackage installs) on Debian 13 and AlmaLinux 10. It improves early
 detection of a foreign installation before future server provisioning.
 
 The probe accepts only the two versioned platform identities, the fixed

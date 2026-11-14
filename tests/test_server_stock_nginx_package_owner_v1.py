@@ -39,7 +39,7 @@ def test_foreign_and_forged_platforms_refused(raw):
 @pytest.mark.parametrize("distro,output,expected", [
     ("debian13", "nginx: /usr/sbin/nginx\n", "nginx"),
     ("debian13", "nginx:amd64: /usr/sbin/nginx\n", "nginx"),
-    ("almalinux10", "nginx\n", "nginx"),
+    ("almalinux10", "nginx-core\n", "nginx-core"),
 ])
 def test_package_owner_contract(distro, output, expected):
     assert p._owner(distro, output) == expected
@@ -49,6 +49,7 @@ def test_package_owner_contract(distro, output, expected):
     ("debian13", "nginx-common: /usr/sbin/nginx\n"),
     ("debian13", "nginx: /etc/nginx/nginx.conf\n"),
     ("debian13", "nginx: /usr/sbin/nginx\nnginx: /usr/sbin/nginx\n"),
+    ("almalinux10", "nginx\n"),
     ("almalinux10", "nginx-custom\n"),
     ("almalinux10", "nginx\nother\n"),
     ("almalinux10", "nginx: valid\n"),
@@ -64,7 +65,7 @@ def test_live_probe_observes_only_fixed_binary_and_manager():
         st_uid=0, st_gid=0, st_nlink=1, st_size=345678,
         st_mtime_ns=5, st_ctime_ns=5,
     )
-    run_result = subprocess.CompletedProcess([], 0, stdout="nginx\n", stderr="")
+    run_result = subprocess.CompletedProcess([], 0, stdout="nginx-core\n", stderr="")
     with mock.patch.object(Path, "read_text", return_value='ID=almalinux\nVERSION_ID="10"\n'), \
          mock.patch.object(p.os, "lstat", return_value=info) as lstat, \
          mock.patch.object(p.subprocess, "run", return_value=run_result) as call:

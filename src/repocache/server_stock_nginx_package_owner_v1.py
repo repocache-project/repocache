@@ -83,9 +83,11 @@ def _owner(platform: str, output: str) -> str:
     if len(lines) != 1:
         _deny("PACKAGE_DB_UNVERIFIED")
     if platform == "almalinux10":
-        if lines[0] != "nginx":
+        if lines[0] != "nginx-core":
             _deny("FOREIGN_PACKAGE")
-        return "nginx"
+        # AlmaLinux's official nginx metapackage installs the nginx-core
+        # payload, which owns /usr/sbin/nginx. Never accept arbitrary forks.
+        return "nginx-core"
     if ": " not in lines[0]:
         _deny("PACKAGE_DB_UNVERIFIED")
     package, path = lines[0].rsplit(": ", 1)
