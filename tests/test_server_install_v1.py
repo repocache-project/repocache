@@ -559,8 +559,8 @@ def test_review_parser_calls_preconversion_integer_callback(monkeypatch):
 
 
 @pytest.mark.parametrize("oversized", [
-    "ID=debian\\nVERSION_ID=13\\n" + "X=" + "z" * (16 * 1024),
-    "ID=debian\\nVERSION_ID=13\\n" + "PRETTY_NAME=" + "é" * 9000,
+    "ID=debian\nVERSION_ID=13\n" + "X=" + "z" * (16 * 1024),
+    "ID=debian\nVERSION_ID=13\n" + "PRETTY_NAME=" + "é" * 9000,
 ])
 def test_oversized_direct_os_release_input_is_refused_before_parsing(oversized):
     """A direct string caller must respect the same 16 KiB native reader cap."""
@@ -571,12 +571,12 @@ def test_oversized_direct_os_release_input_is_refused_before_parsing(oversized):
 
 
 def test_invalid_unicode_os_release_identity_is_redacted_and_rejected():
-    payload = "ID=debian\\nVERSION_ID=13\\nSECRET=" + "\\ud800"
+    payload = "ID=debian\nVERSION_ID=13\nSECRET=" + "\ud800"
     with pytest.raises(InstallInputError, match="os-release: invalid Unicode") as error:
         validate_os_identity(payload, (3, 13))
     assert "SECRET=" not in str(error.value)
 
 
 def test_normal_utf8_descriptive_os_release_fields_are_accepted():
-    payload = "ID=debian\\nVERSION_ID=13\\nPRETTY_NAME=Debian verão\\n"
+    payload = "ID=debian\nVERSION_ID=13\nPRETTY_NAME=Debian verão\n"
     assert validate_os_identity(payload, (3, 13)) == "debian"
