@@ -71,7 +71,7 @@ def test_live_probe_observes_only_fixed_binary_and_manager():
          mock.patch.object(p.subprocess, "run", return_value=run_result) as call:
         observed = p.inspect_stock_nginx_package_owner()
     assert observed["platform"] == "almalinux10"
-    assert observed["package_name"] == "nginx"
+    assert observed["package_name"] == "nginx-core"
     assert not observed["authorizes_nginx_adoption"]
     assert lstat.call_count == 2
     assert all(c.args == ("/usr/sbin/nginx",) for c in lstat.call_args_list)
@@ -105,7 +105,7 @@ def test_changed_binary_inode_refused():
     with mock.patch.object(Path, "read_text", return_value="ID=almalinux\nVERSION_ID=10\n"), \
          mock.patch.object(p.os, "lstat", side_effect=[good, changed]), \
          mock.patch.object(p.subprocess, "run",
-             return_value=subprocess.CompletedProcess([], 0, stdout="nginx\n")):
+             return_value=subprocess.CompletedProcess([], 0, stdout="nginx-core\n")):
         with pytest.raises(p.StockNginxPackageOwnerError, match="BINARY_CHANGED"):
             p.inspect_stock_nginx_package_owner()
 
