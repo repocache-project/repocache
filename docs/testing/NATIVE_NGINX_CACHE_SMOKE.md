@@ -194,3 +194,47 @@ fixture bytes, not real publisher-signed metadata, and the traffic uses
 fixed test-only loopback TLS and a non-root isolated process. Production
 operator ownership, actual signed APT/DNF retrieval and booted VM remain
 NOT VERIFIED until the consolidated #19 campaign.
+
+
+## Actual live repository withdrawal, retained cache and re-addition (#95)
+
+The same isolated Debian 13 and AlmaLinux 10 native NGINX data-plane
+smoke now covers an **actual in-process route removal**, rather than only
+comparing static nginx -T output. It warms the DNF metadata cache to an
+observed HIT and records every fixture cache object's SHA-256 and inode.
+It invokes the reviewed #95 batch removal planner with the DNF ID,
+requires cache retention and no state-write/purge authority, then renders
+the **reduced project NGINX candidate** from its complete proposed document
+while retaining the APT repository.
+The generated candidate must contain exactly one cache zone, no former DNF
+route or upstream, and still deny NGINX activation.
+
+Before any reload, it validates the reduced candidate with real packaged
+nginx -t, validates its unmodified public-pin form with nginx -T, and
+obtains a **non-publishable** derived client catalog containing only the APT
+entry. The live test changes only its private non-root NGINX instance,
+performs nginx -s reload, waits for the old worker generation to drain,
+and then verifies all of the following together:
+
+- Removed DNF HTTPS route returns 404 (no stale worker still serving it).
+- Independently managed APT cached metadata remains a real HIT.
+- Every previously cached DNF fixture file keeps its original bytes,
+  SHA-256 and inode throughout normal removal.
+- The running isolated NGINX master remains alive.
+
+Finally, another real nginx -t and reload restore the **exact** original
+configuration bytes. DNF requests again return the expected fixture bytes
+with a subsequent cache HIT; APT remains available without a refetch.
+The first re-addition request is intentionally *not* required to HIT:
+re-creating an NGINX cache zone does not guarantee immediate reuse of
+in-memory cache keys even if retained disk bytes survive.
+
+The test uses the same explicit **test-only** loopback rewrite *after*
+strict public pin validation as the existing native smoke. It executes
+without host network, privileges, source writes, actual package management,
+installed service mutation, client source application or catalog publication.
+This verifies the #95 **data-plane and byte-retention prerequisite** only.
+Authenticated protected-state commits, durable retired IDs, cross-resource
+journal and atomic active-only catalog publication, native systemd/SELinux,
+live operator approval and signed APT/DNF payload acceptance remain
+**NOT VERIFIED**. A passing container test is not release/VM GO.
