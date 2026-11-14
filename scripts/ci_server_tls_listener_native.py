@@ -112,6 +112,17 @@ def main():
                     time.sleep(0.05)
             assert payload and b"200 OK" in payload
             print("PASS: trusted synthetic certificate and canonical hostname over real TLS",flush=True)
+            # Independently verify TLS SNI. A valid signed fixture
+            # certificate and a valid HTTP Host must NOT make a no-SNI or
+            # foreign-SNI request eligible for any repository route.
+            test_context=ssl.create_default_context()
+            test_context.load_verify_locations(cafile=str(cert))
+            test_context.check_hostname=False  # negative wire-SNI fixture only
+            for indicated_name in (None, "unrelated.example.invalid"):
+                result=handshake(indicated_name,test_context)
+                assert b"421 Misdirected Request" in result, "FOREIGN_TLS_SNI_ADMITTED"
+                assert b"repocache-https" not in result, "FOREIGN_TLS_SNI_BODY_LEAK"
+            print("PASS: absent/foreign TLS SNI denied with valid HTTP Host", flush=True)
             # The certificate and SNI can be valid while a client presents a
             # different HTTP Host. Never serve managed routes to that authority.
             with socket.create_connection(("127.0.0.1",PORT),timeout=3) as raw:
