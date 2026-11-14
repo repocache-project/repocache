@@ -179,3 +179,18 @@ does **not** authenticate real OS publisher metadata, operator approval,
 host namespace, installed TLS CA, production socket, systemd, SELinux or
 the automatic activation/rollback authority that remains NOT VERIFIED for
 #28, #27 and #19. No installed exposure or VM GO is implied.
+
+
+## Real HEAD/GET cache parity on both supported native NGINX binaries (#28)
+
+The generated-fragment HTTPS smoke additionally performs an actual client
+`HEAD` against each *already warm* APT and DNF metadata/package object on
+Debian 13 and AlmaLinux 10 distro-packaged NGINX. It requires 200, no
+response body, the correct cached Content-Length, NGINX `HIT`, no extra
+upstream retrieval, and an unchanged subsequent `GET` body/cache HIT.
+This guards against a regression where package-manager HEAD queries corrupt
+or bypass a previously cached signed-shape artefact. All responses are
+fixture bytes, not real publisher-signed metadata, and the traffic uses
+fixed test-only loopback TLS and a non-root isolated process. Production
+operator ownership, actual signed APT/DNF retrieval and booted VM remain
+NOT VERIFIED until the consolidated #19 campaign.
