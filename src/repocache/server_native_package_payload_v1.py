@@ -150,6 +150,10 @@ def _verify_deb(
             c.isascii() and (c.isalnum() or c in "+-.") for c in name
         ):
             return "NATIVE_PAYLOAD_SET_UNSAFE"
+        if name in names:
+            # Two payloads with one package identity may represent conflicting
+            # architectures or versions. Do not certify an ambiguous set.
+            return "NATIVE_PAYLOAD_SET_UNSAFE"
         names.add(name)
     return ("NATIVE_PAYLOADS_VERIFIED_IN_SCRATCH" if "nginx" in names
             else "NATIVE_NGINX_PAYLOAD_MISSING")
@@ -192,6 +196,10 @@ def _verify_rpm(
         if not name or len(name) > 128 or not all(
             c.isascii() and (c.isalnum() or c in "+-.") for c in name
         ):
+            return "NATIVE_PAYLOAD_SET_UNSAFE"
+        if name in names:
+            # Two payloads with one package identity may represent conflicting
+            # architectures or versions. Do not certify an ambiguous set.
             return "NATIVE_PAYLOAD_SET_UNSAFE"
         names.add(name)
     return ("NATIVE_PAYLOADS_VERIFIED_IN_SCRATCH" if "nginx" in names
