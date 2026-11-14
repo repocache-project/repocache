@@ -202,8 +202,10 @@ The same isolated Debian 13 and AlmaLinux 10 native NGINX data-plane
 smoke now covers an **actual in-process route removal**, rather than only
 comparing static nginx -T output. It warms the DNF metadata cache to an
 observed HIT and records every fixture cache object's SHA-256 and inode.
-It generates a **reduced project NGINX candidate** after normally removing
-that repository from a copy of the declarative document, keeping APT active.
+It invokes the reviewed #95 batch removal planner with the DNF ID,
+requires cache retention and no state-write/purge authority, then renders
+the **reduced project NGINX candidate** from its complete proposed document
+while retaining the APT repository.
 The generated candidate must contain exactly one cache zone, no former DNF
 route or upstream, and still deny NGINX activation.
 
