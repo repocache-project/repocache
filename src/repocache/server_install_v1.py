@@ -341,8 +341,16 @@ def validate_install_document(document: Any, *, for_apply: bool = False) -> dict
         "bind_address", "hostname", "https_port"})
     address = _string(listen["bind_address"], "deployment.listen.bind_address")
     try:
-        if str(ipaddress.ip_address(address)) != address:
+        ip = ipaddress.ip_address(address)
+        if str(ip) != address:
             _reject("deployment.listen.bind_address: noncanonical IP")
+        # A listener is a single local unicast or intentional wildcard
+        # endpoint. Multicast and IPv4-mapped IPv6 are ambiguous host
+        # exposure, not a safe HTTPS/TCP bind policy.
+        if (ip.is_multicast
+                or (isinstance(ip, ipaddress.IPv6Address)
+                    and ip.ipv4_mapped is not None)):
+            _reject("deployment.listen.bind_address: unsafe bind IP")
     except ValueError:
         _reject("deployment.listen.bind_address: invalid IP literal")
     _host(listen["hostname"], "deployment.listen.hostname")
