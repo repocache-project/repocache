@@ -44,6 +44,8 @@ def bounded_getaddrinfo(
     host: str, port: int, *,
     family: int, type: int, proto: int,
     timeout_seconds: float = DEFAULT_DNS_SECONDS,
+    run_as_uid: int | None = None,
+    run_as_gid: int | None = None,
 ) -> list[tuple[Any, ...]]:
     """Resolve in a killable process; report only redacted socket errors.
 
@@ -61,6 +63,25 @@ def bounded_getaddrinfo(
             or not 0 < timeout_seconds <= MAX_DNS_SECONDS
             or not os.path.isabs(sys.executable)):
         raise socket.gaierror("DNS worker: invalid request")
+    # The native root worker must never run name resolution with its own
+    # credentials. Explicit client-requested numeric identities are not
+    # authority: this API only supports a *downward* privilege transition
+    # from an already-root process, never a root-target child.
+    if (run_as_uid is None) != (run_as_gid is None):
+        raise socket.gaierror("DNS worker: invalid identity")
+    child_identity: dict[str, Any] = {}
+    if run_as_uid is not None:
+        if (builtins.type(run_as_uid) is not int
+                or builtins.type(run_as_gid) is not int
+                or not 1 <= run_as_uid <= 2**32 - 2
+                or not 1 <= run_as_gid <= 2**32 - 2
+                or os.geteuid() != 0):
+            raise socket.gaierror("DNS worker: invalid identity")
+        child_identity = {
+            "user": run_as_uid,
+            "group": run_as_gid,
+            "extra_groups": [],
+        }
     try:
         completed = subprocess.run(
             [sys.executable, "-I", "-c", _WORKER, host, str(port)],
@@ -73,6 +94,7 @@ def bounded_getaddrinfo(
             env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
             close_fds=True,
             start_new_session=True,
+            **child_identity,
         )
         if (completed.returncode != 0 or builtins.type(completed.stdout) is not bytes
                 or not 2 <= len(completed.stdout) <= _MAX_REPLY_BYTES):
