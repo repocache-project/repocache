@@ -1,0 +1,52 @@
+name: Native active-only NGINX and discovery withdrawal
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/ci_server_nginx_active_only_withdraw_v1.py'
+      - '.github/workflows/server-native-active-only-withdraw.yml'
+      - 'docs/testing/SERVER_NATIVE_ACTIVE_ONLY_WITHDRAW_V1.md'
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  withdrawal:
+    name: Native nginx -T route and catalog withdrawal (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: debian13
+            image: debian:trixie-slim
+          - platform: almalinux10
+            image: almalinux:10
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - name: Install official native NGINX Python and switch tool
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [ '${{ matrix.platform }}' = debian13 ]; then
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq
+            apt-get install -y -qq --no-install-recommends nginx python3 util-linux ca-certificates
+          else
+            dnf -y -q --enablerepo=crb install nginx python3 util-linux ca-certificates
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run real syntax and derived read-only catalog across state changes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -f /.dockerenv
+          setpriv --reuid 65534 --regid 65534 --clear-groups \
+            env PYTHONPATH="$GITHUB_WORKSPACE/src" PYTHONDONTWRITEBYTECODE=1 \
+              REPOCACHE_DISPOSABLE_NGINX_SMOKE=1 \
+            python3 -B scripts/ci_server_nginx_active_only_withdraw_v1.py

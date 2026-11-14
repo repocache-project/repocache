@@ -216,3 +216,22 @@ def test_valid_distinct_client_mappings_are_stable_across_repeated_derivation():
     assert len({row["upstream"] for row in first["candidate_catalog"]["repositories"]}) == 2
     assert len({row["cache"] for row in first["candidate_catalog"]["repositories"]}) == 2
     assert not first["authorizes_catalog_publication"]
+
+
+
+@pytest.mark.parametrize("extra", [
+    "é" * (2 * 1024 * 1024 + 10),
+    "\ud800",
+    "\udfff",
+])
+def test_catalog_dump_rejects_oversize_encoded_utf8_or_surrogate(extra):
+    """Reject malformed/unbounded caller text before treating it as nginx -T."""
+    with pytest.raises(DerivedCatalogCandidateError,
+                       match="NGINX_DUMP_INVALID"):
+        preview(doc(), raw=dump(doc()) + extra)
+
+
+def test_catalog_dump_accepts_genuine_utf8_comments_without_authority():
+    result = preview(doc(), raw=dump(doc()) + "# NGINX café comment\n")
+    assert result["status"] == "INERT_DERIVED_CATALOG_CANDIDATE_ONLY"
+    assert result["authorizes_catalog_publication"] is False
