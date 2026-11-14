@@ -51,10 +51,19 @@ def preview_derived_catalog_from_nginx_dump(
     """
     if type(nginx_t_exit_code) is not int or nginx_t_exit_code != 0:
         _deny("NGINX_SYNTAX_NOT_OBSERVED")
+    # Do not allocate a proportional encoded copy of an unbounded
+    # caller-supplied Python string. A genuine nginx -T text dump must also
+    # be valid strict UTF-8, never a surrogate-containing Python surrogatepass
+    # fixture that would be impossible to serialize safely as native text.
     if (type(nginx_dump_text) is not str
-            or not 1 <= len(nginx_dump_text.encode("utf-8", "surrogatepass"))
-                   <= _MAX_NGINX_DUMP
+            or not 1 <= len(nginx_dump_text) <= _MAX_NGINX_DUMP
             or "\x00" in nginx_dump_text or "\r" in nginx_dump_text):
+        _deny("NGINX_DUMP_INVALID")
+    try:
+        dump_bytes = nginx_dump_text.encode("utf-8", "strict")
+    except UnicodeError:
+        _deny("NGINX_DUMP_INVALID")
+    if len(dump_bytes) > _MAX_NGINX_DUMP:
         _deny("NGINX_DUMP_INVALID")
     try:
         document = validate_install_document(untrusted_document, for_apply=True)
