@@ -230,11 +230,13 @@ def hold_existing_native_package_locks(
             finally:
                 for parent in reversed(parents):
                     os.close(parent)
-        # Do not return an eternal write_eligible token. The only proof
-        # of locks is their lifetime inside this context manager.
-        yield
     except (OSError, OverflowError, TypeError) as exc:
         raise LockInspectionRefused("Native package lock scope unavailable") from exc
+    else:
+        # Do not return an eternal write_eligible token. The only proof
+        # of locks is their lifetime inside this context manager. Keep
+        # caller exceptions untouched; only acquisition errors are mapped.
+        yield
     finally:
         # Closing each fd releases both of its kernel lock families.
         # Attempt every close even if one fails; never leak held lock FDs.
