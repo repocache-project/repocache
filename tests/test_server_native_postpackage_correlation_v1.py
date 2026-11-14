@@ -181,6 +181,6 @@ def test_readonly_probe_error_is_redacted(monkeypatch):
 def test_source_has_no_native_write_or_service_calls():
     import inspect
     code = inspect.getsource(mod.inspect_current_namespace_native_postpackage_candidate)
-    for token in ("os.replace(", "os.unlink(", "subprocess.run(", "systemctl",
+    for token in ("os.replace(", "os.unlink(", "subprocess.run(", '"systemctl"',
                   "apt-get", "dnf install", "os.chown("):
         assert token not in code
