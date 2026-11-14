@@ -20,6 +20,9 @@ TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}\Z", re.ASCII)
 ID = re.compile(r"[a-z][a-z0-9-]{0,47}\Z", re.ASCII)
 LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z", re.ASCII)
 OS_SUPPORTED = {"debian": ("13", (3, 13)), "almalinux": ("10", (3, 12))}
+# Match the bounded /etc/os-release preflight read. Direct in-memory callers
+# must not be allowed to bypass the same size and Unicode rejection gate.
+MAX_OS_IDENTITY_BYTES = 16 * 1024
 
 
 class InstallInputError(ValueError):
@@ -485,6 +488,16 @@ def validate_os_identity(os_release: str, python_version: tuple[int, int]) -> st
     """
     if type(os_release) is not str:
         _reject("os-release: expected text")
+    # Check characters first so encoding even a huge direct Python string
+    # cannot allocate unbounded memory. A UTF-8 byte check is still needed:
+    # 9,000 non-ASCII characters exceed the native 16 KiB input contract.
+    if len(os_release) > MAX_OS_IDENTITY_BYTES:
+        _reject("os-release: input exceeds 16 KiB")
+    try:
+        if len(os_release.encode("utf-8", "strict")) > MAX_OS_IDENTITY_BYTES:
+            _reject("os-release: input exceeds 16 KiB")
+    except UnicodeError:
+        _reject("os-release: invalid Unicode")
     values: dict[str, str] = {}
     for line in os_release.splitlines():
         line = line.strip()
