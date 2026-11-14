@@ -888,3 +888,92 @@ def run(argv: list[str] | None = None, root: Path = Path("/")) -> int:
 
 if __name__ == "__main__":
     sys.exit(run())
+
+
+
+_NATIVE_CACHE_PATH = re.compile(
+    r"/__repocache/repos/([a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?)/\Z",
+    re.ASCII,
+)
+
+
+def preview_native_client_catalog_route(
+    server: str, catalog: dict, *,
+    upstream: str, repository_id: str,
+) -> dict:
+    """Reject arbitrary same-origin catalog paths before future source apply.
+
+    This is a pure *shape* check for the v0.6 managed route namespace, not
+    authentication of a remote catalog, installed server, operator consent,
+    publisher signature or APT/DNF source writer. Never invoke this function
+    as an authorization decision without those separate mandatory checks.
+    Historical read-only _catalog() mappings deliberately remain untouched.
+    """
+    if (type(repository_id) is not str or not 1 <= len(repository_id) <= 48
+            or _NATIVE_CACHE_PATH.fullmatch(
+                "/__repocache/repos/" + repository_id + "/"
+            ) is None):
+        raise ClientError("Native catalog repository ID is invalid")
+    if type(upstream) is not str:
+        raise ClientError("Native catalog upstream is invalid")
+    try:
+        origin = _server(server)
+        if (not upstream.startswith("https://")
+                or _safe_url(upstream) != upstream
+                or not upstream.endswith("/")):
+            raise ValueError("invalid upstream")
+    except (ClientError, ValueError, TypeError):
+        raise ClientError("Native catalog origin or upstream is invalid") from None
+    if (type(catalog) is not dict or set(catalog) != {"schema", "repositories"}
+            or type(catalog.get("schema")) is not int or catalog["schema"] != 1
+            or type(catalog["repositories"]) is not list
+            or len(catalog["repositories"]) > 500):
+        raise ClientError("Native catalog schema is invalid")
+    expected_path = "/__repocache/repos/" + repository_id + "/"
+    exact_count = 0
+    observed_sources: set[str] = set()
+    observed_cache: set[str] = set()
+    for mapping in catalog["repositories"]:
+        if (type(mapping) is not dict
+                or set(mapping) != {"upstream", "cache"}
+                or type(mapping["upstream"]) is not str
+                or type(mapping["cache"]) is not str):
+            raise ClientError("Native catalog mapping is invalid")
+        source, cache = mapping["upstream"], mapping["cache"]
+        try:
+            if (not source.startswith("https://")
+                    or not cache.startswith("https://")
+                    or _safe_url(source) != source
+                    or _safe_url(cache) != cache
+                    or not source.endswith("/") or not cache.endswith("/")
+                    or not _same_https_origin(cache, origin)
+                    or _NATIVE_CACHE_PATH.fullmatch(urlsplit(cache).path)
+                       is None):
+                raise ValueError("invalid route")
+        except (ValueError, TypeError, ClientError):
+            raise ClientError("Native catalog route is invalid") from None
+        if source in observed_sources or cache in observed_cache:
+            raise ClientError("Native catalog mapping is ambiguous")
+        observed_sources.add(source)
+        observed_cache.add(cache)
+        match = _NATIVE_CACHE_PATH.fullmatch(urlsplit(cache).path)
+        assert match is not None
+        if source == upstream:
+            if match.group(1) != repository_id:
+                raise ClientError("Native catalog route ID mismatch")
+            exact_count += 1
+        elif match.group(1) == repository_id:
+            raise ClientError("Native catalog route ID collision")
+    if exact_count != 1:
+        raise ClientError("Native catalog approved route is unavailable")
+    return {
+        "schema_version": 1,
+        "status": "NATIVE_CATALOG_ROUTE_SHAPE_ONLY",
+        "repository_id": repository_id,
+        "read_only_mapping_observed": True,
+        "catalog_publisher_authenticated": False,
+        "native_operator_approval_verified": False,
+        "source_file_ownership_verified": False,
+        "native_fallback_verified": False,
+        "authorizes_source_write": False,
+    }
