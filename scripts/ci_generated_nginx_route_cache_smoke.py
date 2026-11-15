@@ -105,6 +105,7 @@ def trusted_fixture_origin(counts, lock):
             names = (
                 ("/debian/", "/apt/"),
                 ("/debian-auto/", "/apt/"),
+                ("/almalinux/10/AppStream/x86_64/os/", "/dnf/"),
                 ("/almalinux/10/BaseOS/x86_64/os/", "/dnf/"),
             )
             path = next(
@@ -1081,6 +1082,180 @@ def main() -> None:
                 future["repository_id"] != auto_id
                 and future["id_eligibility"] == "CALLER_SNAPSHOT_ONLY",
                 "retired ID is not reused in a supplied all-time snapshot",
+            )
+
+            # Repeat the same *real* data-driven lifecycle for a previously
+            # unknown DNF repository. The third-party origin is a disposable
+            # signed-shape fixture; the actual production generic renderer,
+            # not code for a named package, creates the DNF route/cache.
+            dnf_candidate = copy.deepcopy(document["repositories"][1])
+            del dnf_candidate["id"]
+            dnf_candidate["upstream"]["base_url"] = (
+                "https://mirror.example.invalid/almalinux/10/AppStream/x86_64/os/"
+            )
+            recorded_ids = all_time_ids | {auto_id}
+            dnf_auto = propose_automatic_repository_id(
+                document, dnf_candidate, current_generation=0,
+                reserved_ids=recorded_ids,
+            )
+            dnf_id = dnf_auto["repository_id"]
+            require(
+                dnf_auto["existing"] is False and dnf_id not in recorded_ids
+                and dnf_auto["id_eligibility"] == "CALLER_SNAPSHOT_ONLY",
+                "new DNF metadata obtains a new candidate ID without source edits",
+            )
+            dnf_add = plan_repository_change(
+                document, current_generation=0, operation="add",
+                proposed_repository={**dnf_candidate, "id": dnf_id},
+                reserved_ids=recorded_ids,
+            )
+            dnf_document = dnf_add["candidate_document"]
+            require(
+                dnf_add["changed"]
+                and len(dnf_document["repositories"]) == 3
+                and len(document["repositories"]) == 2,
+                "DNF metadata-only plan adds exactly one inert repository",
+            )
+            dnf_cache_root = root / "cache" / dnf_id
+            dnf_cache_root.mkdir(mode=0o700)
+            dnf_pins = {
+                item["id"]: {HOST: ["8.8.8.8"]}
+                for item in dnf_document["repositories"]
+            }
+            dnf_render = render_repository_nginx_bundle_candidate(
+                dnf_document, expected_state_generation=0,
+                candidate_pins_by_repository=dnf_pins,
+                ca_bundle_path=str(origin_cert),
+            )
+            require(
+                dnf_render["proposed_repository_ids"]
+                    == sorted((*all_time_ids, dnf_id))
+                and dnf_render["http_upstream_fragment"].count(
+                    "proxy_cache_path "
+                ) == 3
+                and not dnf_render["authorizes_nginx_activation"]
+                and not dnf_render["authorizes_catalog_publication"],
+                "new DNF cache zone and route are generated without grants",
+            )
+            dnf_upstream = dnf_render["http_upstream_fragment"].replace(
+                "server 8.8.8.8:443;",
+                f"server 127.0.0.1:{origin_port};",
+            )
+            dnf_locations = dnf_render["server_location_fragment"].replace(
+                "    proxy_cache_valid 200 60s;",
+                "    proxy_cache_valid 200 60s;\n"
+                "    add_header X-RepoCache-Smoke $upstream_cache_status always;",
+            )
+            dnf_live_text = normal_text.replace(
+                upstream, dnf_upstream, 1,
+            ).replace(locations, dnf_locations, 1)
+            require(
+                dnf_live_text != normal_text
+                and f"location ^~ /__repocache/repos/{dnf_id}/"
+                    in dnf_live_text,
+                "generated DNF route is present only in disposable candidate",
+            )
+            dnf_public = dnf_live_text.replace(
+                f"server 127.0.0.1:{origin_port};",
+                "server 8.8.8.8:443;",
+            ).replace(
+                "    add_header X-RepoCache-Smoke $upstream_cache_status always;\n",
+                "",
+            )
+            dnf_catalog_conf = root / "dnf-added-catalog-candidate.conf"
+            dnf_catalog_conf.write_text(dnf_public, encoding="utf-8")
+            dnf_dump = subprocess.run(
+                [nginx, "-T", "-e", str(root / "dnf-added-catalog.log"),
+                 "-p", str(root), "-c", str(dnf_catalog_conf)],
+                capture_output=True, text=True, check=False, timeout=10,
+            )
+            require(dnf_dump.returncode == 0,
+                    "stock nginx -T accepts new DNF repository config")
+            dnf_catalog = preview_derived_catalog_from_nginx_dump(
+                dnf_document, candidate_pins_by_repository=dnf_pins,
+                ca_bundle_path=str(origin_cert),
+                nginx_dump_text=dnf_dump.stdout,
+                nginx_t_exit_code=dnf_dump.returncode,
+            )
+            require(
+                len(dnf_catalog["candidate_catalog"]["repositories"]) == 3
+                and dnf_id in dnf_catalog["desired_active_repository_ids"]
+                and not dnf_catalog["authorizes_catalog_publication"],
+                "real nginx -T includes new DNF route only in inert catalog",
+            )
+
+            config.write_text(dnf_live_text, encoding="utf-8")
+            run(nginx, "-t", "-e", str(root / "dnf-added-syntax.log"),
+                "-p", str(root), "-c", str(config))
+            old_dnf_workers = nginx_master_children(process.pid)
+            run(nginx, "-s", "reload", "-e", str(root / "dnf-added-reload.log"),
+                "-p", str(root), "-c", str(config))
+            await_worker_generation_drained(process, old_dnf_workers)
+            dynamic_dnf_url = base + dnf_id + "/repodata/repomd.xml"
+            with lock:
+                before_new_dnf = counts["/dnf/repodata/repomd.xml"]
+            dnf_first = request(dynamic_dnf_url, client_tls)
+            dnf_second = request(dynamic_dnf_url, client_tls)
+            with lock:
+                after_new_dnf = counts["/dnf/repodata/repomd.xml"]
+            require(
+                dnf_first[:3] == (
+                    200, FIXTURES["/dnf/repodata/repomd.xml"][1], "MISS"
+                ) and dnf_second[:3] == (
+                    200, FIXTURES["/dnf/repodata/repomd.xml"][1], "HIT"
+                ) and after_new_dnf == before_new_dnf + 1
+                and request(apt_url, client_tls)[:3] == (
+                    200, FIXTURES["/apt/dists/trixie/InRelease"][1], "HIT"
+                ) and request(dnf_url, client_tls)[:3] == (
+                    200, FIXTURES["/dnf/repodata/repomd.xml"][1], "HIT"
+                ) and process.poll() is None,
+                "new DNF repository has isolated real MISS/HIT with no "
+                "interruption to existing APT/DNF cache",
+            )
+            def dynamic_dnf_bytes():
+                return {
+                    str(f.relative_to(dnf_cache_root)): (
+                        hashlib.sha256(f.read_bytes()).hexdigest(), f.stat().st_ino
+                    )
+                    for f in dnf_cache_root.rglob("*") if f.is_file()
+                }
+            dnf_retained = dynamic_dnf_bytes()
+            require(bool(dnf_retained), "new DNF cache has retained bytes")
+            dnf_removal = plan_repository_change(
+                dnf_document, current_generation=0,
+                operation="remove", repository_id=dnf_id,
+            )
+            require(
+                dnf_removal["changed"]
+                and dnf_removal["candidate_document"] == document,
+                "normal DNF removal proposes route withdrawal without purge",
+            )
+            config.write_bytes(original_conf)
+            run(nginx, "-t", "-e", str(root / "dnf-remove-syntax.log"),
+                "-p", str(root), "-c", str(config))
+            active_dnf_workers = nginx_master_children(process.pid)
+            run(nginx, "-s", "reload", "-e", str(root / "dnf-remove-reload.log"),
+                "-p", str(root), "-c", str(config))
+            await_worker_generation_drained(process, active_dnf_workers)
+            require(
+                request(dynamic_dnf_url, client_tls)[0] == 404
+                and dynamic_dnf_bytes() == dnf_retained
+                and request(apt_url, client_tls)[:3] == (
+                    200, FIXTURES["/apt/dists/trixie/InRelease"][1], "HIT"
+                ) and request(dnf_url, client_tls)[:3] == (
+                    200, FIXTURES["/dnf/repodata/repomd.xml"][1], "HIT"
+                ) and process.poll() is None
+                and config.read_bytes() == original_conf,
+                "DNF dynamic withdrawal preserves bytes/inodes, original "
+                "APT/DNF cache and running NGINX",
+            )
+            future_dnf = propose_automatic_repository_id(
+                document, copy.deepcopy(dnf_candidate), current_generation=0,
+                reserved_ids=recorded_ids | {dnf_id},
+            )
+            require(
+                future_dnf["repository_id"] != dnf_id,
+                "new DNF tombstone also blocks candidate ID reuse",
             )
         finally:
             process.terminate()

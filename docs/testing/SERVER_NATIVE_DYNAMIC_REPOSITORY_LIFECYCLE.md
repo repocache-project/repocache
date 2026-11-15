@@ -2,12 +2,12 @@
 
 ## CI-exercised scenario
 
-The existing **Disposable stock NGINX HTTPS cache smoke** now exercises a third,
-previously unknown APT repository, using only validated install-v1 metadata and
+The existing **Disposable stock NGINX HTTPS cache smoke** now exercises an additional,
+previously unknown APT repository and then an additional DNF repository, using only validated install-v1 metadata and
 a deterministic non-authoritative automatic ID. It uses the packaged NGINX
 binary on disposable, rootless Debian 13 and AlmaLinux 10 runners; no
 repository-specific production source edits are necessary to generate the
-additional route, isolated cache zone or inert derived client catalog.
+additional routes, isolated cache zones or inert derived client catalogs.
 
 The test performs the complete **Stage-A test-only data-plane sequence**:
 
@@ -17,20 +17,21 @@ The test performs the complete **Stage-A test-only data-plane sequence**:
    schema object but with a distinct HTTPS origin path; omit the administrator
    ID. Require deterministic `propose_automatic_repository_id`, distinct
    output and repeat/no-op planning with a frozen all-time reservation view.
-3. Re-render the actual multi-repository NGINX fragments with three isolated
-   cache zones, independently validate an unmodified public-IP candidate
-   through real stock `nginx -T` and derive a three-entry, still inert client
-   catalog containing the new route.
+3. For each newly added APT **and** DNF repository in turn, re-render the
+   actual multi-repository NGINX fragments with three isolated cache zones,
+   validate the public-IP candidate through stock `nginx -T`, and derive
+   a three-entry, still inert client catalog containing the new route.
 4. In the **test-only** NGINX process, replace the prevalidated public IPs
    with an isolated local HTTPS fixture address, run stock `nginx -t` and
    execute an explicit test-only master reload. Wait until former workers
-   drain. Assert real new APT metadata **MISS then HIT** with exactly one
-   upstream request, while both existing APT and DNF routes remain HIT.
+   drain. Assert real new APT `InRelease` and new DNF `repomd.xml` metadata
+   each yield **MISS then HIT** with exactly one independent upstream request,
+   while both existing APT and DNF routes remain HIT.
 5. Build a pure normal removal intent; restore the exact original NGINX
    bytes through another validated test-only reload. Assert new route 404,
    preservation of all newly cached file bytes and inode identifiers, old
    APT/DNF HIT and continued NGINX health. A caller-provided tombstone set
-   prevents the automatic allocator from proposing the removed ID again.
+   prevents the automatic allocator from proposing either removed ID again.
 
 Both the original and new candidates explicitly deny activation, state
 commit and catalog publication. The ID reservation set used here is fixture
