@@ -40,7 +40,14 @@ host execution and requires the explicit disposable Docker intent marker.
    repository URL twice, prove the *second* native NGINX response is HIT and
    byte-identical to the signed fixture, and prove actual upstream contact.
    The APT case also refuses a wrong-CA native package-manager refresh.
-6. Terminate the private NGINX process and local TLS origin; the CI container
+6. To prove a real negative path, render a test-only `proxy_cache off`
+   candidate for that repository, validate `nginx -t`, reload only the private
+   NGINX master, and wait for old workers to exit. Tamper with the signed APT
+   `InRelease` or DNF `repomd.xml.asc` in the fixture, then require a
+   **fresh** native package-manager metadata cache to reject it. Confirm the
+   tampered upstream response was actually requested; a previously cached
+   authentic object is never misclassified as a signature failure.
+7. Terminate the private NGINX process and local TLS origin; the CI container
    and all keys, sources, package caches and artefacts are destroyed.
 
 Both matrix jobs must complete SUCCESS, alongside project Python/security CI
@@ -57,8 +64,9 @@ configuration is applied **only** by an expressly isolated disposable
 test process after `nginx -t`; the actual source code does not expose any
 write/reload authority.
 
-Existing standalone native APT/DNF signed transport tests cover tampered
-metadata/package negatives; this test adds the *missing generated NGINX
-route in the signed chain*. Do not infer that production catalog/NGINX
+Existing standalone native APT/DNF signed transport tests also cover altered
+package payloads. This integration additionally demonstrates that *tampered
+signed metadata* is refused through the **generated NGINX route** with a
+validated cache-off generation and genuinely fresh manager metadata. Do not infer that production catalog/NGINX
 atomic activation or full issue #95 AC1–AC7 has passed before #31/#64
 and the final booted Debian 13 / AlmaLinux 10 campaign in #19.
