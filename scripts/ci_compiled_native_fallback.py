@@ -20,6 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "client"))
 import native_fallback_plan as compiler
 import ci_client_native_fallback as fixture
+import ci_dnf_signed_rpm_fallback as signed_rpm
 
 
 def _checked_container():
@@ -71,11 +72,20 @@ def smoke(manager: str):
         base = Path(work)
         (base / "www").mkdir()
         ident = secrets.token_hex(16)
+        signed_rpm_file = None
+        signed_rpm_bytes = None
+        rpmdb = None
         if manager == "apt":
             key = fixture.apt_repository(base, package_transfer=True)
             installed_key = Path("/etc/apt/keyrings") / ("repocache-ci-" + ident + ".gpg")
         else:
-            key = fixture.dnf_repository(base, signed=True)
+            # The compiler-generated DNF source must also prove a REAL
+            # signed RPM metadata -> transfer -> trusted RPMDB chain.
+            # Reuse the already reviewed disposable signature fixture
+            # rather than trusting a separate hand-written DNF repo.
+            key, signed_rpm_file, signed_rpm_bytes, rpmdb = (
+                signed_rpm._signed_fixture(base)
+            )
             installed_key = Path("/etc/pki/rpm-gpg") / ("repocache-ci-" + ident + ".asc")
         assert key is not None
         _create_unique(installed_key, key.read_bytes())
@@ -165,9 +175,83 @@ def smoke(manager: str):
                                hashlib.sha256(source_deb.read_bytes()).digest()):
                         raise RuntimeError("Signed APT package hash or transfer failed:\n" +
                                            package.stdout[-3500:])
+                if manager == "dnf" and phase != "both-failed":
+                    assert signed_rpm_bytes is not None and rpmdb is not None
+                    rpm_dest = base / ("compiled-signed-rpm-" + phase)
+                    received = signed_rpm._download_dnf(argv, rpm_dest)
+                    downloaded = rpm_dest / signed_rpm._RPM_NAME
+                    rpm_checksum_ok = (
+                        received.returncode == 0 and downloaded.is_file()
+                        and hashlib.sha256(downloaded.read_bytes()).digest()
+                            == hashlib.sha256(signed_rpm_bytes).digest()
+                    )
+                    rpm_signature_ok = False
+                    if rpm_checksum_ok:
+                        verify = signed_rpm._run([
+                            "rpm", "--dbpath", str(rpmdb), "-Kv",
+                            str(downloaded),
+                        ])
+                        rpm_signature_ok = signed_rpm._rpm_signature_verified(verify)
+                    if not (rpm_checksum_ok and rpm_signature_ok):
+                        raise RuntimeError(
+                            "Compiled DNF signed RPM transfer refused: "
+                            + phase + " signed=" + str(rpm_signature_ok)
+                            + " same_bytes=" + str(rpm_checksum_ok)
+                            + " dnf_exit=" + str(received.returncode)
+                        )
+                    print(
+                        "PASS: compiler-generated DNF fallback transferred "
+                        "RPM with identical SHA256 and independently trusted "
+                        "ephemeral RPMDB signature in " + phase,
+                        flush=True,
+                    )
                 print("compiled-%s %s PASS: primary_hits=%d upstream_hits=%d" %
                       (manager, phase, len(cache.hits), len(upstream.hits)),
                       flush=True)
+
+            # A valid-looking compiled HTTPS DNF source must not allow
+            # altered RPM bytes after signed repodata generation. In this
+            # case metadata may pass but a native package download MUST
+            # fail its signed checksum chain. Never install a package.
+            if manager == "dnf":
+                assert signed_rpm_file is not None and signed_rpm_bytes is not None
+                signed_rpm_file.write_bytes(
+                    b"tampered after signed repodata: not a valid RPM\n"
+                )
+                try:
+                    cache.mode = upstream.mode = "healthy"
+                    cache.hits.clear()
+                    upstream.hits.clear()
+                    argv = fixture.dnf_command(
+                        base, cache, upstream, "compiled-tampered-rpm",
+                        ca_certificate=cert, metadata_key=key,
+                    )
+                    (base / "repos" / "repocache-ci.repo").write_bytes(
+                        native.proposed
+                        + ("sslverify=1\nsslcacert=" + str(cert) + "\n").encode("utf-8")
+                    )
+                    metadata = subprocess.run(
+                        argv, text=True, stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT, timeout=120, check=False,
+                    )
+                    bad_download = signed_rpm._download_dnf(
+                        argv, base / "compiled-tampered-download",
+                    ) if metadata.returncode == 0 else None
+                    if (metadata.returncode != 0
+                            or bad_download is None
+                            or bad_download.returncode == 0
+                            or not cache.hits):
+                        raise RuntimeError(
+                            "Compiled DNF altered signed RPM was not rejected "
+                            "by native package manager"
+                        )
+                    print(
+                        "PASS: compiled DNF source refuses tampered RPM bytes "
+                        "after successful signed metadata verification",
+                        flush=True,
+                    )
+                finally:
+                    signed_rpm_file.write_bytes(signed_rpm_bytes)
 
             # The *actual compiled* source must never accept a cache or
             # upstream certificate signed by an unrelated CI-only CA.
