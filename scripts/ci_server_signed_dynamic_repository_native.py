@@ -217,17 +217,12 @@ def apt_native_signed_download(
     foreign_cert, _ = native.temporary_tls_identity(base, "wrong-ca")
     other_lists = base / "apt-foreign-lists"
     (other_lists / "partial").mkdir(parents=True)
-    mismatched = [
-        ("-o", f"Dir::State::lists={other_lists}")
-        if pair[0] == "-o" and pair[1].startswith("Dir::State::lists=")
-        else pair
-        for pair in zip(args[::2], args[1::2])
-    ]
-    wrong = [token for pair in mismatched for token in pair]
     wrong = [
-        (f"Acquire::https::CaInfo={foreign_cert}"
+        (f"Dir::State::lists={other_lists}"
+         if token.startswith("Dir::State::lists=") else
+         f"Acquire::https::CaInfo={foreign_cert}"
          if token.startswith("Acquire::https::CaInfo=") else token)
-        for token in wrong
+        for token in args
     ]
     if subprocess_status([*wrong, "update"]):
         raise AssertionError("UNTRUSTED_APT_FRONTEND_CA_ACCEPTED")
@@ -258,6 +253,15 @@ def dnf_native_signed_download(
     )
     if not signed_rpm._rpm_signature_verified(verified):
         raise AssertionError("NATIVE_DNF_RPM_SIGNATURE_UNVERIFIED")
+    # A fully signed repository is still refused if the frontend TLS CA is
+    # unrelated: keep a fresh native cache so previous success cannot mask it.
+    foreign_cert, _ = native.temporary_tls_identity(base, "dnf-wrong-ca")
+    wrong = native.dnf_command(
+        base, target, target, "dynamic-wrong-ca",
+        ca_certificate=foreign_cert, metadata_key=key,
+    )
+    if subprocess_status(wrong):
+        raise AssertionError("UNTRUSTED_DNF_FRONTEND_CA_ACCEPTED")
 
 
 def exercise(kind: str) -> None:
