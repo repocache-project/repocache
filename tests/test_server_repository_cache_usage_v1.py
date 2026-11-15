@@ -52,7 +52,7 @@ def check(owned, ids=(APT, DNF), **overrides):
 
 def cache_file(owned, rid, data: bytes):
     base = owned[3] / "var/cache/nginx/repocache-managed" / rid / "a" / "bc"
-    base.mkdir(mode=0o700)
+    base.mkdir(mode=0o700, parents=True)
     dest = base / DIGEST
     dest.write_bytes(data)
     return dest
