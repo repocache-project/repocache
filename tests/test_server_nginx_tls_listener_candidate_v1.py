@@ -30,6 +30,7 @@ def test_canonical_default_https_and_operator_key_reference():
         "ssl_certificate_key /etc/repocache/tls/example-key.pem;\n"
         "ssl_protocols TLSv1.2 TLSv1.3;\n"
         "ssl_session_tickets off;\n"
+        "if ($ssl_server_name !~* \"^cache\\.example\\.invalid$\") { return 421; }\n"
         "server_tokens off;\n"
     )
     for key in ("operator_key_bytes_read","certificate_chain_verified",
@@ -109,3 +110,14 @@ def test_listener_is_statically_bound_to_the_exact_approved_http_host():
         "ssl_certificate /etc/repocache/tls/example-chain.pem;"
     )
     assert rendered["authorizes_nginx_activation"] is False
+
+
+def test_tls_sni_bound_to_validated_hostname_and_remains_non_authorizing():
+    d = doc()
+    d["deployment"]["listen"]["hostname"] = "mirror.example.invalid"
+    fragment = render_native_tls_listener_candidate(d)["server_context_fragment"]
+    assert 'if ($ssl_server_name !~* "^mirror\\.example\\.invalid$") { return 421; }' in fragment
+    assert 'if ($http_host !~* "^mirror\\.example\\.invalid(:443)?$") { return 421; }' in fragment
+    assert "if ($host != mirror.example.invalid) { return 421; }" in fragment
+    assert "ssl_session_tickets off;" in fragment
+    assert "authorizes" not in fragment
