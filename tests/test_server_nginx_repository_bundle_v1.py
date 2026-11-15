@@ -247,3 +247,42 @@ def test_disabled_repository_has_no_allocated_cache_zone():
     assert "repocache_cache_almalinux_baseos" not in (
         result["http_upstream_fragment"] + result["server_location_fragment"]
     )
+
+
+def test_future_global_cache_changes_respect_individual_override_fields():
+    doc = document()
+    doc["repositories"][0]["cache_overrides"] = {"inactive_seconds": 120}
+    doc["repositories"][1]["cache_overrides"] = {"max_size_bytes": 8388608}
+    before = copy.deepcopy(doc)
+    original = render(doc=doc)
+    assert doc == before
+    old = original["http_upstream_fragment"]
+    assert "inactive=120s max_size=10737418240" in old
+    assert "inactive=604800s max_size=8388608" in old
+
+    future = copy.deepcopy(doc)
+    future["deployment"]["cache_policy"]["global"]["inactive_seconds"] = 900
+    future["deployment"]["cache_policy"]["global"]["max_size_bytes"] = 16777216
+    future_snapshot = copy.deepcopy(future)
+    changed = render(doc=future)
+    assert future == future_snapshot
+    new = changed["http_upstream_fragment"]
+    assert "inactive=120s max_size=16777216" in new
+    assert "inactive=900s max_size=8388608" in new
+    assert "inactive=604800s" not in new
+    assert "max_size=10737418240" not in new
+    assert old == original["http_upstream_fragment"]
+    assert changed["proposed_repository_ids"] == original["proposed_repository_ids"]
+    assert changed["server_location_fragment"] == original["server_location_fragment"]
+    assert changed["authorizes_nginx_activation"] is False
+    assert changed["authorizes_catalog_publication"] is False
+
+
+def test_future_global_cache_policy_rejects_zero_capacity_before_rendering():
+    doc = document()
+    doc["repositories"][0]["cache_overrides"] = {"inactive_seconds": 120}
+    doc["deployment"]["cache_policy"]["global"]["max_size_bytes"] = 0
+    before = copy.deepcopy(doc)
+    with pytest.raises(NginxRepositoryBundleError, match="NGINX_BUNDLE_DOCUMENT_INVALID"):
+        render(doc=doc)
+    assert doc == before
