@@ -7,7 +7,7 @@ checks the fixture's trusted root-owned cache/repository marker and the strict
 NGINX levels=1:2 on-disk object layout. The API does not open arbitrary paths,
 follow symlinks, inspect bytes or invoke external commands.
 
-The function \`preview_owned_repository_cache_usage_under_root\` accepts a
+The function `preview_owned_repository_cache_usage_under_root` accepts a
 nonempty ordered tuple of up to 500 *caller-selected* valid repository IDs and
 explicit detached test-root descriptor/owner IDs. It sorts IDs, rejects
 duplicates, and refuses **the entire report** if any selected repository is
@@ -19,9 +19,9 @@ and allocated data blocks from actual file metadata. They never include
 unobserved or omitted repositories.
 
 This is an **observed selected subset**, not a complete inventory. It
-explicitly reports \`full_cache_inventory_verified=false\`,
-\`all_repository_ids_authenticated=false\` and
-\`multi_repository_snapshot_atomic=false\`: independent read-only scans
+explicitly reports `full_cache_inventory_verified=false`,
+`all_repository_ids_authenticated=false` and
+`multi_repository_snapshot_atomic=false`: independent read-only scans
 cannot provide a shared transaction snapshot while NGINX is active.
 Allocated blocks are not guaranteed reclaimable disk space (filesystem
 semantics, quotas, cache ownership and active transfers can differ). A
