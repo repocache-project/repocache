@@ -348,6 +348,8 @@ def validate_install_document(document: Any, *, for_apply: bool = False) -> dict
     # handler. InstallInputError is itself a ValueError, and swallowing it
     # would collapse unsafe multicast/mapped-address diagnostics.
     if (ip.is_multicast
+            or (isinstance(ip, ipaddress.IPv4Address)
+                and ip.is_reserved)
             or (isinstance(ip, ipaddress.IPv6Address)
                 and ip.ipv4_mapped is not None)):
         _reject("deployment.listen.bind_address: unsafe bind IP")
