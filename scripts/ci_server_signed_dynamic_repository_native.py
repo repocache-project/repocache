@@ -28,7 +28,9 @@ from types import SimpleNamespace
 
 import ci_client_native_fallback as native
 import ci_dnf_signed_rpm_fallback as signed_rpm
-from ci_generated_nginx_route_cache_smoke import HOST, self_signed
+from ci_generated_nginx_route_cache_smoke import (
+    HOST, await_worker_generation_drained, nginx_master_children, self_signed,
+)
 from ci_native_nginx_cache_smoke import ROOT, free_port, request
 from repocache.server_nginx_repository_bundle_v1 import (
     render_repository_nginx_bundle_candidate,
@@ -109,11 +111,18 @@ def chown_worker_paths(base: Path, rid: str, kind: str) -> str:
 def nginx_config(base: Path, rid: str, pins: dict, doc: dict, *,
                  nginx_port: int, origin_port: int,
                  origin_cert: Path, front_cert: Path, front_key: Path,
-                 worker: str) -> Path:
+                 worker: str, bypass: bool = False) -> Path:
     rendered = render_repository_nginx_bundle_candidate(
         doc, expected_state_generation=0,
         candidate_pins_by_repository=pins, ca_bundle_path=str(origin_cert),
+        cache_bypass_repository_ids=(rid,) if bypass else (),
     )
+    if bypass and (
+        rendered["cache_bypass_recovery_candidate_repository_ids"] != [rid]
+        or rendered["cache_bypass_activation_verified"] is not False
+        or "    proxy_cache off;" not in rendered["server_location_fragment"]
+    ):
+        raise RuntimeError("TEST_ONLY_CACHE_BYPASS_UNVERIFIED")
     if (rendered["proposed_repository_ids"] != [rid]
             or rendered["authorizes_nginx_activation"] is not False
             or rendered["authorizes_catalog_publication"] is not False):
@@ -171,7 +180,7 @@ def wait_for_nginx(process: subprocess.Popen, root_url: str, cert: Path) -> None
 def apt_native_signed_download(
     base: Path, base_url: str, frontend_cert: Path,
     signed_keyring: Path, expected: Path,
-) -> None:
+) -> list[str]:
     source = base / "native-dynamic.sources"
     source.write_text(
         "Types: deb\n"
@@ -226,12 +235,13 @@ def apt_native_signed_download(
     ]
     if subprocess_status([*wrong, "update"]):
         raise AssertionError("UNTRUSTED_APT_FRONTEND_CA_ACCEPTED")
+    return args
 
 
 def dnf_native_signed_download(
     base: Path, base_url: str, frontend_cert: Path, key: Path,
     expected: Path, private_rpmdb: Path,
-) -> None:
+) -> list[str]:
     # Reuse the existing tested signed DNF5 fixture harness rather than
     # creating separate unreviewed DNF signature/security options.
     target = SimpleNamespace(origin=base_url)
@@ -262,6 +272,7 @@ def dnf_native_signed_download(
     )
     if subprocess_status(wrong):
         raise AssertionError("UNTRUSTED_DNF_FRONTEND_CA_ACCEPTED")
+    return args
 
 
 def exercise(kind: str) -> None:
@@ -314,14 +325,14 @@ def exercise(kind: str) -> None:
             route_url = root_url + "/__repocache/repos/" + rid + "/"
             assert expected is not None and signed_key is not None
             if kind == "apt":
-                apt_native_signed_download(
+                original_native_args = apt_native_signed_download(
                     base, route_url, front_cert, signed_key, expected,
                 )
                 metadata = "dists/stable/InRelease"
                 original = base / "www/repo" / metadata
             else:
                 assert rpmdb is not None
-                dnf_native_signed_download(
+                original_native_args = dnf_native_signed_download(
                     base, route_url, front_cert, signed_key, expected, rpmdb,
                 )
                 metadata = "repodata/repomd.xml"
@@ -348,10 +359,61 @@ def exercise(kind: str) -> None:
                     or two[:3] != (200, artifact_bytes, "HIT")
                     or not any(package_path in hit for hit in backend.hits)):
                 raise AssertionError("DYNAMIC_ARTIFACT_CACHE_INTEGRITY_UNVERIFIED")
+            # A warm, valid cache is not a signature-negative test.
+            # Change ONLY this detached test NGINX generation to a validated
+            # cache-off candidate, then force a fresh native manager cache.
+            # This tests signature refusal against actual modified upstream
+            # bytes rather than incorrectly claiming a valid cached object
+            # should become invalid when the origin later changes.
+            tampered_path = (
+                base / "www/repo/dists/stable/InRelease"
+                if kind == "apt" else
+                base / "www/repo/repodata/repomd.xml.asc"
+            )
+            recorded = tampered_path.read_bytes()
+            before_hits = len(backend.hits)
+            prior_workers = nginx_master_children(process.pid)
+            nginx_config(
+                base, rid, pins, doc, nginx_port=frontend_port,
+                origin_port=origin_port, origin_cert=origin_cert,
+                front_cert=front_cert, front_key=front_key,
+                worker=worker, bypass=True,
+            )
+            if not subprocess_status([nginx, "-t", "-p", str(base), "-c", str(conf)]):
+                raise AssertionError("TEST_ONLY_BYPASS_NGINX_SYNTAX_REFUSED")
+            process.send_signal(signal.SIGHUP)  # Only detached test process
+            await_worker_generation_drained(process, prior_workers)
+            try:
+                tampered_path.write_bytes(b"invalid-ephemeral-metadata-signature\\n")
+                if kind == "apt":
+                    fresh = base / "apt-tampered-lists"
+                    (fresh / "partial").mkdir(parents=True)
+                    args = [
+                        f"Dir::State::lists={fresh}"
+                        if arg.startswith("Dir::State::lists=") else arg
+                        for arg in original_native_args
+                    ]
+                    accepted = subprocess_status([*args, "update"])
+                    marker = "dists/stable/InRelease"
+                else:
+                    target = SimpleNamespace(origin=route_url)
+                    args = native.dnf_command(
+                        base, target, target, "dynamic-tampered-signature",
+                        ca_certificate=front_cert, metadata_key=signed_key,
+                    )
+                    accepted = subprocess_status(args)
+                    marker = "repomd.xml.asc"
+                new_hits = backend.hits[before_hits:]
+                if accepted or not any(marker in hit for hit in new_hits):
+                    raise AssertionError("NATIVE_TAMPERED_METADATA_NOT_REFUSED")
+            finally:
+                tampered_path.write_bytes(recorded)
+
             print("PASS: " + kind.upper() +
                   " configuration-only repository + stock NGINX HTTPS cache, "
                   "real native signed metadata, package hash/signature, "
-                  "metadata and artifact HIT with identical bytes")
+                  "metadata and artifact HIT with identical bytes; signed "
+                  "metadata tampering refused on a fresh cache-off path")
             print("NOT VERIFIED: real publisher signatures, installed "
                   "root/systemd/SELinux, protected lifecycle activation, "
                   "catalog publication, state v2 or client source fallback")
