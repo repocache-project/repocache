@@ -107,6 +107,7 @@ def test_malformed_unit_report_is_not_accepted(monkeypatch, response):
 
 
 def test_fixed_file_reader_rejects_nonregular_before_bytes(monkeypatch):
+    monkeypatch.setattr(vm, "_trusted_os_release_reference", lambda: "/etc/os-release")
     calls = []
     monkeypatch.setattr(vm, "os", SimpleNamespace(
         O_RDONLY=os.O_RDONLY, O_NONBLOCK=os.O_NONBLOCK,
@@ -144,3 +145,103 @@ def test_sysfs_virtual_attribute_size_does_not_mask_enforcing_status(monkeypatch
     ))
     assert vm._read_fixed("/sys/fs/selinux/enforce", 32) == b"1\\n"
     assert events == [83]
+
+
+def test_vm_fixed_reader_refuses_any_unapproved_path_or_size_before_open(monkeypatch):
+    monkeypatch.setattr(vm.os, "open",
+                        lambda *_a, **_kw: pytest.fail("unexpected file opened"))
+    for path, size in (
+        ("/etc/shadow", 8192), ("/etc/os-release", 16384),
+        ("/proc/self/comm", 64), ("/proc/1/comm", 65536),
+        ("/sys/fs/selinux/enforce", 8192),
+    ):
+        with pytest.raises(vm.NativeVMReadOnlyError, match="^FIXED_READ_UNSAFE$"):
+            vm._read_fixed(path, size)
+
+
+def test_vm_kernel_observation_uses_nofollow_and_distribution_release_is_compatible(monkeypatch):
+    monkeypatch.setattr(vm, "_trusted_os_release_reference", lambda: "/etc/os-release")
+    called = []
+    flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    assert nofollow != 0, "Linux nofollow is a required native primitive"
+
+    def fake_open(path, mode):
+        called.append((path, mode))
+        return 38
+
+    monkeypatch.setattr(vm, "os", SimpleNamespace(
+        O_RDONLY=os.O_RDONLY, O_NONBLOCK=os.O_NONBLOCK,
+        O_NOFOLLOW=nofollow, O_CLOEXEC=getattr(os, "O_CLOEXEC", 0),
+        open=fake_open,
+        fstat=lambda _fd: SimpleNamespace(st_mode=stat.S_IFREG | 0o444,
+                                          st_size=4096),
+        read=lambda _fd, _n: b"1\n",
+        close=lambda _fd: None,
+    ))
+    assert vm._read_fixed("/sys/fs/selinux/enforce", 32) == b"1\n"
+    assert vm._read_fixed("/proc/1/comm", 64) == b"1\n"
+    assert vm._read_fixed("/etc/os-release", 8192) == b"1\n"
+    assert called == [
+        ("/sys/fs/selinux/enforce", flags | nofollow),
+        ("/proc/1/comm", flags | nofollow),
+        ("/etc/os-release", flags | nofollow),
+    ]
+
+
+def test_vm_kernel_leaf_symlink_refusal_redacts_path(monkeypatch):
+    def fake_open(path, flags):
+        if flags & getattr(os, "O_NOFOLLOW", 0):
+            raise OSError("synthetic symlink to /private/token")
+        pytest.fail("kernel leaf was opened without nofollow")
+
+    monkeypatch.setattr(vm.os, "open", fake_open)
+    with pytest.raises(vm.NativeVMReadOnlyError, match="^FIXED_READ_UNAVAILABLE$") as exc:
+        vm._read_fixed("/proc/1/comm", 64)
+    assert "private" not in str(exc.value)
+
+
+@pytest.mark.parametrize("link,target,valid", [
+    (True, "../usr/lib/os-release", True),
+    (True, "/usr/lib/os-release", True),
+    (False, None, True),
+    (True, "../../etc/shadow", False),
+    (True, "/tmp/untrusted-os-release", False),
+    (True, "../usr/lib/../lib/os-release", False),
+])
+def test_os_release_reference_rejects_foreign_symlinks_before_read(
+    monkeypatch, link, target, valid,
+):
+    def fake_stat(path):
+        mode = stat.S_IFDIR | 0o755 if path in ("/", "/etc", "/usr", "/usr/lib") else (
+            stat.S_IFLNK | 0o777 if path == "/etc/os-release" and link
+            else stat.S_IFREG | 0o644
+        )
+        return SimpleNamespace(st_mode=mode, st_uid=0, st_gid=0,
+                               st_nlink=1, st_size=180)
+    monkeypatch.setattr(vm.os, "lstat", fake_stat)
+    monkeypatch.setattr(vm.os, "readlink", lambda _: target)
+    if valid:
+        assert vm._trusted_os_release_reference() == (
+            "/usr/lib/os-release" if link else "/etc/os-release"
+        )
+    else:
+        with pytest.raises(vm.NativeVMReadOnlyError, match="^FIXED_READ_UNSAFE$"):
+            vm._trusted_os_release_reference()
+
+
+def test_os_release_reference_denies_mutable_owner_and_special_target(monkeypatch):
+    def fake_stat(path):
+        if path == "/usr/lib/os-release":
+            return SimpleNamespace(st_mode=stat.S_IFREG | 0o666,
+                                   st_uid=1000, st_gid=0, st_nlink=1, st_size=120)
+        if path == "/etc/os-release":
+            return SimpleNamespace(st_mode=stat.S_IFLNK | 0o777,
+                                   st_uid=0, st_gid=0, st_nlink=1, st_size=17)
+        return SimpleNamespace(st_mode=stat.S_IFDIR | 0o755,
+                               st_uid=0, st_gid=0, st_nlink=1, st_size=0)
+    monkeypatch.setattr(vm.os, "lstat", fake_stat)
+    monkeypatch.setattr(vm.os, "readlink",
+                        lambda _: "../usr/lib/os-release")
+    with pytest.raises(vm.NativeVMReadOnlyError, match="^FIXED_READ_UNSAFE$"):
+        vm._trusted_os_release_reference()

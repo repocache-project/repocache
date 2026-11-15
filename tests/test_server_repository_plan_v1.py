@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from pathlib import Path
 
@@ -10,6 +11,8 @@ import pytest
 from repocache.server_install_v1 import InstallInputError
 from repocache.server_repository_plan_v1 import (
     RepositoryPlanError,
+    _canonical_identity,
+    _validated_candidate,
     plan_repository_change,
     propose_automatic_repository_id,
 )
@@ -560,3 +563,55 @@ def test_reservation_cardinality_rechecked_after_copy_interleaving(monkeypatch):
         planner._reserved_snapshot(before, reservations)
     assert original_count == len(before["repositories"])
     assert len(reservations) > 10000
+
+
+
+@pytest.mark.parametrize("historical_tombstone_count", [256, 9998])
+def test_auto_id_search_scales_to_valid_all_time_tombstones_without_reuse(
+    historical_tombstone_count,
+):
+    """One more candidate than the reservation count avoids false exhaustion."""
+    before = document()
+    incoming = new_apt(before)
+    del incoming["id"]
+    identity = _canonical_identity(_validated_candidate(before, incoming))
+    retained = {row["id"] for row in before["repositories"]}
+    tombstones = {
+        "repo-" + hashlib.sha256(
+            (identity + "#" + str(nonce)).encode("utf-8")
+        ).hexdigest()[:32]
+        for nonce in range(historical_tombstone_count)
+    }
+    assert len(tombstones) == historical_tombstone_count
+    reserved = retained | tombstones
+    assert len(reserved) <= 10000
+    original = copy.deepcopy(before), copy.deepcopy(incoming)
+    result = propose_automatic_repository_id(
+        before, incoming, current_generation=0, reserved_ids=reserved,
+    )
+    expected = "repo-" + hashlib.sha256(
+        (identity + "#" + str(historical_tombstone_count)).encode("utf-8")
+    ).hexdigest()[:32]
+    assert result == {
+        "schema_version": 1, "status": "PLAN_ONLY",
+        "repository_id": expected,
+        "existing": False, "id_eligibility": "CALLER_SNAPSHOT_ONLY",
+    }
+    assert result["repository_id"] not in reserved
+    assert (before, incoming) == original
+    assert propose_automatic_repository_id(
+        before, incoming, current_generation=0,
+        reserved_ids=frozenset(reserved),
+    ) == result
+
+
+def test_automatic_id_still_refuses_reservation_ledger_over_bound():
+    before = document()
+    incoming = new_apt(before)
+    del incoming["id"]
+    reservations = {row["id"] for row in before["repositories"]}
+    reservations.update(f"retired-{i}" for i in range(10000))
+    with pytest.raises(RepositoryPlanError, match="bounded snapshot"):
+        propose_automatic_repository_id(
+            before, incoming, current_generation=0, reserved_ids=reservations,
+        )

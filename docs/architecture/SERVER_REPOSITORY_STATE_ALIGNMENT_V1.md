@@ -475,3 +475,40 @@ is mutated. This compatibility fixture does **not** import, duplicate or
 adopt #251's unmerged changes. Once #28's independently accepted renderer
 is integrated, run the same tests on the resulting actual branch; current
 CI only certifies the renderer at the tested source SHA.
+
+## All-time ID tombstone exhaustion bound (Stage A, #95)
+
+Auto-generated repository IDs are deterministic suggestions derived from the
+strictly validated canonical upstream identity and SHA-256, not committed
+identifiers. A previously fixed 256-nonce loop could refuse a legitimate
+new repository after 256 tombstoned candidates even if a valid bounded
+reservation snapshot still had many unused IDs.
+
+The allocator now probes **up to the reservation count plus one** candidate
+nonces (at most 10,001 attempts for the existing 10,000-ID input cap).
+For unique hash-prefix candidates, this is sufficient to find a result not
+in the caller's reservation set; it never reuses a removed ID or suppresses
+a canonical identity conflict. Automated tests exercise both the 256-limit
+regression and nearly maximal accepted historical tombstone inventory,
+while proving deterministic proposals and unchanged caller data.
+
+This fix **does not make untrusted caller reservations persistent, locked or
+authoritative**. The installed lifecycle transaction still must authenticate
+the complete all-time ownership/tombstone ledger, use the protected state
+lock to reserve an ID atomically, handle theoretically colliding hashes,
+validate generation and NGINX ownership and publish only actually exposed
+approved repositories. Issue #95 remains OPEN; no production authorisation
+or native VM readiness is implied.
+
+
+## Client-compatible unambiguous derived catalog (#28/#24)
+
+An approved NGINX repository identity can legitimately distinguish an APT
+repository from a DNF repository while both use the same HTTPS upstream
+base URL. The client schema 1 mapping does **not** support two different
+cache targets for one upstream URL. The source-only active-only catalog
+preview now refuses such duplicates before emitting an unusable client
+catalog, rather than treating an internally valid NGINX route set as proof
+of client compatibility. This retains unique-cache-route checks and
+non-authorizing output; the root-controlled installed publication, active
+runtime NGINX exposure and real APT/DNF integration are still required.

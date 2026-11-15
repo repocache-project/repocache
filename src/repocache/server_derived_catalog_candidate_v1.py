@@ -16,6 +16,7 @@ from typing import Any
 from repocache.server_install_v1 import validate_install_document
 from repocache.server_nginx_repository_bundle_v1 import (
     NginxRepositoryBundleError, render_repository_nginx_bundle_candidate,
+    render_repository_https_server_candidate,
 )
 
 _MAX_NGINX_DUMP = 4 * 1024 * 1024
@@ -51,10 +52,19 @@ def preview_derived_catalog_from_nginx_dump(
     """
     if type(nginx_t_exit_code) is not int or nginx_t_exit_code != 0:
         _deny("NGINX_SYNTAX_NOT_OBSERVED")
+    # Do not allocate a proportional encoded copy of an unbounded
+    # caller-supplied Python string. A genuine nginx -T text dump must also
+    # be valid strict UTF-8, never a surrogate-containing Python surrogatepass
+    # fixture that would be impossible to serialize safely as native text.
     if (type(nginx_dump_text) is not str
-            or not 1 <= len(nginx_dump_text.encode("utf-8", "surrogatepass"))
-                   <= _MAX_NGINX_DUMP
+            or not 1 <= len(nginx_dump_text) <= _MAX_NGINX_DUMP
             or "\x00" in nginx_dump_text or "\r" in nginx_dump_text):
+        _deny("NGINX_DUMP_INVALID")
+    try:
+        dump_bytes = nginx_dump_text.encode("utf-8", "strict")
+    except UnicodeError:
+        _deny("NGINX_DUMP_INVALID")
+    if len(dump_bytes) > _MAX_NGINX_DUMP:
         _deny("NGINX_DUMP_INVALID")
     try:
         document = validate_install_document(untrusted_document, for_apply=True)
@@ -111,6 +121,12 @@ def preview_derived_catalog_from_nginx_dump(
             "upstream": repo["upstream"]["base_url"],
             "cache": origin + _PREFIX + identifier + "/",
         })
+    # The shipped client schema rejects duplicate upstream/cache mappings.
+    # A valid managed repository identity does not automatically imply a
+    # client-unambiguous source URL (APT/DNF may share one origin URL).
+    if (len({row["upstream"] for row in mapped}) != len(mapped)
+            or len({row["cache"] for row in mapped}) != len(mapped)):
+        _deny("CLIENT_MAPPING_AMBIGUOUS")
     mapped.sort(key=lambda item: (item["upstream"], item["cache"]))
     catalog = {"schema": 1, "repositories": mapped}
     if len(json.dumps(catalog, sort_keys=True).encode("utf-8")) > _MAX_CATALOG:
@@ -126,5 +142,72 @@ def preview_derived_catalog_from_nginx_dump(
         "actual_active_exposure_verified": False,
         "installed_catalog_publication_verified": False,
         "authorizes_nginx_reload": False,
+        "authorizes_catalog_publication": False,
+    }
+
+
+
+def preview_derived_https_catalog_from_nginx_dump(
+    untrusted_document: dict[str, Any], *,
+    candidate_pins_by_repository: dict[str, dict[str, list[str]]],
+    ca_bundle_path: str,
+    nginx_dump_text: str,
+    nginx_t_exit_code: int,
+) -> dict[str, Any]:
+    """Require exact fully composed HTTPS server context for a catalog hint.
+
+    A route-only nginx -T preview can match active repository locations
+    while omitting their HTTPS listener, SNI, key references or whole
+    server context. This stronger preview checks the single composed
+    server block AND exact named upstreams from the same validated v1
+    document. All inputs, including the dump and test exit code, remain
+    UNTRUSTED. The result is never permission to publish or activate.
+    """
+    # Reuse the closed schema, bounds, route set, upstream and client-schema
+    # checks, and refuse incomplete byte/text or unsuccessful syntax claims.
+    ordinary = preview_derived_catalog_from_nginx_dump(
+        untrusted_document,
+        candidate_pins_by_repository=candidate_pins_by_repository,
+        ca_bundle_path=ca_bundle_path,
+        nginx_dump_text=nginx_dump_text,
+        nginx_t_exit_code=nginx_t_exit_code,
+    )
+    try:
+        document = validate_install_document(untrusted_document, for_apply=True)
+        complete = render_repository_https_server_candidate(
+            document,
+            expected_state_generation=document["expected_state_generation"],
+            candidate_pins_by_repository=candidate_pins_by_repository,
+            ca_bundle_path=ca_bundle_path,
+        )
+    except (ValueError, TypeError, RecursionError, NginxRepositoryBundleError):
+        _deny("HTTPS_RENDER_INVALID")
+    if (complete.get("status") != "HTTPS_REPOSITORY_SERVER_CANDIDATE_ONLY"
+            or complete.get("proposed_repository_ids")
+               != ordinary["desired_active_repository_ids"]
+            or complete.get("authorizes_nginx_activation") is not False
+            or complete.get("authorizes_catalog_publication") is not False
+            or complete.get("authorizes_firewall_change") is not False):
+        _deny("HTTPS_RENDER_INVALID")
+
+    https_block = complete["server_block_fragment"]
+    upstream_blocks = complete["http_context_fragment"]
+    # Match the entire block as one contiguous candidate, not isolated
+    # TLS/SNI directive strings scattered among foreign server contexts.
+    # This still does NOT authenticate an installed nginx -T or running
+    # listener and cannot replace a protected, locked root-side recheck.
+    if (not https_block
+            or nginx_dump_text.count(https_block) != 1
+            or (upstream_blocks and nginx_dump_text.count(upstream_blocks) != 1)):
+        _deny("HTTPS_SERVER_CONTEXT_MISSING_OR_AMBIGUOUS")
+    return {
+        **ordinary,
+        "status": "INERT_DERIVED_HTTPS_CATALOG_CANDIDATE_ONLY",
+        "exact_https_server_context_candidate_matched": True,
+        "installed_tls_certificate_verified": False,
+        "real_tls_handshake_verified": False,
+        "nginx_dump_provenance_authenticated": False,
+        "kernel_listener_exposure_verified": False,
+        "authorizes_nginx_activation": False,
         "authorizes_catalog_publication": False,
     }

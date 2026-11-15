@@ -59,3 +59,24 @@ the test API on a real server. Parent #29/#25/#19 remain OPEN. Converge with
 
 CI: .github/workflows/server-native-storage-bootstrap.yml
 Tests: python3 -m pytest -q tests/test_server_native_storage_bootstrap_v1.py
+
+## Cross-root preflight before first mutation (CI Stage A)
+
+The fixed cache and log roots are an inseparable first-install proposal.
+The fixture-scoped bootstrap now checks both parents and any *existing*
+directory/owner markers with pinned FDs **before either first mkdir, chown
+or marker creation**. An unsupported foreign log root, a mismatched owner
+marker, a symlink, or an ACL/xattr denial on the log side must not leave
+a newly created cache directory on the other side. The normal write-stage
+validation still repeats inode, ownership, mode and marker checks to
+refuse changes between preflight and commit; this read-only first pass
+is not a TOCTOU authorization or a cross-filesystem atomic commit.
+
+Negative tests exercise real filesystem foreign root preservation,
+corrupt/symlinked markers, unchanged cached bytes after rejected rerun,
+and successful repeat provisioning on both supported distro containers.
+Partial failure **during** mkdir/chown/fsync still requires the existing
+explicit reconciliation; the code never recursively removes cache data.
+Actual host-root authority, NGINX UID/GID provenance, SELinux enforcing
+and installed service operation remain NOT VERIFIED until the final
+native campaign and independently approved privileged installer.

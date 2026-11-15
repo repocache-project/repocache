@@ -1,0 +1,63 @@
+name: Stock NGINX min_free syntax (disposable distro containers)
+
+on:
+  pull_request:
+    paths:
+      - 'src/repocache/server_native_min_free_syntax_probe_v1.py'
+      - 'tests/test_server_native_min_free_syntax_probe_v1.py'
+      - 'docs/testing/SERVER_NATIVE_MIN_FREE_SYNTAX_V1.md'
+      - '.github/workflows/server-native-min-free-syntax.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  min-free-package-syntax:
+    name: min_free nonroot nginx -t (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: debian13
+            image: debian:trixie-slim
+          - platform: almalinux10
+            image: almalinux:10
+    container:
+      image: ${{ matrix.image }}
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Install stock distro NGINX and nonroot test tools
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [ '${{ matrix.platform }}' = debian13 ]; then
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq
+            apt-get install -y -qq --no-install-recommends nginx python3 util-linux ca-certificates
+          else
+            dnf -y -q --enablerepo=crb install nginx python3 util-linux ca-certificates
+          fi
+          test -x /usr/sbin/nginx
+          nginx -v
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Execute adversarial unittest and real stock parser as nobody
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -f /.dockerenv
+          test -r "$GITHUB_WORKSPACE/src/repocache/server_native_min_free_syntax_probe_v1.py"
+          setpriv --reuid 65534 --regid 65534 --clear-groups \
+            env PYTHONPATH="$GITHUB_WORKSPACE/src" PYTHONDONTWRITEBYTECODE=1 \
+            python3 -B -m unittest discover -s tests \
+              -p test_server_native_min_free_syntax_probe_v1.py -v
+          setpriv --reuid 65534 --regid 65534 --clear-groups \
+            env PYTHONPATH="$GITHUB_WORKSPACE/src" PYTHONDONTWRITEBYTECODE=1 \
+              REPOCACHE_DISPOSABLE_NGINX_MIN_FREE_PROBE=1 \
+            python3 -B -m repocache.server_native_min_free_syntax_probe_v1
+          echo "PASS: stock package nginx -t baseline observed in disposable container"
+          echo "NOT VERIFIED: host package identity, booted systemd, SELinux, activation"

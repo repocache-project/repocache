@@ -1,0 +1,52 @@
+name: Native pressure bypass hysteresis with real NGINX parser
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/ci_server_pressure_nginx_hysteresis_native.py'
+      - '.github/workflows/server-pressure-hysteresis-nginx.yml'
+      - 'docs/testing/SERVER_PRESSURE_HYSTERESIS_NATIVE_NGINX.md'
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  native-cache-bypass:
+    name: Native NGINX pressure bypass and recovery (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: debian13
+            image: debian:trixie-slim
+          - platform: almalinux10
+            image: almalinux:10
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - name: Install distro NGINX, CA and rootless test runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [ '${{ matrix.platform }}' = debian13 ]; then
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq
+            apt-get install -y -qq --no-install-recommends nginx python3 util-linux ca-certificates
+          else
+            dnf -y -q --enablerepo=crb install nginx python3 util-linux ca-certificates
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Exercise real parser across finite state alarm transitions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -f /.dockerenv
+          setpriv --reuid 65534 --regid 65534 --clear-groups \
+            env PYTHONPATH="$GITHUB_WORKSPACE/src" PYTHONDONTWRITEBYTECODE=1 \
+              REPOCACHE_DISPOSABLE_NGINX_SMOKE=1 \
+            python3 -B scripts/ci_server_pressure_nginx_hysteresis_native.py

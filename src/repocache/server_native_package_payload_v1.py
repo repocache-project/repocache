@@ -97,6 +97,13 @@ def _artifacts(directory: Path, extension: str) -> tuple[Path, ...] | None:
         if not directory.is_dir() or directory.is_symlink():
             return None
         root = os.stat(directory)
+        # The extraction/download root itself must be private and owned by
+        # the executing user. Checking only the children left a writable
+        # root able to acquire injected new payloads during inventory.
+        if (not stat.S_ISDIR(root.st_mode)
+                or root.st_uid != os.geteuid()
+                or root.st_mode & 0o022):
+            return None
         found: list[Path] = []
         total = 0
         for item in directory.rglob("*"):
@@ -143,6 +150,10 @@ def _verify_deb(
             c.isascii() and (c.isalnum() or c in "+-.") for c in name
         ):
             return "NATIVE_PAYLOAD_SET_UNSAFE"
+        if name in names:
+            # Two payloads with one package identity may represent conflicting
+            # architectures or versions. Do not certify an ambiguous set.
+            return "NATIVE_PAYLOAD_SET_UNSAFE"
         names.add(name)
     return ("NATIVE_PAYLOADS_VERIFIED_IN_SCRATCH" if "nginx" in names
             else "NATIVE_NGINX_PAYLOAD_MISSING")
@@ -185,6 +196,10 @@ def _verify_rpm(
         if not name or len(name) > 128 or not all(
             c.isascii() and (c.isalnum() or c in "+-.") for c in name
         ):
+            return "NATIVE_PAYLOAD_SET_UNSAFE"
+        if name in names:
+            # Two payloads with one package identity may represent conflicting
+            # architectures or versions. Do not certify an ambiguous set.
             return "NATIVE_PAYLOAD_SET_UNSAFE"
         names.add(name)
     return ("NATIVE_PAYLOADS_VERIFIED_IN_SCRATCH" if "nginx" in names

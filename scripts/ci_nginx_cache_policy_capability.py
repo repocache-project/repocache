@@ -139,6 +139,47 @@ def main() -> None:
         print("PASS: stock nginx -t validates independent inherited/overridden "
               "inactive and max_size directives", flush=True)
 
+        # Re-render a future global policy update after independently
+        # overriding only one field in each repository. Neither cache zone
+        # must freeze the old global value for an unoverridden field.
+        future = copy.deepcopy(original)
+        future_global = future["deployment"]["cache_policy"]["global"]
+        future_global["inactive_seconds"] = 900
+        future_global["max_size_bytes"] = 16 * 1024 * 1024
+        future_apt = next(i for i in future["repositories"] if i["kind"] == "apt")
+        future_dnf = next(i for i in future["repositories"] if i["kind"] == "dnf")
+        future_apt["cache_overrides"] = {"inactive_seconds": 120}
+        future_dnf["cache_overrides"] = {"max_size_bytes": 8 * 1024 * 1024}
+        future_snapshot = copy.deepcopy(future)
+        updated = render_repository_nginx_bundle_candidate(
+            future, expected_state_generation=0,
+            candidate_pins_by_repository=pins, ca_bundle_path=ca,
+        )
+        assert future == future_snapshot, "POLICY_RENDER_MUTATED_INPUT"
+        assert updated["authorizes_nginx_activation"] is False
+        assert updated["authorizes_catalog_publication"] is False
+        updated_fragment = updated["http_upstream_fragment"]
+        new_zones = {}
+        for line in updated_fragment.splitlines():
+            if line.startswith("proxy_cache_path "):
+                parsed = CACHE_LINE.fullmatch(line)
+                assert parsed is not None, "NATIVE_CACHE_POLICY_SHAPE_DRIFT"
+                path, zone, inactive, capacity = parsed.groups()
+                assert path.startswith(str(cache_root) + "/")
+                assert zone not in new_zones, "DUPLICATED_CACHE_ZONE"
+                new_zones[zone] = (int(inactive), int(capacity))
+        assert new_zones == {
+            "repocache_cache_debian_trixie_main": (120, 16 * 1024 * 1024),
+            "repocache_cache_almalinux_baseos": (900, 8 * 1024 * 1024),
+        }, "FUTURE_GLOBAL_POLICY_INHERITANCE_MISMATCH"
+        assert checked_syntax(
+            nginx, root, updated_fragment, updated["server_location_fragment"]
+        ), "FUTURE_GLOBAL_POLICY_STOCK_NGINX_SYNTAX_INVALID"
+        assert fragment == bundle["http_upstream_fragment"]
+        assert original["deployment"]["cache_policy"]["global"] != future_global
+        print("PASS: stock nginx -t accepts future global policy change with "
+              "independent partial overrides and no source mutation", flush=True)
+
         # The *actual production renderer*, not a test-only string patch,
         # proposes min_free using the contract's validated critical threshold.
         # Positive nginx -t is still a disposable-binary observation, not a

@@ -117,6 +117,57 @@ def _canonical(value: dict[str, Any]) -> bytes:
                       separators=(",", ":")).encode("ascii")
 
 
+def _precheck_one(root_fd: int, stack: ExitStack, *,
+                  kind: str, segments: tuple[str, ...],
+                  root_uid: int, desired_uid: int, desired_gid: int,
+                  mode: int) -> None:
+    """Read-only two-root preflight, before the first mkdir or owner write.
+
+    A later pre-existing foreign log/cache root must not leave the other
+    root partially provisioned. This is not a substitute for the normal
+    *second* open/recheck during mutation (which handles concurrent swaps).
+    """
+    parent_fd, ancestry = _walk(root_fd, segments, stack, root_uid)
+    parent = _safe_directory(parent_fd, root_uid)
+    _no_unverified_xattrs(parent_fd)
+    parent_identity = _structural(parent)
+    try:
+        os.stat(_LEAF, dir_fd=parent_fd, follow_symlinks=False)
+        leaf_present = True
+    except FileNotFoundError:
+        leaf_present = False
+    try:
+        os.stat(_MARKER, dir_fd=parent_fd, follow_symlinks=False)
+        marker_present = True
+    except FileNotFoundError:
+        marker_present = False
+    if leaf_present != marker_present:
+        _deny("PARTIAL_OR_FOREIGN_ROOT")
+    if leaf_present:
+        leaf_fd = os.open(_LEAF, _DIRECTORY_FLAGS, dir_fd=parent_fd)
+        stack.callback(os.close, leaf_fd)
+        _no_unverified_xattrs(leaf_fd)
+        leaf = os.fstat(leaf_fd)
+        named = os.stat(_LEAF, dir_fd=parent_fd, follow_symlinks=False)
+        if (not stat.S_ISDIR(leaf.st_mode)
+                or leaf.st_uid != desired_uid or leaf.st_gid != desired_gid
+                or stat.S_IMODE(leaf.st_mode) != mode
+                or leaf.st_dev != parent.st_dev
+                or _structural(leaf) != _structural(named)):
+            _deny("ROOT_UNTRUSTED")
+        if _read_marker(parent_fd, root_uid=root_uid) != {
+            "schema": 1, "kind": kind, **_proof(leaf),
+        }:
+            _deny("MARKER_MISMATCH")
+        if (_structural(os.fstat(leaf_fd)) != _structural(
+                os.stat(_LEAF, dir_fd=parent_fd, follow_symlinks=False)
+        )):
+            _deny("ROOT_CHANGED")
+    if _structural(_safe_directory(parent_fd, root_uid)) != parent_identity:
+        _deny("ROOT_CHANGED")
+    _recheck(ancestry, root_uid)
+
+
 def _ensure_one(root_fd: int, stack: ExitStack, *,
                 kind: str, segments: tuple[str, ...],
                 root_uid: int, desired_uid: int, desired_gid: int,
@@ -226,6 +277,18 @@ def bootstrap_native_nginx_storage_under_root(
             _deny("LIVE_ROOT_FORBIDDEN")
         with ExitStack() as stack:
             _safe_directory(root_fd, root_uid)
+            # Refuse a conflicting existing cache OR log root before any
+            # creation/chown, so failure on the second cannot half-provision
+            # the first. _ensure_one revalidates after this inspection.
+            for kind, segments, uid, gid, mode in (
+                ("cache", _CACHE_PARENT, cache_uid, cache_gid, 0o700),
+                ("log", _LOG_PARENT, root_uid, os.fstat(root_fd).st_gid, 0o750),
+            ):
+                _precheck_one(
+                    root_fd, stack, kind=kind, segments=segments,
+                    root_uid=root_uid, desired_uid=uid,
+                    desired_gid=gid, mode=mode,
+                )
             cache_fresh = _ensure_one(
                 root_fd, stack, kind="cache", segments=_CACHE_PARENT,
                 root_uid=root_uid, desired_uid=cache_uid,

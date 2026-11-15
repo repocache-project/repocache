@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import configparser
 import hashlib
+import ipaddress
 import re
 from dataclasses import dataclass
 from urllib.parse import urlsplit
@@ -69,10 +70,34 @@ def _canonical_https(value: str, *, allow_missing_slash: bool = False) -> str:
             or uri.query or uri.fragment or port == 0
             or not uri.path.startswith("/")
             or (not allow_missing_slash and not uri.path.endswith("/"))
-            or uri.hostname.lower() != uri.hostname
             or any(seg in (".", "..") for seg in uri.path.split("/"))
             or value.endswith(":")):
         raise FallbackRefused("Unsupported HTTPS endpoint")
+    # urlsplit().hostname silently lowercases the authority: inspecting
+    # only that property previously accepted noncanonical uppercase DNS,
+    # alternate port spellings and malformed host-label boundaries.
+    host = uri.hostname
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        if (host.endswith(".") or len(host) > 253
+                or any(not re.fullmatch(
+                    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", part,
+                    flags=re.ASCII,
+                ) for part in host.split("."))
+                or all(re.fullmatch(
+                    r"(?:[0-9]+|0[xX][0-9a-fA-F]+)", part,
+                    flags=re.ASCII,
+                ) for part in host.split("."))):
+            raise FallbackRefused("Noncanonical DNS hostname")
+    else:
+        if str(address) != host:
+            raise FallbackRefused("Noncanonical IP hostname")
+    authority = ("[" + host + "]" if ":" in host else host)
+    if port is not None:
+        authority += ":" + str(port)
+    if uri.netloc != authority:
+        raise FallbackRefused("Noncanonical HTTPS authority")
     return value
 
 
@@ -244,6 +269,9 @@ def proposal_bytes_converged(proposal: FallbackProposal, current: bytes,
     xattrs, approved route or journal; only a future root helper can do so.
     """
     if (type(proposal) is not FallbackProposal or type(current) is not bytes
+            or proposal.production_write_eligible is not False
+            or proposal.native_fallback_verified is not False
+            or proposal.route_approval_verified is not False
             or current != proposal.proposed
             or _sha(current) != proposal.proposed_sha256):
         return False

@@ -165,7 +165,8 @@ def _observe_nginx_master_kernel(pid: int) -> None:
         current = os.stat(proc)
         rechecked = os.stat(proc + "/exe")
         binary_again = os.lstat(binary)
-        if ((current.st_dev, current.st_ino) != (process.st_dev, process.st_ino)
+        if ((current.st_dev, current.st_ino, current.st_uid, current.st_mode)
+                != (process.st_dev, process.st_ino, process.st_uid, process.st_mode)
                 or (rechecked.st_dev, rechecked.st_ino)
                    != (installed.st_dev, installed.st_ino)
                 or any(getattr(binary_again, name) != getattr(installed, name)
@@ -206,6 +207,26 @@ def inspect_effective_native_nginx_unit(distribution: str) -> dict[str, Any]:
         _deny("SYSTEMCTL_FAILED")
     observed = _parse_fixed_unit_status(completed.stdout)
     _observe_nginx_master_kernel(int(observed["MainPID"]))
+    # A service restart/replacement may race the gap between systemd show
+    # and the kernel executable-inode lookup. Observe the fixed unit again:
+    # changed MainPID or override/active state invalidates this snapshot.
+    try:
+        again = subprocess.run(
+            _FIXED_ARGS, shell=False, check=False, capture_output=True,
+            text=True, timeout=5, cwd="/",
+            stdin=subprocess.DEVNULL,
+            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+            start_new_session=True,
+        )
+    except (OSError, subprocess.TimeoutExpired, ValueError, TypeError):
+        _deny("SYSTEMCTL_RECHECK_UNAVAILABLE")
+    if (again.returncode != 0 or type(again.stdout) is not str
+            or type(again.stderr) is not str
+            or len(again.stderr) > 4096):
+        _deny("SYSTEMCTL_RECHECK_FAILED")
+    rechecked = _parse_fixed_unit_status(again.stdout)
+    if rechecked != observed:
+        _deny("SYSTEMCTL_UNIT_CHANGED")
     return {
         "schema_version": 1,
         "status": "NATIVE_NGINX_EFFECTIVE_READ_ONLY_OBSERVATION",

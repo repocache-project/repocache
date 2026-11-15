@@ -51,6 +51,20 @@ def _compile(path: str, original: bytes, upstream: str, cache: str,
         managed_id=ident, upstream=upstream, cache=cache)
 
 
+def _assert_compiled_tls_refusal(
+    returncode: int, cache_hits: list[str], upstream_hits: list[str],
+) -> None:
+    """Refuse any false-positive result from a native wrong-CA fetch.
+
+    A TLS handshake must not succeed at either endpoint, whether the
+    primary is healthy or the package manager tries its signed fallback.
+    """
+    if (type(returncode) is not int or returncode == 0
+            or type(cache_hits) is not list or type(upstream_hits) is not list
+            or cache_hits or upstream_hits):
+        raise RuntimeError("COMPILED_NATIVE_TLS_FOREIGN_CA_NOT_REFUSED")
+
+
 def smoke(manager: str):
     _checked_container()
     with tempfile.TemporaryDirectory(prefix="repocache-compiled-native-ci-") as work:
@@ -154,6 +168,46 @@ def smoke(manager: str):
                 print("compiled-%s %s PASS: primary_hits=%d upstream_hits=%d" %
                       (manager, phase, len(cache.hits), len(upstream.hits)),
                       flush=True)
+
+            # The *actual compiled* source must never accept a cache or
+            # upstream certificate signed by an unrelated CI-only CA.
+            # APT and DNF use a fresh metadata cache/repository for this
+            # negative check; a previously valid update is not evidence.
+            foreign_ca, _foreign_key = fixture.temporary_tls_identity(
+                base, "compiled-foreign-ca",
+            )
+            cache.mode = "healthy"
+            upstream.mode = "healthy"
+            cache.hits.clear()
+            upstream.hits.clear()
+            if manager == "apt":
+                argv = fixture.apt_command(
+                    base, cache, upstream, "foreign-ca", key,
+                    ca_certificate=foreign_ca,
+                )
+                (base / "ci.sources").write_bytes(native.proposed)
+            else:
+                argv = fixture.dnf_command(
+                    base, cache, upstream, "foreign-ca",
+                    ca_certificate=foreign_ca, metadata_key=key,
+                )
+                (base / "repos" / "repocache-ci.repo").write_bytes(
+                    native.proposed
+                    + ("sslverify=1\nsslcacert=" + str(foreign_ca)
+                       + "\n").encode("utf-8")
+                )
+            assert cache.origin.startswith("https://")
+            assert upstream.origin.startswith("https://")
+            negative = subprocess.run(
+                argv, text=True, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, check=False, timeout=120,
+            )
+            _assert_compiled_tls_refusal(
+                negative.returncode, cache.hits, upstream.hits,
+            )
+            print("compiled-%s foreign-ca PASS: native TLS rejects both "
+                  "healthy origins before serving metadata" % manager,
+                  flush=True)
         finally:
             cache.close()
             upstream.close()

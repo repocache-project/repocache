@@ -4,7 +4,9 @@ on:
   pull_request:
     paths:
       - "src/repocache/server_cache_pressure_alarm_v1.py"
+      - "src/repocache/server_cache_bypass_decision_v1.py"
       - "tests/test_server_cache_pressure_alarm_v1.py"
+      - "tests/test_server_cache_bypass_decision_v1.py"
       - ".github/workflows/server-native-cache-alarm.yml"
   merge_group:
 
@@ -51,5 +53,6 @@ jobs:
           python3 -B -m pytest -q -rs \
             tests/test_server_cache_pressure_alarm_v1.py \
             tests/test_server_cache_pressure_observe_v1.py \
-            tests/test_server_cache_pressure_policy_v1.py
-          echo "PASS: non-activating native pressure alarm and statvfs tests"
+            tests/test_server_cache_pressure_policy_v1.py \
+            tests/test_server_cache_bypass_decision_v1.py
+          echo "PASS: non-activating native pressure alarm, cache-bypass proposal and statvfs tests"

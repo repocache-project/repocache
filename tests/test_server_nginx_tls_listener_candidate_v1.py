@@ -24,10 +24,13 @@ def test_canonical_default_https_and_operator_key_reference():
     assert x["server_context_fragment"] == (
         "listen 127.0.0.1:443 ssl;\n"
         "server_name cache.example.invalid;\n"
+        "if ($http_host !~* \"^cache\\.example\\.invalid(:443)?$\") { return 421; }\n"
+        "if ($host != cache.example.invalid) { return 421; }\n"
         "ssl_certificate /etc/repocache/tls/example-chain.pem;\n"
         "ssl_certificate_key /etc/repocache/tls/example-key.pem;\n"
         "ssl_protocols TLSv1.2 TLSv1.3;\n"
         "ssl_session_tickets off;\n"
+        "if ($ssl_server_name !~* \"^cache\\.example\\.invalid$\") { return 421; }\n"
         "server_tokens off;\n"
     )
     for key in ("operator_key_bytes_read","certificate_chain_verified",
@@ -41,7 +44,7 @@ def test_ipv6_address_bracketed_not_double_quoted():
     d=doc()
     d["deployment"]["listen"]["bind_address"]="::1"
     result=render_native_tls_listener_candidate(d)
-    assert "listen [::1]:443 ssl;" in result["server_context_fragment"]
+    assert "listen [::1]:443 ssl ipv6only=on;" in result["server_context_fragment"]
 
 
 @pytest.mark.parametrize("bad",[
@@ -92,3 +95,57 @@ def test_does_not_read_secrets_or_modify_files():
     assert "os.open(" not in text
     assert "read_bytes(" not in text
     assert "systemctl" not in text
+
+
+def test_listener_is_statically_bound_to_the_exact_approved_http_host():
+    d = doc()
+    d["deployment"]["listen"]["hostname"] = "mirror.example.invalid"
+    rendered = render_native_tls_listener_candidate(d)
+    lines = rendered["server_context_fragment"].splitlines()
+    assert "server_name mirror.example.invalid;" in lines
+    expected = 'if ($http_host !~* "^mirror\\.example\\.invalid(:443)?$") { return 421; }'
+    assert expected in lines
+    assert "if ($host != mirror.example.invalid) { return 421; }" in lines
+    assert lines.index(expected) < lines.index(
+        "ssl_certificate /etc/repocache/tls/example-chain.pem;"
+    )
+    assert rendered["authorizes_nginx_activation"] is False
+
+
+def test_tls_sni_bound_to_validated_hostname_and_remains_non_authorizing():
+    d = doc()
+    d["deployment"]["listen"]["hostname"] = "mirror.example.invalid"
+    fragment = render_native_tls_listener_candidate(d)["server_context_fragment"]
+    assert 'if ($ssl_server_name !~* "^mirror\\.example\\.invalid$") { return 421; }' in fragment
+    assert 'if ($http_host !~* "^mirror\\.example\\.invalid(:443)?$") { return 421; }' in fragment
+    assert "if ($host != mirror.example.invalid) { return 421; }" in fragment
+    assert "ssl_session_tickets off;" in fragment
+    assert "authorizes" not in fragment
+
+
+def test_ipv6_wildcard_has_explicit_v6_only_socket_and_ipv4_does_not():
+    d = doc()
+    d["deployment"]["listen"]["bind_address"] = "::"
+    output = render_native_tls_listener_candidate(d)
+    fragment = output["server_context_fragment"]
+    assert "listen [::]:443 ssl ipv6only=on;" in fragment
+    assert output["authorizes_firewall_change"] is False
+    assert output["authorizes_nginx_activation"] is False
+    d["deployment"]["listen"]["bind_address"] = "0.0.0.0"
+    other = render_native_tls_listener_candidate(d)["server_context_fragment"]
+    assert "listen 0.0.0.0:443 ssl;" in other
+    assert "ipv6only" not in other
+
+
+def test_ipv6_listener_preserves_combined_tls_sni_and_http_authority_gates():
+    d = doc()
+    d["deployment"]["listen"]["bind_address"] = "::1"
+    d["deployment"]["listen"]["hostname"] = "mirror.example.invalid"
+    result = render_native_tls_listener_candidate(d)
+    lines = result["server_context_fragment"].splitlines()
+    assert "listen [::1]:443 ssl ipv6only=on;" in lines
+    assert 'if ($http_host !~* "^mirror\\.example\\.invalid(:443)?$") { return 421; }' in lines
+    assert "if ($host != mirror.example.invalid) { return 421; }" in lines
+    assert 'if ($ssl_server_name !~* "^mirror\\.example\\.invalid$") { return 421; }' in lines
+    assert result["authorizes_nginx_activation"] is False
+    assert result["authorizes_firewall_change"] is False

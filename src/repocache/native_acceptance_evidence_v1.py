@@ -148,6 +148,7 @@ def collect_candidate_evidence(
         report["native_probe_code"] = native["code"]
         report["native_prerequisites_observed"] = (
             native.get("status") == "READ_ONLY_PREREQUISITES_OBSERVED"
+            and native["code"] == "OBSERVATION_ONLY_NO_HOST_AUTHORITY"
             and native.get("systemd_pid1_namespace_shape_observed") is True
             and native.get("effective_nginx_master_observed") is True
         )

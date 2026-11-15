@@ -32,7 +32,16 @@ _NGINX_MARKERS = (
     "/etc/systemd/system/nginx.service",
     "/etc/systemd/system/nginx.service.d",
     "/etc/systemd/system/nginx.socket",
+    # Non-packaged host units and runtime drop-ins can exist even after an
+    # operator removes /etc/nginx and the distribution-owned binary.
+    "/usr/local/lib/systemd/system/nginx.service",
+    "/usr/local/lib/systemd/system/nginx.socket",
+    "/usr/local/lib/systemd/system/nginx.service.d",
+    "/etc/systemd/system/nginx.socket.d",
     "/run/systemd/system/nginx.service",
+    "/run/systemd/system/nginx.service.d",
+    "/run/systemd/system/nginx.socket",
+    "/run/systemd/system/nginx.socket.d",
     "/etc/init.d/nginx",
     "/run/nginx.pid",
     "/var/run/nginx.pid",

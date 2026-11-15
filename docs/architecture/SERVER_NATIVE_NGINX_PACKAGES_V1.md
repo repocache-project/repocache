@@ -364,3 +364,18 @@ live-manifest reconcile must also reject any unreconciled #27 package marker
 before they acquire mutation authority; this is a dependency, not something
 the current read-only #31 inspection has proved. No unreviewed implicit
 rollback/purge of distro packages or service takeover is permitted.
+
+
+## Bounded native distribution signing-key file identity (#27)
+
+Before a native APT/DNF metadata probe, the fixed distribution keyring
+leaf must be root-owned, regular, non-writable by unprivileged users,
+**single-link**, non-empty and at most 1 MiB. Parent directories remain
+fixed, root-owned, non-symlink and non-group/world-writable. A hard-linked
+trust-anchor leaf or oversized key file is refused before *any* repository
+metadata traffic, even if all paths look familiar. Existing supported
+Debian 13 and AlmaLinux 10 native keyring files must satisfy this bound;
+positive CI checks do not prove an installed host key was signed by its
+own distribution or authorize an NGINX package transaction. Privileged
+fresh package installation, rollback and booted-host acceptance remain
+separate review and native tests.
