@@ -1,0 +1,57 @@
+name: v0.6 Native NGINX IPv6-only TLS Socket
+
+on:
+  pull_request:
+    paths:
+      - "src/repocache/server_nginx_tls_listener_candidate_v1.py"
+      - "scripts/ci_server_tls_ipv6_only_native.py"
+      - "tests/test_server_tls_ipv6_only_ci_v1.py"
+      - ".github/workflows/server-tls-ipv6-only-native.yml"
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  ipv6-tls-socket:
+    name: Rootless NGINX IPv6-only TLS socket (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: debian13
+            image: debian:trixie-slim
+          - platform: almalinux10
+            image: almalinux:10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build stock distro NGINX in disposable image
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > "$RUNNER_TEMP/Dockerfile.ipv6" <<'EOF'
+          ARG BASE_IMAGE
+          FROM $BASE_IMAGE
+          RUN if command -v apt-get >/dev/null; then \
+                apt-get update -qq && DEBIAN_FRONTEND=noninteractive \
+                apt-get install -y -qq nginx python3 openssl ca-certificates; \
+              else dnf -y -q install nginx python3 openssl ca-certificates; fi
+          EOF
+          docker build --pull -f "$RUNNER_TEMP/Dockerfile.ipv6" \
+            --build-arg BASE_IMAGE=${{ matrix.image }} \
+            -t "repocache-tls-ipv6:${{ matrix.platform }}" "$RUNNER_TEMP"
+      - name: Verify IPv6 TLS and same-port IPv4 refusal
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker run --rm --network none --read-only --user 65534:65534 \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,nosuid,nodev,size=128m,mode=1777 \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/repo,readonly" \
+            -e PYTHONPATH=/repo/src -e REPOCACHE_DISPOSABLE_NGINX_IPV6=1 \
+            "repocache-tls-ipv6:${{ matrix.platform }}" \
+            python3 -B /repo/scripts/ci_server_tls_ipv6_only_native.py

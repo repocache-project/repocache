@@ -39,8 +39,11 @@ def render_native_tls_listener_candidate(document: dict[str, Any]
                 or not hostname.isascii()):
             raise ValueError("unsafe NGINX SSL directive token")
         address = f"[{addr}]" if addr.version == 6 else str(addr)
+        # Explicit IPv6-only socket prevents an IPv6 wildcard from
+        # accepting IPv4-mapped connections under permissive kernel defaults.
+        v6_only = " ipv6only=on" if addr.version == 6 else ""
         fragment = (
-            f"listen {address}:{port} ssl;\n"
+            f"listen {address}:{port} ssl{v6_only};\n"
             f"server_name {hostname};\n"
             # NGINX $host falls back to server_name when HTTP/1.0 omits
             # Host. Use the actual wire authority instead, with an optional

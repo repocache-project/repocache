@@ -44,7 +44,7 @@ def test_ipv6_address_bracketed_not_double_quoted():
     d=doc()
     d["deployment"]["listen"]["bind_address"]="::1"
     result=render_native_tls_listener_candidate(d)
-    assert "listen [::1]:443 ssl;" in result["server_context_fragment"]
+    assert "listen [::1]:443 ssl ipv6only=on;" in result["server_context_fragment"]
 
 
 @pytest.mark.parametrize("bad",[
@@ -121,3 +121,31 @@ def test_tls_sni_bound_to_validated_hostname_and_remains_non_authorizing():
     assert "if ($host != mirror.example.invalid) { return 421; }" in fragment
     assert "ssl_session_tickets off;" in fragment
     assert "authorizes" not in fragment
+
+
+def test_ipv6_wildcard_has_explicit_v6_only_socket_and_ipv4_does_not():
+    d = doc()
+    d["deployment"]["listen"]["bind_address"] = "::"
+    output = render_native_tls_listener_candidate(d)
+    fragment = output["server_context_fragment"]
+    assert "listen [::]:443 ssl ipv6only=on;" in fragment
+    assert output["authorizes_firewall_change"] is False
+    assert output["authorizes_nginx_activation"] is False
+    d["deployment"]["listen"]["bind_address"] = "0.0.0.0"
+    other = render_native_tls_listener_candidate(d)["server_context_fragment"]
+    assert "listen 0.0.0.0:443 ssl;" in other
+    assert "ipv6only" not in other
+
+
+def test_ipv6_listener_preserves_combined_tls_sni_and_http_authority_gates():
+    d = doc()
+    d["deployment"]["listen"]["bind_address"] = "::1"
+    d["deployment"]["listen"]["hostname"] = "mirror.example.invalid"
+    result = render_native_tls_listener_candidate(d)
+    lines = result["server_context_fragment"].splitlines()
+    assert "listen [::1]:443 ssl ipv6only=on;" in lines
+    assert 'if ($http_host !~* "^mirror\\.example\\.invalid(:443)?$") { return 421; }' in lines
+    assert "if ($host != mirror.example.invalid) { return 421; }" in lines
+    assert 'if ($ssl_server_name !~* "^mirror\\.example\\.invalid$") { return 421; }' in lines
+    assert result["authorizes_nginx_activation"] is False
+    assert result["authorizes_firewall_change"] is False
