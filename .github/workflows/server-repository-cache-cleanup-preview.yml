@@ -5,6 +5,9 @@ on:
     paths:
       - 'src/repocache/server_repository_cache_cleanup_preview_v1.py'
       - 'tests/test_server_repository_cache_cleanup_preview_v1.py'
+      - 'src/repocache/server_repository_cache_usage_v1.py'
+      - 'tests/test_server_repository_cache_usage_v1.py'
+      - 'docs/testing/SERVER_REPOSITORY_CACHE_USAGE_V1.md'
       - '.github/workflows/server-repository-cache-cleanup-preview.yml'
       - 'docs/testing/SERVER_REPOSITORY_CACHE_CLEANUP_PREVIEW_V1.md'
   merge_group:
@@ -52,6 +55,7 @@ jobs:
           setpriv --reuid 65534 --regid 65534 --clear-groups \
             env PYTHONPATH="$GITHUB_WORKSPACE/src" PYTHONDONTWRITEBYTECODE=1 \
             python3 -B -m pytest -q -p no:cacheprovider \
-              tests/test_server_repository_cache_cleanup_preview_v1.py
-          echo "PASS: read-only fixture-owned NGINX cache preview; no cache removal"
+              tests/test_server_repository_cache_cleanup_preview_v1.py \
+              tests/test_server_repository_cache_usage_v1.py
+          echo "PASS: read-only fixture-owned NGINX cache cleanup/usage preflight; no cache removal"
           echo "NOT VERIFIED: host NGINX quiescence, root install, SELinux or authorization"
