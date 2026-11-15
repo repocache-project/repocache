@@ -149,16 +149,19 @@ def render_test_config(
         "    proxy_cache_valid 200 60s;\n"
         "    add_header X-RepoCache-Smoke $upstream_cache_status always;",
     )
-    for name in ("client_temp", "proxy_temp", "fastcgi_temp", "uwsgi_temp", "scgi_temp"):
+    temp_dirs = ("client_body", "proxy", "fastcgi", "uwsgi", "scgi")
+    for name in temp_dirs:
         (root / name).mkdir(mode=0o700, exist_ok=True)
     return (
         f"pid {root / 'nginx.pid'};\n"
         f"error_log {root / 'nginx-error.log'} notice;\n"
         "worker_processes 1;\nevents { worker_connections 128; }\n"
         "http { access_log off;\n"
-        + "".join(f"{name}_temp_path {root / name};\n"
-                  for name in ("client", "proxy", "fastcgi", "uwsgi", "scgi"))
-          .replace("client_temp_path", "client_body_temp_path")
+        + "".join(
+            f"{'client_body' if name == 'client_body' else name}_temp_path "
+            f"{root / name};\n"
+            for name in temp_dirs
+        )
         + upstream
         + f"server {{ listen 127.0.0.1:{frontend_port} ssl;\n"
         + "server_name localhost;\n"
