@@ -316,7 +316,7 @@ def test_strict_catalog_refuses_incomplete_or_ambiguous_https_context(mutation):
     elif mutation == "duplicate-server":
         raw += exact
     else:
-        raw = raw.replace("server {\n", "server {\n}\nserver {\n", 1)
+        raw = raw.replace("ssl_certificate_key ", "}\nserver {\nssl_certificate_key ", 1)
     assert raw != https_dump(source)
     with pytest.raises(DerivedCatalogCandidateError):
         strict_preview(source, raw)
@@ -350,3 +350,18 @@ def test_strict_https_preview_remains_read_only(monkeypatch):
     monkeypatch.setattr(os, "replace", forbidden)
     result = strict_preview(doc())
     assert result["authorizes_nginx_activation"] is False
+
+
+
+def test_unrelated_nginx_server_does_not_invalidate_exact_managed_https_candidate():
+    # An existing, independently owned server block is not a REPOCACHE
+    # route or an authorization to publish; do not require takeover of
+    # another service merely to preview the managed HTTPS candidate.
+    source = doc()
+    raw = https_dump(source)
+    raw = raw.replace("http {\n", "http {\nserver {\n    listen 127.0.0.1:19191;\n}\n", 1)
+    assert raw != https_dump(source)
+    result = strict_preview(source, raw)
+    assert result["exact_https_server_context_candidate_matched"] is True
+    assert result["authorizes_nginx_activation"] is False
+    assert result["authorizes_catalog_publication"] is False
