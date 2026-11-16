@@ -6,6 +6,7 @@ on:
       - 'src/repocache/server_install_v1.py'
       - 'src/repocache/server_preflight_v1.py'
       - 'src/repocache/server_host_checks_v1.py'
+      - 'src/repocache/server_preflight_guidance_v1.py'
       - 'tests/test_server_install_v1.py'
       - 'tests/test_server_preflight_v1.py'
       - 'src/repocache/native_acceptance_evidence_v1.py'
@@ -133,6 +134,27 @@ jobs:
                       after_example.st_ctime_ns)
           assert tuple(observed_metadata(p) for p in protected_paths) == before_paths
           print("PASS: repeated local probes and protected path metadata unchanged")
+
+          from repocache.server_preflight_guidance_v1 import explain_native_preflight
+
+          # Docker mounts sysfs read-only for these unprivileged job
+          # containers. Read the real kernel flag without probing writes.
+          assert os.statvfs("/sys").f_flag & os.ST_RDONLY
+          sysfs_before = observed_metadata("/sys")
+          for key in ("state_root", "cache_root", "log_root"):
+              case = json.loads(original)
+              case["deployment"]["paths"][key] = "/sys"
+              report = inspect_deployment_host(case, intent="install")
+              check = next(row for row in explain_native_preflight(report)
+                           if row["check"] == "storage_free_space")
+              assert check["status"] == "FAIL"
+              assert check["code"] == "STORAGE_FILESYSTEM_READ_ONLY"
+              assert "writable" in check["guidance"]
+              assert "/sys" not in json.dumps(check)
+              assert not report.authorizes_installation
+          assert observed_metadata("/sys") == sysfs_before
+          assert tuple(observed_metadata(p) for p in protected_paths) == before_paths
+          print("PASS: kernel read-only storage refused for state, cache and logs")
           PY
           # Docker userspace is NOT booted native systemd or SELinux evidence.
       - name: Execute read-only positive and negative preflight regressions

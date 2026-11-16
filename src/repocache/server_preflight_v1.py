@@ -112,6 +112,7 @@ _PROBE_CODES: Mapping[str, Mapping[str, PreflightStatus]] = {
         "STORAGE_OWNERSHIP_MANIFEST_UNVERIFIED": PreflightStatus.NOT_VERIFIED,
     },
     "storage_free_space": {
+        "STORAGE_FILESYSTEM_READ_ONLY": PreflightStatus.FAIL,
         "STORAGE_CAPACITY_UNVERIFIED": PreflightStatus.NOT_VERIFIED,
         "STORAGE_SPACE_BELOW_CRITICAL_THRESHOLD": PreflightStatus.FAIL,
         "STATE_OR_LOG_SPACE_EXHAUSTED": PreflightStatus.FAIL,

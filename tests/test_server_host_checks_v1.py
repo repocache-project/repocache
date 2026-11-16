@@ -139,7 +139,7 @@ def test_capacity_critical_warning_and_unknown(monkeypatch):
         position = idx["a"]
         idx["a"] = (position + 1) % 3
         return SimpleNamespace(f_bavail=state[position], f_frsize=1024,
-                               f_favail=inode[position], f_fsid=ids[position])
+                               f_favail=inode[position], f_fsid=ids[position], f_flag=0)
     monkeypatch.setattr(host.os, "statvfs", fake_statvfs)
     assert byname(host._storage_checks(spec()), "storage_free_space").status is PreflightStatus.PASS
     state[1] = 0
@@ -163,6 +163,28 @@ def test_capacity_critical_warning_and_unknown(monkeypatch):
     monkeypatch.setattr(host, "_safe_existing_ancestor",
                         lambda path: (None, "STORAGE_PATH_ACCESS_UNVERIFIED"))
     assert byname(host._storage_checks(spec()), "storage_free_space").status is PreflightStatus.NOT_VERIFIED
+
+
+@pytest.mark.parametrize("root", ["state_root", "cache_root", "log_root"])
+@pytest.mark.parametrize("missing", [False, True])
+def test_capacity_rejects_read_only_storage_with_free_bytes(monkeypatch, root, missing):
+    settings = spec()
+    destination = getattr(settings, root)
+    mount = str(Path(destination).parent) if missing else destination
+
+    def observed_directory(path):
+        if missing and path == destination:
+            return mount, "PATH_PARENT_OBSERVED_ONLY"
+        return path, "EXISTING_PATH_OWNERSHIP_UNVERIFIED"
+
+    monkeypatch.setattr(host, "_safe_existing_ancestor", observed_directory)
+    monkeypatch.setattr(host.os, "statvfs", lambda path: SimpleNamespace(
+        f_bavail=100000, f_frsize=4096, f_favail=100, f_fsid=1,
+        f_flag=os.ST_NOSUID | (os.ST_RDONLY if path == mount else 0),
+    ))
+    _, result = host._storage_checks(settings)
+    assert result.status is PreflightStatus.FAIL
+    assert result.code == "STORAGE_FILESYSTEM_READ_ONLY"
 
 
 def test_include_collision_never_adopts_existing_file(tmp_path, monkeypatch):
@@ -368,11 +390,11 @@ def test_capacity_unknown_fsid_and_inodes_are_not_success(monkeypatch):
     monkeypatch.setattr(host, "_safe_existing_ancestor",
                         lambda path: ("/", "EXISTING_PATH_OWNERSHIP_UNVERIFIED"))
     def untrusted_statvfs(_path):
-        return SimpleNamespace(f_bavail=100000, f_frsize=4096, f_favail=100)
+        return SimpleNamespace(f_bavail=100000, f_frsize=4096, f_favail=100, f_flag=0)
     monkeypatch.setattr(host.os, "statvfs", untrusted_statvfs)
     assert byname(host._storage_checks(spec()), "storage_free_space").status is PreflightStatus.NOT_VERIFIED
     monkeypatch.setattr(host.os, "statvfs", lambda _: SimpleNamespace(
-        f_bavail=100000, f_frsize=4096, f_fsid=1
+        f_bavail=100000, f_frsize=4096, f_fsid=1, f_flag=0
     ))
     assert byname(host._storage_checks(spec()), "storage_free_space").status is PreflightStatus.NOT_VERIFIED
 
@@ -396,7 +418,7 @@ def test_full_readonly_probe_orchestration_with_isolated_os_paths(monkeypatch, t
                         else proc() if path == "/proc/net/tcp"
                         else b"systemd\n" if path == "/proc/1/comm" else b"1\n")
     monkeypatch.setattr(host.os, "statvfs", lambda path: SimpleNamespace(
-        f_bavail=100000, f_frsize=4096, f_favail=100, f_fsid=1
+        f_bavail=100000, f_frsize=4096, f_favail=100, f_fsid=1, f_flag=os.ST_NOSUID
     ))
     original_stat = host.os.stat
     monkeypatch.setattr(host.os, "stat",
@@ -456,7 +478,7 @@ def test_space_and_inode_policy_boundaries(
         i = counter["i"] % 3
         counter["i"] += 1
         return SimpleNamespace(f_bavail=free[i], f_frsize=1,
-                               f_favail=inodes[i], f_fsid=i+1)
+                               f_favail=inodes[i], f_fsid=i+1, f_flag=0)
     monkeypatch.setattr(host.os, "statvfs", statvfs)
     result = byname(host._storage_checks(spec()), "storage_free_space")
     assert (result.status, result.code) == (expected, code)
