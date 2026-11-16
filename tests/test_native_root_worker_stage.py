@@ -114,7 +114,7 @@ def test_stage_refuses_symlinked_asset(tmp_path):
     outside.write_bytes(b"must not be opened through the candidate name")
     (tmp_path / stage.ARCHIVE).symlink_to(outside)
     output = tmp_path / "worker-stage"
-    with pytest.raises(OSError):
+    with pytest.raises(stage.WorkerStageError, match="WORKER_STAGE_INVALID_ASSET"):
         stage.stage_authenticated_worker(tmp_path, output, commit="a" * 40, archive_sha256="b" * 64)
     assert not output.exists()
 
@@ -251,3 +251,11 @@ def test_systemd_unit_paths_use_the_running_manager_and_refuse_unusable_values(m
     Result.stdout = b"/etc/systemd/system /untrusted/../path\n"
     with pytest.raises(stage.WorkerStageError, match="UNIT_PATH_UNVERIFIED"):
         install._systemd_unit_paths()
+
+
+
+def test_stage_does_not_open_a_fifo_for_io(tmp_path):
+    os.mkfifo(tmp_path / stage.ARCHIVE)
+    with pytest.raises(stage.WorkerStageError, match="WORKER_STAGE_INVALID_ASSET"):
+        stage.stage_authenticated_worker(tmp_path, tmp_path / "unused",
+                                         commit="a" * 40, archive_sha256="b" * 64)

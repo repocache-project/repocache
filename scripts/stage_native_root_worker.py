@@ -44,11 +44,12 @@ def _asset_bytes(
 ) -> bytes:
     def identity(info: os.stat_result) -> tuple[int, ...]:
         return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink,
-                info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+                info.st_size, info.st_uid, info.st_gid, info.st_mtime_ns, info.st_ctime_ns)
 
-    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
-    with os.fdopen(os.open(name, flags, dir_fd=directory), "rb") as stream:
-        before = os.fstat(stream.fileno())
+    with ExitStack() as stack:
+        pinned = os.open(name, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory)
+        stack.callback(os.close, pinned)
+        before = os.fstat(pinned)
         if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
                 or not 1 <= before.st_size <= maximum):
             raise WorkerStageError("WORKER_STAGE_INVALID_ASSET")
@@ -56,6 +57,12 @@ def _asset_bytes(
             before.st_uid != 0 or before.st_gid != 0 or stat.S_IMODE(before.st_mode) != installed_mode
         ):
             raise WorkerStageError("WORKER_INSTALL_METADATA_MISMATCH")
+        # The proc FD is the already validated inode, even if the incoming
+        # filename is replaced. Special devices and FIFOs never open for I/O.
+        flags = os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC
+        stream = stack.enter_context(os.fdopen(os.open(f"/proc/self/fd/{pinned}", flags), "rb"))
+        if identity(os.fstat(stream.fileno())) != identity(before):
+            raise WorkerStageError("WORKER_STAGE_CHANGED_ASSET")
         payload = stream.read(before.st_size + 1)
         after = os.fstat(stream.fileno())
         named = os.stat(name, dir_fd=directory, follow_symlinks=False)
