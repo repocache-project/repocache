@@ -33,3 +33,13 @@ keys and the canonical verifier from #249. It covers matching artifacts,
 wrong trust data, wrong owner pins, unsupported OS and existing output.
 Real publisher signing and booted Debian 13 and enforcing AlmaLinux 10
 acceptance remain separate gates.
+
+
+After separately authorized placement, the trusted verifier can check
+the actual files before starting the socket. Use the same assets and pins,
+and replace the output option with --verify-installed. The readback checks
+root-owned regular files at /usr/libexec/repocache/server-control-worker
+and /etc/systemd/system/repocache-control.{service,socket}. It refuses
+symlinks, hard links, unsafe ancestor ownership/mode, unexpected installed
+permissions and any content difference. Actual unit loading, drop-ins,
+SELinux labels and service behavior require separate native acceptance.

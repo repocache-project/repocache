@@ -123,3 +123,36 @@ def test_stage_refuses_malformed_pin_before_enumerating_assets(tmp_path):
             Path("must-not-be-opened"), tmp_path / "worker-stage",
             commit="not-a-commit", archive_sha256="b" * 64,
         )
+
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="requires a disposable root-owned filesystem")
+def test_authenticated_installed_readback_refuses_drift(candidate, tmp_path):
+    archive, digest, commit, _ = candidate
+    payloads, _ = stage._authenticated_payloads(
+        archive.parent, commit=commit, archive_sha256=digest,
+        system=None if _combined() else {"ID": "debian", "VERSION_ID": "13"},
+    )
+    root = tmp_path / "installed-fixture"
+    worker_dir = root / "usr/libexec/repocache"
+    unit_dir = root / "etc/systemd/system"
+    worker_dir.mkdir(parents=True)
+    unit_dir.mkdir(parents=True)
+    for name, raw in payloads.items():
+        destination = (worker_dir if name == stage.WORKER else unit_dir) / name
+        destination.write_bytes(raw)
+        destination.chmod(0o755 if name == stage.WORKER else 0o644)
+    stage._audit_worker_files(root, payloads)
+    unit = unit_dir / stage.UNITS[0]
+    before = unit.read_bytes()
+    unit.write_bytes(bytes([before[0] ^ 1]) + before[1:])
+    with pytest.raises(stage.WorkerStageError, match="WORKER_INSTALL_CONTENT_MISMATCH"):
+        stage._audit_worker_files(root, payloads)
+    unit.write_bytes(before)
+    unit.chmod(0o666)
+    with pytest.raises(stage.WorkerStageError, match="WORKER_INSTALL_METADATA_MISMATCH"):
+        stage._audit_worker_files(root, payloads)
+    unit.unlink()
+    unit.symlink_to(stage.UNITS[1])
+    with pytest.raises(OSError):
+        stage._audit_worker_files(root, payloads)
