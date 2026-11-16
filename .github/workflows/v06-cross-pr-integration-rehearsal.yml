@@ -20,6 +20,8 @@ on:
       - 'scripts/ci_v06_cross_pr_multi_wal_contract.py'
       - 'scripts/build_release.py'
       - 'scripts/build_native_root_worker.py'
+      - 'scripts/stage_native_root_worker.py'
+      - 'tests/test_native_root_worker_stage.py'
       - 'src/repocache/upgrade.py'
       - 'tests/test_v06_release_source_inventory.py'
       - 'scripts/ci_native_nginx_process_inode_smoke.py'
@@ -155,6 +157,8 @@ jobs:
             tests/test_v06_release_source_inventory.py \
             tests/test_release_provenance.py \
             tests/test_public_release_acceptance.py
+          REPOCACHE_REQUIRE_CANONICAL_WORKER_VERIFIER=1 \
+            python3 -B -m pytest -q -rs tests/test_native_root_worker_stage.py
           # Fixed package-root syntax inspection is only exercised in this
           # disposable CI container. The root worker remains non-activating.
           REPOCACHE_NATIVE_TEST_CONTAINER=CONFIRMED_DISPOSABLE_DOCKER_ONLY \
