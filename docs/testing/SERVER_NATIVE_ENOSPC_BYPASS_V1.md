@@ -1,9 +1,10 @@
-# Actual bounded ENOSPC -> NGINX cache-bypass regression (Stage A)
+# Native NGINX cache-bypass regression for ENOSPC and read-only storage (Stage A)
 
 **Issue:** #97 (with #28/#29/#31/#24), **release:** v0.6.0.
 This CI integration extends the earlier rootless EACCES and synthetic
 pressure/hysteresis tests with **kernel-observed ENOSPC on a dedicated
-4 MiB Docker tmpfs**, using real Debian 13 and AlmaLinux 10 packaged NGINX.
+4 MiB Docker tmpfs** and **kernel-observed EROFS on a separate read-only
+fixture mount**, using real Debian 13 and AlmaLinux 10 packaged NGINX.
 
 ## Containment and expected results
 
@@ -39,12 +40,19 @@ The scenario:
    exercise the existing policy hysteresis and validate/reload the original
    normal cache candidate. Existing APT/DNF warm entries remain HIT without
    new upstream fetch; new entries resume normal MISS/HIT behavior.
-7. Shut down the private origin and NGINX master; Docker destroys the entire
+7. Exercise a separate read-only cache fixture with ample free bytes and
+   inodes. Require the observer to report `ST_RDONLY` and require the kernel
+   to refuse a new file with `EROFS`. A full disk or permissions-only refusal
+   cannot pass this phase. The decision must report `STORAGE_WRITE_REFUSED`
+   and propose cache-off for both routes. Validate and reload only the test
+   NGINX process, verify repeated exact upstream bytes without HIT and check
+   that the read-only fixture file inventory and digests remain identical.
+8. Shut down the private origin and NGINX master; Docker destroys the entire
    temporary filesystem. CI prints fixed PASS/NOT VERIFIED summaries only.
 
 The test fails rather than skipping if dedicated tmpfs identity, the real
-ENOSPC observation, NGINX validation/reload, worker handoff, byte integrity,
-upstream re-fetch, or recovery cannot be demonstrated.
+ENOSPC or EROFS observation, NGINX validation/reload, worker handoff, byte
+integrity, upstream re-fetch, or recovery cannot be demonstrated.
 
 ## Acceptance boundaries
 
