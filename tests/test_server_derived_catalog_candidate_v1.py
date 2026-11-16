@@ -9,9 +9,11 @@ import pytest
 
 from repocache.server_derived_catalog_candidate_v1 import (
     DerivedCatalogCandidateError, preview_derived_catalog_from_nginx_dump,
+    preview_derived_https_catalog_from_nginx_dump,
 )
 from repocache.server_nginx_repository_bundle_v1 import (
     render_repository_nginx_bundle_candidate,
+    render_repository_https_server_candidate,
 )
 
 EXAMPLE = (Path(__file__).resolve().parents[1]
@@ -234,4 +236,132 @@ def test_catalog_dump_rejects_oversize_encoded_utf8_or_surrogate(extra):
 def test_catalog_dump_accepts_genuine_utf8_comments_without_authority():
     result = preview(doc(), raw=dump(doc()) + "# NGINX café comment\n")
     assert result["status"] == "INERT_DERIVED_CATALOG_CANDIDATE_ONLY"
+    assert result["authorizes_catalog_publication"] is False
+
+
+
+def https_dump(d):
+    full = render_repository_https_server_candidate(
+        d, expected_state_generation=d["expected_state_generation"],
+        candidate_pins_by_repository=pins(d), ca_bundle_path=_CA,
+    )
+    assert full["authorizes_nginx_activation"] is False
+    assert full["authorizes_catalog_publication"] is False
+    return (
+        "pid /tmp/nginx.pid;\nevents { worker_connections 64; }\n"
+        "http {\n" + full["http_context_fragment"]
+        + full["server_block_fragment"] + "}\n"
+    )
+
+
+def strict_preview(d, raw=None, *, exit_code=0):
+    return preview_derived_https_catalog_from_nginx_dump(
+        d, candidate_pins_by_repository=pins(d), ca_bundle_path=_CA,
+        nginx_dump_text=https_dump(d) if raw is None else raw,
+        nginx_t_exit_code=exit_code,
+    )
+
+
+def test_full_https_catalog_requires_single_exact_tls_listener_and_routes():
+    source = doc()
+    original = copy.deepcopy(source)
+    ordinary = preview(source, raw=https_dump(source))
+    strict = strict_preview(source)
+    assert strict["status"] == "INERT_DERIVED_HTTPS_CATALOG_CANDIDATE_ONLY"
+    assert strict["candidate_catalog"] == ordinary["candidate_catalog"]
+    assert strict["desired_active_repository_ids"] == [
+        "almalinux-baseos", "debian-trixie-main"
+    ]
+    assert strict["exact_https_server_context_candidate_matched"] is True
+    for flag in (
+        "installed_tls_certificate_verified", "real_tls_handshake_verified",
+        "nginx_dump_provenance_authenticated", "kernel_listener_exposure_verified",
+        "authorizes_catalog_publication", "authorizes_nginx_activation",
+    ):
+        assert strict[flag] is False
+    assert source == original
+
+
+def test_route_only_nginx_dump_is_insufficient_for_https_catalog_candidate():
+    source = doc()
+    assert preview(source)["candidate_catalog"]["repositories"]
+    with pytest.raises(DerivedCatalogCandidateError,
+                       match="HTTPS_SERVER_CONTEXT_MISSING_OR_AMBIGUOUS"):
+        strict_preview(source, dump(source))
+
+
+@pytest.mark.parametrize("mutation", [
+    "different-sni", "different-host", "different-key", "different-port",
+    "missing-server", "duplicate-server", "split-server-context",
+])
+def test_strict_catalog_refuses_incomplete_or_ambiguous_https_context(mutation):
+    source = doc()
+    full = render_repository_https_server_candidate(
+        source, expected_state_generation=0,
+        candidate_pins_by_repository=pins(source), ca_bundle_path=_CA,
+    )
+    exact = full["server_block_fragment"]
+    raw = https_dump(source)
+    if mutation == "different-sni":
+        raw = raw.replace("$ssl_server_name", "$ssl_fake_name", 1)
+    elif mutation == "different-host":
+        raw = raw.replace("$http_host", "$host", 1)
+    elif mutation == "different-key":
+        raw = raw.replace("ssl_certificate_key ", "ssl_certificate_key /foreign-", 1)
+    elif mutation == "different-port":
+        raw = raw.replace("listen 127.0.0.1:443 ssl;",
+                          "listen 127.0.0.1:8443 ssl;", 1)
+    elif mutation == "missing-server":
+        raw = raw.replace(exact, "")
+    elif mutation == "duplicate-server":
+        raw += exact
+    else:
+        raw = raw.replace("ssl_certificate_key ", "}\nserver {\nssl_certificate_key ", 1)
+    assert raw != https_dump(source)
+    with pytest.raises(DerivedCatalogCandidateError):
+        strict_preview(source, raw)
+
+
+@pytest.mark.parametrize("active", [
+    ("debian-trixie-main",), ("almalinux-baseos",), (),
+])
+def test_strict_https_candidate_tracks_only_desired_active_repositories(active):
+    source = doc(active=active)
+    result = strict_preview(source)
+    assert result["desired_active_repository_ids"] == sorted(active)
+    assert len(result["candidate_catalog"]["repositories"]) == len(active)
+    assert result["authorizes_catalog_publication"] is False
+
+
+def test_strict_https_candidate_rejects_forged_nginx_t_success():
+    source = doc()
+    for bad in (1, True, -1, None):
+        with pytest.raises(DerivedCatalogCandidateError,
+                           match="NGINX_SYNTAX_NOT_OBSERVED"):
+            strict_preview(source, exit_code=bad)
+
+
+def test_strict_https_preview_remains_read_only(monkeypatch):
+    import os
+    import subprocess
+    def forbidden(*args, **kwargs):
+        pytest.fail("HTTPS catalog preview attempted host mutation")
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    monkeypatch.setattr(os, "replace", forbidden)
+    result = strict_preview(doc())
+    assert result["authorizes_nginx_activation"] is False
+
+
+
+def test_unrelated_nginx_server_does_not_invalidate_exact_managed_https_candidate():
+    # An existing, independently owned server block is not a REPOCACHE
+    # route or an authorization to publish; do not require takeover of
+    # another service merely to preview the managed HTTPS candidate.
+    source = doc()
+    raw = https_dump(source)
+    raw = raw.replace("http {\n", "http {\nserver {\n    listen 127.0.0.1:19191;\n}\n", 1)
+    assert raw != https_dump(source)
+    result = strict_preview(source, raw)
+    assert result["exact_https_server_context_candidate_matched"] is True
+    assert result["authorizes_nginx_activation"] is False
     assert result["authorizes_catalog_publication"] is False

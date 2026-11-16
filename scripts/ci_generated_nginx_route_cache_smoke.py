@@ -7,6 +7,8 @@ This does NOT permit loopback pins in production or grant host activation.
 from __future__ import annotations
 
 import collections
+import copy
+import hashlib
 from contextlib import contextmanager
 import json
 import os
@@ -26,6 +28,11 @@ from ci_native_nginx_cache_smoke import (
 )
 from repocache.server_nginx_repository_bundle_v1 import (
     render_repository_nginx_bundle_candidate,
+)
+from repocache.server_repository_plan_v1 import (
+    plan_batch_repository_removals,
+    plan_repository_change,
+    propose_automatic_repository_id,
 )
 from repocache.server_derived_catalog_candidate_v1 import (
     preview_derived_catalog_from_nginx_dump,
@@ -97,6 +104,8 @@ def trusted_fixture_origin(counts, lock):
         def do_GET(self) -> None:
             names = (
                 ("/debian/", "/apt/"),
+                ("/debian-auto/", "/apt/"),
+                ("/almalinux/10/AppStream/x86_64/os/", "/dnf/"),
                 ("/almalinux/10/BaseOS/x86_64/os/", "/dnf/"),
             )
             path = next(
@@ -698,6 +707,555 @@ def main() -> None:
                 and config.read_bytes() == original_conf
                 and process.poll() is None,
                 "rollback restores exact config and existing TLS/cache HIT without refetch",
+            )
+
+            # Normal repository removal MUST withdraw its *live* NGINX
+            # route without deleting retained cache objects or interrupting
+            # independent APT access. This is a disposable, nonroot fixture:
+            # a production state/catalog transaction is NOT implemented here.
+            dnf_url = base + "almalinux-baseos/repodata/repomd.xml"
+            apt_url = base + "debian-trixie-main/dists/trixie/InRelease"
+            retained_root = root / "cache" / "almalinux-baseos"
+            def retained_snapshot():
+                return {
+                    str(item.relative_to(retained_root)): (
+                        hashlib.sha256(item.read_bytes()).hexdigest(),
+                        item.stat().st_ino,
+                    )
+                    for item in retained_root.rglob("*") if item.is_file()
+                }
+            retained_before = retained_snapshot()
+            require(
+                bool(retained_before)
+                and request(dnf_url, client_tls)[:3] ==
+                    (200, FIXTURES["/dnf/repodata/repomd.xml"][1], "HIT"),
+                "native DNF cache holds real on-disk objects before removal",
+            )
+            removal_plan = plan_batch_repository_removals(
+                document, current_generation=0,
+                repository_ids=("almalinux-baseos",),
+            )
+            require(
+                removal_plan["status"] == "BATCH_REMOVE_PLAN_ONLY"
+                and removal_plan["retired_ids_proposed"] == ["almalinux-baseos"]
+                and removal_plan["cache_retained"] is True
+                and removal_plan["authorizes_state_write"] is False
+                and removal_plan["authorizes_cache_purge"] is False,
+                "reviewed batch removal planner retains cache and grants no write",
+            )
+            removed = removal_plan["candidate_document"]
+            surviving_pins = {"debian-trixie-main": {HOST: ["8.8.8.8"]}}
+            withdrawal = render_repository_nginx_bundle_candidate(
+                removed, expected_state_generation=0,
+                candidate_pins_by_repository=surviving_pins,
+                ca_bundle_path=str(origin_cert),
+            )
+            require(
+                withdrawal["proposed_repository_ids"] == ["debian-trixie-main"]
+                and not withdrawal["authorizes_nginx_activation"]
+                and not withdrawal["authorizes_catalog_publication"]
+                and withdrawal["http_upstream_fragment"].count(
+                    "proxy_cache_path "
+                ) == 1,
+                "normal removal candidate omits exactly the DNF cache zone",
+            )
+            withdrawn_upstream = withdrawal["http_upstream_fragment"].replace(
+                "server 8.8.8.8:443;",
+                f"server 127.0.0.1:{origin_port};",
+            )
+            withdrawn_locations = withdrawal["server_location_fragment"].replace(
+                "    proxy_cache_valid 200 60s;",
+                "    proxy_cache_valid 200 60s;\n"
+                "    add_header X-RepoCache-Smoke $upstream_cache_status always;",
+            )
+            normal_text = original_conf.decode("utf-8")
+            require(
+                normal_text.count(upstream) == 1
+                and normal_text.count(locations) == 1,
+                "removal fixture identifies exact original generated fragments",
+            )
+            withdrawn_text = normal_text.replace(
+                upstream, withdrawn_upstream, 1,
+            ).replace(locations, withdrawn_locations, 1)
+            require(
+                withdrawn_text != normal_text
+                and "repocache_cache_almalinux_baseos" not in withdrawn_text
+                and "location ^~ /__repocache/repos/almalinux-baseos/" not
+                    in withdrawn_text,
+                "removed DNF repository has no remaining generated exposure",
+            )
+            config.write_text(withdrawn_text, encoding="utf-8")
+            run(nginx, "-t", "-e", str(root / "remove-syntax.log"),
+                "-p", str(root), "-c", str(config))
+
+            # The separately generated public-pin -T file verifies the
+            # read-only active-only discovery projection. Neither this
+            # temporary -T text nor the live fixture publishes a catalog.
+            removed_catalog_conf = root / "removed-catalog-candidate.conf"
+            removed_catalog_conf.write_text(
+                withdrawn_text.replace(
+                    f"server 127.0.0.1:{origin_port};",
+                    "server 8.8.8.8:443;",
+                ).replace(
+                    "    add_header X-RepoCache-Smoke $upstream_cache_status always;\n",
+                    "",
+                ), encoding="utf-8",
+            )
+            removed_dump = subprocess.run(
+                [nginx, "-T", "-e", str(root / "removed-catalog-syntax.log"),
+                 "-p", str(root), "-c", str(removed_catalog_conf)],
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+            require(
+                removed_dump.returncode == 0,
+                "stock nginx -T validates reduced candidate before live reload",
+            )
+            projected = preview_derived_catalog_from_nginx_dump(
+                removed, candidate_pins_by_repository=surviving_pins,
+                ca_bundle_path=str(origin_cert),
+                nginx_dump_text=removed_dump.stdout,
+                nginx_t_exit_code=removed_dump.returncode,
+            )
+            require(
+                len(projected["candidate_catalog"]["repositories"]) == 1
+                and projected["desired_active_repository_ids"]
+                    == ["debian-trixie-main"]
+                and projected["authorizes_catalog_publication"] is False
+                and projected["actual_active_exposure_verified"] is False,
+                "derived catalog candidate withdraws removed DNF entry",
+            )
+            removal_workers = nginx_master_children(process.pid)
+            run(nginx, "-s", "reload", "-e", str(root / "remove-reload.log"),
+                "-p", str(root), "-c", str(config))
+            await_worker_generation_drained(process, removal_workers)
+            refused = request(dnf_url, client_tls)
+            continued = request(apt_url, client_tls)
+            require(
+                refused[0] == 404
+                and continued[:3] == (
+                    200, FIXTURES["/apt/dists/trixie/InRelease"][1], "HIT",
+                ) and retained_snapshot() == retained_before
+                and process.poll() is None,
+                "real NGINX route removal returns 404; APT stays HIT and "
+                "all DNF cache bytes/inodes survive",
+            )
+
+            # Restore the exact original configuration through another
+            # tested reload. Retained on-disk cache bytes are not proof
+            # that NGINX will immediately reload its former in-memory keys.
+            config.write_bytes(original_conf)
+            run(nginx, "-t", "-e", str(root / "remove-restore-syntax.log"),
+                "-p", str(root), "-c", str(config))
+            removed_workers = nginx_master_children(process.pid)
+            run(nginx, "-s", "reload", "-e", str(root / "remove-restore.log"),
+                "-p", str(root), "-c", str(config))
+            await_worker_generation_drained(process, removed_workers)
+            readded_first = request(dnf_url, client_tls)
+            readded_second = request(dnf_url, client_tls)
+            require(
+                readded_first[:2] == (
+                    200, FIXTURES["/dnf/repodata/repomd.xml"][1],
+                ) and readded_second[:3] == (
+                    200, FIXTURES["/dnf/repodata/repomd.xml"][1], "HIT",
+                ) and request(apt_url, client_tls)[:3] == (
+                    200, FIXTURES["/apt/dists/trixie/InRelease"][1], "HIT",
+                ) and config.read_bytes() == original_conf
+                and process.poll() is None,
+                "re-add restores verified DNF bytes/HIT and unchanged APT "
+                "availability under the exact prior configuration",
+            )
+
+            # Real CI data-plane acceptance for a NEW administrator-added
+            # supported APT repository selected only by install-v1 metadata.
+            # No repository-specific production source code or CLI extension
+            # is allowed. Inert ID allocation and plan remain untrusted:
+            # neither authenticates the owner nor commits protected state.
+            auto_candidate = copy.deepcopy(document["repositories"][0])
+            del auto_candidate["id"]
+            auto_candidate["upstream"]["base_url"] = (
+                "https://mirror.example.invalid/debian-auto/"
+            )
+            all_time_ids = {repo["id"] for repo in document["repositories"]}
+            auto = propose_automatic_repository_id(
+                document, auto_candidate, current_generation=0,
+                reserved_ids=all_time_ids,
+            )
+            again = propose_automatic_repository_id(
+                document, copy.deepcopy(auto_candidate),
+                current_generation=0, reserved_ids=frozenset(all_time_ids),
+            )
+            auto_id = auto["repository_id"]
+            require(
+                auto == again and auto["existing"] is False
+                and auto["status"] == "PLAN_ONLY"
+                and auto_id not in all_time_ids
+                and auto_id.startswith("repo-"),
+                "deterministic, distinct, untrusted automatic ID for a new APT repo",
+            )
+            addition = plan_repository_change(
+                document, current_generation=0, operation="add",
+                proposed_repository={**auto_candidate, "id": auto_id},
+                reserved_ids=all_time_ids,
+            )
+            candidate_document = addition["candidate_document"]
+            require(
+                addition["changed"] is True
+                and addition["id_eligibility"] == "CALLER_SNAPSHOT_ONLY"
+                and len(candidate_document["repositories"]) == 3
+                and len(document["repositories"]) == 2,
+                "validated metadata-only add creates a candidate, not state",
+            )
+            repeated = plan_repository_change(
+                candidate_document, current_generation=0, operation="add",
+                proposed_repository={**auto_candidate, "id": auto_id},
+                reserved_ids=all_time_ids | {auto_id},
+            )
+            require(
+                repeated["changed"] is False,
+                "repeated complete add is an idempotent non-authorizing plan",
+            )
+
+            # Only a disposable test-owned directory is created; the future
+            # protected #31 writer must separately prove/lock real ownership.
+            new_cache_root = root / "cache" / auto_id
+            new_cache_root.mkdir(mode=0o700)
+            added_pins = {
+                item["id"]: {HOST: ["8.8.8.8"]}
+                for item in candidate_document["repositories"]
+            }
+            added_fragment = render_repository_nginx_bundle_candidate(
+                candidate_document, expected_state_generation=0,
+                candidate_pins_by_repository=added_pins,
+                ca_bundle_path=str(origin_cert),
+            )
+            require(
+                added_fragment["proposed_repository_ids"]
+                    == sorted((*all_time_ids, auto_id))
+                and added_fragment["http_upstream_fragment"].count(
+                    "proxy_cache_path "
+                ) == 3
+                and added_fragment["http_upstream_fragment"].count(
+                    "server 8.8.8.8:443;"
+                ) == 3
+                and not added_fragment["authorizes_nginx_activation"]
+                and not added_fragment["authorizes_catalog_publication"],
+                "production renderer generated a new isolated cache zone and route",
+            )
+            added_upstream = added_fragment["http_upstream_fragment"].replace(
+                "server 8.8.8.8:443;",
+                f"server 127.0.0.1:{origin_port};",
+            )
+            added_locations = added_fragment["server_location_fragment"].replace(
+                "    proxy_cache_valid 200 60s;",
+                "    proxy_cache_valid 200 60s;\n"
+                "    add_header X-RepoCache-Smoke $upstream_cache_status always;",
+            )
+            require(
+                normal_text.count(upstream) == 1
+                and normal_text.count(locations) == 1,
+                "exact original nginx fragments are uniquely identified",
+            )
+            added_text = normal_text.replace(
+                upstream, added_upstream, 1,
+            ).replace(locations, added_locations, 1)
+            require(
+                added_text != normal_text
+                and f"location ^~ /__repocache/repos/{auto_id}/" in added_text
+                and added_text.count("proxy_cache_path ") == 3,
+                "generated route add modifies only the disposable fixture",
+            )
+
+            # An actual packaged nginx -T proves the catalogue projection
+            # refers to the new route and only the validated public-pin
+            # candidate. No real catalog is written or published.
+            added_public = added_text.replace(
+                f"server 127.0.0.1:{origin_port};",
+                "server 8.8.8.8:443;",
+            ).replace(
+                "    add_header X-RepoCache-Smoke $upstream_cache_status always;\n",
+                "",
+            )
+            added_catalog_config = root / "added-catalog-candidate.conf"
+            added_catalog_config.write_text(added_public, encoding="utf-8")
+            added_dump = subprocess.run(
+                [nginx, "-T", "-e", str(root / "added-catalog.log"),
+                 "-p", str(root), "-c", str(added_catalog_config)],
+                capture_output=True, text=True, check=False, timeout=10,
+            )
+            require(
+                added_dump.returncode == 0,
+                "stock nginx -T accepts newly generated three-repository candidate",
+            )
+            added_catalog = preview_derived_catalog_from_nginx_dump(
+                candidate_document, candidate_pins_by_repository=added_pins,
+                ca_bundle_path=str(origin_cert),
+                nginx_dump_text=added_dump.stdout,
+                nginx_t_exit_code=added_dump.returncode,
+            )
+            expected_cache = (
+                "https://cache.example.invalid/__repocache/repos/"
+                + auto_id + "/"
+            )
+            require(
+                len(added_catalog["candidate_catalog"]["repositories"]) == 3
+                and expected_cache in {
+                    entry["cache"]
+                    for entry in added_catalog["candidate_catalog"]["repositories"]
+                }
+                and added_catalog["desired_active_repository_ids"]
+                    == sorted((*all_time_ids, auto_id))
+                and not added_catalog["authorizes_catalog_publication"],
+                "candidate discovery includes only the new validated active route",
+            )
+
+            config.write_text(added_text, encoding="utf-8")
+            run(nginx, "-t", "-e", str(root / "added-syntax.log"),
+                "-p", str(root), "-c", str(config))
+            old_add_workers = nginx_master_children(process.pid)
+            run(nginx, "-s", "reload", "-e", str(root / "added-reload.log"),
+                "-p", str(root), "-c", str(config))
+            await_worker_generation_drained(process, old_add_workers)
+            dynamic_url = base + auto_id + "/dists/trixie/InRelease"
+            with lock:
+                before_dynamic_origin = counts["/apt/dists/trixie/InRelease"]
+            dynamic_first = request(dynamic_url, client_tls)
+            dynamic_second = request(dynamic_url, client_tls)
+            with lock:
+                after_dynamic_origin = counts["/apt/dists/trixie/InRelease"]
+            require(
+                dynamic_first[:3] == (
+                    200, FIXTURES["/apt/dists/trixie/InRelease"][1], "MISS"
+                ) and dynamic_second[:3] == (
+                    200, FIXTURES["/apt/dists/trixie/InRelease"][1], "HIT"
+                ) and after_dynamic_origin == before_dynamic_origin + 1
+                and request(apt_url, client_tls)[:3] == (
+                    200, FIXTURES["/apt/dists/trixie/InRelease"][1], "HIT"
+                ) and request(dnf_url, client_tls)[:3] == (
+                    200, FIXTURES["/dnf/repodata/repomd.xml"][1], "HIT"
+                ) and process.poll() is None,
+                "real NGINX adds an unknown APT route with isolated MISS/HIT "
+                "while existing APT and DNF remain cached",
+            )
+
+            def dynamic_cache_snapshot():
+                return {
+                    str(f.relative_to(new_cache_root)): (
+                        hashlib.sha256(f.read_bytes()).hexdigest(), f.stat().st_ino
+                    )
+                    for f in new_cache_root.rglob("*") if f.is_file()
+                }
+            dynamic_bytes = dynamic_cache_snapshot()
+            require(bool(dynamic_bytes),
+                    "new route created genuine isolated cache bytes")
+            removal = plan_repository_change(
+                candidate_document, current_generation=0,
+                operation="remove", repository_id=auto_id,
+            )
+            require(
+                removal["changed"] and removal["candidate_document"] == document,
+                "normal remove withdraws the new ID without cache cleanup",
+            )
+            config.write_bytes(original_conf)
+            run(nginx, "-t", "-e", str(root / "dynamic-restore-syntax.log"),
+                "-p", str(root), "-c", str(config))
+            dynamic_workers = nginx_master_children(process.pid)
+            run(nginx, "-s", "reload", "-e", str(root / "dynamic-restore.log"),
+                "-p", str(root), "-c", str(config))
+            await_worker_generation_drained(process, dynamic_workers)
+            require(
+                request(dynamic_url, client_tls)[0] == 404
+                and dynamic_cache_snapshot() == dynamic_bytes
+                and request(apt_url, client_tls)[:3] == (
+                    200, FIXTURES["/apt/dists/trixie/InRelease"][1], "HIT"
+                ) and request(dnf_url, client_tls)[:3] == (
+                    200, FIXTURES["/dnf/repodata/repomd.xml"][1], "HIT"
+                ) and process.poll() is None
+                and config.read_bytes() == original_conf,
+                "dynamic remove withdraws real TLS route, retains all cache "
+                "bytes/inodes and preserves independent APT/DNF service",
+            )
+            future = propose_automatic_repository_id(
+                document, copy.deepcopy(auto_candidate), current_generation=0,
+                reserved_ids=all_time_ids | {auto_id},
+            )
+            require(
+                future["repository_id"] != auto_id
+                and future["id_eligibility"] == "CALLER_SNAPSHOT_ONLY",
+                "retired ID is not reused in a supplied all-time snapshot",
+            )
+
+            # Repeat the same *real* data-driven lifecycle for a previously
+            # unknown DNF repository. The third-party origin is a disposable
+            # signed-shape fixture; the actual production generic renderer,
+            # not code for a named package, creates the DNF route/cache.
+            dnf_candidate = copy.deepcopy(document["repositories"][1])
+            del dnf_candidate["id"]
+            dnf_candidate["upstream"]["base_url"] = (
+                "https://mirror.example.invalid/almalinux/10/AppStream/x86_64/os/"
+            )
+            recorded_ids = all_time_ids | {auto_id}
+            dnf_auto = propose_automatic_repository_id(
+                document, dnf_candidate, current_generation=0,
+                reserved_ids=recorded_ids,
+            )
+            dnf_id = dnf_auto["repository_id"]
+            require(
+                dnf_auto["existing"] is False and dnf_id not in recorded_ids
+                and dnf_auto["id_eligibility"] == "CALLER_SNAPSHOT_ONLY",
+                "new DNF metadata obtains a new candidate ID without source edits",
+            )
+            dnf_add = plan_repository_change(
+                document, current_generation=0, operation="add",
+                proposed_repository={**dnf_candidate, "id": dnf_id},
+                reserved_ids=recorded_ids,
+            )
+            dnf_document = dnf_add["candidate_document"]
+            require(
+                dnf_add["changed"]
+                and len(dnf_document["repositories"]) == 3
+                and len(document["repositories"]) == 2,
+                "DNF metadata-only plan adds exactly one inert repository",
+            )
+            dnf_cache_root = root / "cache" / dnf_id
+            dnf_cache_root.mkdir(mode=0o700)
+            dnf_pins = {
+                item["id"]: {HOST: ["8.8.8.8"]}
+                for item in dnf_document["repositories"]
+            }
+            dnf_render = render_repository_nginx_bundle_candidate(
+                dnf_document, expected_state_generation=0,
+                candidate_pins_by_repository=dnf_pins,
+                ca_bundle_path=str(origin_cert),
+            )
+            require(
+                dnf_render["proposed_repository_ids"]
+                    == sorted((*all_time_ids, dnf_id))
+                and dnf_render["http_upstream_fragment"].count(
+                    "proxy_cache_path "
+                ) == 3
+                and not dnf_render["authorizes_nginx_activation"]
+                and not dnf_render["authorizes_catalog_publication"],
+                "new DNF cache zone and route are generated without grants",
+            )
+            dnf_upstream = dnf_render["http_upstream_fragment"].replace(
+                "server 8.8.8.8:443;",
+                f"server 127.0.0.1:{origin_port};",
+            )
+            dnf_locations = dnf_render["server_location_fragment"].replace(
+                "    proxy_cache_valid 200 60s;",
+                "    proxy_cache_valid 200 60s;\n"
+                "    add_header X-RepoCache-Smoke $upstream_cache_status always;",
+            )
+            dnf_live_text = normal_text.replace(
+                upstream, dnf_upstream, 1,
+            ).replace(locations, dnf_locations, 1)
+            require(
+                dnf_live_text != normal_text
+                and f"location ^~ /__repocache/repos/{dnf_id}/"
+                    in dnf_live_text,
+                "generated DNF route is present only in disposable candidate",
+            )
+            dnf_public = dnf_live_text.replace(
+                f"server 127.0.0.1:{origin_port};",
+                "server 8.8.8.8:443;",
+            ).replace(
+                "    add_header X-RepoCache-Smoke $upstream_cache_status always;\n",
+                "",
+            )
+            dnf_catalog_conf = root / "dnf-added-catalog-candidate.conf"
+            dnf_catalog_conf.write_text(dnf_public, encoding="utf-8")
+            dnf_dump = subprocess.run(
+                [nginx, "-T", "-e", str(root / "dnf-added-catalog.log"),
+                 "-p", str(root), "-c", str(dnf_catalog_conf)],
+                capture_output=True, text=True, check=False, timeout=10,
+            )
+            require(dnf_dump.returncode == 0,
+                    "stock nginx -T accepts new DNF repository config")
+            dnf_catalog = preview_derived_catalog_from_nginx_dump(
+                dnf_document, candidate_pins_by_repository=dnf_pins,
+                ca_bundle_path=str(origin_cert),
+                nginx_dump_text=dnf_dump.stdout,
+                nginx_t_exit_code=dnf_dump.returncode,
+            )
+            require(
+                len(dnf_catalog["candidate_catalog"]["repositories"]) == 3
+                and dnf_id in dnf_catalog["desired_active_repository_ids"]
+                and not dnf_catalog["authorizes_catalog_publication"],
+                "real nginx -T includes new DNF route only in inert catalog",
+            )
+
+            config.write_text(dnf_live_text, encoding="utf-8")
+            run(nginx, "-t", "-e", str(root / "dnf-added-syntax.log"),
+                "-p", str(root), "-c", str(config))
+            old_dnf_workers = nginx_master_children(process.pid)
+            run(nginx, "-s", "reload", "-e", str(root / "dnf-added-reload.log"),
+                "-p", str(root), "-c", str(config))
+            await_worker_generation_drained(process, old_dnf_workers)
+            dynamic_dnf_url = base + dnf_id + "/repodata/repomd.xml"
+            with lock:
+                before_new_dnf = counts["/dnf/repodata/repomd.xml"]
+            dnf_first = request(dynamic_dnf_url, client_tls)
+            dnf_second = request(dynamic_dnf_url, client_tls)
+            with lock:
+                after_new_dnf = counts["/dnf/repodata/repomd.xml"]
+            require(
+                dnf_first[:3] == (
+                    200, FIXTURES["/dnf/repodata/repomd.xml"][1], "MISS"
+                ) and dnf_second[:3] == (
+                    200, FIXTURES["/dnf/repodata/repomd.xml"][1], "HIT"
+                ) and after_new_dnf == before_new_dnf + 1
+                and request(apt_url, client_tls)[:3] == (
+                    200, FIXTURES["/apt/dists/trixie/InRelease"][1], "HIT"
+                ) and request(dnf_url, client_tls)[:3] == (
+                    200, FIXTURES["/dnf/repodata/repomd.xml"][1], "HIT"
+                ) and process.poll() is None,
+                "new DNF repository has isolated real MISS/HIT with no "
+                "interruption to existing APT/DNF cache",
+            )
+            def dynamic_dnf_bytes():
+                return {
+                    str(f.relative_to(dnf_cache_root)): (
+                        hashlib.sha256(f.read_bytes()).hexdigest(), f.stat().st_ino
+                    )
+                    for f in dnf_cache_root.rglob("*") if f.is_file()
+                }
+            dnf_retained = dynamic_dnf_bytes()
+            require(bool(dnf_retained), "new DNF cache has retained bytes")
+            dnf_removal = plan_repository_change(
+                dnf_document, current_generation=0,
+                operation="remove", repository_id=dnf_id,
+            )
+            require(
+                dnf_removal["changed"]
+                and dnf_removal["candidate_document"] == document,
+                "normal DNF removal proposes route withdrawal without purge",
+            )
+            config.write_bytes(original_conf)
+            run(nginx, "-t", "-e", str(root / "dnf-remove-syntax.log"),
+                "-p", str(root), "-c", str(config))
+            active_dnf_workers = nginx_master_children(process.pid)
+            run(nginx, "-s", "reload", "-e", str(root / "dnf-remove-reload.log"),
+                "-p", str(root), "-c", str(config))
+            await_worker_generation_drained(process, active_dnf_workers)
+            require(
+                request(dynamic_dnf_url, client_tls)[0] == 404
+                and dynamic_dnf_bytes() == dnf_retained
+                and request(apt_url, client_tls)[:3] == (
+                    200, FIXTURES["/apt/dists/trixie/InRelease"][1], "HIT"
+                ) and request(dnf_url, client_tls)[:3] == (
+                    200, FIXTURES["/dnf/repodata/repomd.xml"][1], "HIT"
+                ) and process.poll() is None
+                and config.read_bytes() == original_conf,
+                "DNF dynamic withdrawal preserves bytes/inodes, original "
+                "APT/DNF cache and running NGINX",
+            )
+            future_dnf = propose_automatic_repository_id(
+                document, copy.deepcopy(dnf_candidate), current_generation=0,
+                reserved_ids=recorded_ids | {dnf_id},
+            )
+            require(
+                future_dnf["repository_id"] != dnf_id,
+                "new DNF tombstone also blocks candidate ID reuse",
             )
         finally:
             process.terminate()

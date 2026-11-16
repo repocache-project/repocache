@@ -28,3 +28,24 @@ The complete original #30 requirement — operator-approved firewall behaviour
 with NGINX/TLS/server ownership on real Debian 13 and AlmaLinux 10 with
 enforcing SELinux — remains NOT VERIFIED until the final native acceptance
 campaign under #19. No implicit firewall opening or host mutation is added.
+
+
+## IPv4 reserved/broadcast exposure is not reviewable (#30)
+
+The independent, non-authorizing native firewall intent now refuses
+reserved IPv4 addresses such as Class-E `240.0.0.1` and limited
+broadcast `255.255.255.255` as an HTTPS TCP listener target.
+A canonical address string alone cannot make these meaningful
+single-interface unicast exposure candidates.
+
+The refusal occurs regardless of whether the operator has requested
+firewall modification, so a disabled firewall toggle does not convert
+an invalid host exposure into a safe candidate. Both Debian13 and
+AlmaLinux10 fixture tests require static `FIREWALL_DOCUMENT_INVALID`,
+no input mutation and preserved explicit unicast/port review semantics.
+
+This guard covers the **firewall intent** boundary only. The separately
+validated input contract, actual native bind, packet filter backend and
+host-root authority must be rechecked by an eventual protected worker.
+No real firewall rules, NGINX files or services are modified. Booted
+systemd/SELinux acceptance remains NOT VERIFIED under #30/#19.

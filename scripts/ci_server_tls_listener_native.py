@@ -10,8 +10,8 @@ import subprocess
 import tempfile
 import time
 
-from repocache.server_nginx_tls_listener_candidate_v1 import (
-    render_native_tls_listener_candidate,
+from repocache.server_nginx_repository_bundle_v1 import (
+    render_repository_https_server_candidate,
 )
 
 HOST="cache.example.invalid"
@@ -40,7 +40,32 @@ def main():
         d["deployment"]["listen"]["https_port"]=PORT
         d["deployment"]["tls"]["certificate_file"]=str(cert)
         d["deployment"]["tls"]["private_key_file"]=str(key)
-        result=render_native_tls_listener_candidate(d)
+        d["repositories"][0]["desired_state"]="active"
+        d["repositories"][1]["id"]="almalinux-baseos"
+        d["repositories"][1]["desired_state"]="active"
+        d["deployment"]["paths"]["cache_root"]=str(root/"managed-cache")
+        for repo in d["repositories"]:
+            (root/"managed-cache"/repo["id"]).mkdir(parents=True,mode=0o700)
+        ca=next((candidate for candidate in (
+            "/etc/ssl/certs/ca-certificates.crt",
+            "/etc/pki/tls/certs/ca-bundle.crt",
+        ) if Path(candidate).is_file()),None)
+        assert ca is not None, "STOCK_CA_BUNDLE_UNAVAILABLE"
+        result=render_repository_https_server_candidate(
+            d,expected_state_generation=d["expected_state_generation"],
+            candidate_pins_by_repository={
+                repo["id"]:{"mirror.example.invalid":["8.8.8.8"]}
+                for repo in d["repositories"]
+            },
+            ca_bundle_path=ca,
+        )
+        assert result["proposed_repository_ids"]==[
+            "almalinux-baseos","debian-trixie-main",
+        ]
+        assert result["http_context_fragment"].count("proxy_cache_path ")==2
+        assert result["server_block_fragment"].count(
+            "location ^~ /__repocache/repos/"
+        )==2
         assert not result["authorizes_nginx_activation"]
         # Stock distro NGINX default temp paths are root-owned. Pin all
         # private scratch paths to the disposable rootless namespace.
@@ -53,7 +78,12 @@ def main():
         config=(f"pid {root/'nginx.pid'};\n"
                 f"error_log {root/'error.log'} notice;\n"
                 "worker_processes 1;\nevents { worker_connections 32; }\n"
-                "http {\naccess_log off;\n" + temp_paths + "server {\n" + result["server_context_fragment"]
+                "http {\naccess_log off;\n" + temp_paths
+                + result["http_context_fragment"]
+                # The diagnostic health route is test-only, inserted inside
+                # the already closed validated server block, not generated
+                # by the candidate composer.
+                + result["server_block_fragment"][:-2]
                 + 'location = /__test { return 200 "repocache-https"; }\n'
                 + "}\n}\n")
         conf=root/"nginx.conf"
@@ -61,7 +91,7 @@ def main():
         syntax=subprocess.run([nginx,"-t","-p",str(root),"-c",str(conf)],
                               capture_output=True,timeout=15,check=False)
         assert syntax.returncode == 0, "STOCK_NGINX_TLS_SYNTAX_INVALID"
-        print("PASS: validated v1 candidate accepted by actual native NGINX",flush=True)
+        print("PASS: generated TLS + APT/DNF route/cache candidate accepted by stock NGINX",flush=True)
         proc=subprocess.Popen([nginx,"-p",str(root),"-c",str(conf),
                                "-g","daemon off;"],stdin=subprocess.DEVNULL,
                               stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
@@ -82,6 +112,73 @@ def main():
                     time.sleep(0.05)
             assert payload and b"200 OK" in payload
             print("PASS: trusted synthetic certificate and canonical hostname over real TLS",flush=True)
+            # Independent SNI check: retain the existing HTTP wire Host
+            # and absolute-form request-target tests below.
+            test_context=ssl.create_default_context()
+            test_context.load_verify_locations(cafile=str(cert))
+            test_context.check_hostname=False  # negative SNI fixture only
+            for indicated_name in (None, "unrelated.example.invalid"):
+                result=handshake(indicated_name,test_context)
+                assert b"421 Misdirected Request" in result, "FOREIGN_TLS_SNI_ADMITTED"
+                assert b"repocache-https" not in result, "FOREIGN_TLS_SNI_BODY_LEAK"
+            print("PASS: absent/foreign TLS SNI denied with valid HTTP Host", flush=True)
+            # The certificate and SNI can be valid while a client presents a
+            # different HTTP Host. Never serve managed routes to that authority.
+            with socket.create_connection(("127.0.0.1",PORT),timeout=3) as raw:
+                with context.wrap_socket(raw,server_hostname=HOST) as sock:
+                    sock.sendall(
+                        b"GET /__test HTTP/1.1\r\n"
+                        b"Host: unrelated.example.invalid\r\n"
+                        b"Connection: close\r\n\r\n"
+                    )
+                    mismatch=sock.recv(4096)
+            assert b"421 Misdirected Request" in mismatch, "FOREIGN_HTTP_HOST_ADMITTED"
+            assert b"repocache-https" not in mismatch, "HOST_BOUNDARY_BODY_LEAK"
+            print("PASS: valid TLS SNI refuses foreign HTTP Host with 421", flush=True)
+            # NGINX $host silently falls back to server_name if no Host
+            # was sent; test the actual wire authority, not just a foreign
+            # supplied header. Matching explicit port is allowed; foreign
+            # port must be denied without serving repository content.
+            for request, accepted in (
+                (b"GET /__test HTTP/1.0\r\n\r\n", False),
+                (b"GET /__test HTTP/1.1\r\nHost: cache.example.invalid:9999\r\nConnection: close\r\n\r\n", False),
+                (b"GET /__test HTTP/1.1\r\nHost: CACHE.EXAMPLE.INVALID:" + str(PORT).encode("ascii") + b"\r\nConnection: close\r\n\r\n", True),
+            ):
+                with socket.create_connection(("127.0.0.1",PORT),timeout=3) as raw:
+                    with context.wrap_socket(raw,server_hostname=HOST) as sock:
+                        sock.sendall(request)
+                        reply=sock.recv(4096)
+                assert (b"200 OK" in reply) is accepted, "WIRE_AUTHORITY_BOUNDARY_MISMATCH"
+                assert (b"421 Misdirected Request" in reply) is not accepted, "WIRE_AUTHORITY_REFUSAL_MISMATCH"
+                if not accepted:
+                    assert b"repocache-https" not in reply, "WIRE_AUTHORITY_BODY_LEAK"
+            print("PASS: absent Host and foreign port refused; canonical Host port admitted", flush=True)
+            # A request-line absolute URI takes precedence in NGINX $host.
+            # An approved wire Host must not authorize a foreign request
+            # target, even when the TLS SNI was valid.
+            with socket.create_connection(("127.0.0.1",PORT),timeout=3) as raw:
+                with context.wrap_socket(raw,server_hostname=HOST) as sock:
+                    sock.sendall(
+                        b"GET https://foreign.example.invalid/__test HTTP/1.1\r\n"
+                        b"Host: cache.example.invalid\r\n"
+                        b"Connection: close\r\n\r\n"
+                    )
+                    denied=sock.recv(4096)
+            assert b"421 Misdirected Request" in denied, "ABSOLUTE_URI_FOREIGN_AUTHORITY_ADMITTED"
+            assert b"repocache-https" not in denied, "ABSOLUTE_URI_BODY_LEAK"
+            print("PASS: foreign absolute URI denied despite approved HTTP Host", flush=True)
+            # An unapproved source URL must never become a route, even
+            # with two explicitly active APT/DNF repository candidates.
+            with socket.create_connection(("127.0.0.1",PORT),timeout=3) as raw:
+                with context.wrap_socket(raw,server_hostname=HOST) as sock:
+                    sock.sendall(
+                        b"GET /__repocache/repos/unapproved/ HTTP/1.1\r\n"
+                        b"Host: cache.example.invalid\r\nConnection: close\r\n\r\n"
+                    )
+                    refused=sock.recv(4096)
+                    assert b"404 Not Found" in refused
+                    assert b"200 OK" not in refused
+            print("PASS: unapproved repository route is not exposed",flush=True)
             try:
                 handshake("wrong.example.invalid",context)
             except ssl.SSLCertVerificationError:

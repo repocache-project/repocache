@@ -261,3 +261,82 @@ def propose_automatic_repository_id(
                     "repository_id": identifier, "existing": False,
                     "id_eligibility": "CALLER_SNAPSHOT_ONLY"}
     raise RepositoryPlanError("automatic ID: reservation conflict")
+
+
+
+def plan_batch_repository_removals(
+    current_document: dict[str, Any],
+    *,
+    current_generation: int,
+    repository_ids: tuple[str, ...] = (),
+    all_repositories: bool = False,
+) -> dict[str, Any]:
+    """Prepare one inert batch remove with stable per-target no-op outcomes.
+
+    This implements the frozen CLI *semantics* for remove ID.../--all without
+    exposing a new CLI command, mutating trusted state, touching NGINX, or
+    deleting any cache. The future authenticated #31 writer must hold its
+    actual transaction lock and journal, preserve all-time retired IDs, and
+    verify activation/catalog changes before using any proposed state.
+    """
+    if type(current_generation) is not int or not 0 <= current_generation <= MAX_INT:
+        raise RepositoryPlanError("batch removal: invalid generation")
+    if type(all_repositories) is not bool:
+        raise RepositoryPlanError("batch removal: invalid scope")
+    if (type(repository_ids) is not tuple
+            or len(repository_ids) > 500
+            or (all_repositories and repository_ids)
+            or (not all_repositories and not repository_ids)):
+        raise RepositoryPlanError("batch removal: invalid selector")
+    # Refuse malformed or repeated IDs at the command boundary, before any
+    # candidate creation. A missing *valid* ID is a no-op, never an error.
+    selected: list[str] = []
+    for value in repository_ids:
+        selected.append(_id(value))
+    if len(set(selected)) != len(selected):
+        raise RepositoryPlanError("batch removal: duplicate selector")
+    try:
+        base = validate_install_document(current_document, for_apply=True)
+    except (ValueError, TypeError, RecursionError):
+        raise RepositoryPlanError("batch removal: invalid document") from None
+    if base["expected_state_generation"] != current_generation:
+        raise RepositoryPlanError("batch removal: stale generation")
+    if any("id" not in value for value in base["repositories"]):
+        raise RepositoryPlanError("batch removal: durable identifiers required")
+
+    present = {value["id"] for value in base["repositories"]}
+    if all_repositories:
+        selected = sorted(present)
+    drop = present.intersection(selected)
+    draft = copy.deepcopy(base)
+    draft["repositories"] = [
+        value for value in draft["repositories"] if value["id"] not in drop
+    ]
+    try:
+        candidate = validate_install_document(draft, for_apply=True)
+    except (ValueError, TypeError, RecursionError):
+        raise RepositoryPlanError("batch removal: candidate invalid") from None
+    return {
+        "schema_version": 1,
+        "status": "BATCH_REMOVE_PLAN_ONLY",
+        "operation": "remove",
+        "expected_state_generation": current_generation,
+        "selected_all": all_repositories,
+        "per_repository": [
+            {"repository_id": name,
+             "result": "REMOVE_CANDIDATE" if name in drop else "ALREADY_ABSENT"}
+            for name in selected
+        ],
+        "changed": candidate != base,
+        "retired_ids_proposed": sorted(drop),
+        "candidate_document": candidate,
+        "cache_retained": True,
+        "retirement_ledger_persisted": False,
+        "operator_authorization_verified": False,
+        "native_nginx_routes_reconciled": False,
+        "active_catalog_reconciled": False,
+        "authorizes_nginx_activation": False,
+        "authorizes_catalog_publication": False,
+        "authorizes_cache_purge": False,
+        "authorizes_state_write": False,
+    }

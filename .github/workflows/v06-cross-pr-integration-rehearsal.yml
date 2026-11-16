@@ -2,6 +2,7 @@ name: v0.6.0 Cross-PR Integration Rehearsal (Read Only)
 
 on:
   pull_request:
+    branches: ['integration/v0.6.0']
     paths:
       - '.github/workflows/v06-cross-pr-integration-rehearsal.yml'
       - 'src/repocache/server_proposed_state_v2_store.py'
@@ -41,9 +42,10 @@ jobs:
     env:
       PYTHONPATH: src
       PYTHONDONTWRITEBYTECODE: '1'
-      BASE_SHA: 8492edfc6fbedd8e8fc23186ef5b2f0fc40c09cf
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       FORK_SHA: 675e7b49b3573b1e5ede2ca023ed55e270397d4f
-      PR64_SHA: d21cc7e11e3c045988c7381665d97e8a2009b815
+      PR64_SHA: 03d271dca3852e1e90f0db6ebd75dba684216af1
       PR76_SHA: 3966fac76d410b585e6e642bfb23cd9f2348adcb
     steps:
       # Install git before checkout: the stock distro container images
@@ -76,17 +78,16 @@ jobs:
           # operator-supplied or repository-controlled path.
           test "$GITHUB_WORKSPACE" = "/__w/repocache/repocache"
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          # A SHA checkout lacks the integration base ref even with full history.
-          # Fetch one read-only canonical branch and pin its exact revision.
+          # Use the exact base in this PR event, even if another PR advances
+          # the live branch while the job is queued. Confirm that the event
+          # base is on the protected integration branch before merging it.
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA"
           git fetch --no-tags origin +refs/heads/integration/v0.6.0:refs/remotes/origin/integration/v0.6.0
-          test "$(git rev-parse refs/remotes/origin/integration/v0.6.0)" = "$BASE_SHA" || {
-            echo "Integration base moved; stale combined rehearsal refused"
-            exit 1
-          }
-          # The protected base includes all previously integrated v0.6 work,
-          # including #281 and #282. Never replay merged PRs.
-          # Combine only still-unmerged #64 and #76 at exact revisions;
-          # never push or treat a disposable merge as authority to activate.
+          git merge-base --is-ancestor "$BASE_SHA" refs/remotes/origin/integration/v0.6.0
+          git merge-base --is-ancestor "$FORK_SHA" "$BASE_SHA"
+          git merge-base --is-ancestor "$FORK_SHA" "$HEAD_SHA"
+
+          # Combine only still-unmerged #64 and #76 at exact revisions.
           git fetch --no-tags origin \
             +refs/heads/feat/64-fixed-credentialed-native-control-v1:refs/remotes/origin/pr64
           observed="$(git rev-parse refs/remotes/origin/pr64)"
@@ -94,14 +95,12 @@ jobs:
             echo "Dependency PR #254 moved; update exact SHA before rehearsal"
             exit 1
           }
-          # Recheck the dependency's reviewed ancestry and the exact
-          # current protected base before any disposable source merging.
           git merge-base --is-ancestor d53782ed01e1f85686f10279fd3c7eea6d7f6720 "$observed"
           git merge-base --is-ancestor "$FORK_SHA" "$observed"
-          git merge-base --is-ancestor "$BASE_SHA" HEAD
           git config user.email "read-only-rehearsal@repocache.invalid"
           git config user.name "REPOCACHE disposable CI"
           git switch -c local-v06-rehearsal
+          git merge --no-ff --no-edit "$BASE_SHA"
           git merge --no-ff --no-edit refs/remotes/origin/pr64
           git fetch --no-tags origin \
             +refs/heads/fix/76-repository-transfer-v06-candidate-20261107:refs/remotes/origin/pr76
@@ -123,7 +122,8 @@ jobs:
             'tests/test_server_*' \
             'scripts/ci_v06_cross_pr_*'
           test -z "$(git status --porcelain)"
-          echo "PASS: exact-SHA disposable test: current protected v0.6 base plus draft #237 #254 #249"
+          printf 'Rehearsal source: base=%s head=%s pr254=%s pr249=%s combined=%s\n' \
+            "$BASE_SHA" "$HEAD_SHA" "$PR64_SHA" "$PR76_SHA" "$(git rev-parse HEAD)"
           echo "NOT VERIFIED: protected integration merge, host-root, systemd, SELinux, release"
       - name: Run combined state, NGINX, catalog, systemd and lifecycle tests
         shell: bash
@@ -158,5 +158,6 @@ jobs:
           # It cannot claim systemd, SELinux or host-root acceptance.
           REPOCACHE_NATIVE_TEST_CONTAINER=CONFIRMED_DISPOSABLE_DOCKER_ONLY \
             python3 -B scripts/ci_native_nginx_process_inode_smoke.py
+          echo "PASS: exact-SHA combined container tests; booted host and publisher acceptance NOT VERIFIED"
           # Never modify protected branches, merge on GitHub, install a root
           # worker, start systemd, approve a catalog or publish a release.

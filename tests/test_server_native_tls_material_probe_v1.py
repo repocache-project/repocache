@@ -310,3 +310,49 @@ def test_wildcard_dns_san_is_not_an_exact_listener_identity(fixture, san_name):
         match="^TLS_MATERIAL_FIXTURE_IDENTITY_REJECTED$",
     ):
         inspect_fixture_identity(fixture, cert.read_bytes())
+
+
+def test_unreviewed_tls_fixture_root_xattr_denied_before_key_walk(
+    fixture, monkeypatch,
+):
+    from repocache import server_native_tls_material_probe_v1 as probe
+    fd, root, _tls, doc = fixture
+    original = probe.os.listxattr
+    seen = []
+    def fake_listxattr(number):
+        seen.append(number)
+        return ["user.unreviewed"] if number == fd else original(number)
+    monkeypatch.setattr(probe.os, "listxattr", fake_listxattr)
+    monkeypatch.setattr(
+        probe, "_directory",
+        lambda number, owner: (
+            probe.os.fstat(number) if number == fd else
+            pytest.fail("unreviewed root reached TLS private-key directory")
+        ),
+    )
+    with pytest.raises(
+        NativeTLSMaterialProbeError,
+        match="^TLS_MATERIAL_XATTR_OR_SELINUX_UNVERIFIED$",
+    ):
+        inspect_native_tls_pair_under_root(
+            fd, owner_uid=os.geteuid(), document=doc,
+        )
+    assert seen == [fd]
+
+
+def test_real_linux_unreviewed_tls_fixture_root_xattr_refused(fixture):
+    fd, root, tls, _ = fixture
+    generate(tls, "test")
+    try:
+        os.setxattr(root, "user.repocache-unreviewed", b"fixture")
+    except OSError as exc:
+        pytest.skip("fixture filesystem lacks user xattrs: " + type(exc).__name__)
+    try:
+        with pytest.raises(
+            NativeTLSMaterialProbeError,
+            match="^TLS_MATERIAL_XATTR_OR_SELINUX_UNVERIFIED$",
+        ):
+            inspect(fixture)
+    finally:
+        os.removexattr(root, "user.repocache-unreviewed")
+    assert inspect(fixture)["openssl_matching_pair_verified"] is True

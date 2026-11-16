@@ -39,13 +39,31 @@ def render_native_tls_listener_candidate(document: dict[str, Any]
                 or not hostname.isascii()):
             raise ValueError("unsafe NGINX SSL directive token")
         address = f"[{addr}]" if addr.version == 6 else str(addr)
+        # Explicit IPv6-only socket prevents an IPv6 wildcard from
+        # accepting IPv4-mapped connections under permissive kernel defaults.
+        v6_only = " ipv6only=on" if addr.version == 6 else ""
         fragment = (
-            f"listen {address}:{port} ssl;\n"
+            f"listen {address}:{port} ssl{v6_only};\n"
             f"server_name {hostname};\n"
+            # NGINX $host falls back to server_name when HTTP/1.0 omits
+            # Host. Use the actual wire authority instead, with an optional
+            # *matching* listener port, so absent Host or a foreign port
+            # cannot silently access an approved repository route.
+            f'if ($http_host !~* "^{re.escape(hostname)}(:{port})?$") '
+            "{ return 421; }\n"
+            # NGINX $host prefers an absolute request-target authority
+            # over Host. Both checks are required: $http_host forbids a
+            # missing/foreign Host, while $host forbids absolute-form
+            # request-target domain-fronting with an approved Host.
+            f"if ($host != {hostname}) {{ return 421; }}\n"
             f"ssl_certificate {cert};\n"
             f"ssl_certificate_key {key};\n"
             "ssl_protocols TLSv1.2 TLSv1.3;\n"
             "ssl_session_tickets off;\n"
+            # Valid HTTP Host and request authority do not excuse absent
+            # or foreign TLS SNI. Reject before managed locations are used.
+            f'if ($ssl_server_name !~* "^{re.escape(hostname)}$") '
+            "{ return 421; }\n"
             "server_tokens off;\n"
         )
         if len(fragment.encode("ascii")) > _MAX_BYTES:

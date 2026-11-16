@@ -379,3 +379,15 @@ positive CI checks do not prove an installed host key was signed by its
 own distribution or authorize an NGINX package transaction. Privileged
 fresh package installation, rollback and booted-host acceptance remain
 separate review and native tests.
+
+
+### Download-only native package architecture compatibility (Stage A)
+
+In addition to signed native metadata and RPM signatures, download-only
+rehearsal checks every package's declared architecture against the observed
+native machine architecture. DEB dependencies may use the matching native
+architecture or `all`; RPM dependencies may use the native architecture
+or `noarch`. Unknown machines and foreign headers fail closed as
+`NATIVE_PAYLOAD_SET_UNSAFE`. This is not an approved architecture support
+matrix, host installation authorization, publisher signature claim or
+booted-VM acceptance.

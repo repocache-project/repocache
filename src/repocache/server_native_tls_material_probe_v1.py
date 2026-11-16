@@ -173,8 +173,19 @@ def inspect_native_tls_pair_under_root(
         _deny("DOCUMENT_INVALID")
 
     try:
+        # This API is strictly a detached-fixture tool. A caller-controlled
+        # descriptor must never silently turn it into a reader of live
+        # operator-owned TLS private keys from the real host root.
+        native = os.stat("/", follow_symlinks=False)
+        supplied = os.fstat(root_fd)
+        if (native.st_dev, native.st_ino) == (supplied.st_dev, supplied.st_ino):
+            _deny("LIVE_ROOT_FORBIDDEN")
         with ExitStack() as stack:
             root = _directory(root_fd, owner_uid)
+            # Treat a fixture root with an unreviewed ACL/xattr/SELinux
+            # label like every child directory: ownership/mode alone is
+            # insufficient to trust credential access.
+            _reject_unreviewed_attributes(root_fd)
             current = root_fd
             chain = []
             for segment in _PARENT:
@@ -212,6 +223,10 @@ def inspect_native_tls_pair_under_root(
             context.load_cert_chain(
                 certfile="/proc/self/fd/" + str(leaf_fds[0]),
                 keyfile="/proc/self/fd/" + str(leaf_fds[1]),
+                # Without an explicit password, OpenSSL can prompt on the
+                # native terminal for an encrypted operator key. A fixture
+                # probe must never block, ask for secrets or guess a PIN.
+                password=b"",
             )
             if fixture_ca_pem is not None:
                 _check_fixture_tls_identity(

@@ -341,10 +341,20 @@ def validate_install_document(document: Any, *, for_apply: bool = False) -> dict
         "bind_address", "hostname", "https_port"})
     address = _string(listen["bind_address"], "deployment.listen.bind_address")
     try:
-        if str(ipaddress.ip_address(address)) != address:
-            _reject("deployment.listen.bind_address: noncanonical IP")
+        ip = ipaddress.ip_address(address)
     except ValueError:
         _reject("deployment.listen.bind_address: invalid IP literal")
+    # Keep schema errors outside the ipaddress conversion's ValueError
+    # handler. InstallInputError is itself a ValueError, and swallowing it
+    # would collapse unsafe multicast/mapped-address diagnostics.
+    if (ip.is_multicast
+            or (isinstance(ip, ipaddress.IPv4Address)
+                and ip.is_reserved)
+            or (isinstance(ip, ipaddress.IPv6Address)
+                and ip.ipv4_mapped is not None)):
+        _reject("deployment.listen.bind_address: unsafe bind IP")
+    if str(ip) != address:
+        _reject("deployment.listen.bind_address: noncanonical IP")
     _host(listen["hostname"], "deployment.listen.hostname")
     _integer(listen["https_port"], "deployment.listen.https_port", 1, 65535)
 
