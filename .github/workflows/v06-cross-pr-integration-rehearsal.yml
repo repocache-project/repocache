@@ -49,7 +49,7 @@ jobs:
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       FORK_SHA: 675e7b49b3573b1e5ede2ca023ed55e270397d4f
       PR64_SHA: 03d271dca3852e1e90f0db6ebd75dba684216af1
-      PR76_SHA: 3966fac76d410b585e6e642bfb23cd9f2348adcb
+      PR76_SHA: 20a0ed5dec425e6265b040deb2a795b76e148e34
     steps:
       # Install git before checkout: the stock distro container images
       # lack git, so checkout would otherwise fall back to an archive with
