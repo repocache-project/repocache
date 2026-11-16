@@ -1,4 +1,4 @@
-name: Native NGINX bounded ENOSPC bypass and recovery
+name: Native NGINX cache storage failure and recovery
 
 on:
   pull_request:
@@ -28,12 +28,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Observe real ENOSPC only inside a 4 MiB disposable Docker tmpfs
+      - name: Exercise ENOSPC and a read-only mount with packaged NGINX
         shell: bash
         run: |
           set -Eeuo pipefail
+          readonly_fixture=$(mktemp -d "$RUNNER_TEMP/repocache-cache-ro-XXXXXX")
+          chmod 1777 "$readonly_fixture"
+          mkdir "$readonly_fixture/debian-trixie-main" "$readonly_fixture/almalinux-baseos"
+          printf '%s\n' 'preserved cache fixture' > "$readonly_fixture/debian-trixie-main/fixture"
           docker run --rm --network bridge \
             --tmpfs /repocache-ci-enospc:rw,nosuid,nodev,size=4m,mode=1777 \
+            --mount "type=bind,source=$readonly_fixture,target=/repocache-ci-readonly,readonly" \
             --mount "type=bind,source=$PWD,target=/workspace,readonly" \
             --workdir /workspace '${{ matrix.image }}' \
             sh -ec '

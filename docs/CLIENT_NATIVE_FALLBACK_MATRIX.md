@@ -61,6 +61,14 @@ a temporary directory. They do **not** mutate host APT/DNF repository sources.
 
 No scenario removes package signatures or claims source rewrite capability.
 
+The compiler-generated HTTPS source rehearsal also tests HTTP 404 and a
+cache that accepts a TLS connection and request but sends no response.
+Only the stalled fixture uses a short native package-manager timeout. The
+probe requires both endpoints to be contacted, requires the client to fall
+back before the fixture closes the stalled connection, and verifies signed
+metadata and package bytes through the existing APT and RPM checks. The
+recovery phase still demonstrates that the cache becomes preferred again.
+
 ## Remaining mandatory acceptance gates
 
 **NOT VERIFIED** until separate targeted tests PASS:

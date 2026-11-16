@@ -31,7 +31,7 @@ _ACTIONS = MappingProxyType({
     "tls_reference_files": "Check TLS parent and file types, modes and ownership; do not read or display private key material.",
     "native_package_binaries": "Check fixed native executables; issue #27 handles missing packages with trusted APT/DNF.",
     "storage_path_safety": "Reject symlinks and unsafe parents; require verified ownership before using existing paths.",
-    "storage_free_space": "Check free bytes, filesystem inodes, mounts and approved minimum storage thresholds.",
+    "storage_free_space": "Check that state, cache and log mounts are writable and meet the required free byte and inode thresholds.",
     "nginx_native_binary": "Check NGINX executable presence; issue #27 must verify its native package provenance.",
     "nginx_managed_include_collision": "Do not overwrite or adopt a foreign NGINX include without verified ownership.",
     "systemd_binary": "Check systemctl presence; a binary alone does not prove working native systemd.",
