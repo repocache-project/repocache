@@ -11,7 +11,9 @@ import socket
 import pytest
 
 import repocache.server_native_root_control_entrypoint_v1 as worker
+import repocache.server_native_v2_transaction_v1 as transaction
 from repocache.server_root_control_protocol_v1 import FixedRootControlError
+from test_server_proposed_state_v2_store import document
 
 
 class Server:
@@ -172,3 +174,49 @@ def test_real_native_wrapper_is_not_the_inert_protocol_skeleton():
     assert "execute_native_fixed_v2_transaction" in getsource(
         worker.serve_one_native_fixed_request,
     )
+
+
+def test_real_transaction_checks_service_mount_view_before_nginx(monkeypatch):
+    def refuse():
+        raise worker.NativeHostPreflightError("NATIVE_HOST_SERVICE_MOUNT_VIEW_DIFFERENT")
+
+    monkeypatch.setattr(transaction, "require_socket_worker_host_preconditions", refuse)
+    monkeypatch.setattr(transaction, "inspect_effective_native_nginx_unit",
+                        lambda _distro: pytest.fail("NGINX inspection after mount refusal"))
+    with pytest.raises(worker.NativeHostPreflightError, match="SERVICE_MOUNT_VIEW_DIFFERENT"):
+        transaction.execute_native_fixed_v2_transaction("APPLY_V2", "debian")
+
+
+def test_native_pin_resolution_drops_privilege_and_bounds_total_wait(monkeypatch):
+    config = document(count=2)
+    repository = config["repositories"][0]
+    repository["desired_state"] = "active"
+    calls = []
+    times = iter((100.0, 144.0))
+    # Replace the transaction's binding rather than mutating the test
+    # process's global time.monotonic.
+    from types import SimpleNamespace
+    monkeypatch.setattr(transaction, "time", SimpleNamespace(monotonic=lambda: next(times)))
+
+    def resolve(host, port, **options):
+        calls.append((host, port, options))
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP,
+                 "", ("8.8.8.8", port))]
+
+    monkeypatch.setattr(transaction, "bounded_getaddrinfo", resolve)
+    host, = repository["upstream"]["allowed_hosts"]
+    assert transaction._resolve_pins(config) == {"repo-0": {host: ["8.8.8.8"]}}
+    assert len(calls) == 1
+    assert calls[0][:2] == (host, 443)
+    assert calls[0][2]["timeout_seconds"] == 1.0
+    assert calls[0][2]["run_as_uid"] == calls[0][2]["run_as_gid"] == 65534
+
+
+def test_native_pin_resolution_refuses_mismatched_sockaddr(monkeypatch):
+    config = document(count=1)
+    config["repositories"][0]["desired_state"] = "active"
+    monkeypatch.setattr(transaction, "bounded_getaddrinfo", lambda *_a, **_kw: [
+        (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("8.8.8.8", 80)),
+    ])
+    with pytest.raises(transaction.NativeV2TransactionError, match="DNS_UNVERIFIED"):
+        transaction._resolve_pins(config)

@@ -233,7 +233,7 @@ def test_systemd_worker_blocks_preflight_failure_before_peer_processing(
 
         monkeypatch.setattr(worker, "_validate_listener", accepted_socket)
         monkeypatch.setattr(
-            worker, "require_native_host_preconditions", refuse_host,
+            worker, "require_socket_worker_host_preconditions", refuse_host,
         )
         with pytest.raises(
             NativeHostPreflightError, match="SYSTEMD_PID1_REQUIRED",
@@ -255,7 +255,7 @@ def test_systemd_worker_does_not_treat_preflight_as_approval(monkeypatch):
         )
         monkeypatch.setattr(worker, "_validate_listener", lambda _: None)
         monkeypatch.setattr(
-            worker, "require_native_host_preconditions",
+            worker, "require_socket_worker_host_preconditions",
             lambda: {"host_root_provenance_verified": False},
         )
         with worker._systemd_listener() as accepted:

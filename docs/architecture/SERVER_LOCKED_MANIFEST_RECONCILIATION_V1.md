@@ -1337,3 +1337,11 @@ Compensation after a failed apply restores the prior catalog and NGINX,
 then validates the prior active generation before clearing the durable
 recovery journal. Neither a green CI nor source mock is evidence of
 installed SELinux policy, exact signed worker provenance or VM success.
+
+The native transaction repeats the socket worker's fixed service path
+comparison before inspecting NGINX or opening the protected state. The
+systemd filesystem sandbox stays in place. Repository DNS discovery uses
+the shared public-address and exact socket-address policy, with a fixed
+unprivileged UID/GID, no supplementary groups, a per-lookup timeout and a
+45-second aggregate DNS budget. A failed lookup refuses the transaction
+before a native WAL or generated configuration is written.

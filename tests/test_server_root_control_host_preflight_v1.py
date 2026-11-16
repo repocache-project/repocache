@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import os
+import socket
 import stat
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -127,6 +129,81 @@ def test_invalid_namespace_kind_refused_before_syscalls(monkeypatch):
     with pytest.raises(NativeHostPreflightError,
                        match="NAMESPACE_KIND_REFUSED"):
         gate._same_namespace("../net")
+
+
+def test_private_mount_namespace_requires_matching_service_view(monkeypatch):
+    _prepared(monkeypatch)
+    observed = []
+    monkeypatch.setattr(gate, "_namespace_pair", lambda kind: ((1, 10), (1, 20)))
+    monkeypatch.setattr(gate, "_matching_service_mount_view", lambda: observed.append(True))
+    report = gate.require_socket_worker_host_preconditions()
+    assert observed == [True]
+    assert report["private_mount_and_fixed_service_view_observed"] is True
+    assert report["pid1_systemd_and_matching_namespaces_observed"] is False
+    assert report["signed_installed_binary_verified"] is False
+    assert report["authorizes_nginx_reload"] is False
+
+
+def test_standalone_observation_still_refuses_a_private_mount_namespace(monkeypatch):
+    _prepared(monkeypatch)
+
+    def same(kind):
+        if kind == "mnt":
+            raise NativeHostPreflightError("NATIVE_HOST_NAMESPACE_DIFFERENT")
+
+    monkeypatch.setattr(gate, "_same_namespace", same)
+    monkeypatch.setattr(gate, "_matching_service_mount_view",
+                        lambda: pytest.fail("standalone probe must remain strict"))
+    with pytest.raises(NativeHostPreflightError, match="NAMESPACE_DIFFERENT"):
+        require_native_host_preconditions()
+
+
+def test_mount_namespace_drift_remains_a_refusal(monkeypatch):
+    _prepared(monkeypatch)
+    views = iter((((1, 10), (1, 20)), ((1, 10), (1, 21))))
+    monkeypatch.setattr(gate, "_namespace_pair", lambda kind: next(views))
+    monkeypatch.setattr(gate, "_matching_service_mount_view", lambda: None)
+    with pytest.raises(NativeHostPreflightError, match="NAMESPACE_CHANGED"):
+        gate.require_socket_worker_host_preconditions()
+
+
+def test_service_view_compares_real_rooted_socket_inodes_and_refuses_substitutions(
+    monkeypatch, tmp_path,
+):
+    here = tmp_path / "worker"
+    there = tmp_path / "pid1"
+    here.mkdir()
+    there.mkdir()
+    # Start two real sockets in temporary directories; tools never query
+    # PID 1 or a real control socket for this regression.
+    for root in (here, there):
+        (root / "run").mkdir()
+        (root / "worker").write_text("marker", encoding="ascii")
+    with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as first, \
+            socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as second:
+        # Use relative addresses to stay inside Linux sun_path limits.
+        monkeypatch.chdir(tmp_path)
+        first.bind("worker/s")
+        second.bind("pid1/s")
+        native_open = os.open
+        roots = {"/": here, "/proc/1/root": here}
+
+        def open_fixed(path, *args, **kwargs):
+            return native_open(roots.get(path, path), *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", open_fixed)
+        monkeypatch.setattr(gate, "_SERVICE_DIRECTORIES", ("/run",))
+        monkeypatch.setattr(gate, "_SERVICE_FILES", ("/worker",))
+        monkeypatch.setattr(gate, "_SERVICE_SOCKETS", ("/s",))
+        gate._matching_service_mount_view()
+        roots["/proc/1/root"] = there
+        with pytest.raises(NativeHostPreflightError, match="SERVICE_MOUNT_VIEW_DIFFERENT"):
+            gate._matching_service_mount_view()
+        roots["/proc/1/root"] = here
+        (here / "worker").rename(here / "worker-real")
+        (here / "worker").symlink_to(Path("worker-real"))
+        with pytest.raises(NativeHostPreflightError, match="SERVICE_MOUNT_VIEW_UNSAFE"):
+            gate._matching_service_mount_view()
 
 
 def test_unsafe_proc_data_is_redacted_and_size_limited(monkeypatch):

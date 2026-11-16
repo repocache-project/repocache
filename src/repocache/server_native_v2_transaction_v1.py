@@ -30,6 +30,7 @@ import time
 from contextlib import ExitStack
 from typing import Any
 
+from repocache.server_bounded_dns_v1 import DEFAULT_DNS_SECONDS, bounded_getaddrinfo
 from repocache.server_install_v1 import parse_install_bytes
 from repocache.server_locked_manifest_reconcile_v1 import (
     _validate_proposed_v2_snapshot, preview_proposed_v2_state_transition,
@@ -65,7 +66,7 @@ from repocache.server_root_control_full_context_v1 import (
     _capture_default_nginx_dump_private,
 )
 from repocache.server_root_control_host_preflight_v1 import (
-    require_native_host_preconditions,
+    require_socket_worker_host_preconditions,
 )
 from repocache.server_root_control_pinned_tls_pair_v1 import (
     _inspect_pinned_tls_pair_for_future_transaction,
@@ -73,8 +74,8 @@ from repocache.server_root_control_pinned_tls_pair_v1 import (
 from repocache.server_root_control_native_syntax_v1 import (
     inspect_installed_default_nginx_syntax_only,
 )
-from repocache.server_upstream_address_preflight_v1 import (
-    inspect_upstream_address_snapshot,
+from repocache.server_upstream_rotation_v1 import (
+    UpstreamRotationError, propose_automatic_upstream_refresh,
 )
 
 # Fixed, non-operator-selected on-disk ownership domains. Provision the
@@ -98,6 +99,8 @@ _SYSTEMCTL = "/usr/bin/systemctl"
 _UNIT = "nginx.service"
 _ENV = {"PATH": "/usr/sbin:/usr/bin:/bin", "LC_ALL": "C"}
 _HEALTH = "/__repocache/healthz"
+_DNS_CHILD_ID = 65534  # Unprivileged nobody identity on both supported distros.
+_DNS_BUDGET_SECONDS = 45
 _CA = {"debian": "/etc/ssl/certs/ca-certificates.crt",
        "almalinux": "/etc/pki/tls/certs/ca-bundle.crt"}
 
@@ -595,34 +598,32 @@ def _verify_tls_pair(root_fd: int, document: dict[str, Any]) -> None:
 
 
 def _resolve_pins(document: dict[str, Any]) -> dict[str, dict[str, list[str]]]:
-    """Native OS resolution, not a caller-supplied socket payload or JSON."""
-    from urllib.parse import urlsplit
+    """Resolve approved names with the shared policy and a bounded nonroot child."""
     answers = {}
+    deadline = time.monotonic() + _DNS_BUDGET_SECONDS
+
+    def lookup(host: str, port: int, **socket_parameters: int) -> list:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise socket.gaierror("DNS worker: transaction deadline")
+        return bounded_getaddrinfo(
+            host, port, timeout_seconds=min(remaining, DEFAULT_DNS_SECONDS),
+            run_as_uid=_DNS_CHILD_ID, run_as_gid=_DNS_CHILD_ID, **socket_parameters,
+        )
+
     for repository in document["repositories"]:
         if repository["desired_state"] != "active":
             continue
         rid = repository["id"]
-        host_map = {}
-        port = urlsplit(repository["upstream"]["base_url"]).port or 443
-        for host in repository["upstream"]["allowed_hosts"]:
-            try:
-                found = socket.getaddrinfo(
-                    host, port, family=socket.AF_UNSPEC,
-                    type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP,
-                )
-            except (OSError, ValueError):
-                _deny("DNS_UNVERIFIED")
-            addresses = sorted(set(item[4][0] for item in found))
-            if not 1 <= len(addresses) <= 32:
-                _deny("DNS_UNVERIFIED")
-            host_map[host] = addresses
         try:
-            inspect_upstream_address_snapshot(
-                document, repository_id=rid, answers_by_host=host_map,
+            proposal = propose_automatic_upstream_refresh(
+                document, repository_id=rid,
+                current_generation=document["expected_state_generation"],
+                previous_pins_by_host=None, resolver=lookup,
             )
-        except (ValueError, TypeError):
+        except UpstreamRotationError:
             _deny("DNS_UNVERIFIED")
-        answers[rid] = host_map
+        answers[rid] = proposal["candidate_pins_by_host"]
     return answers
 
 
@@ -947,7 +948,7 @@ def execute_native_fixed_v2_transaction(operation: str,
     shell or callback from its caller. Socket worker integration MUST prove
     signed worker/unit provenance and separate issue #64 approval first.
     """
-    report = require_native_host_preconditions()
+    report = require_socket_worker_host_preconditions()
     if report["host_root_provenance_verified"] is not False:
         _deny("HOST_CONTEXT_INVALID")
     # A fixed working vendor NGINX unit must already exist, be active and
