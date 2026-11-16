@@ -81,6 +81,7 @@ def test_complete_first_party_source_and_client_modules_in_inventory():
         "scripts/server_v06_preflight.py",
         "scripts/build_native_root_worker.py",
     "scripts/stage_native_root_worker.py",
+    "scripts/install_native_root_worker.py",
         "scripts/collect_native_candidate_evidence.py",
         "scripts/inspect_native_vm_nginx_prerequisites.py",
         "scripts/format_native_vm_paste_receipt.py",

@@ -21,6 +21,7 @@ on:
       - 'scripts/build_release.py'
       - 'scripts/build_native_root_worker.py'
       - 'scripts/stage_native_root_worker.py'
+      - 'scripts/install_native_root_worker.py'
       - 'tests/test_native_root_worker_stage.py'
       - 'src/repocache/upgrade.py'
       - 'tests/test_v06_release_source_inventory.py'

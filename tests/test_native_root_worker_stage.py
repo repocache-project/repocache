@@ -11,7 +11,9 @@ import time
 import pytest
 
 from repocache import signatures, upgrade
-from scripts import build_release, stage_native_root_worker as stage
+from repocache.server_protected_state_store_v1 import LOCK_NAME
+from scripts import build_release, install_native_root_worker as install
+from scripts import stage_native_root_worker as stage
 from test_signatures import _openssl, _sign
 from test_v06_release_source_inventory import _candidate_source
 
@@ -156,3 +158,96 @@ def test_authenticated_installed_readback_refuses_drift(candidate, tmp_path):
     unit.symlink_to(stage.UNITS[1])
     with pytest.raises(OSError):
         stage._audit_worker_files(root, payloads)
+
+
+
+def _placement_root(tmp_path):
+    root = tmp_path / "root-placement"
+    state = root / "var/lib/repocache/server"
+    state.mkdir(parents=True, mode=0o700)
+    lock = state / LOCK_NAME
+    lock.touch(mode=0o600)
+    lock.chmod(0o600)
+    (root / "usr/libexec/repocache").mkdir(parents=True)
+    (root / "etc/systemd/system").mkdir(parents=True)
+    return root, state
+
+
+_UNIT_PATHS = ("/etc/systemd/system", "/usr/lib/systemd/system")
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="requires a disposable root-owned filesystem")
+def test_authenticated_placement_recovers_interrupted_atomic_publish(candidate, tmp_path, monkeypatch):
+    archive, digest, commit, _ = candidate
+    payloads, receipt = stage._authenticated_payloads(
+        archive.parent, commit=commit, archive_sha256=digest,
+        system=None if _combined() else {"ID": "debian", "VERSION_ID": "13"},
+    )
+    root, state = _placement_root(tmp_path)
+    current_finish = install._finish_link
+
+    def interrupted(*_args):
+        raise InterruptedError("injected after the atomic no-replace link")
+
+    monkeypatch.setattr(install, "_finish_link", interrupted)
+    with pytest.raises(InterruptedError):
+        install._place_worker_files(root, payloads, receipt, unit_paths=_UNIT_PATHS)
+    worker = root / "usr/libexec/repocache" / stage.WORKER
+    assert worker.stat().st_nlink == 2
+    assert len(tuple(state.glob(".native-worker-placement.pending-*"))) == 1
+    with pytest.raises(stage.WorkerStageError, match="OTHER_CANDIDATE"):
+        install._place_worker_files(root, payloads, {**receipt, "source_sha": "d" * 40},
+                                    unit_paths=_UNIT_PATHS)
+    monkeypatch.setattr(install, "_finish_link", current_finish)
+    install._place_worker_files(root, payloads, receipt, unit_paths=_UNIT_PATHS)
+    stage._audit_worker_files(root, payloads)
+    assert worker.stat().st_nlink == 1
+    assert not tuple(state.glob(".native-worker-placement.pending-*"))
+    assert len(tuple(state.glob(".native-worker-placement.complete-*"))) == 1
+    before = worker.stat()
+    install._place_worker_files(root, payloads, receipt, unit_paths=_UNIT_PATHS)
+    assert worker.stat().st_ino == before.st_ino
+    assert worker.stat().st_mtime_ns == before.st_mtime_ns
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="requires a disposable root-owned filesystem")
+@pytest.mark.parametrize("conflict,code", [
+    ("etc/systemd/system/repocache-control.service", "FOREIGN_EXISTING_DESTINATION"),
+    ("usr/lib/systemd/system/repocache-control.socket", "FOREIGN_UNIT_OR_OVERRIDE"),
+    ("etc/systemd/system/repocache-control.service.d/test.conf", "FOREIGN_UNIT_OR_OVERRIDE"),
+    ("etc/systemd/system/sockets.target.wants/repocache-control.socket", "FOREIGN_UNIT_DEPENDENCY"),
+    ("run/repocache/server-control.sock", "LIVE_CONTROL_SOCKET"),
+])
+def test_placement_preserves_foreign_paths_before_any_write(tmp_path, conflict, code):
+    root, state = _placement_root(tmp_path)
+    foreign = root / conflict
+    foreign.parent.mkdir(parents=True, exist_ok=True)
+    foreign.write_bytes(b"foreign transport or unit file")
+    payloads = {name: b"test bytes" for name in (stage.WORKER, *stage.UNITS)}
+    with pytest.raises(stage.WorkerStageError, match=code):
+        install._place_worker_files(root, payloads, {"source_sha": "a" * 40},
+                                    unit_paths=_UNIT_PATHS)
+    assert foreign.read_bytes() == b"foreign transport or unit file"
+    assert not tuple(state.glob(".native-worker-placement.*"))
+    assert not (root / "usr/libexec/repocache" / stage.WORKER).exists()
+
+
+def test_systemd_unit_paths_use_the_running_manager_and_refuse_unusable_values(monkeypatch):
+    seen = []
+    class Result:
+        returncode = 0
+        stdout = b"/etc/systemd/system /usr/lib/systemd/system\n"
+
+    def run(argv, **kwargs):
+        seen.append(argv)
+        assert kwargs["timeout"] == 12
+        return Result()
+
+    monkeypatch.setattr(install.subprocess, "run", run)
+    assert install._systemd_unit_paths() == _UNIT_PATHS
+    assert seen == [[
+        "/usr/bin/systemctl", "--system", "--no-pager", "show", "--property=UnitPath", "--value",
+    ]]
+    Result.stdout = b"/etc/systemd/system /untrusted/../path\n"
+    with pytest.raises(stage.WorkerStageError, match="UNIT_PATH_UNVERIFIED"):
+        install._systemd_unit_paths()
