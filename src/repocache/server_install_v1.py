@@ -20,6 +20,9 @@ TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}\Z", re.ASCII)
 ID = re.compile(r"[a-z][a-z0-9-]{0,47}\Z", re.ASCII)
 LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z", re.ASCII)
 OS_SUPPORTED = {"debian": ("13", (3, 13)), "almalinux": ("10", (3, 12))}
+# Match the bounded /etc/os-release preflight read. Direct in-memory callers
+# must not be allowed to bypass the same size and Unicode rejection gate.
+MAX_OS_IDENTITY_BYTES = 16 * 1024
 
 
 class InstallInputError(ValueError):
@@ -338,10 +341,20 @@ def validate_install_document(document: Any, *, for_apply: bool = False) -> dict
         "bind_address", "hostname", "https_port"})
     address = _string(listen["bind_address"], "deployment.listen.bind_address")
     try:
-        if str(ipaddress.ip_address(address)) != address:
-            _reject("deployment.listen.bind_address: noncanonical IP")
+        ip = ipaddress.ip_address(address)
     except ValueError:
         _reject("deployment.listen.bind_address: invalid IP literal")
+    # Keep schema errors outside the ipaddress conversion's ValueError
+    # handler. InstallInputError is itself a ValueError, and swallowing it
+    # would collapse unsafe multicast/mapped-address diagnostics.
+    if (ip.is_multicast
+            or (isinstance(ip, ipaddress.IPv4Address)
+                and ip.is_reserved)
+            or (isinstance(ip, ipaddress.IPv6Address)
+                and ip.ipv4_mapped is not None)):
+        _reject("deployment.listen.bind_address: unsafe bind IP")
+    if str(ip) != address:
+        _reject("deployment.listen.bind_address: noncanonical IP")
     _host(listen["hostname"], "deployment.listen.hostname")
     _integer(listen["https_port"], "deployment.listen.https_port", 1, 65535)
 
@@ -485,6 +498,16 @@ def validate_os_identity(os_release: str, python_version: tuple[int, int]) -> st
     """
     if type(os_release) is not str:
         _reject("os-release: expected text")
+    # Check characters first so encoding even a huge direct Python string
+    # cannot allocate unbounded memory. A UTF-8 byte check is still needed:
+    # 9,000 non-ASCII characters exceed the native 16 KiB input contract.
+    if len(os_release) > MAX_OS_IDENTITY_BYTES:
+        _reject("os-release: input exceeds 16 KiB")
+    try:
+        if len(os_release.encode("utf-8", "strict")) > MAX_OS_IDENTITY_BYTES:
+            _reject("os-release: input exceeds 16 KiB")
+    except UnicodeError:
+        _reject("os-release: invalid Unicode")
     values: dict[str, str] = {}
     for line in os_release.splitlines():
         line = line.strip()

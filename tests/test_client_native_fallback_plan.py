@@ -229,3 +229,30 @@ def test_literal_loopback_test_endpoints_remain_canonical_without_write_authorit
         assert p.route_sha256 == sha(b"https://127.0.0.1:18443/repo/")
         assert p.production_write_eligible is False
         assert p.route_approval_verified is False
+
+
+def test_forged_proposal_authority_flags_cannot_pass_byte_convergence():
+    from dataclasses import replace
+
+    p = compile_one("etc/apt/sources.list", APT, APT)
+    assert p.companion is not None
+    assert plan.proposal_bytes_converged(p, p.proposed, p.companion[1])
+    for field in (
+        "production_write_eligible", "native_fallback_verified",
+        "route_approval_verified",
+    ):
+        forged = replace(p, **{field: True})
+        assert not plan.proposal_bytes_converged(
+            forged, forged.proposed, forged.companion[1],
+        )
+        forged = replace(p, **{field: 0})
+        assert not plan.proposal_bytes_converged(
+            forged, forged.proposed, forged.companion[1],
+        )
+
+    rpm = compile_one("etc/yum.repos.d/alma.repo", DNF, DNF,
+                      upstream=RPM_UPSTREAM)
+    assert plan.proposal_bytes_converged(rpm, rpm.proposed)
+    assert not plan.proposal_bytes_converged(
+        replace(rpm, native_fallback_verified=True), rpm.proposed,
+    )

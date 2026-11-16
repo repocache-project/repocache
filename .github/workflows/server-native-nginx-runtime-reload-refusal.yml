@@ -1,0 +1,53 @@
+name: Native NGINX reload runtime refusal and safe rollback (disposable)
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/ci_v06_nginx_reload_runtime_failure.py'
+      - '.github/workflows/server-native-nginx-runtime-reload-refusal.yml'
+      - 'docs/testing/SERVER_NATIVE_NGINX_RUNTIME_RELOAD_REFUSAL.md'
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  real-nginx-reload-refusal:
+    name: NGINX runtime reload refusal (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: debian13
+            image: debian:trixie-slim
+          - platform: almalinux10
+            image: almalinux:10
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - name: Install packaged NGINX, Python and unprivileged switch
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [ '${{ matrix.platform }}' = debian13 ]; then
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq
+            apt-get install -y -qq --no-install-recommends nginx python3 util-linux
+          else
+            dnf -y -q --enablerepo=crb install nginx python3 util-linux
+          fi
+          test -x /usr/sbin/nginx
+          test -x /usr/bin/setpriv
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Assert syntax-valid reload can fail at bind and rollback stays healthy
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -f /.dockerenv
+          setpriv --reuid 65534 --regid 65534 --clear-groups \
+            env PYTHONDONTWRITEBYTECODE=1 REPOCACHE_DISPOSABLE_NGINX_RELOAD_CI=1 \
+            python3 -B scripts/ci_v06_nginx_reload_runtime_failure.py

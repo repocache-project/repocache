@@ -162,3 +162,29 @@ def test_public_receipt_contains_no_untrusted_filename(tmp_path):
     assert "secret-token" not in str(proof)
     assert "evil" not in str(proof)
     assert proof["native_probe_code"] == "NATIVE_OBSERVATION_NOT_EXECUTED"
+
+
+@pytest.mark.parametrize("code", [
+    "CONTAINER_CONTEXT_REFUSED", "EFFECTIVE_NGINX_NOT_OBSERVED",
+    "SYSTEMD_PID1_NOT_OBSERVED", "CANDIDATE_UNAVAILABLE",
+])
+def test_contradictory_native_probe_code_never_reports_observed_prerequisites(
+    tmp_path, code,
+):
+    path = candidate(tmp_path)
+    actual = digest(path.read_bytes())
+    result = receipt.collect_candidate_evidence(
+        path, actual, SOURCE_SHA, native_probe=lambda: {
+            "status": "READ_ONLY_PREREQUISITES_OBSERVED",
+            "code": code,
+            "systemd_pid1_namespace_shape_observed": True,
+            "effective_nginx_master_observed": True,
+        },
+    )
+    assert result["artifact_digest_matched"] is True
+    assert result["status"] == "NOT VERIFIED"
+    assert result["native_probe_code"] == code
+    assert result["native_prerequisites_observed"] is False
+    assert result["code"] == "DIGEST_MATCH_NATIVE_EVIDENCE_PENDING"
+    assert not result["complete_server_acceptance_passed"]
+    assert not result["authorizes_host_write"]

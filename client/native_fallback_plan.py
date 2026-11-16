@@ -269,6 +269,9 @@ def proposal_bytes_converged(proposal: FallbackProposal, current: bytes,
     xattrs, approved route or journal; only a future root helper can do so.
     """
     if (type(proposal) is not FallbackProposal or type(current) is not bytes
+            or proposal.production_write_eligible is not False
+            or proposal.native_fallback_verified is not False
+            or proposal.route_approval_verified is not False
             or current != proposal.proposed
             or _sha(current) != proposal.proposed_sha256):
         return False

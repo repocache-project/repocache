@@ -20,6 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "client"))
 import native_fallback_plan as compiler
 import ci_client_native_fallback as fixture
+import ci_dnf_signed_rpm_fallback as signed_rpm
 
 
 def _checked_container():
@@ -51,17 +52,40 @@ def _compile(path: str, original: bytes, upstream: str, cache: str,
         managed_id=ident, upstream=upstream, cache=cache)
 
 
+def _assert_compiled_tls_refusal(
+    returncode: int, cache_hits: list[str], upstream_hits: list[str],
+) -> None:
+    """Refuse any false-positive result from a native wrong-CA fetch.
+
+    A TLS handshake must not succeed at either endpoint, whether the
+    primary is healthy or the package manager tries its signed fallback.
+    """
+    if (type(returncode) is not int or returncode == 0
+            or type(cache_hits) is not list or type(upstream_hits) is not list
+            or cache_hits or upstream_hits):
+        raise RuntimeError("COMPILED_NATIVE_TLS_FOREIGN_CA_NOT_REFUSED")
+
+
 def smoke(manager: str):
     _checked_container()
     with tempfile.TemporaryDirectory(prefix="repocache-compiled-native-ci-") as work:
         base = Path(work)
         (base / "www").mkdir()
         ident = secrets.token_hex(16)
+        signed_rpm_file = None
+        signed_rpm_bytes = None
+        rpmdb = None
         if manager == "apt":
             key = fixture.apt_repository(base, package_transfer=True)
             installed_key = Path("/etc/apt/keyrings") / ("repocache-ci-" + ident + ".gpg")
         else:
-            key = fixture.dnf_repository(base, signed=True)
+            # The compiler-generated DNF source must also prove a REAL
+            # signed RPM metadata -> transfer -> trusted RPMDB chain.
+            # Reuse the already reviewed disposable signature fixture
+            # rather than trusting a separate hand-written DNF repo.
+            key, signed_rpm_file, signed_rpm_bytes, rpmdb = (
+                signed_rpm._signed_fixture(base)
+            )
             installed_key = Path("/etc/pki/rpm-gpg") / ("repocache-ci-" + ident + ".asc")
         assert key is not None
         _create_unique(installed_key, key.read_bytes())
@@ -151,9 +175,123 @@ def smoke(manager: str):
                                hashlib.sha256(source_deb.read_bytes()).digest()):
                         raise RuntimeError("Signed APT package hash or transfer failed:\n" +
                                            package.stdout[-3500:])
+                if manager == "dnf" and phase != "both-failed":
+                    assert signed_rpm_bytes is not None and rpmdb is not None
+                    rpm_dest = base / ("compiled-signed-rpm-" + phase)
+                    received = signed_rpm._download_dnf(argv, rpm_dest)
+                    downloaded = rpm_dest / signed_rpm._RPM_NAME
+                    rpm_checksum_ok = (
+                        received.returncode == 0 and downloaded.is_file()
+                        and hashlib.sha256(downloaded.read_bytes()).digest()
+                            == hashlib.sha256(signed_rpm_bytes).digest()
+                    )
+                    rpm_signature_ok = False
+                    if rpm_checksum_ok:
+                        verify = signed_rpm._run([
+                            "rpm", "--dbpath", str(rpmdb), "-Kv",
+                            str(downloaded),
+                        ])
+                        rpm_signature_ok = signed_rpm._rpm_signature_verified(verify)
+                    if not (rpm_checksum_ok and rpm_signature_ok):
+                        raise RuntimeError(
+                            "Compiled DNF signed RPM transfer refused: "
+                            + phase + " signed=" + str(rpm_signature_ok)
+                            + " same_bytes=" + str(rpm_checksum_ok)
+                            + " dnf_exit=" + str(received.returncode)
+                        )
+                    print(
+                        "PASS: compiler-generated DNF fallback transferred "
+                        "RPM with identical SHA256 and independently trusted "
+                        "ephemeral RPMDB signature in " + phase,
+                        flush=True,
+                    )
                 print("compiled-%s %s PASS: primary_hits=%d upstream_hits=%d" %
                       (manager, phase, len(cache.hits), len(upstream.hits)),
                       flush=True)
+
+            # A valid-looking compiled HTTPS DNF source must not allow
+            # altered RPM bytes after signed repodata generation. In this
+            # case metadata may pass but a native package download MUST
+            # fail its signed checksum chain. Never install a package.
+            if manager == "dnf":
+                assert signed_rpm_file is not None and signed_rpm_bytes is not None
+                signed_rpm_file.write_bytes(
+                    b"tampered after signed repodata: not a valid RPM\n"
+                )
+                try:
+                    cache.mode = upstream.mode = "healthy"
+                    cache.hits.clear()
+                    upstream.hits.clear()
+                    argv = fixture.dnf_command(
+                        base, cache, upstream, "compiled-tampered-rpm",
+                        ca_certificate=cert, metadata_key=key,
+                    )
+                    (base / "repos" / "repocache-ci.repo").write_bytes(
+                        native.proposed
+                        + ("sslverify=1\nsslcacert=" + str(cert) + "\n").encode("utf-8")
+                    )
+                    metadata = subprocess.run(
+                        argv, text=True, stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT, timeout=120, check=False,
+                    )
+                    bad_download = signed_rpm._download_dnf(
+                        argv, base / "compiled-tampered-download",
+                    ) if metadata.returncode == 0 else None
+                    if (metadata.returncode != 0
+                            or bad_download is None
+                            or bad_download.returncode == 0
+                            or not cache.hits):
+                        raise RuntimeError(
+                            "Compiled DNF altered signed RPM was not rejected "
+                            "by native package manager"
+                        )
+                    print(
+                        "PASS: compiled DNF source refuses tampered RPM bytes "
+                        "after successful signed metadata verification",
+                        flush=True,
+                    )
+                finally:
+                    signed_rpm_file.write_bytes(signed_rpm_bytes)
+
+            # The *actual compiled* source must never accept a cache or
+            # upstream certificate signed by an unrelated CI-only CA.
+            # APT and DNF use a fresh metadata cache/repository for this
+            # negative check; a previously valid update is not evidence.
+            foreign_ca, _foreign_key = fixture.temporary_tls_identity(
+                base, "compiled-foreign-ca",
+            )
+            cache.mode = "healthy"
+            upstream.mode = "healthy"
+            cache.hits.clear()
+            upstream.hits.clear()
+            if manager == "apt":
+                argv = fixture.apt_command(
+                    base, cache, upstream, "foreign-ca", key,
+                    ca_certificate=foreign_ca,
+                )
+                (base / "ci.sources").write_bytes(native.proposed)
+            else:
+                argv = fixture.dnf_command(
+                    base, cache, upstream, "foreign-ca",
+                    ca_certificate=foreign_ca, metadata_key=key,
+                )
+                (base / "repos" / "repocache-ci.repo").write_bytes(
+                    native.proposed
+                    + ("sslverify=1\nsslcacert=" + str(foreign_ca)
+                       + "\n").encode("utf-8")
+                )
+            assert cache.origin.startswith("https://")
+            assert upstream.origin.startswith("https://")
+            negative = subprocess.run(
+                argv, text=True, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, check=False, timeout=120,
+            )
+            _assert_compiled_tls_refusal(
+                negative.returncode, cache.hits, upstream.hits,
+            )
+            print("compiled-%s foreign-ca PASS: native TLS rejects both "
+                  "healthy origins before serving metadata" % manager,
+                  flush=True)
         finally:
             cache.close()
             upstream.close()

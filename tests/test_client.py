@@ -223,3 +223,42 @@ def test_check_fallback_is_not_applicable_with_direct_only_sources(
     assert "Not applicable" in fallback["detail"]
     assert {str(p): p.read_bytes() for p in host.rglob("*") if p.is_file()} == before
 
+
+
+def test_disabled_apply_refuses_before_config_sources_platform_or_network(
+        monkeypatch, tmp_path, capsys):
+    """A refused root-bound action cannot cause even read-side host discovery.
+
+    This regression is narrower than a production apply implementation.
+    """
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("Disabled --apply attempted I/O or pre-authorization")
+    for name in (
+        "_installed_server_config", "_server", "discover", "_distro",
+        "_select_repositories", "_catalog", "_sync_plan", "_connectivity",
+    ):
+        monkeypatch.setattr(client, name, forbidden)
+    assert client.run(["--json", "repos", "sync", "--apply"], root=tmp_path) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schema_version"] == 1
+    assert payload["ok"] is False
+    assert payload["error"] == {
+        "code": "OPERATION_FAILED",
+        "message": "Applying changes is disabled until reviewed",
+    }
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_disabled_apply_never_probes_even_with_untrusted_server_argument(
+        monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(client, "_installed_server_config", lambda *_:
+                        pytest.fail("No installed configuration read permitted"))
+    monkeypatch.setattr(client, "_server", lambda *_:
+                        pytest.fail("No server or catalog processing permitted"))
+    assert client.run([
+        "repos", "sync", "--json", "--apply", "--server",
+        "https://untrusted.invalid",
+    ], root=tmp_path) == 2
+    result = json.loads(capsys.readouterr().out)
+    assert result["error"]["code"] == "OPERATION_FAILED"
+    assert "untrusted.invalid" not in json.dumps(result)

@@ -294,3 +294,42 @@ def test_normal_single_link_signed_distribution_anchor_still_eligible(monkeypatc
     key = "/usr/share/keyrings/debian-archive-keyring.pgp"
     monkeypatch.setattr(native.os, "lstat", lambda p: leaf if str(p) == key else directory)
     assert native._trusted_key(key) is True
+
+
+@pytest.mark.parametrize("output", [
+    "Candidate: 1.26.3-1\n",
+    "foreign-package:\n Candidate: 1.26.3-1\n",
+    "nginx:\n Candidate: /tmp/untrusted-package\n",
+    "nginx:\n Candidate: not-a-version\n",
+    "nginx:\n Candidate: 1.2;unexpected\n",
+    "nginx:\n Candidate: 1.2\nnginx:\n",
+    "nginx:\n Candidate: 1.2\n Candidate: 1.3\n",
+])
+def test_apt_policy_candidate_requires_exact_nginx_and_version(
+    monkeypatch, output,
+):
+    monkeypatch.setattr(native, "_trusted_key", lambda path: True)
+    _, runner = _run_success(output)
+    evidence = native.inspect_native_nginx_metadata(
+        os_release=DEBIAN, python_version=(3, 13),
+        document=document(), runner=runner,
+    )
+    assert evidence.to_dict()["code"] == "NATIVE_PACKAGE_NOT_AVAILABLE"
+    assert not evidence.candidate_available
+    assert not evidence.authorizes_installation
+
+
+@pytest.mark.parametrize("version", [
+    "1.26.3-1", "2:1.26.3-1+deb13u1", "1.26.3~bpo13+1",
+])
+def test_legitimate_debian_versions_remain_valid_scratch_metadata(
+    monkeypatch, version,
+):
+    monkeypatch.setattr(native, "_trusted_key", lambda path: True)
+    _, runner = _run_success("nginx:\n Installed: (none)\n Candidate: " + version + "\n")
+    evidence = native.inspect_native_nginx_metadata(
+        os_release=DEBIAN, python_version=(3, 13),
+        document=document(), runner=runner,
+    )
+    assert evidence.to_dict()["code"] == "NATIVE_CANDIDATE_OBSERVED"
+    assert evidence.candidate_available and not evidence.authorizes_installation

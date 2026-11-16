@@ -286,3 +286,17 @@ release identity. These checks are narrower than signed package/host trust:
 no file contents or paths enter public evidence and no root install authority
 is gained. PID1 namespaces, NGINX, SELinux and signed installed release
 acceptance still need the real booted-VM campaign.
+
+
+## Recheck the NGINX MainPID process metadata (#27)
+
+The fixed read-only /proc observation now compares the observed NGINX
+MainPID process ownership UID and full mode/type as well as the process
+inode/device on the second kernel lookup. Keeping the same PID inode while
+its ownership or mode changes must fail closed, not yield a positive
+non-authorizing observation. Mocked, deterministic regression cases exercise
+both second-read changes without reading service configuration or invoking
+systemctl/reload. This narrows one stale-process window but cannot prevent
+PID reuse, independently authenticate native package ownership or prove an
+installed booted systemd/SELinux service; all host and reload gates remain
+NOT VERIFIED.

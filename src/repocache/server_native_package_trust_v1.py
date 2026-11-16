@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+import re
 from pathlib import Path
 import stat
 import subprocess
@@ -282,12 +283,19 @@ def inspect_native_nginx_metadata(
         if distro == "debian":
             # Locale C apt-cache policy output: only accept an explicit
             # nonempty candidate, never an installed-package-only result.
-            candidates = [line.strip().split(":", 1)[1].strip()
-                          for line in output.splitlines()
-                          if line.strip().startswith("Candidate:")]
-            available = (len(candidates) == 1 and
-                         candidates[0] not in ("(none)", "", "none") and
-                         len(candidates[0]) <= 128)
+            # A Candidate token alone is not a valid package policy query.
+            # Require the fixed nginx header and one Debian version token.
+            lines = [line.strip() for line in output.splitlines()
+                     if line.strip()]
+            candidates = [line.split(":", 1)[1].strip()
+                          for line in lines if line.startswith("Candidate:")]
+            available = (bool(lines) and lines[0] == "nginx:"
+                         and lines.count("nginx:") == 1
+                         and len(candidates) == 1
+                         and re.fullmatch(
+                             r"(?:[0-9]+:)?[0-9][A-Za-z0-9.+~:-]{0,127}",
+                             candidates[0], re.ASCII,
+                         ) is not None)
         else:
             # Force --available and fixed repository list. Reject ambiguous
             # or untrusted output rather than assuming rc=0 means available.
