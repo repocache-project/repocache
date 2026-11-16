@@ -55,9 +55,11 @@ def _parse_native_reply(raw: bytes, *, operation: str) -> dict[str, Any]:
         "transaction_completed": False,
     }:
         _deny("OPERATION_REFUSED")
-    success = {"APPLIED", "UNCHANGED"} if operation == "APPLY_V2" else (
-        {"RECOVERED", "CLEAN"} if operation == "RECOVER_V2" else set()
-    )
+    success = {
+        "APPLY_V2": {"APPLIED", "UNCHANGED"},
+        "RECOVER_V2": {"RECOVERED", "CLEAN"},
+        "RELOAD_V2": {"RELOADED"},
+    }.get(operation, ())
     if (type(value.get("schema_version")) is not int
             or value["schema_version"] != 1
             or value.get("status") not in success
@@ -73,7 +75,7 @@ def _parse_native_reply(raw: bytes, *, operation: str) -> dict[str, Any]:
             or type(value["nginx_reload_and_exposure_observed"]) is not bool
             or type(value["active_catalog_published"]) is not bool):
         _deny("RESPONSE_UNEXPECTED")
-    if operation == "APPLY_V2":
+    if operation in ("APPLY_V2", "RELOAD_V2"):
         if type(value["state_generation"]) is not int or not (
             0 <= value["state_generation"] < 2**63
         ):
@@ -81,14 +83,15 @@ def _parse_native_reply(raw: bytes, *, operation: str) -> dict[str, Any]:
     elif value["state_generation"] is not None:
         _deny("RESPONSE_UNEXPECTED")
     published = value["status"] == "APPLIED"
+    reloaded = value["status"] in ("APPLIED", "RELOADED")
     if (value["active_catalog_published"] is not published
-            or value["nginx_reload_and_exposure_observed"] is not published):
+            or value["nginx_reload_and_exposure_observed"] is not reloaded):
         _deny("RESPONSE_UNEXPECTED")
     return value
 
 
 def request_native_fixed_v2(operation: str) -> dict[str, Any]:
-    """Perform only apply-v2 or recover-v2 as a kernel-authorized operator.
+    """Request one fixed operation as a kernel-authorized operator.
 
     A transport failure after send is OUTCOME_UNCONFIRMED, never a claim that
     the privileged actor did not commit. No automatic retries or bypass.

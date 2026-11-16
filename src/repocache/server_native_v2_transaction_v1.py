@@ -656,6 +656,46 @@ def _native_syntax_check() -> None:
         _deny("SYNTAX_UNVERIFIED")
 
 
+def _verify_owned_include_in_dump(include: bytes) -> None:
+    header = b"/etc/nginx/conf.d/repocache-managed.conf:\n"
+    dump = _capture_default_nginx_dump_private()
+    sections = re.split(rb"(?m)^# configuration file ", dump)[1:]
+    managed = [section[len(header):] for section in sections if section.startswith(header)]
+    if len(managed) != 1 or managed[0] not in (include, include + b"\n"):
+        _deny("NGINX_DUMP_MISMATCH")
+
+
+def _reload_owned_locked(
+    root_fd: int, state_fd: int, include_fd: int, public_fd: int, distribution: str,
+) -> dict:
+    """Reload only the last verified committed generation, without staging files."""
+    _no_conflicting_pending(state_fd)
+    old = _read_all(state_fd, include_fd, public_fd)
+    _verify_owned(old)
+    snapshot, raw = _read_v2(state_fd, 0)
+    if snapshot is None or raw != old[V2_STATE]:
+        _deny("MANAGED_GENERATION_REQUIRED")
+    document = parse_install_bytes(
+        base64.b64decode(snapshot["configuration_base64"], validate=True), for_apply=True,
+    )
+    generation = snapshot["state_generation"]
+    _verify_tls_pair(root_fd, document)
+    _local_https_generation(document, generation)
+    _local_https_catalog(document, old[_CATALOG])
+    _native_syntax_check()
+    _verify_owned_include_in_dump(old[_INCLUDE])
+    if _read_all(state_fd, include_fd, public_fd) != old:
+        _deny("PRE_RELOAD_DRIFT")
+    # NGINX reloads the same known-good generation. There are no staged
+    # state/catalog bytes to promote, restore or mark committed on failure.
+    _reload_native(distribution)
+    _local_https_generation(document, generation)
+    _local_https_catalog(document, old[_CATALOG])
+    if _read_all(state_fd, include_fd, public_fd) != old:
+        _deny("POST_RELOAD_DRIFT")
+    return {"status": "NATIVE_V2_RELOADED", "state_generation": generation}
+
+
 def _apply_locked(root_fd: int, state_fd: int,
                   include_fd: int, public_fd: int,
                   distribution: str, *, fixture: bool = False) -> dict:
@@ -912,7 +952,7 @@ def _operation_under_root(root_fd: int, *, distribution: str,
     """Internal entry. Only trusted root code selects the fixed operation."""
     if type(distribution) is not str or distribution not in _CA:
         _deny("DISTRIBUTION_UNSUPPORTED")
-    if operation not in ("APPLY_V2", "RECOVER_V2"):
+    if operation not in ("APPLY_V2", "RECOVER_V2", "RELOAD_V2"):
         _deny("OPERATION_REFUSED")
     if fixture:
         _refuse_actual_root_fixture_write(root_fd)
@@ -927,6 +967,9 @@ def _operation_under_root(root_fd: int, *, distribution: str,
             if operation == "APPLY_V2":
                 result = _apply_locked(root_fd, state_fd, include_fd,
                                        public_fd, distribution, fixture=fixture)
+            elif operation == "RELOAD_V2":
+                result = _reload_owned_locked(root_fd, state_fd, include_fd,
+                                              public_fd, distribution)
             else:
                 _legacy_refusal(state_fd, 0)
                 if _pending(state_fd, 0):

@@ -21,7 +21,7 @@ def result(operation, status, *, generation=None):
         "requested_operation": operation,
         "state_generation": generation,
         "transaction_completed": True,
-        "nginx_reload_and_exposure_observed": published,
+        "nginx_reload_and_exposure_observed": status in ("APPLIED", "RELOADED"),
         "active_catalog_published": published,
     }
 
@@ -31,6 +31,7 @@ def result(operation, status, *, generation=None):
     ("APPLY_V2", "UNCHANGED", 2),
     ("RECOVER_V2", "RECOVERED", None),
     ("RECOVER_V2", "CLEAN", None),
+    ("RELOAD_V2", "RELOADED", 7),
 ])
 def test_only_exact_accepted_success_is_parsed(op, status, gen):
     expected = result(op, status, generation=gen)
@@ -66,6 +67,13 @@ def test_operation_denied_is_not_success():
     with pytest.raises(client.NativeRootControlClientError,
                        match="OPERATION_REFUSED"):
         client._parse_native_reply(packet(denied), operation="APPLY_V2")
+
+
+def test_reload_success_cannot_claim_catalog_publication():
+    forged = result("RELOAD_V2", "RELOADED", generation=7)
+    forged["active_catalog_published"] = True
+    with pytest.raises(client.NativeRootControlClientError, match="RESPONSE_UNEXPECTED"):
+        client._parse_native_reply(packet(forged), operation="RELOAD_V2")
 
 
 def test_unsupported_operation_refused_before_accessing_socket(monkeypatch):

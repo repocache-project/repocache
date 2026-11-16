@@ -25,6 +25,13 @@ shapes, and outputs an allowlisted subset. Arbitrary input fields, secrets,
 paths, private hostnames and human-entered comments are never forwarded.
 Do not paste the raw unredacted VM logs unless requested after review.
 
+Each line includes the fixed native-probe outcome code and, when observed,
+the supported distribution. This identifies the Debian 13 and AlmaLinux 10
+results without a hostname or a separate label. The AlmaLinux line also
+retains the read-only SELinux enforcing observation, even if the NGINX
+probe is still pending. A prior schema-1 receipt without platform fields
+remains readable and shows an unknown distribution.
+
 All valid results remain `NOT VERIFIED` (or `FAIL` on a mismatched
 candidate hash). Exit 2 = partial/pending evidence; exit 1 = detected digest
 mismatch; **no successful exit and no release GO are possible**. A matched

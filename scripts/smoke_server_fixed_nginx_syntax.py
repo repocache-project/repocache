@@ -16,6 +16,7 @@ from repocache.server_root_control_native_syntax_v1 import (
 from repocache.server_root_control_full_context_v1 import (
     FixedNginxFullContextError, inspect_installed_default_nginx_full_context_only,
 )
+from repocache.server_native_v2_transaction_v1 import _verify_owned_include_in_dump
 
 
 def main() -> int:
@@ -63,6 +64,17 @@ def main() -> int:
     assert recovered["default_config_syntax_observed"] is True
     recovered_dump = inspect_installed_default_nginx_full_context_only()
     assert recovered_dump["full_context_sha256"] == full["full_context_sha256"]
+    # Confirm the managed-section parser against real packaged nginx -T.
+    # Exclusive creation and the Docker-only guard protect unrelated files.
+    managed = Path("/etc/nginx/conf.d/repocache-managed.conf")
+    sample = b"# disposable managed include\n"
+    with managed.open("xb") as handle:
+        handle.write(sample)
+    try:
+        _verify_owned_include_in_dump(sample)
+    finally:
+        managed.unlink()
+    print("PASS: packaged NGINX dump contains the exact managed include section")
     print("PASS: DISPOSABLE_NATIVE_NGINX_DEFAULT_SYNTAX_AND_REFUSAL")
     return 0
 

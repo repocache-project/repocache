@@ -22,6 +22,7 @@ on:
       - 'src/repocache/upgrade.py'
       - 'tests/test_v06_release_source_inventory.py'
       - 'scripts/ci_native_nginx_process_inode_smoke.py'
+      - 'scripts/smoke_server_fixed_nginx_syntax.py'
       - 'docs/architecture/SERVER_LOCKED_MANIFEST_RECONCILIATION_V1.md'
 
 permissions:

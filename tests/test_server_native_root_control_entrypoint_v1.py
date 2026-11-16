@@ -48,6 +48,8 @@ def valid(operation):
     ("RECOVER_V2", {"status": "NATIVE_V2_CLEAN"}, "CLEAN"),
     ("RECOVER_V2",
      {"status": "NATIVE_V2_UNPUBLISHED_WAL_DISCARDED"}, "RECOVERED"),
+    ("RELOAD_V2", {"status": "NATIVE_V2_RELOADED",
+                   "state_generation": 3}, "RELOADED"),
 ])
 def test_fixed_kernel_operation_dispatch_positive(monkeypatch, operation, result, status):
     client, accepted = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
@@ -71,6 +73,9 @@ def test_fixed_kernel_operation_dispatch_positive(monkeypatch, operation, result
         assert response["status"] == status
         assert response["requested_operation"] == operation
         assert response["transaction_completed"] is True
+        if status == "RELOADED":
+            assert response["nginx_reload_and_exposure_observed"] is True
+            assert response["active_catalog_published"] is False
         assert effects == [(operation, "debian")]
         assert "command" not in response and "path" not in response
 

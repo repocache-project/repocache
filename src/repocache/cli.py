@@ -466,14 +466,45 @@ def service_show(ctx: typer.Context) -> None:
         raise typer.Exit(1)
 
 
+def _has_managed_nginx_control() -> bool:
+    for path in (
+        "/usr/libexec/repocache/server-control-worker",
+        "/run/repocache/server-control.sock",
+        "/var/lib/repocache/server",
+    ):
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            # An inaccessible managed installation must not silently fall
+            # back to direct, operator-owned NGINX service commands.
+            return True
+        return True
+    return False
+
+
 @service_app.command("reload")
 def service_reload(ctx: typer.Context, yes: bool = typer.Option(False, "--yes", help="Explicit, non-interactive acknowledgement")) -> None:
     """Run nginx -t before reloading the NGINX service."""
     _require_text_output(ctx)
-    console.print("[yellow]Operation: nginx -t → systemctl reload nginx[/yellow]")
     if not yes:
         console.print("[yellow]Reload refused: pass --yes explicitly; no changes made.[/yellow]")
         raise typer.Exit(2)
+    if _has_managed_nginx_control():
+        try:
+            from repocache.server_native_root_control_client_v1 import request_native_fixed_v2
+        except ImportError:
+            console.print("[red]Managed NGINX control is unavailable.[/red]")
+            raise typer.Exit(1) from None
+        try:
+            request_native_fixed_v2("RELOAD_V2")
+        except (OSError, ValueError):
+            console.print("[red]Managed NGINX reload failed or could not be confirmed.[/red]")
+            raise typer.Exit(1) from None
+        console.print("[green]Reload completed successfully.[/green]")
+        return
+    console.print("[yellow]Operation: nginx -t → systemctl reload nginx[/yellow]")
     result = command([settings().nginx_bin, "-t"], timeout=12)
     if not result["ok"]:
         console.print(f"[red]Invalid NGINX configuration. Reload skipped. {result['stderr']}[/red]")

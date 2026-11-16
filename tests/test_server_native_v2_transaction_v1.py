@@ -105,6 +105,12 @@ def recover(fs):
     )
 
 
+def reload_owned(fs):
+    return native._operation_under_root(
+        fs[0], distribution="debian", operation="RELOAD_V2", fixture=True,
+    )
+
+
 def assert_no_pending(fs):
     _, state, include, catalog, _events = fs
     assert not (state / native._WAL).exists()
@@ -207,6 +213,54 @@ def test_first_install_commits_real_three_resource_paths(filesystem, monkeypatch
     assert json.loads(catalog.read_text()) == {"schema": 1, "repositories": []}
     assert (state / native._MANIFEST).is_file()
     assert recover(filesystem)["status"] == "NATIVE_V2_CLEAN"
+    assert_no_pending(filesystem)
+
+
+@pytest.mark.parametrize("failure", [None, "invalid-syntax", "reload-timeout", "foreign-dump"])
+def test_managed_reload_keeps_committed_files_and_checks_exact_context(
+    filesystem, monkeypatch, failure,
+):
+    stage(filesystem, snapshot(count=1))
+    apply(filesystem)
+    _fd, state, include, catalog, events = filesystem
+    paths = (state / V2_STATE, include, catalog, state / native._MANIFEST)
+    previous = [(path.read_bytes(), path.stat().st_ino, path.stat().st_mtime_ns)
+                for path in paths]
+    events.clear()
+    managed_bytes = previous[1][0] if failure != "foreign-dump" else b"# unrelated\n"
+    monkeypatch.setattr(native, "_capture_default_nginx_dump_private", lambda: (
+        b"# configuration file /etc/nginx/nginx.conf:\nhttp {}\n\n"
+        b"# configuration file /etc/nginx/conf.d/repocache-managed.conf:\n" + managed_bytes + b"\n"
+    ))
+
+    def refuse(*_args):
+        raise native.NativeV2TransactionError(failure)
+
+    if failure == "invalid-syntax":
+        monkeypatch.setattr(native, "_native_syntax_check", refuse)
+    if failure == "reload-timeout":
+        monkeypatch.setattr(native, "_reload_native", refuse)
+    if failure:
+        expected = "NGINX_DUMP_MISMATCH" if failure == "foreign-dump" else failure
+        with pytest.raises(native.NativeV2TransactionError, match=expected):
+            reload_owned(filesystem)
+        assert ("reload", "debian") not in events
+    else:
+        assert reload_owned(filesystem) == {
+            "status": "NATIVE_V2_RELOADED", "state_generation": 1,
+        }
+        assert events.count(("reload", "debian")) == 1
+        assert events.count(("exposure", 1)) == 2
+        assert events.index("syntax") < events.index(("reload", "debian"))
+    assert [(path.read_bytes(), path.stat().st_ino, path.stat().st_mtime_ns)
+            for path in paths] == previous
+    assert_no_pending(filesystem)
+
+
+def test_reload_refuses_unmanaged_state_without_any_native_effect(filesystem):
+    with pytest.raises(native.NativeV2TransactionError, match="MANAGED_GENERATION_REQUIRED"):
+        reload_owned(filesystem)
+    assert not filesystem[-1]
     assert_no_pending(filesystem)
 
 

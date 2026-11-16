@@ -1,6 +1,6 @@
 """Actual fixed native root-control dispatcher for v0.6 (#31/#64).
 
-Unlike the non-installed #254 protocol skeleton, this dispatches the two
+Unlike the non-installed #254 protocol skeleton, this dispatches the
 fixed authenticated operations through the durable native v2/NGINX/catalog
 transaction. It exposes no generic path, command, environment, JSON body
 or shell. It MUST be installed only from a separately authenticated signed
@@ -31,11 +31,16 @@ from repocache.server_root_control_host_preflight_v1 import (
 
 _RELEASE_ID = "/usr/lib/os-release"
 _KNOWN_RESULTS = {
-    "NATIVE_V2_COMMITTED": "APPLIED",
-    "NATIVE_V2_NO_CHANGE": "UNCHANGED",
-    "NATIVE_V2_CLEAN": "CLEAN",
-    "NATIVE_V2_ROLLED_BACK": "RECOVERED",
-    "NATIVE_V2_UNPUBLISHED_WAL_DISCARDED": "RECOVERED",
+    "APPLY_V2": {
+        "NATIVE_V2_COMMITTED": "APPLIED",
+        "NATIVE_V2_NO_CHANGE": "UNCHANGED",
+    },
+    "RECOVER_V2": {
+        "NATIVE_V2_CLEAN": "CLEAN",
+        "NATIVE_V2_ROLLED_BACK": "RECOVERED",
+        "NATIVE_V2_UNPUBLISHED_WAL_DISCARDED": "RECOVERED",
+    },
+    "RELOAD_V2": {"NATIVE_V2_RELOADED": "RELOADED"},
 }
 
 
@@ -85,21 +90,15 @@ def _native_distro() -> str:
 
 def _exact_reply(operation: str, outcome: dict) -> dict:
     """No arbitrary underlying service/debug fields on the operator socket."""
-    if operation not in ("APPLY_V2", "RECOVER_V2"):
+    if type(operation) is not str or operation not in _KNOWN_RESULTS:
         _deny("OPERATION_REFUSED")
-    if type(outcome) is not dict or outcome.get("status") not in _KNOWN_RESULTS:
+    if type(outcome) is not dict or type(outcome.get("status")) is not str:
         _deny("OUTCOME_INVALID")
-    if operation == "APPLY_V2" and outcome["status"] not in (
-        "NATIVE_V2_COMMITTED", "NATIVE_V2_NO_CHANGE",
-    ):
-        _deny("OUTCOME_INVALID")
-    if operation == "RECOVER_V2" and outcome["status"] not in (
-        "NATIVE_V2_CLEAN", "NATIVE_V2_ROLLED_BACK",
-        "NATIVE_V2_UNPUBLISHED_WAL_DISCARDED",
-    ):
+    status = _KNOWN_RESULTS[operation].get(outcome["status"])
+    if status is None:
         _deny("OUTCOME_INVALID")
     generation = outcome.get("state_generation")
-    if operation == "APPLY_V2":
+    if operation in ("APPLY_V2", "RELOAD_V2"):
         if type(generation) is not int or not 0 <= generation < 2**63:
             _deny("OUTCOME_INVALID")
     else:
@@ -107,13 +106,11 @@ def _exact_reply(operation: str, outcome: dict) -> dict:
             _deny("OUTCOME_INVALID")
     return {
         "schema_version": 1,
-        "status": _KNOWN_RESULTS[outcome["status"]],
+        "status": status,
         "requested_operation": operation,
         "state_generation": generation,
         "transaction_completed": True,
-        "nginx_reload_and_exposure_observed": (
-            outcome["status"] == "NATIVE_V2_COMMITTED"
-        ),
+        "nginx_reload_and_exposure_observed": status in ("APPLIED", "RELOADED"),
         "active_catalog_published": (
             outcome["status"] == "NATIVE_V2_COMMITTED"
         ),
@@ -142,7 +139,7 @@ def serve_one_native_fixed_request() -> dict[str, Any]:
                     or authorized.get("authorizes_nginx_reload") is not False):
                 _deny("PEER_SELECTION_REFUSED")
             operation = authorized.get("operation")
-            if operation not in ("APPLY_V2", "RECOVER_V2"):
+            if type(operation) is not str or operation not in _KNOWN_RESULTS:
                 _deny("OPERATION_REFUSED")
             distribution = _native_distro()
             try:
