@@ -1,0 +1,57 @@
+name: Server v0.6 Native TLS Listener Candidate
+
+on:
+  pull_request:
+    paths:
+      - "src/repocache/server_nginx_tls_listener_candidate_v1.py"
+      - "tests/test_server_nginx_tls_listener_candidate_v1.py"
+      - "scripts/ci_server_tls_listener_native.py"
+      - ".github/workflows/server-tls-listener-native.yml"
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  native-tls-listener:
+    name: Native trusted TLS (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: debian13
+            image: debian:trixie-slim
+          - platform: almalinux10
+            image: almalinux:10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build disposable distro native NGINX TLS image
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > "$RUNNER_TEMP/Dockerfile.tls" <<'EOF'
+          ARG BASE_IMAGE
+          FROM $BASE_IMAGE
+          RUN if command -v apt-get >/dev/null; then \
+                apt-get update -qq && DEBIAN_FRONTEND=noninteractive \
+                apt-get install -y -qq nginx python3 openssl ca-certificates; \
+              else dnf -y -q install nginx python3 openssl ca-certificates; fi
+          EOF
+          docker build --pull -f "$RUNNER_TEMP/Dockerfile.tls" \
+            --build-arg BASE_IMAGE=${{ matrix.image }} \
+            -t "repocache-tls:${{ matrix.platform }}" "$RUNNER_TEMP"
+      - name: Test actual native TLS handshake, hostname and trust refusal
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker run --rm --network none --read-only --user 65534:65534 \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,nosuid,nodev,size=128m,mode=1777 \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/repo,readonly" \
+            -e PYTHONPATH=/repo/src -e REPOCACHE_DISPOSABLE_NGINX_SMOKE=1 \
+            "repocache-tls:${{ matrix.platform }}" \
+            python3 -B /repo/scripts/ci_server_tls_listener_native.py

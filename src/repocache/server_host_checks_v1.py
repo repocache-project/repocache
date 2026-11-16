@@ -81,11 +81,18 @@ def _read_fixed(path: str, limit: int) -> bytes:
 
 
 def _executable_at(path: str) -> bool | None:
+    """Observe a fixed executable leaf without following an untrusted link.
+
+    A symlink is NOT VERIFIED, not evidence of a distro-owned native binary.
+    Package provenance remains a separate #27 security gate.
+    """
     try:
-        info = os.stat(path)
+        info = os.lstat(path)
     except FileNotFoundError:
         return False
     except OSError:
+        return None
+    if stat.S_ISLNK(info.st_mode):
         return None
     return stat.S_ISREG(info.st_mode) and bool(info.st_mode & 0o111)
 

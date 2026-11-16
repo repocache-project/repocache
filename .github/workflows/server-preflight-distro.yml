@@ -12,6 +12,7 @@ on:
       - 'scripts/collect_native_candidate_evidence.py'
       - 'tests/test_native_acceptance_evidence_v1.py'
       - 'tests/test_server_host_checks_v1.py'
+      - 'tests/test_server_native_port_collision_v1.py'
       - '.github/workflows/server-preflight-distro.yml'
   workflow_dispatch:
 
@@ -143,6 +144,7 @@ jobs:
             tests/test_server_install_v1.py \
             tests/test_server_preflight_v1.py \
             tests/test_server_host_checks_v1.py \
+            tests/test_server_native_port_collision_v1.py \
             tests/test_native_acceptance_evidence_v1.py
           # This is distro userspace/container evidence, NOT a booted
           # systemd or SELinux enforcing/managed-label acceptance test.

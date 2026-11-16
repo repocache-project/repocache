@@ -139,24 +139,79 @@ def main() -> None:
         print("PASS: stock nginx -t validates independent inherited/overridden "
               "inactive and max_size directives", flush=True)
 
-        # min_free support is a *binary capability*, not inferred from
-        # distro identity or NGINX version strings. Test actual config.
-        add_min_free = fragment.replace(
-            " use_temp_path=off;", " min_free=8m use_temp_path=off;")
-        if add_min_free == fragment:
-            raise AssertionError("Policy candidate missing expected safe parameter")
+        # Re-render a future global policy update after independently
+        # overriding only one field in each repository. Neither cache zone
+        # must freeze the old global value for an unoverridden field.
+        future = copy.deepcopy(original)
+        future_global = future["deployment"]["cache_policy"]["global"]
+        future_global["inactive_seconds"] = 900
+        future_global["max_size_bytes"] = 16 * 1024 * 1024
+        future_apt = next(i for i in future["repositories"] if i["kind"] == "apt")
+        future_dnf = next(i for i in future["repositories"] if i["kind"] == "dnf")
+        future_apt["cache_overrides"] = {"inactive_seconds": 120}
+        future_dnf["cache_overrides"] = {"max_size_bytes": 8 * 1024 * 1024}
+        future_snapshot = copy.deepcopy(future)
+        updated = render_repository_nginx_bundle_candidate(
+            future, expected_state_generation=0,
+            candidate_pins_by_repository=pins, ca_bundle_path=ca,
+        )
+        assert future == future_snapshot, "POLICY_RENDER_MUTATED_INPUT"
+        assert updated["authorizes_nginx_activation"] is False
+        assert updated["authorizes_catalog_publication"] is False
+        updated_fragment = updated["http_upstream_fragment"]
+        new_zones = {}
+        for line in updated_fragment.splitlines():
+            if line.startswith("proxy_cache_path "):
+                parsed = CACHE_LINE.fullmatch(line)
+                assert parsed is not None, "NATIVE_CACHE_POLICY_SHAPE_DRIFT"
+                path, zone, inactive, capacity = parsed.groups()
+                assert path.startswith(str(cache_root) + "/")
+                assert zone not in new_zones, "DUPLICATED_CACHE_ZONE"
+                new_zones[zone] = (int(inactive), int(capacity))
+        assert new_zones == {
+            "repocache_cache_debian_trixie_main": (120, 16 * 1024 * 1024),
+            "repocache_cache_almalinux_baseos": (900, 8 * 1024 * 1024),
+        }, "FUTURE_GLOBAL_POLICY_INHERITANCE_MISMATCH"
+        assert checked_syntax(
+            nginx, root, updated_fragment, updated["server_location_fragment"]
+        ), "FUTURE_GLOBAL_POLICY_STOCK_NGINX_SYNTAX_INVALID"
+        assert fragment == bundle["http_upstream_fragment"]
+        assert original["deployment"]["cache_policy"]["global"] != future_global
+        print("PASS: stock nginx -t accepts future global policy change with "
+              "independent partial overrides and no source mutation", flush=True)
+
+        # The *actual production renderer*, not a test-only string patch,
+        # proposes min_free using the contract's validated critical threshold.
+        # Positive nginx -t is still a disposable-binary observation, not a
+        # trust assertion about an installed or subsequently upgraded host.
+        min_free_bundle = render_repository_nginx_bundle_candidate(
+            original, expected_state_generation=0,
+            candidate_pins_by_repository=pins, ca_bundle_path=ca,
+            native_min_free_supported=True,
+        )
+        critical = original["deployment"]["cache_policy"]["disk_pressure"][
+            "critical_free_bytes"]
+        enhanced = min_free_bundle["http_upstream_fragment"]
+        assert enhanced.count(f" min_free={critical} ") == 2
+        assert min_free_bundle["native_min_free_candidate_emitted"] is True
+        assert min_free_bundle["native_min_free_supported_verified"] is False
+        assert min_free_bundle["authorizes_nginx_activation"] is False
+        assert " min_free=" not in fragment
         supported = checked_syntax(
-            nginx, root, add_min_free, bundle["server_location_fragment"])
+            nginx, root, enhanced,
+            min_free_bundle["server_location_fragment"],
+        )
         if supported:
-            print("PASS: stock nginx accepts min_free on this exact binary",
-                  flush=True)
+            print("PASS: stock nginx -t accepts strictly rendered critical "
+                  "min_free threshold on this actual binary", flush=True)
         else:
-            # Unsupported min_free requires explicit refusal/fallback.
-            # The production renderer must not silently assume availability.
+            # Exact binary capability unsupported. Never silently promote the
+            # enhanced candidate or claim pressure enforcement; the unchanged
+            # legacy baseline is still a distinct syntactically valid fallback.
             assert checked_syntax(
                 nginx, root, fragment, bundle["server_location_fragment"])
-            print("NOT VERIFIED: min_free unavailable; original candidate "
-                  "remains syntactically valid, no activation", flush=True)
+            print("NOT VERIFIED: min_free unsupported on this binary; "
+                  "fallback candidate unchanged; no activation", flush=True)
 
         # An invalid native value must never be accepted or deployed.
         poisoned = fragment.replace(

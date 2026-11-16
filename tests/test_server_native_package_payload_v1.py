@@ -86,6 +86,8 @@ def scripted_runner(distro, *, problem=None):
                     rpm.unlink()
         if args[0] == "/usr/bin/dpkg-deb":
             assert "--field" in args
+            if args[-1] == "Architecture":
+                return SimpleNamespace(returncode=0, stdout="amd64\n", stderr="")
             name = "other" if problem == "missing-nginx" else "nginx"
             return SimpleNamespace(returncode=0, stdout=name+"\n", stderr="")
         if args[0] == "/usr/bin/rpmkeys":
@@ -99,7 +101,8 @@ def scripted_runner(distro, *, problem=None):
             assert any(x.startswith("--dbpath=") for x in args)
             if "-qp" in args:
                 return SimpleNamespace(returncode=0, stdout=(
-                    "other" if problem == "missing-nginx" else "nginx"), stderr="")
+                    ("other" if problem == "missing-nginx" else "nginx") +
+                "\tx86_64"), stderr="")
             assert "--initdb" in args or "--import" in args
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -251,3 +254,143 @@ def test_ci_diagnostics_never_log_scratch_paths(monkeypatch, capsys):
     assert "operator-secret" not in diagnostics
     assert "untrusted native output" not in diagnostics
     assert diagnostics.count("ci_native_manager_stage") == 3
+
+
+def test_download_directory_itself_must_be_owned_and_non_writable_to_others(
+    tmp_path, monkeypatch,
+):
+    directory = tmp_path / "payloads"
+    directory.mkdir(mode=0o700)
+    artifact = directory / "nginx_1_amd64.deb"
+    artifact.write_bytes(b"fixture bytes, not an executable package")
+    assert stage._artifacts(directory, ".deb") == (artifact,)
+    directory.chmod(0o777)
+    try:
+        assert stage._artifacts(directory, ".deb") is None
+    finally:
+        directory.chmod(0o700)
+    directory.chmod(0o770)
+    try:
+        assert stage._artifacts(directory, ".deb") is None
+    finally:
+        directory.chmod(0o700)
+    assert stage._artifacts(directory, ".deb") == (artifact,)
+
+
+def test_foreign_download_root_owner_refuses_even_safe_children(tmp_path, monkeypatch):
+    directory = tmp_path / "payloads"
+    directory.mkdir(mode=0o700)
+    artifact = directory / "nginx_1_amd64.deb"
+    artifact.write_bytes(b"fixture")
+    original_stat = stage.os.stat
+
+    def suspicious_root(path, *args, **kwargs):
+        record = original_stat(path, *args, **kwargs)
+        if path == directory:
+            return SimpleNamespace(
+                st_mode=record.st_mode,
+                st_uid=os.geteuid() + 1,
+                st_dev=record.st_dev,
+            )
+        return record
+
+    monkeypatch.setattr(stage.os, "stat", suspicious_root)
+    assert stage._artifacts(directory, ".deb") is None
+
+
+@pytest.mark.parametrize("distribution", ["debian", "almalinux"])
+@pytest.mark.parametrize("duplicate", [True, False])
+def test_native_download_inventory_requires_unique_package_names(
+    tmp_path, monkeypatch, distribution, duplicate,
+):
+    """Multiple versions/architectures of one package are not one safe set."""
+    first = tmp_path / ("first.deb" if distribution == "debian" else "first.rpm")
+    second = tmp_path / ("second.deb" if distribution == "debian" else "second.rpm")
+    first.write_bytes(b"fixture-a")
+    second.write_bytes(b"fixture-b")
+    def fake_run(argv, *, work, runner):
+        if argv[0] == "/usr/bin/dpkg-deb" or "-qp" in argv:
+            if argv[0] == "/usr/bin/dpkg-deb" and argv[-1] == "Architecture":
+                return "amd64\n", ""
+            name = "nginx" if duplicate or str(first) in argv else "nginx-core"
+            return name + ("\tx86_64" if "-qp" in argv else "\n"), ""
+        if argv[0] == "/usr/bin/rpmkeys":
+            return "fixture.rpm: digests signatures OK\n", ""
+        return "", ""
+    monkeypatch.setattr(stage, "_run", fake_run)
+    files = (first, second)
+    result = (stage._verify_deb(files, work=tmp_path, runner=object())
+              if distribution == "debian" else
+              stage._verify_rpm(files, work=tmp_path, runner=object()))
+    assert result == ("NATIVE_PAYLOAD_SET_UNSAFE" if duplicate else
+                      "NATIVE_PAYLOADS_VERIFIED_IN_SCRATCH")
+
+
+@pytest.mark.parametrize("distribution,extension,bad_arch", [
+    ("debian", ".deb", "arm64"),
+    ("almalinux", ".rpm", "aarch64"),
+])
+def test_reject_signed_but_wrong_architecture_payload(
+    tmp_path, monkeypatch, distribution, extension, bad_arch,
+):
+    """Authentic package names and signatures do not prove ABI compatibility."""
+    monkeypatch.setattr(stage.platform, "machine", lambda: "x86_64")
+    artifact = tmp_path / ("nginx" + extension)
+    artifact.write_bytes(b"synthetic-package-header")
+    def fake_run(args, *, work, runner):
+        if args[0] == "/usr/bin/dpkg-deb":
+            return (bad_arch + "\n", "") if args[-1] == "Architecture" else ("nginx\n", "")
+        if args[0] == "/usr/bin/rpmkeys":
+            return "nginx.rpm: digests signatures OK\n", ""
+        if args[0] == "/usr/bin/rpm" and "-qp" in args:
+            return "nginx\t" + bad_arch, ""
+        return "", ""
+    monkeypatch.setattr(stage, "_run", fake_run)
+    result = (stage._verify_deb((artifact,), work=tmp_path, runner=object())
+              if distribution == "debian" else
+              stage._verify_rpm((artifact,), work=tmp_path, runner=object()))
+    assert result == "NATIVE_PAYLOAD_SET_UNSAFE"
+
+
+@pytest.mark.parametrize("distribution,extension,neutral_arch", [
+    ("debian", ".deb", "all"),
+    ("almalinux", ".rpm", "noarch"),
+])
+def test_accept_architecture_neutral_native_dependencies(
+    tmp_path, monkeypatch, distribution, extension, neutral_arch,
+):
+    monkeypatch.setattr(stage.platform, "machine", lambda: "x86_64")
+    artifact = tmp_path / ("nginx" + extension)
+    artifact.write_bytes(b"synthetic")
+    def fake_run(args, *, work, runner):
+        if args[0] == "/usr/bin/dpkg-deb":
+            return (neutral_arch + "\n", "") if args[-1] == "Architecture" else ("nginx\n", "")
+        if args[0] == "/usr/bin/rpmkeys":
+            return "nginx.rpm: digests signatures OK\n", ""
+        if args[0] == "/usr/bin/rpm" and "-qp" in args:
+            return "nginx\t" + neutral_arch, ""
+        return "", ""
+    monkeypatch.setattr(stage, "_run", fake_run)
+    result = (stage._verify_deb((artifact,), work=tmp_path, runner=object())
+              if distribution == "debian" else
+              stage._verify_rpm((artifact,), work=tmp_path, runner=object()))
+    assert result == "NATIVE_PAYLOADS_VERIFIED_IN_SCRATCH"
+
+
+@pytest.mark.parametrize("distribution,extension", [
+    ("debian", ".deb"),
+    ("almalinux", ".rpm"),
+])
+def test_unknown_machine_architecture_refuses_before_payload_tools(
+    tmp_path, monkeypatch, distribution, extension,
+):
+    monkeypatch.setattr(stage.platform, "machine", lambda: "unreviewed-architecture")
+    artifact = tmp_path / ("nginx" + extension)
+    artifact.write_bytes(b"synthetic")
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("Unknown host architecture must fail before payload tools")
+    monkeypatch.setattr(stage, "_run", forbidden)
+    result = (stage._verify_deb((artifact,), work=tmp_path, runner=object())
+              if distribution == "debian" else
+              stage._verify_rpm((artifact,), work=tmp_path, runner=object()))
+    assert result == "NATIVE_PAYLOAD_SET_UNSAFE"

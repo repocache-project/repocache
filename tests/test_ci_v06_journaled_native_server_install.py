@@ -99,3 +99,24 @@ def test_no_host_install_authority_in_success_schema():
         '_retain_native_package_journal_lock_under_root',
     ):
         assert token in src
+
+
+
+def test_postpackage_stage_requires_read_only_correlated_binary_unit():
+    source = (ROOT / "scripts/ci_v06_journaled_native_server_install.py").read_text()
+    assert 'inspect_current_namespace_native_postpackage_candidate(' in source
+    assert '"native_binary_and_vendor_unit_correlated_in_container": True' in source
+    assert '"native_postpackage_correlation_authorizes_no_reentry": True' in source
+    for flag in (
+        "native_package_signature_verified",
+        "installed_host_root_authenticated",
+        "systemd_pid1_and_service_verified",
+        "selinux_enforcing_verified",
+        "operator_approval_verified",
+        "package_effects_reconciled",
+        "authorizes_native_marker_removal",
+        "authorizes_package_installation",
+        "authorizes_nginx_reload",
+        "authorizes_host_mutation",
+    ):
+        assert flag in source

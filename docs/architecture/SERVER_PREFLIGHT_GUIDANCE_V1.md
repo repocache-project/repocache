@@ -23,3 +23,18 @@ Issue #26 remains **OPEN / NOT VERIFIED** until its other original criteria,
 including the cross-issue missing-package diagnostic evidence from #27, are
 satisfied. The maintainer-accepted limited booted systemd/SELinux test-risk
 exception remains unchanged. No release, signing or deployment authorization.
+
+
+## Fixed native executable leaf symlink refusal (#26)
+
+The read-only executable presence probes for native APT/DNF, the supported
+OS Python interpreter, NGINX and systemctl use `lstat` on the fixed leaf.
+A symlink, including a dangling symlink, is classified **NOT VERIFIED**,
+rather than silently following an executable outside the expected path.
+A missing leaf or a non-executable regular file remains a failure. This is
+a conservative presence observation only: even a regular executable is
+not authenticated as a distribution package and cannot authorize an
+installation. Native package availability, signing and provenance belong
+to the separately verified #27 APT/DNF transaction boundary. No files,
+service state, sources, package-manager metadata or network endpoints are
+modified by the #26 preflight.

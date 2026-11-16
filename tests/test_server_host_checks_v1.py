@@ -792,3 +792,43 @@ def test_root_only_tls_parent_denied_stays_unverified(monkeypatch):
     assert (result.status, result.code) == (
         PreflightStatus.NOT_VERIFIED, "TLS_REFERENCE_ACCESS_UNVERIFIED"
     )
+
+
+@pytest.mark.parametrize("target_kind", ["symlink", "dangling", "regular", "directory"])
+def test_fixed_executable_observation_refuses_symlink_substitution(tmp_path, target_kind):
+    target = tmp_path / "fixed-native-binary"
+    if target_kind in ("symlink", "dangling"):
+        destination = tmp_path / "external-executable"
+        if target_kind == "symlink":
+            destination.write_text("#!/bin/sh\n", encoding="ascii")
+            destination.chmod(0o755)
+        target.symlink_to(destination)
+        assert host._executable_at(str(target)) is None
+    elif target_kind == "regular":
+        target.write_text("#!/bin/sh\n", encoding="ascii")
+        target.chmod(0o755)
+        assert host._executable_at(str(target)) is True
+        target.chmod(0o644)
+        assert host._executable_at(str(target)) is False
+    else:
+        target.mkdir()
+        assert host._executable_at(str(target)) is False
+
+
+def test_native_executable_symlink_propagates_uncertainty_not_success(monkeypatch):
+    native = host._EXECUTABLES["debian"]
+    monkeypatch.setattr(host, "_executable_at",
+                        lambda path: None if path == native[0] else True)
+    result = host._package_binary_check("debian")
+    assert result.status is PreflightStatus.NOT_VERIFIED
+    assert result.code == "NATIVE_EXECUTABLE_ACCESS_UNVERIFIED"
+    monkeypatch.setattr(host, "_executable_at",
+                        lambda path: None if path == "/usr/sbin/nginx" else True)
+    result = byname(host._nginx_checks(spec()), "nginx_native_binary")
+    assert result.status is PreflightStatus.NOT_VERIFIED
+    assert result.code == "NGINX_EXECUTABLE_ACCESS_UNVERIFIED"
+    monkeypatch.setattr(host, "_executable_at",
+                        lambda path: None if path == "/usr/bin/systemctl" else True)
+    result = byname(host._systemd_checks(), "systemd_binary")
+    assert result.status is PreflightStatus.NOT_VERIFIED
+    assert result.code == "SYSTEMD_CLIENT_ACCESS_UNVERIFIED"

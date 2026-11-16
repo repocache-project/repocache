@@ -1,0 +1,62 @@
+name: Server v0.6 Joined NGINX Routes and Metrics
+
+on:
+  pull_request:
+    paths:
+      - "src/repocache/server_nginx_metrics_bundle_join_v1.py"
+      - "tests/test_server_nginx_metrics_bundle_join_v1.py"
+      - "scripts/ci_server_nginx_metrics_join_native.py"
+      - ".github/workflows/server-nginx-metrics-join.yml"
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  native-joined-nginx:
+    name: Joined native NGINX (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: debian13
+            image: debian:trixie-slim
+          - platform: almalinux10
+            image: almalinux:10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run native stock NGINX in disposable rootless container
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker run --rm --network bridge -v "$GITHUB_WORKSPACE:/repo:ro" \
+            -w /repo --user 0:0 ${{ matrix.image }} sh -ec '
+            if command -v apt-get >/dev/null; then
+              apt-get update -qq
+              apt-get install -y -qq nginx python3 ca-certificates >/dev/null
+            else
+              dnf -y -q install nginx python3 ca-certificates >/dev/null
+            fi
+            '
+          # Installation is inside a disposable container, never the host.
+          cat > "$RUNNER_TEMP/Dockerfile.joined" <<'EOF'
+          ARG BASE_IMAGE
+          FROM $BASE_IMAGE
+          RUN if command -v apt-get >/dev/null; then \
+                apt-get update -qq && apt-get install -y -qq nginx python3 ca-certificates; \
+              else dnf -y -q install nginx python3 ca-certificates; fi
+          EOF
+          docker build --pull -f "$RUNNER_TEMP/Dockerfile.joined" \
+            --build-arg BASE_IMAGE=${{ matrix.image }} \
+            -t "repocache-joined:${{ matrix.platform }}" "$RUNNER_TEMP"
+          docker run --rm --network none --read-only --user 65534:65534 \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,nosuid,nodev,size=128m,mode=1777 \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/repo,readonly" \
+            -e PYTHONPATH=/repo/src -e REPOCACHE_DISPOSABLE_NGINX_SMOKE=1 \
+            "repocache-joined:${{ matrix.platform }}" \
+            python3 -B /repo/scripts/ci_server_nginx_metrics_join_native.py

@@ -1,0 +1,55 @@
+name: Stock NGINX package-owner observation (disposable native)
+
+on:
+  pull_request:
+    paths:
+      - 'src/repocache/server_stock_nginx_package_owner_v1.py'
+      - 'tests/test_server_stock_nginx_package_owner_v1.py'
+      - 'docs/testing/SERVER_STOCK_NGINX_PACKAGE_OWNER_V1.md'
+      - '.github/workflows/server-stock-nginx-package-owner.yml'
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  observe:
+    name: Packaged NGINX owner (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: debian13
+            image: debian:trixie-slim
+          - platform: almalinux10
+            image: almalinux:10
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - name: Install stock NGINX and distro Python/pytest
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [ '${{ matrix.platform }}' = debian13 ]; then
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq
+            apt-get install -y -qq --no-install-recommends nginx python3 python3-pytest
+          else
+            dnf -y -q --enablerepo=crb install nginx python3 python3-pytest
+          fi
+          test -x /usr/sbin/nginx
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify fixed native package owner, refusals and no activation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest \
+            -q -p no:cacheprovider tests/test_server_stock_nginx_package_owner_v1.py
+          PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 \
+            python3 -B -m repocache.server_stock_nginx_package_owner_v1
+          echo 'PASS: distro native package database owns fixed nginx binary'
+          echo 'NOT VERIFIED: signing provenance, installed systemd and SELinux'

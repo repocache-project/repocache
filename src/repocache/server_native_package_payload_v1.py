@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+import platform
 from pathlib import Path
 import stat
 import subprocess
@@ -97,6 +98,13 @@ def _artifacts(directory: Path, extension: str) -> tuple[Path, ...] | None:
         if not directory.is_dir() or directory.is_symlink():
             return None
         root = os.stat(directory)
+        # The extraction/download root itself must be private and owned by
+        # the executing user. Checking only the children left a writable
+        # root able to acquire injected new payloads during inventory.
+        if (not stat.S_ISDIR(root.st_mode)
+                or root.st_uid != os.geteuid()
+                or root.st_mode & 0o022):
+            return None
         found: list[Path] = []
         total = 0
         for item in directory.rglob("*"):
@@ -126,9 +134,31 @@ def _artifacts(directory: Path, extension: str) -> tuple[Path, ...] | None:
         return None
 
 
+# Signed repository metadata and package signatures alone do not establish
+# ABI compatibility. This check is only a scratch-stage observation; it never
+# authorizes native package installation or defines approved host hardware.
+_NATIVE_PACKAGE_ARCH = {
+    "x86_64": ("amd64", "x86_64"),
+    "aarch64": ("arm64", "aarch64"),
+    "ppc64le": ("ppc64el", "ppc64le"),
+    "s390x": ("s390x", "s390x"),
+}
+
+
+def _expected_native_payload_arch(distribution: str) -> str | None:
+    machine = platform.machine()
+    if type(machine) is not str or machine not in _NATIVE_PACKAGE_ARCH:
+        return None
+    deb, rpm = _NATIVE_PACKAGE_ARCH[machine]
+    return deb if distribution == "debian" else rpm if distribution == "almalinux" else None
+
+
 def _verify_deb(
     files: tuple[Path, ...], *, work: Path, runner: Callable[..., Any],
 ) -> str:
+    expected_arch = _expected_native_payload_arch("debian")
+    if expected_arch is None:
+        return "NATIVE_PAYLOAD_SET_UNSAFE"
     names: set[str] = set()
     for item in files:
         # Metadata read only; NEVER evaluate maintainer scripts inside .debs.
@@ -143,6 +173,16 @@ def _verify_deb(
             c.isascii() and (c.isalnum() or c in "+-.") for c in name
         ):
             return "NATIVE_PAYLOAD_SET_UNSAFE"
+        if name in names:
+            # Two payloads with one package identity may represent conflicting
+            # architectures or versions. Do not certify an ambiguous set.
+            return "NATIVE_PAYLOAD_SET_UNSAFE"
+        architecture, error = _run(
+            ["/usr/bin/dpkg-deb", "--field", str(item), "Architecture"],
+            work=work, runner=runner,
+        )
+        if error or architecture.strip() not in (expected_arch, "all"):
+            return "NATIVE_PAYLOAD_SET_UNSAFE"
         names.add(name)
     return ("NATIVE_PAYLOADS_VERIFIED_IN_SCRATCH" if "nginx" in names
             else "NATIVE_NGINX_PAYLOAD_MISSING")
@@ -151,6 +191,9 @@ def _verify_deb(
 def _verify_rpm(
     files: tuple[Path, ...], *, work: Path, runner: Callable[..., Any],
 ) -> str:
+    expected_arch = _expected_native_payload_arch("almalinux")
+    if expected_arch is None:
+        return "NATIVE_PAYLOAD_SET_UNSAFE"
     db = work / "rpmdb"
     db.mkdir(mode=0o700)
     for command in (
@@ -174,17 +217,24 @@ def _verify_rpm(
         if (error or len(lines) != 1 or ": " not in lines[0]
                 or lines[0].rsplit(": ", 1)[1] != "digests signatures OK"):
             return "NATIVE_PAYLOAD_SIGNATURE_FAILED"
-        name, error = _run(
+        identity, error = _run(
             ["/usr/bin/rpm", f"--dbpath={db}", "-qp",
-             "--queryformat=%{NAME}", str(item)],
+             "--queryformat=%{NAME}\t%{ARCH}", str(item)],
             work=work, runner=runner,
         )
         if error:
             return "NATIVE_PAYLOAD_SIGNATURE_FAILED"
-        name = name.strip()
+        fields = identity.strip().split("\t")
+        if len(fields) != 2 or fields[1] not in (expected_arch, "noarch"):
+            return "NATIVE_PAYLOAD_SET_UNSAFE"
+        name = fields[0]
         if not name or len(name) > 128 or not all(
             c.isascii() and (c.isalnum() or c in "+-.") for c in name
         ):
+            return "NATIVE_PAYLOAD_SET_UNSAFE"
+        if name in names:
+            # Two payloads with one package identity may represent conflicting
+            # architectures or versions. Do not certify an ambiguous set.
             return "NATIVE_PAYLOAD_SET_UNSAFE"
         names.add(name)
     return ("NATIVE_PAYLOADS_VERIFIED_IN_SCRATCH" if "nginx" in names

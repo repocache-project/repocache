@@ -1,0 +1,73 @@
+name: Server v0.6 Opt-in Repository Metrics (Native NGINX)
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/server-v06-native-metrics-candidate.yml'
+      - 'src/repocache/server_nginx_metrics_candidate_v1.py'
+      - 'tests/test_server_nginx_metrics_candidate_v1.py'
+      - 'scripts/ci_server_nginx_metrics_candidate_v1.py'
+      - 'docs/testing/SERVER_NGINX_METRICS_CANDIDATE_V1.md'
+      - 'src/repocache/core.py'
+  push:
+    branches: [main, 'integration/**']
+    paths:
+      - '.github/workflows/server-v06-native-metrics-candidate.yml'
+      - 'src/repocache/server_nginx_metrics_candidate_v1.py'
+      - 'scripts/ci_server_nginx_metrics_candidate_v1.py'
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  generated-native-metrics:
+    name: Approved-route real NGINX metrics (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: debian13
+            image: debian:trixie-slim
+          - platform: almalinux10
+            image: almalinux:10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build disposable stock NGINX with native distro Python
+        shell: bash
+        env:
+          BASE_IMAGE: ${{ matrix.image }}
+        run: |
+          set -Eeuo pipefail
+          cat > "$RUNNER_TEMP/Dockerfile.repocache-metrics-v06" <<'DOCKERFILE'
+          ARG BASE_IMAGE
+          FROM $BASE_IMAGE
+          RUN if command -v apt-get >/dev/null 2>&1; then \
+                apt-get update -qq && \
+                DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+                  nginx python3 ca-certificates && \
+                rm -rf /var/lib/apt/lists/*; \
+              else \
+                dnf -y -q install nginx python3 ca-certificates && \
+                dnf -q clean all; \
+              fi
+          DOCKERFILE
+          docker build --pull --build-arg "BASE_IMAGE=$BASE_IMAGE" \
+            -t "repocache-v06-native-metrics:${{ matrix.platform }}" \
+            -f "$RUNNER_TEMP/Dockerfile.repocache-metrics-v06" "$RUNNER_TEMP"
+      - name: Actual rootless NGINX emission and CLI parser readback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker run --rm --network none --read-only --user 65534:65534 \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,nosuid,nodev,size=128m,mode=1777 \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/repo,readonly" \
+            -e PYTHONPATH=/repo/src -e REPOCACHE_DISPOSABLE_NGINX_SMOKE=1 \
+            "repocache-v06-native-metrics:${{ matrix.platform }}" \
+            python3 -B /repo/scripts/ci_server_nginx_metrics_candidate_v1.py
+          # Actual NGINX in Linux Docker only; not installed systemd/SELinux.

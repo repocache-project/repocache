@@ -50,8 +50,14 @@ jobs:
             --env REPOCACHE_DISPOSABLE_NATIVE_CI=1 \
             --mount "type=bind,source=$PWD,target=/workspace,readonly" \
             --workdir /workspace almalinux:10 \
-            sh -ec 'dnf install -y python3 createrepo_c openssl gnupg2 >/dev/null && \
+            sh -ec 'dnf install -y python3 createrepo_c openssl gnupg2 rpm-build rpm-sign >/dev/null && \
+                    if command -v dnf5 >/dev/null 2>&1; then \
+                      dnf install -y dnf5-plugins >/dev/null; \
+                    else \
+                      dnf install -y dnf-plugins-core >/dev/null; \
+                    fi && \
                     python3 scripts/ci_client_native_fallback.py dnf && \
                     python3 scripts/ci_client_native_fallback.py dnf --tls && \
                     python3 scripts/ci_client_native_fallback.py dnf --tls --signed-dnf && \
-                    python3 scripts/ci_compiled_native_fallback.py dnf'
+                    python3 scripts/ci_compiled_native_fallback.py dnf && \
+                    python3 scripts/ci_dnf_signed_rpm_fallback.py'

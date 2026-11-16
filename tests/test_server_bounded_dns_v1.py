@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from repocache import server_bounded_dns_v1 as worker
 from repocache.server_bounded_dns_v1 import (
     DEFAULT_DNS_SECONDS,
     MAX_DNS_SECONDS,
@@ -31,6 +32,7 @@ def wire(*, addr="8.8.8.8", port=443):
 
 
 def test_dns_worker_uses_isolated_process_with_hard_timeout(monkeypatch):
+    monkeypatch.setattr(worker.os, "geteuid", lambda: 1001)
     observed = []
 
     def fake_run(argv, **kwargs):
@@ -91,6 +93,7 @@ def test_bad_call_refused_before_child(monkeypatch, bad):
     SimpleNamespace(returncode=0, stdout=b'[[2,1,6,"",["8.8.8.8"]]]'),
 ])
 def test_invalid_worker_responses_fail_closed(monkeypatch, result):
+    monkeypatch.setattr(worker.os, "geteuid", lambda: 1001)
     monkeypatch.setattr(subprocess, "run",
                         lambda *_a, **_kw: result)
     with pytest.raises(socket.gaierror, match="lookup failed"):
@@ -98,6 +101,7 @@ def test_invalid_worker_responses_fail_closed(monkeypatch, result):
 
 
 def test_worker_timeout_and_os_errors_are_redacted(monkeypatch):
+    monkeypatch.setattr(worker.os, "geteuid", lambda: 1001)
     for error in [
         subprocess.TimeoutExpired(["never log hostname"], timeout=0.2),
         FileNotFoundError(HOST),
@@ -111,6 +115,8 @@ def test_worker_timeout_and_os_errors_are_redacted(monkeypatch):
         assert "never log hostname" not in str(exc.value)
 
 
+@pytest.mark.skipif(__import__("os").geteuid() == 0,
+                    reason="default DNS child must never inherit root credentials")
 def test_real_child_resolves_localhost_but_never_creates_a_proxy():
     # A local OS resolver test; not an approved repo pin or global-IP PASS.
     answer = bounded_getaddrinfo(
@@ -122,6 +128,7 @@ def test_real_child_resolves_localhost_but_never_creates_a_proxy():
 
 
 def test_bounded_resolver_cannot_override_public_destination_policy(monkeypatch):
+    monkeypatch.setattr(worker.os, "geteuid", lambda: 1001)
     from repocache.server_upstream_rotation_v1 import (
         UpstreamRotationError, propose_automatic_upstream_refresh,
     )
@@ -140,3 +147,99 @@ def test_bounded_resolver_cannot_override_public_destination_policy(monkeypatch)
             current_generation=0, previous_pins_by_host=None,
             resolver=bounded_getaddrinfo,
         )
+
+
+
+@pytest.mark.parametrize("uid,gid", [
+    (0,0), (0,65534), (65534,0),
+    (True,65534), (65534,False),
+    (-1,65534), (65534,-1),
+    (2**32,65534), (65534,2**32),
+    ("nobody",65534), (65534,"nobody"),
+    (65534,None), (None,65534),
+])
+def test_requested_child_identity_cannot_grant_or_guess_privilege(
+        monkeypatch, uid, gid):
+    from repocache import server_bounded_dns_v1 as worker
+    monkeypatch.setattr(worker.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(subprocess, "run", lambda *_a, **_k:
+                        pytest.fail("invalid child identity reached subprocess"))
+    with pytest.raises(socket.gaierror, match="invalid identity"):
+        resolve(run_as_uid=uid, run_as_gid=gid)
+
+
+def test_nonroot_caller_cannot_request_child_identity(monkeypatch):
+    from repocache import server_bounded_dns_v1 as worker
+    monkeypatch.setattr(worker.os, "geteuid", lambda: 1001)
+    monkeypatch.setattr(subprocess, "run", lambda *_a, **_k:
+                        pytest.fail("nonroot requested setuid child"))
+    with pytest.raises(socket.gaierror, match="invalid identity"):
+        resolve(run_as_uid=65534, run_as_gid=65534)
+
+
+def test_root_caller_passes_explicit_drop_and_cleared_groups(monkeypatch):
+    from repocache import server_bounded_dns_v1 as worker
+    monkeypatch.setattr(worker.os, "geteuid", lambda: 0)
+    observed = []
+    def fake_run(argv, **kwargs):
+        observed.append((argv, kwargs))
+        return SimpleNamespace(returncode=0, stdout=wire())
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert resolve(run_as_uid=65534, run_as_gid=65534)
+    argv, opts = observed[0]
+    assert argv[1:3] == ["-I", "-c"]
+    assert opts["user"] == 65534
+    assert opts["group"] == 65534
+    assert opts["extra_groups"] == []
+    assert opts["close_fds"] is True
+    assert opts["start_new_session"] is True
+    assert opts["stdin"] == subprocess.DEVNULL
+    assert opts["stderr"] == subprocess.DEVNULL
+    assert opts["timeout"] == DEFAULT_DNS_SECONDS
+    assert opts["env"] == {
+        "PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C",
+    }
+
+
+@pytest.mark.skipif(__import__("os").geteuid() != 0,
+                    reason="requires disposable native root container")
+def test_real_linux_child_is_nonroot_with_no_supplementary_groups(monkeypatch):
+    """Real kernel credentials, not an injected fake subprocess result."""
+    import os
+    from repocache import server_bounded_dns_v1 as worker
+    # Replace the fixed child program IN THIS TEST ONLY to return its real
+    # numeric uid/gid/group vector. The production worker is unchanged and
+    # the pure caller treats this fixture address only as untrusted text.
+    code = (
+        "import json, os, socket\n"
+        "print(json.dumps([[socket.AF_INET, socket.SOCK_STREAM, "
+        "socket.IPPROTO_TCP, '', "
+        "[str(os.geteuid()) + ':' + str(os.getegid()) + ':' + "
+        "str(list(os.getgroups())), 443]]]))\n"
+    )
+    monkeypatch.setattr(worker, "_WORKER", code)
+    result = resolve(run_as_uid=65534, run_as_gid=65534)
+    assert len(result) == 1
+    assert result[0][4][0] == "65534:65534:[]"
+    assert os.geteuid() == 0
+
+
+def test_root_cannot_run_default_dns_worker_without_explicit_drop(monkeypatch):
+    monkeypatch.setattr(worker.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(subprocess, "run",
+                        lambda *_a, **_kw: pytest.fail("DNS child ran as root"))
+    with pytest.raises(socket.gaierror,
+                       match="^DNS worker: unprivileged identity required$"):
+        resolve()
+
+
+def test_nonroot_default_dns_worker_still_retains_normal_behavior(monkeypatch):
+    monkeypatch.setattr(worker.os, "geteuid", lambda: 1001)
+    seen = []
+    def harmless(argv, **kw):
+        seen.append(kw)
+        return SimpleNamespace(returncode=0, stdout=wire())
+    monkeypatch.setattr(subprocess, "run", harmless)
+    assert resolve()
+    assert len(seen) == 1
+    assert "user" not in seen[0] and "group" not in seen[0]

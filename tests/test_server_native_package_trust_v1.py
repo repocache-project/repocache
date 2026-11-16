@@ -233,7 +233,7 @@ def test_trust_anchor_rejects_symlink_and_unprivileged_ancestors(
     good = SimpleNamespace(st_uid=0, st_mode=(stat.S_IFDIR | 0o755),
                            st_size=1024)
     leaf = SimpleNamespace(st_uid=0, st_mode=(stat.S_IFREG | 0o644),
-                           st_size=128)
+                           st_size=128, st_nlink=1)
 
     def virtual_lstat(path):
         return leaf if str(path) == "/etc/pki/rpm-gpg/KEY" else good
@@ -257,7 +257,7 @@ def test_debian_key_path_must_be_real_root_owned_regular_file(monkeypatch):
     )
     key = native._NATIVE["debian"][2]
     root = SimpleNamespace(st_uid=0, st_mode=stat.S_IFDIR | 0o755, st_size=4096)
-    proper = SimpleNamespace(st_uid=0, st_mode=stat.S_IFREG | 0o644, st_size=128)
+    proper = SimpleNamespace(st_uid=0, st_mode=stat.S_IFREG | 0o644, st_size=128, st_nlink=1)
     link = SimpleNamespace(st_uid=0, st_mode=stat.S_IFLNK | 0o777, st_size=128)
     monkeypatch.setattr(native.os, "lstat",
                         lambda name: proper if str(name) == key else root)
@@ -265,3 +265,71 @@ def test_debian_key_path_must_be_real_root_owned_regular_file(monkeypatch):
     monkeypatch.setattr(native.os, "lstat",
                         lambda name: link if str(name) == key else root)
     assert native._trusted_key(key) is False
+
+
+@pytest.mark.parametrize("changes", [
+    {"st_nlink": 2}, {"st_nlink": 0}, {"st_nlink": True},
+    {"st_size": 0}, {"st_size": 1024 * 1024 + 1},
+])
+def test_native_signing_anchor_must_be_single_link_and_bounded(
+    monkeypatch, changes,
+):
+    good_dir = SimpleNamespace(st_uid=0, st_mode=stat.S_IFDIR | 0o755,
+                               st_size=4096)
+    leaf = dict(st_uid=0, st_mode=stat.S_IFREG | 0o644,
+                st_size=4096, st_nlink=1)
+    leaf.update(changes)
+    key = "/etc/pki/rpm-gpg/RPM-GPG-KEY-AlmaLinux-10"
+    monkeypatch.setattr(native.os, "lstat", lambda path: (
+        SimpleNamespace(**leaf) if str(path) == key else good_dir
+    ))
+    assert native._trusted_key(key) is False
+
+
+def test_normal_single_link_signed_distribution_anchor_still_eligible(monkeypatch):
+    directory = SimpleNamespace(st_uid=0, st_mode=stat.S_IFDIR | 0o755,
+                                st_size=4096)
+    leaf = SimpleNamespace(st_uid=0, st_mode=stat.S_IFREG | 0o644,
+                           st_size=4096, st_nlink=1)
+    key = "/usr/share/keyrings/debian-archive-keyring.pgp"
+    monkeypatch.setattr(native.os, "lstat", lambda p: leaf if str(p) == key else directory)
+    assert native._trusted_key(key) is True
+
+
+@pytest.mark.parametrize("output", [
+    "Candidate: 1.26.3-1\n",
+    "foreign-package:\n Candidate: 1.26.3-1\n",
+    "nginx:\n Candidate: /tmp/untrusted-package\n",
+    "nginx:\n Candidate: not-a-version\n",
+    "nginx:\n Candidate: 1.2;unexpected\n",
+    "nginx:\n Candidate: 1.2\nnginx:\n",
+    "nginx:\n Candidate: 1.2\n Candidate: 1.3\n",
+])
+def test_apt_policy_candidate_requires_exact_nginx_and_version(
+    monkeypatch, output,
+):
+    monkeypatch.setattr(native, "_trusted_key", lambda path: True)
+    _, runner = _run_success(output)
+    evidence = native.inspect_native_nginx_metadata(
+        os_release=DEBIAN, python_version=(3, 13),
+        document=document(), runner=runner,
+    )
+    assert evidence.to_dict()["code"] == "NATIVE_PACKAGE_NOT_AVAILABLE"
+    assert not evidence.candidate_available
+    assert not evidence.authorizes_installation
+
+
+@pytest.mark.parametrize("version", [
+    "1.26.3-1", "2:1.26.3-1+deb13u1", "1.26.3~bpo13+1",
+])
+def test_legitimate_debian_versions_remain_valid_scratch_metadata(
+    monkeypatch, version,
+):
+    monkeypatch.setattr(native, "_trusted_key", lambda path: True)
+    _, runner = _run_success("nginx:\n Installed: (none)\n Candidate: " + version + "\n")
+    evidence = native.inspect_native_nginx_metadata(
+        os_release=DEBIAN, python_version=(3, 13),
+        document=document(), runner=runner,
+    )
+    assert evidence.to_dict()["code"] == "NATIVE_CANDIDATE_OBSERVED"
+    assert evidence.candidate_available and not evidence.authorizes_installation

@@ -57,6 +57,40 @@ def _safe_native_systemctl() -> None:
             _deny("EXECUTABLE_UNSAFE")
 
 
+def _observe_systemd_pid1() -> None:
+    """Read a bounded kernel PID1 name before trusting an active unit snapshot.
+
+    This is a fail-closed prerequisite, not proof of a native booted host,
+    executable provenance or privileged service authority.
+    """
+    try:
+        process = os.lstat("/proc/1")
+        if (not stat.S_ISDIR(process.st_mode) or process.st_uid != 0
+                or stat.S_IMODE(process.st_mode) & 0o022):
+            _deny("PID1_IDENTITY_REFUSED")
+        fd = os.open(
+            "/proc/1/comm",
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+        try:
+            comm = os.fstat(fd)
+            if (not stat.S_ISREG(comm.st_mode) or comm.st_uid != 0
+                    or os.read(fd, 32) != b"systemd\n"):
+                _deny("PID1_IDENTITY_REFUSED")
+        finally:
+            os.close(fd)
+        again = os.lstat("/proc/1")
+        if (again.st_dev, again.st_ino, again.st_uid, again.st_mode) != (
+                process.st_dev, process.st_ino, process.st_uid,
+                process.st_mode):
+            _deny("PID1_IDENTITY_REFUSED")
+    except EffectiveNginxUnitError:
+        raise
+    except (OSError, TypeError, ValueError, OverflowError):
+        _deny("PID1_UNAVAILABLE")
+
+
 def _parse_fixed_unit_status(value: Any) -> dict[str, str]:
     if (type(value) is not str or not 1 <= len(value) <= 8192
             or "\x00" in value or "\r" in value):
@@ -131,7 +165,8 @@ def _observe_nginx_master_kernel(pid: int) -> None:
         current = os.stat(proc)
         rechecked = os.stat(proc + "/exe")
         binary_again = os.lstat(binary)
-        if ((current.st_dev, current.st_ino) != (process.st_dev, process.st_ino)
+        if ((current.st_dev, current.st_ino, current.st_uid, current.st_mode)
+                != (process.st_dev, process.st_ino, process.st_uid, process.st_mode)
                 or (rechecked.st_dev, rechecked.st_ino)
                    != (installed.st_dev, installed.st_ino)
                 or any(getattr(binary_again, name) != getattr(installed, name)
@@ -154,6 +189,7 @@ def inspect_effective_native_nginx_unit(distribution: str) -> dict[str, Any]:
     vendor = inspect_native_nginx_unit(distribution)
     if vendor.code != "VENDOR_NGINX_UNIT_OBSERVED" or vendor.digest is None:
         _deny("VENDOR_UNIT_UNVERIFIED")
+    _observe_systemd_pid1()
     _safe_native_systemctl()
     try:
         completed = subprocess.run(
@@ -171,6 +207,26 @@ def inspect_effective_native_nginx_unit(distribution: str) -> dict[str, Any]:
         _deny("SYSTEMCTL_FAILED")
     observed = _parse_fixed_unit_status(completed.stdout)
     _observe_nginx_master_kernel(int(observed["MainPID"]))
+    # A service restart/replacement may race the gap between systemd show
+    # and the kernel executable-inode lookup. Observe the fixed unit again:
+    # changed MainPID or override/active state invalidates this snapshot.
+    try:
+        again = subprocess.run(
+            _FIXED_ARGS, shell=False, check=False, capture_output=True,
+            text=True, timeout=5, cwd="/",
+            stdin=subprocess.DEVNULL,
+            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+            start_new_session=True,
+        )
+    except (OSError, subprocess.TimeoutExpired, ValueError, TypeError):
+        _deny("SYSTEMCTL_RECHECK_UNAVAILABLE")
+    if (again.returncode != 0 or type(again.stdout) is not str
+            or type(again.stderr) is not str
+            or len(again.stderr) > 4096):
+        _deny("SYSTEMCTL_RECHECK_FAILED")
+    rechecked = _parse_fixed_unit_status(again.stdout)
+    if rechecked != observed:
+        _deny("SYSTEMCTL_UNIT_CHANGED")
     return {
         "schema_version": 1,
         "status": "NATIVE_NGINX_EFFECTIVE_READ_ONLY_OBSERVATION",
@@ -179,6 +235,7 @@ def inspect_effective_native_nginx_unit(distribution: str) -> dict[str, Any]:
         "kernel_nginx_master_executable_inode_observed": True,
         "vendor_unit_sha256": vendor.digest,
         "effective_unit_shape_observed": True,
+        "kernel_systemd_pid1_comm_observed": True,
         "distro_package_owner_verified": False,
         "real_pid1_and_nginx_process_verified": False,
         "host_root_and_selinux_verified": False,

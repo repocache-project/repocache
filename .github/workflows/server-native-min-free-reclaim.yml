@@ -1,0 +1,57 @@
+name: Stock NGINX min_free actual manager pressure and recovery
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/ci_nginx_min_free_reclaim_v1.py'
+      - 'tests/test_server_nginx_min_free_reclaim_v1.py'
+      - '.github/workflows/server-native-min-free-reclaim.yml'
+      - 'docs/testing/SERVER_NATIVE_MIN_FREE_MANAGER_RECLAIM_V1.md'
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  min-free-reclaim:
+    name: Real min_free cache manager and pressure recovery (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: debian13
+            image: debian:trixie-slim
+          - platform: almalinux10
+            image: almalinux:10
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - name: Install stock packaged NGINX Python and switch utility
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [ '${{ matrix.platform }}' = debian13 ]; then
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq
+            apt-get install -y -qq --no-install-recommends nginx python3 util-linux
+          else
+            dnf -y -q --enablerepo=crb install nginx python3 util-linux
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify code refusals and real stock NGINX min_free eviction
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -f /.dockerenv
+          setpriv --reuid 65534 --regid 65534 --clear-groups \
+            env PYTHONDONTWRITEBYTECODE=1 \
+            python3 -B -m unittest discover -s tests \
+              -p test_server_nginx_min_free_reclaim_v1.py -v
+          setpriv --reuid 65534 --regid 65534 --clear-groups \
+            env PYTHONDONTWRITEBYTECODE=1 \
+              REPOCACHE_DISPOSABLE_MIN_FREE_PRESSURE=1 \
+            python3 -B scripts/ci_nginx_min_free_reclaim_v1.py

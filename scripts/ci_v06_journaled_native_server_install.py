@@ -21,6 +21,11 @@ from repocache.server_install_v1 import validate_os_identity
 from repocache.server_native_nginx_local_boundary_v1 import (
     inspect_native_nginx_local_boundary,
 )
+from repocache.server_native_package_effects_observe_v1 import (
+    NativeEffectsReconciliationError,
+    inspect_current_namespace_native_package_effects,
+    inspect_current_namespace_native_postpackage_candidate,
+)
 from repocache.server_native_nginx_package_journal_v1 import (
     NATIVE_PENDING_NAME, NATIVE_TMP_NAME, NativePackageJournalError,
     _prepare_native_journal_under_root,
@@ -216,9 +221,53 @@ def run() -> dict[str, Any]:
                 _deny("NATIVE_PACKAGE_REENTRY_UNVERIFIED")
         else:
             _deny("NATIVE_PACKAGE_REENTRY_NOT_BLOCKED")
+        _STAGE = "PENDING_RECONCILIATION"
+        try:
+            effects = inspect_current_namespace_native_package_effects(
+                distribution=distribution,
+            )
+        except NativeEffectsReconciliationError:
+            _deny("NATIVE_PACKAGE_POSTEFFECTS_JOURNAL_UNVERIFIED")
+        if (effects["status"] != "NATIVE_PACKAGE_EFFECTS_PENDING_RECONCILIATION"
+                or effects["distribution"] != distribution
+                or not effects["journal_identity_verified"]
+                or not effects["pending_native_effects_block_reentry"]
+                or effects["native_package_effects_reconciled"]
+                or effects["authorizes_native_marker_removal"]
+                or effects["authorizes_host_mutation"]):
+            _deny("NATIVE_PACKAGE_POSTEFFECTS_JOURNAL_UNVERIFIED")
+        _STAGE = "POSTPACKAGE_CORRELATION"
+        try:
+            correlation = inspect_current_namespace_native_postpackage_candidate(
+                distribution=distribution,
+            )
+        except (NativeEffectsReconciliationError, OSError, ValueError, TypeError):
+            _deny("NATIVE_POSTPACKAGE_CORRELATION_UNVERIFIED")
+        if (correlation.get("status") !=
+                "NATIVE_POSTPACKAGE_CORRELATION_CANDIDATE_ONLY"
+                or correlation.get("distribution") != distribution
+                or correlation.get("pending_journal_stable_across_observations") is not True
+                or correlation.get("native_package_db_owner_observed") is not True
+                or correlation.get("native_vendor_unit_shape_observed") is not True
+                or correlation.get("pending_native_effects_block_reentry") is not True
+                or any(correlation.get(flag) is not False for flag in (
+                    "native_package_signature_verified",
+                    "installed_host_root_authenticated",
+                    "systemd_pid1_and_service_verified",
+                    "selinux_enforcing_verified",
+                    "operator_approval_verified",
+                    "package_effects_reconciled",
+                    "authorizes_native_marker_removal",
+                    "authorizes_package_installation",
+                    "authorizes_nginx_reload",
+                    "authorizes_host_mutation",
+                ))):
+            _deny("NATIVE_POSTPACKAGE_CORRELATION_UNVERIFIED")
         _STAGE = "COMPLETE"
         return {
             "schema_version": 1,
+            "native_binary_and_vendor_unit_correlated_in_container": True,
+            "native_postpackage_correlation_authorizes_no_reentry": True,
             "status": "DISPOSABLE_JOURNALED_NATIVE_INSTALL_PASS",
             "distribution": distribution,
             "actual_distro_package_transaction": True,
@@ -227,6 +276,8 @@ def run() -> dict[str, Any]:
             "real_exclusive_lock_held_during_subprocesses": True,
             "pending_journal_survived_package_effects": True,
             "repeated_install_refused_without_reconciliation": True,
+            "actual_pending_journal_identity_observed_after_install": True,
+            "pending_native_effects_remain_unreconciled": True,
             "installed_server_ready": False,
             "host_root_provenance_verified": False,
             "systemd_pid1_verified": False,
