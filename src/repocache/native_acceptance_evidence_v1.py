@@ -112,6 +112,8 @@ def collect_candidate_evidence(
         "artifact_digest_matched": False,
         "native_prerequisites_observed": False,
         "native_probe_code": "NATIVE_OBSERVATION_NOT_EXECUTED",
+        "native_distribution": None,
+        "native_selinux_enforcing_reported": False,
         "publisher_signature_verified": False,
         "source_commit_authenticity_verified": False,
         "installed_artifact_verified": False,
@@ -146,11 +148,27 @@ def collect_candidate_evidence(
             type(native.get("code")) is str and
             _CODE.fullmatch(native["code"])):
         report["native_probe_code"] = native["code"]
+        distribution = native.get("distribution")
+        if (native["code"] not in ("NATIVE_OBSERVATION_NOT_EXECUTED",
+                                  "SUPPORTED_OS_NOT_OBSERVED")
+                and type(distribution) is str and distribution in ("debian", "almalinux")
+                and native.get("supported_distro_python_observed") is True):
+            report["native_distribution"] = distribution
+        report["native_selinux_enforcing_reported"] = (
+            report["native_distribution"] == "almalinux"
+            and native["code"] in (
+                "EFFECTIVE_NGINX_NOT_OBSERVED", "OBSERVATION_ONLY_NO_HOST_AUTHORITY",
+            )
+            and native.get("systemd_pid1_namespace_shape_observed") is True
+            and native.get("almalinux_selinux_enforcing_observed") is True
+        )
         report["native_prerequisites_observed"] = (
             native.get("status") == "READ_ONLY_PREREQUISITES_OBSERVED"
             and native["code"] == "OBSERVATION_ONLY_NO_HOST_AUTHORITY"
             and native.get("systemd_pid1_namespace_shape_observed") is True
             and native.get("effective_nginx_master_observed") is True
+            and (report["native_distribution"] == "debian"
+                 or report["native_selinux_enforcing_reported"])
         )
     report["code"] = (
         "DIGEST_MATCH_NATIVE_READONLY_OBSERVED"
