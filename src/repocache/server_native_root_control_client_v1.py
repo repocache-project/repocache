@@ -62,6 +62,7 @@ def _parse_native_reply(raw: bytes, *, operation: str) -> dict[str, Any]:
     }.get(operation, ())
     if (type(value.get("schema_version")) is not int
             or value["schema_version"] != 1
+            or type(value.get("status")) is not str
             or value.get("status") not in success
             or value.get("requested_operation") != operation
             or set(value) != {

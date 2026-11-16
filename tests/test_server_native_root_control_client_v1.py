@@ -76,6 +76,13 @@ def test_reload_success_cannot_claim_catalog_publication():
         client._parse_native_reply(packet(forged), operation="RELOAD_V2")
 
 
+def test_reload_reply_with_a_nontext_status_is_rejected_without_a_type_error():
+    malformed = result("RELOAD_V2", "RELOADED", generation=7)
+    malformed["status"] = ["RELOADED"]
+    with pytest.raises(client.NativeRootControlClientError, match="RESPONSE_UNEXPECTED"):
+        client._parse_native_reply(packet(malformed), operation="RELOAD_V2")
+
+
 def test_unsupported_operation_refused_before_accessing_socket(monkeypatch):
     monkeypatch.setattr(client, "_validate_parent_and_socket",
                         lambda: pytest.fail("must not access socket"))

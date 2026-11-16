@@ -172,6 +172,16 @@ def test_operator_owned_reload_retains_validate_then_reload_order(monkeypatch):
     assert calls[1] == ["systemctl", "reload", "nginx"]
 
 
+def test_managed_include_without_worker_or_socket_cannot_use_legacy_reload(monkeypatch):
+    def inspect(path):
+        if path == "/etc/nginx/conf.d/repocache-managed.conf":
+            return object()
+        raise FileNotFoundError
+
+    monkeypatch.setattr(cli.os, "lstat", inspect)
+    assert cli._has_managed_nginx_control()
+
+
 def test_client_aliases_and_global_option_placement_do_not_mutate(monkeypatch, tmp_path, capsys):
     calls = []
     monkeypatch.setattr(client, "discover", lambda *_: calls.append("discover") or [])

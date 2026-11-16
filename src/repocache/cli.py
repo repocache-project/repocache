@@ -471,6 +471,7 @@ def _has_managed_nginx_control() -> bool:
         "/usr/libexec/repocache/server-control-worker",
         "/run/repocache/server-control.sock",
         "/var/lib/repocache/server",
+        "/etc/nginx/conf.d/repocache-managed.conf",
     ):
         try:
             os.lstat(path)
