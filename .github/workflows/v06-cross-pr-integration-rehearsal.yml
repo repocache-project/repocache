@@ -18,6 +18,9 @@ on:
       - 'tests/test_server_proposed_state_v2_store.py'
       - 'scripts/ci_v06_cross_pr_lifecycle_contract.py'
       - 'scripts/ci_v06_cross_pr_multi_wal_contract.py'
+      - 'scripts/build_release.py'
+      - 'src/repocache/upgrade.py'
+      - 'tests/test_v06_release_source_inventory.py'
       - 'scripts/ci_native_nginx_process_inode_smoke.py'
       - 'docs/architecture/SERVER_LOCKED_MANIFEST_RECONCILIATION_V1.md'
 
@@ -147,6 +150,7 @@ jobs:
             tests/test_client.py \
             tests/test_client_source_helper_preview.py \
             tests/test_client_install_contract.py \
+            tests/test_v06_release_source_inventory.py \
             tests/test_release_provenance.py \
             tests/test_public_release_acceptance.py
           # Fixed package-root syntax inspection is only exercised in this
