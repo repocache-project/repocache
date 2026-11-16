@@ -167,7 +167,7 @@ def _storage_checks(spec: HostInspectionSpec) -> tuple[PreflightCheck, Preflight
     try:
         stats = [os.statvfs(directory) for directory, _ in observations]
         if any(item.f_bavail < 0 or item.f_frsize <= 0
-               or item.f_favail < 0 for item in stats):
+               or item.f_favail < 0 or item.f_flag < 0 for item in stats):
             raise ValueError("invalid filesystem capacity observation")
         free = [item.f_bavail * item.f_frsize for item in stats]
         inodes = [item.f_favail for item in stats]
@@ -177,7 +177,10 @@ def _storage_checks(spec: HostInspectionSpec) -> tuple[PreflightCheck, Preflight
     # A cache critical threshold is part of the validated deployment document.
     # State/log byte and filesystem inode floors are diagnostic heuristics:
     # low headroom cannot prove exhaustion or an approved capacity policy.
-    if free[1] < spec.critical_free_bytes:
+    if any(item.f_flag & os.ST_RDONLY for item in stats):
+        disk = _check("storage_free_space", PreflightStatus.FAIL,
+                      "STORAGE_FILESYSTEM_READ_ONLY")
+    elif free[1] < spec.critical_free_bytes:
         disk = _check("storage_free_space", PreflightStatus.FAIL,
                       "STORAGE_SPACE_BELOW_CRITICAL_THRESHOLD")
     elif free[0] == 0 or free[2] == 0:
