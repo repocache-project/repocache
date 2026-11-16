@@ -49,6 +49,9 @@ def test_paste_line_is_compact_redacted_and_non_authorizing():
         "code": "DIGEST_MATCH_NATIVE_EVIDENCE_PENDING",
         "source_sha": "a" * 40, "candidate_sha256": "b" * 64,
         "digest_matched": True, "native_prerequisites_reported_only": False,
+        "native_distribution": None,
+        "native_probe_code": "CONTAINER_CONTEXT_REFUSED",
+        "native_selinux_enforcing_reported": False,
         "complete_server_acceptance_passed": False,
         "authorizes_host_write": False, "authorizes_publication": False,
     }
@@ -77,6 +80,19 @@ def test_exact_digest_mismatch_remains_failure():
     assert code == 1
     assert result["status"] == "FAIL"
     assert not result["digest_matched"]
+
+
+def test_almalinux_selinux_and_native_refusal_survive_redaction():
+    value = sample()
+    value.update(native_distribution="almalinux",
+                 native_selinux_enforcing_reported=True,
+                 native_probe_code="EFFECTIVE_NGINX_NOT_OBSERVED")
+    code, result = run(json.dumps(value).encode())
+    assert code == 2
+    assert result["native_distribution"] == "almalinux"
+    assert result["native_selinux_enforcing_reported"] is True
+    assert result["native_probe_code"] == "EFFECTIVE_NGINX_NOT_OBSERVED"
+    assert result["native_prerequisites_reported_only"] is False
 
 
 @pytest.mark.parametrize("corruption", [
@@ -121,6 +137,9 @@ def test_duplicate_json_keys_and_malformed_utf8_are_refused():
     {"native_prerequisites_observed": True},
     {"publisher_signature_verified": True},
     {"authorizes_nginx_reload": 1},
+    {"native_distribution": "private-hostname.invalid"},
+    {"native_distribution": "debian", "native_selinux_enforcing_reported": True},
+    {"native_distribution": "almalinux", "native_selinux_enforcing_reported": True},
 ])
 def test_forged_receipt_outcome_or_claim_cannot_look_like_evidence(mutation):
     value = sample()
