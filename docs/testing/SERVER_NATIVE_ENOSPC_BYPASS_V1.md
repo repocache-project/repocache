@@ -44,9 +44,10 @@ The scenario:
    inodes. Require the observer to report `ST_RDONLY` and require the kernel
    to refuse a new file with `EROFS`. A full disk or permissions-only refusal
    cannot pass this phase. The decision must report `STORAGE_WRITE_REFUSED`
-   and propose cache-off for both routes. Validate and reload only the test
-   NGINX process, verify repeated exact upstream bytes without HIT and check
-   that the read-only fixture file inventory and digests remain identical.
+   and propose cache-off for both routes. Validate and start a fresh test
+   NGINX master for this separate mount, since a live master cannot reuse
+   its cache zone at a different path. Verify repeated exact upstream bytes
+   without HIT and compare the read-only fixture inventory and digests.
 8. Shut down the private origin and NGINX master; Docker destroys the entire
    temporary filesystem. CI prints fixed PASS/NOT VERIFIED summaries only.
 

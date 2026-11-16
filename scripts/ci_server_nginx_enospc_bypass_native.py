@@ -180,6 +180,37 @@ def assert_nginx_syntax(nginx: str, root: Path, conf: Path) -> None:
     run(nginx, "-t", "-p", str(root), "-c", str(conf))
 
 
+def start_test_nginx(nginx: str, root: Path, conf: Path) -> subprocess.Popen:
+    return subprocess.Popen(
+        [nginx, "-p", str(root), "-c", str(conf), "-g", "daemon off;"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def wait_for_test_nginx(
+    process: subprocess.Popen, url_root: str, context: ssl.SSLContext,
+) -> None:
+    for _ in range(100):
+        if process.poll() is not None:
+            raise AssertionError("DISPOSABLE_NGINX_DIED")
+        try:
+            if request(url_root + "/", context)[0] == 404:
+                return
+        except (OSError, TimeoutError):
+            time.sleep(0.05)
+    raise AssertionError("DISPOSABLE_NGINX_NOT_READY")
+
+
+def stop_test_nginx(process: subprocess.Popen) -> None:
+    process.terminate()
+    try:
+        process.wait(timeout=6)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=4)
+
+
 def read_only_capacity() -> tuple[int, int]:
     fd = os.open(READ_ONLY_MOUNT, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
@@ -261,24 +292,11 @@ def main() -> None:
                 ), encoding="ascii",
             )
             assert_nginx_syntax(nginx, root, conf)
-            process = subprocess.Popen(
-                [nginx, "-p", str(root), "-c", str(conf), "-g", "daemon off;"],
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            process = start_test_nginx(nginx, root, conf)
             try:
                 url_root = f"https://127.0.0.1:{frontend_port}"
                 context = ssl.create_default_context(cafile=str(front_cert))
-                for _ in range(100):
-                    if process.poll() is not None:
-                        raise AssertionError("DISPOSABLE_NGINX_DIED")
-                    try:
-                        if request(url_root + "/", context)[0] == 404:
-                            break
-                    except (OSError, TimeoutError):
-                        time.sleep(0.05)
-                else:
-                    raise AssertionError("DISPOSABLE_NGINX_NOT_READY")
+                wait_for_test_nginx(process, url_root, context)
                 for repo_id, fixture, suffix in WARM:
                     uri = f"{url_root}/__repocache/repos/{repo_id}/{suffix}"
                     expected = FIXTURES[fixture][1]
@@ -398,29 +416,30 @@ def main() -> None:
                         or readonly_candidate["bypass_repository_ids"] != [DNF_ID, APT_ID]
                         or readonly_candidate["authorizes_nginx_reload"] is not False):
                     raise AssertionError("READ_ONLY_BYPASS_PROPOSAL_UNVERIFIED")
-                old_workers = nginx_master_children(process.pid)
-                conf.write_text(render_test_config(
+                # NGINX cannot reuse a cache shared-memory zone across a
+                # live cache path change. Start this separate mount fixture
+                # with a fresh master; both reloads above keep their path.
+                readonly_config = render_test_config(
                     root, readonly_candidate, origin_port=origin_port,
                     frontend_port=frontend_port, origin_cert=origin_cert,
                     frontend_cert=front_cert, frontend_key=front_key,
-                ), encoding="ascii")
+                )
+                if readonly_config.count("    proxy_cache off;") != 2:
+                    raise AssertionError("READ_ONLY_CACHE_OFF_NOT_RENDERED")
+                stop_test_nginx(process)
+                conf.write_text(readonly_config, encoding="ascii")
                 assert_nginx_syntax(nginx, root, conf)
-                process.send_signal(signal.SIGHUP)
-                await_worker_generation_drained(process, old_workers)
+                process = start_test_nginx(nginx, root, conf)
+                wait_for_test_nginx(process, url_root, context)
                 assert_uncached_origin(url_root, context, counts)
                 if cached_hashes(READ_ONLY_MOUNT) != readonly_files:
                     raise AssertionError("READ_ONLY_CACHE_FILES_CHANGED")
                 print("PASS: kernel EROFS with healthy capacity; validated NGINX "
-                      "cache-off reload, exact APT/DNF fixture bytes and preserved files")
+                      "cache-off startup, exact APT/DNF fixture bytes and preserved files")
                 print("NOT VERIFIED: deployed NGINX, root authorization, real signed "
                       "APT/DNF payloads, native systemd/SELinux or client fallback")
             finally:
-                process.terminate()
-                try:
-                    process.wait(timeout=6)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=4)
+                stop_test_nginx(process)
                 origin.shutdown()
                 origin.server_close()
                 origin_thread.join(timeout=4)
