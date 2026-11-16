@@ -45,10 +45,21 @@ class HTTPBackend:
                  key: Path | None = None):
         self.mode = "healthy"
         self.hits: list[str] = []
+        self.release_stalled_requests = threading.Event()
+        self.stall_deadline_elapsed = False
 
         class Handler(http.server.SimpleHTTPRequestHandler):
             def _respond(handler, method: str):
                 self.hits.append(method + " " + handler.path)
+                if self.mode == "stalled":
+                    # Send no HTTP status or bytes. Wait until the test
+                    # has observed the client result, with a hard ceiling.
+                    if not self.release_stalled_requests.wait(timeout=20):
+                        self.stall_deadline_elapsed = True
+                    return
+                if self.mode == "missing":
+                    handler.send_error(404, "Synthetic cache miss")
+                    return
                 if self.mode != "healthy":
                     handler.send_error(503, "Synthetic cache unavailable")
                     return
@@ -86,6 +97,7 @@ class HTTPBackend:
             scheme, self.server.server_port)
 
     def close(self):
+        self.release_stalled_requests.set()
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=10)

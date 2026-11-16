@@ -55,6 +55,8 @@ def _receipt(data: bytes) -> dict:
     matched = item.get("artifact_digest_matched")
     native = item.get("native_prerequisites_observed")
     size = item.get("artifact_size_bytes")
+    distribution = item.get("native_distribution")
+    enforcing = item.get("native_selinux_enforcing_reported", False)
     if (type(sha) is not str or _SHA40.fullmatch(sha) is None
             or type(expected) is not str or _SHA64.fullmatch(expected) is None
             or (observed is not None and
@@ -65,6 +67,11 @@ def _receipt(data: bytes) -> dict:
             or matched is not (observed == expected)
             or (matched and size is None)
             or (not matched and native)
+            or distribution not in (None, "debian", "almalinux")
+            or type(enforcing) is not bool
+            or (not matched and distribution is not None)
+            or (enforcing and distribution != "almalinux")
+            or (native and distribution == "almalinux" and not enforcing)
             or item.get("status") not in ("FAIL", "NOT VERIFIED")
             or type(item.get("status")) is not str
             or type(item.get("code")) is not str or item["code"] not in _CODES
@@ -79,6 +86,12 @@ def _receipt(data: bytes) -> dict:
     # and a mismatch must never be softened to NOT VERIFIED.
     code = item["code"]
     native_code = item["native_probe_code"]
+    if (enforcing and native_code not in (
+        "EFFECTIVE_NGINX_NOT_OBSERVED", "OBSERVATION_ONLY_NO_HOST_AUTHORITY",
+    )) or (distribution is not None and native_code in (
+        "NATIVE_OBSERVATION_NOT_EXECUTED", "SUPPORTED_OS_NOT_OBSERVED",
+    )):
+        raise ValueError("contradictory platform observation")
     if any(
         (key.startswith("authorizes_") or key.endswith("_verified"))
         and value is not False
@@ -118,6 +131,9 @@ def _receipt(data: bytes) -> dict:
         "source_sha": sha,
         "candidate_sha256": observed,
         "digest_matched": matched,
+        "native_distribution": distribution,
+        "native_probe_code": native_code,
+        "native_selinux_enforcing_reported": enforcing,
         "native_prerequisites_reported_only": native,
         "complete_server_acceptance_passed": False,
         "authorizes_host_write": False,

@@ -54,3 +54,16 @@ are only momentary kernel-network snapshots. They do not reserve a future
 deployment port, prove real host-root authority or replace final native
 systemd/SELinux, firewall, NGINX ownership and #27 package availability
 checks. The original #26/#19 operational gates remain NOT VERIFIED.
+
+## Read-only storage refusal (Stage A)
+
+`STORAGE_FILESYSTEM_READ_ONLY` indicates that the kernel reported a
+read-only filesystem for a configured state, cache or log path, or its
+closest existing parent. Use the intended writable mounts and run preflight
+again before provisioning. Free bytes and inodes cannot make a read-only
+mount usable. Preflight checks the kernel mount flag without attempting
+writes and does not print the affected path.
+
+The two distro container jobs check this against their read-only sysfs
+mounts. A writable result is a local observation and does not establish
+ownership, SELinux permissions or future mount configuration.
