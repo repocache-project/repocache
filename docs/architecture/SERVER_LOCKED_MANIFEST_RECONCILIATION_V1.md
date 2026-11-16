@@ -1345,3 +1345,12 @@ the shared public-address and exact socket-address policy, with a fixed
 unprivileged UID/GID, no supplementary groups, a per-lookup timeout and a
 45-second aggregate DNS budget. A failed lookup refuses the transaction
 before a native WAL or generated configuration is written.
+
+The combined CI rehearsal now joins the actual kernel-credential dispatcher
+and descriptor-relative WAL using a temporary socket and isolated fixture
+root. An administrator with the required supplementary group is allowed
+through the dispatcher and commits the fixture transaction. The service UID
+is refused even with that group; an ordinary UID is also refused. Both
+negative cases leave the staged state, include and catalog uncommitted.
+Native lifecycle calls remain fixture effects in this test. Direct real
+NGINX syntax checks are exercised separately in the same distro workflow.

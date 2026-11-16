@@ -10,11 +10,15 @@ import base64
 import hashlib
 import json
 import os
+import socket
+import tempfile
 from pathlib import Path
 
 import pytest
 
 import repocache.server_native_v2_transaction_v1 as native
+import repocache.server_native_root_control_entrypoint_v1 as dispatcher
+import repocache.server_root_control_protocol_v1 as protocol
 from repocache.server_protected_state_store_v1 import LOCK_NAME
 from repocache.server_proposed_state_v2_store import V2_STATE
 from repocache.server_root_control_fixed_candidate_v1 import _NAME
@@ -109,6 +113,73 @@ def assert_no_pending(fs):
     assert not (state / native._MANIFEST_STAGE).exists()
     assert not (include.parent / native._STAGE).exists()
     assert not (catalog.parent / native._STAGE).exists()
+
+
+@pytest.mark.parametrize("uid,groups,denial", [
+    (65532, [49999], None),
+    (65534, [49999], "SERVICE_IDENTITY_DENIED"),
+    (65533, [], "ADMIN_GROUP_REQUIRED"),
+])
+def test_kernel_credentialed_dispatch_reaches_real_wal_only_for_admin(
+    filesystem, monkeypatch, uid, groups, denial,
+):
+    stage(filesystem, snapshot(count=1))
+    fd, state, include, catalog, events = filesystem
+    monkeypatch.setattr(protocol, "_trusted_local_ids", lambda: (49999, 65534))
+    monkeypatch.setattr(dispatcher, "_native_distro", lambda: "debian")
+    monkeypatch.setattr(
+        dispatcher, "execute_native_fixed_v2_transaction",
+        lambda operation, distribution: native._operation_under_root(
+            fd, distribution=distribution, operation=operation, fixture=True,
+        ),
+    )
+    with tempfile.TemporaryDirectory(prefix="repocache-dispatch-") as base:
+        os.chmod(base, 0o755)
+        target = str(Path(base) / "control.sock")
+        with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as server:
+            server.bind(target)
+            # Let all fixture callers reach the actual kernel credential gate.
+            # The installed unit adds its separate root:admin DAC checks.
+            os.chmod(target, 0o666)
+            server.listen(1)
+            monkeypatch.setattr(dispatcher, "_systemd_listener", lambda: server)
+            child = os.fork()
+            if child == 0:
+                try:
+                    server.close()
+                    os.close(fd)
+                    os.setgroups(groups)
+                    os.setgid(uid)
+                    os.setuid(uid)
+                    with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as client:
+                        client.settimeout(5)
+                        client.connect(target)
+                        client.sendall(b"apply-v2\n")
+                        try:
+                            packet = client.recv(1024)
+                        except ConnectionResetError:
+                            packet = b""
+                        if denial is None:
+                            assert json.loads(packet)["status"] == "APPLIED"
+                        else:
+                            assert packet == b""
+                    os._exit(0)
+                except BaseException:
+                    os._exit(70)
+            try:
+                if denial is None:
+                    assert dispatcher.serve_one_native_fixed_request()["status"] == "APPLIED"
+                    assert ("reload", "debian") in events
+                    assert all(path.is_file() for path in (state / V2_STATE, include, catalog))
+                else:
+                    with pytest.raises(protocol.FixedRootControlError, match=denial):
+                        dispatcher.serve_one_native_fixed_request()
+                    assert not events
+                    assert not any(path.exists() for path in (state / V2_STATE, include, catalog))
+            finally:
+                ended, status = os.waitpid(child, 0)
+                assert ended == child and os.waitstatus_to_exitcode(status) == 0
+    assert_no_pending(filesystem)
 
 
 def test_first_install_commits_real_three_resource_paths(filesystem, monkeypatch):
