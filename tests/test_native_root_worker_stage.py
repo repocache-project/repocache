@@ -156,7 +156,7 @@ def test_authenticated_installed_readback_refuses_drift(candidate, tmp_path):
         stage._audit_worker_files(root, payloads)
     unit.unlink()
     unit.symlink_to(stage.UNITS[1])
-    with pytest.raises(OSError):
+    with pytest.raises(stage.WorkerStageError, match="WORKER_STAGE_INVALID_ASSET"):
         stage._audit_worker_files(root, payloads)
 
 
