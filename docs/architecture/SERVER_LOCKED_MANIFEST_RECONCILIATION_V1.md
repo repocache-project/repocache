@@ -1354,3 +1354,19 @@ is refused even with that group; an ordinary UID is also refused. Both
 negative cases leave the staged state, include and catalog uncommitted.
 Native lifecycle calls remain fixture effects in this test. Direct real
 NGINX syntax checks are exercised separately in the same distro workflow.
+
+The v0.6 source bundle contains the fixed worker builder and both reference
+units. From a separately authenticated, extracted candidate, build the
+staged executable with the supported OS interpreter:
+
+~~~sh
+/usr/bin/python3 -I scripts/build_native_root_worker.py \
+  --source . --output /absolute/staging/server-control-worker
+~~~
+
+The executable uses isolated OS Python and a closed set of first-party
+modules. It does not import the mutable application environment. Record
+its SHA-256 and the exact candidate identity before native installation.
+The builder only creates a new file. Installing it under the fixed
+root-owned systemd path and configuring the effective SELinux policy
+are part of the signed native installation, with separate approval.
