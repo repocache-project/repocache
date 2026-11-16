@@ -18,7 +18,7 @@ from repocache.server_root_control_protocol_v1 import (
     authorize_fixed_root_request,
 )
 from repocache.server_root_control_host_preflight_v1 import (
-    NativeHostPreflightError, require_native_host_preconditions,
+    NativeHostPreflightError, require_socket_worker_host_preconditions,
 )
 
 _FIXED_SOCKET = "/run/repocache/server-control.sock"
@@ -93,7 +93,7 @@ def _systemd_listener() -> socket.socket:
         # The exact installed socket alone is not enough: require native
         # non-rootless PID1/systemd context before reading operator requests.
         # This is a necessary check, not installed-host attestation.
-        require_native_host_preconditions()
+        require_socket_worker_host_preconditions()
         return server
     except Exception:
         server.close()

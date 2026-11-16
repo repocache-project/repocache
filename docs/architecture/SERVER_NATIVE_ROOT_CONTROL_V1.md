@@ -159,15 +159,28 @@ this PR. Native installation support remains NOT VERIFIED.
 
 ## Necessary booted Linux root/namespace preflight (no host attestation)
 
-The worker now executes the private fixed-path
-`server_root_control_host_preflight_v1.require_native_host_preconditions`
+The worker executes the fixed-path
+`server_root_control_host_preflight_v1.require_socket_worker_host_preconditions`
 after validating its systemd-activated root-owned listening socket and
 before reading any administrative request. It refuses non-root effective,
-real or saved UID/GID, non-systemd PID 1, differing worker/PID1 mount,
-user or PID namespaces, rootless/subordinate user namespace UID maps,
+real or saved UID/GID, non-systemd PID 1, differing worker/PID 1 user
+or PID namespaces, rootless/subordinate user namespace UID maps,
 missing or group-writable systemd runtime directories, or unreadable
 kernel procfs facts. All reads are bounded and value-redacted; callers
 cannot supply a path, namespace, unit, command or required identity.
+
+`ProtectSystem`, `PrivateTmp`, `PrivateDevices` and related directives
+intentionally give the unit a separate mount namespace. The socket-worker
+preflight compares device/inode, type, mode and owner for each component of
+its fixed service paths against the same paths opened from `/proc/1/root`.
+This covers the transaction directories, fixed executables, main NGINX
+configuration and systemd/REPOCACHE sockets. Each component is opened
+with symlink refusal, and namespace identities are checked again before
+returning. Missing paths, a different view or procfs denial fail closed.
+The PID 1 filesystem descriptor is used solely for observation and closed
+before returning. It is never used for execution, writes or namespace entry.
+Standalone probes still require mount-namespace equality. Do not relax the
+unit's filesystem sandbox or procfs/SELinux protections to make a probe pass.
 
 **Critically, this is only a necessary-context refusal filter.** PID1
 can be `systemd` *inside a privileged container*, and a container can
@@ -183,7 +196,8 @@ NGINX-reload and catalog-publication authority flags to false. The
 worker **still unconditionally returns nonzero with no host side effect**.
 
 CI tests include synthetic PID1, namespaces, UID/GID, procfs and runtime
-ownership failures plus actual Linux procfs observation in disposable
+ownership failures, real descriptor comparisons and Unix socket files, and
+actual Linux procfs observation in disposable
 Debian 13 and AlmaLinux 10 userspaces. These tests are neither a booted
 systemd/PID1 end-to-end acceptance nor proof of enforcing SELinux.
 A future positive host activation remains blocked until an independently

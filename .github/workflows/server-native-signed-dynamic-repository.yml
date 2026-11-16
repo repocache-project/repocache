@@ -1,0 +1,58 @@
+name: Native signed metadata over configuration-only NGINX repositories
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/ci_server_signed_dynamic_repository_native.py'
+      - '.github/workflows/server-native-signed-dynamic-repository.yml'
+      - 'docs/testing/SERVER_DYNAMIC_SIGNED_NATIVE_REPOSITORIES_V1.md'
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  signed-dynamic-repository:
+    name: Signed config-only NGINX repository (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: debian13
+            image: debian:trixie-slim
+            kind: apt
+          - platform: almalinux10
+            image: almalinux:10
+            kind: dnf
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify native signed APT/DNF metadata and artifact over a new generated route
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker run --rm --network bridge \
+            --env REPOCACHE_DISPOSABLE_SIGNED_ROUTE_CI=1 \
+            --mount "type=bind,source=$PWD,target=/workspace,readonly" \
+            --workdir /workspace '${{ matrix.image }}' \
+            sh -ec '
+              if command -v apt-get >/dev/null 2>&1; then
+                export DEBIAN_FRONTEND=noninteractive
+                apt-get update -qq
+                apt-get install -y -qq --no-install-recommends \
+                  nginx python3 openssl gnupg ca-certificates \
+                  dpkg-dev
+              else
+                dnf -y -q --enablerepo=crb install \
+                  nginx python3 openssl gnupg2 ca-certificates \
+                  createrepo_c rpm-build rpm-sign dnf-plugins-core
+              fi
+              test -f /.dockerenv
+              PYTHONDONTWRITEBYTECODE=1 \
+              PYTHONPATH=/workspace/src:/workspace/scripts \
+                python3 -B scripts/ci_server_signed_dynamic_repository_native.py \
+                  "${{ matrix.kind }}"
+            '
