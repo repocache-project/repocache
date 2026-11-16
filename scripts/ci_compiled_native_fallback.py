@@ -125,6 +125,8 @@ def smoke(manager: str):
             for phase, primary_mode, upstream_mode in (
                 ("preferred", "healthy", "healthy"),
                 ("fallback", "unavailable", "healthy"),
+                ("missing-fallback", "missing", "healthy"),
+                ("timeout-fallback", "stalled", "healthy"),
                 ("recovery", "healthy", "healthy"),
                 ("both-failed", "unavailable", "unavailable"),
             ):
@@ -135,12 +137,16 @@ def smoke(manager: str):
                 if manager == "apt":
                     argv = fixture.apt_command(base, cache, upstream, phase, key,
                                                ca_certificate=cert)
+                    if primary_mode == "stalled":
+                        argv.extend(("-o", "Acquire::https::Timeout=2"))
                     source = base / "ci.sources"
                     source.write_bytes(native.proposed)
                 else:
                     argv = fixture.dnf_command(base, cache, upstream, phase,
                                                ca_certificate=cert,
                                                metadata_key=key)
+                    if primary_mode == "stalled":
+                        argv.insert(1, "--setopt=repocache-ci.timeout=2")
                     repo = base / "repos" / "repocache-ci.repo"
                     # Harness-only CA path: the compiler does not change CA
                     # or key policy from the original input.
@@ -151,13 +157,15 @@ def smoke(manager: str):
                                      stderr=subprocess.STDOUT, timeout=120)
                 if phase == "both-failed":
                     accepted = run.returncode != 0 and cache.hits and upstream.hits
-                elif phase == "fallback":
+                elif primary_mode != "healthy":
                     accepted = run.returncode == 0 and cache.hits and upstream.hits
                 else:
                     accepted = run.returncode == 0 and cache.hits and not upstream.hits
                 if not accepted:
                     raise RuntimeError("Compiled %s %s fallback refusal:\n%s" %
                                        (manager, phase, run.stdout[-6500:]))
+                if primary_mode == "stalled" and cache.stall_deadline_elapsed:
+                    raise RuntimeError("Cache ended the stall before the client fell back")
                 if manager == "apt" and phase != "both-failed":
                     # Verify a real signed-metadata-to-package hash chain.
                     download = base / ("download-" + phase)
@@ -205,6 +213,10 @@ def smoke(manager: str):
                         "ephemeral RPMDB signature in " + phase,
                         flush=True,
                     )
+                if primary_mode == "stalled":
+                    if cache.stall_deadline_elapsed:
+                        raise RuntimeError("Cache ended the stall before verified package transfer")
+                    cache.release_stalled_requests.set()
                 print("compiled-%s %s PASS: primary_hits=%d upstream_hits=%d" %
                       (manager, phase, len(cache.hits), len(upstream.hits)),
                       flush=True)

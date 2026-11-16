@@ -30,6 +30,7 @@ def test_exact_hash_match_never_certifies_native_vm(tmp_path):
         path, digest(data), SOURCE_SHA,
         native_probe=lambda: {
             "status": "NOT VERIFIED", "code": "CONTAINER_CONTEXT_REFUSED",
+            "distribution": "debian", "supported_distro_python_observed": True,
             "systemd_pid1_namespace_shape_observed": False,
             "effective_nginx_master_observed": False,
         })
@@ -39,6 +40,8 @@ def test_exact_hash_match_never_certifies_native_vm(tmp_path):
     assert output["status"] == "NOT VERIFIED"
     assert output["native_probe_code"] == "CONTAINER_CONTEXT_REFUSED"
     assert output["native_prerequisites_observed"] is False
+    assert output["native_distribution"] == "debian"
+    assert output["native_selinux_enforcing_reported"] is False
     assert output["code"] == "DIGEST_MATCH_NATIVE_EVIDENCE_PENDING"
     assert all(output[k] is False for k in output
                if k.startswith("authorizes_") or k.endswith("_verified")
@@ -53,6 +56,7 @@ def test_forged_positive_probe_cannot_grant_release_or_install(tmp_path):
         native_probe=lambda: {
             "status": "READ_ONLY_PREREQUISITES_OBSERVED",
             "code": "OBSERVATION_ONLY_NO_HOST_AUTHORITY",
+            "distribution": "debian", "supported_distro_python_observed": True,
             "systemd_pid1_namespace_shape_observed": True,
             "effective_nginx_master_observed": True,
             "publisher_signature_verified": True,
@@ -68,6 +72,29 @@ def test_forged_positive_probe_cannot_grant_release_or_install(tmp_path):
     assert proof["authorizes_publication"] is False
 
 
+@pytest.mark.parametrize("enforcing", [True, False])
+def test_almalinux_positive_readonly_observation_requires_enforcing_selinux(
+    tmp_path, enforcing,
+):
+    path = candidate(tmp_path)
+    result = receipt.collect_candidate_evidence(
+        path, digest(path.read_bytes()), SOURCE_SHA,
+        native_probe=lambda: {
+            "status": "READ_ONLY_PREREQUISITES_OBSERVED",
+            "code": "OBSERVATION_ONLY_NO_HOST_AUTHORITY",
+            "distribution": "almalinux",
+            "supported_distro_python_observed": True,
+            "systemd_pid1_namespace_shape_observed": True,
+            "effective_nginx_master_observed": True,
+            "almalinux_selinux_enforcing_observed": enforcing,
+        },
+    )
+    assert result["status"] == "NOT VERIFIED"
+    assert result["native_distribution"] == "almalinux"
+    assert result["native_selinux_enforcing_reported"] is enforcing
+    assert result["native_prerequisites_observed"] is enforcing
+
+
 def test_hash_mismatch_blocks_before_native_probe(tmp_path):
     path = candidate(tmp_path)
     def forbidden():
@@ -77,6 +104,7 @@ def test_hash_mismatch_blocks_before_native_probe(tmp_path):
     assert output["status"] == "FAIL"
     assert output["code"] == "CANDIDATE_DIGEST_MISMATCH"
     assert output["artifact_digest_matched"] is False
+    assert output["native_distribution"] is None
     assert not output["native_prerequisites_observed"]
 
 
