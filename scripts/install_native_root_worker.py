@@ -24,6 +24,7 @@ if __name__ == "__main__":
     sys.path[:0] = [str(checkout / "src"), str(checkout)]
 
 from repocache import signatures, upgrade
+from repocache.server_install_v1 import MAX_DOCUMENT_BYTES, parse_install_bytes
 from repocache.server_protected_namespace_bootstrap_v1 import bootstrap_protected_namespace_under_root
 from repocache.server_locked_manifest_reconcile_v1 import preview_proposed_v2_state_transition
 from repocache.server_native_v2_transaction_v1 import _no_conflicting_pending, _write_private
@@ -33,6 +34,7 @@ from repocache.server_root_control_fixed_candidate_v1 import (
     _MAX_ENVELOPE, _MAX_STATE, _NAME as _PROPOSAL, _canonical_json, _proposal,
 )
 from repocache.server_root_control_host_preflight_v1 import require_native_host_preconditions
+from repocache.server_repository_plan_v1 import _canonical_identity, propose_automatic_repository_id
 from scripts import stage_native_root_worker as stage
 
 
@@ -305,6 +307,86 @@ def install_authenticated_worker(
 _PROPOSAL_STAGE = ".admin-candidate-v2.stage"
 
 
+def _initial_proposal(raw: bytes, decision_sha256: str) -> bytes:
+    """Prepare generation one as data for separate review and locked intake."""
+    if type(decision_sha256) is not str or not signatures.HEX64.fullmatch(decision_sha256):
+        _reject("DECISION_DIGEST_INVALID")
+    document = parse_install_bytes(raw, for_apply=True)
+    if document["expected_state_generation"] != 0:
+        _reject("INITIAL_GENERATION_REQUIRED")
+    identified = [row for row in document["repositories"] if "id" in row]
+    base = {**document, "repositories": identified}
+    reserved = {row["id"] for row in identified}
+    for row in document["repositories"]:
+        if "id" not in row:
+            suggestion = propose_automatic_repository_id(
+                base, row, current_generation=0, reserved_ids=reserved,
+            )
+            row["id"] = suggestion["repository_id"]
+            reserved.add(row["id"])
+            identified.append(row)
+    document["expected_state_generation"] = 1
+    configuration = _canonical(document, limit=MAX_DOCUMENT_BYTES)
+    records = [{
+        "id": row["id"],
+        "canonical_identity_sha256": hashlib.sha256(
+            _canonical_identity(row).encode("utf-8")
+        ).hexdigest(),
+        "desired_state": row["desired_state"],
+        "observed_state": "not-activated",
+    } for row in document["repositories"]]
+    digest = hashlib.sha256(configuration).hexdigest()
+    snapshot = {
+        "state_schema_version": 2,
+        "state_generation": 1,
+        "configuration_base64": base64.b64encode(configuration).decode("ascii"),
+        "configuration_sha256": digest,
+        "repository_records": records,
+        "id_reservations": [{
+            "id": row["id"],
+            "canonical_identity_sha256": row["canonical_identity_sha256"],
+            "status": "allocated",
+        } for row in records],
+        "approval_reference": {
+            "source": "operator",
+            "decision_sha256": decision_sha256,
+            "configuration_sha256": digest,
+            "expected_generation": 0,
+        },
+    }
+    preview_proposed_v2_state_transition(snapshot, expected_generation=0)
+    return _canonical(snapshot, limit=_MAX_STATE)
+
+
+def prepare_authenticated_initial_proposal(
+    assets: Path, document: Path, output: Path, *,
+    commit: str, archive_sha256: str, decision_sha256: str,
+) -> dict:
+    """Authenticate the candidate, then create a private proposal for review."""
+    stage._authenticated_payloads(
+        assets, commit=commit, archive_sha256=archive_sha256, system=None,
+    )
+    with ExitStack() as stack:
+        source = os.open(document.parent, stage._DIRECTORY)
+        stack.callback(os.close, source)
+        raw = stage._asset_bytes(source, document.name, MAX_DOCUMENT_BYTES)
+        proposal = _initial_proposal(raw, decision_sha256)
+        destination = os.open(output.parent, stage._DIRECTORY)
+        stack.callback(os.close, destination)
+        parent = os.fstat(destination)
+        if parent.st_uid != os.geteuid() or parent.st_mode & 0o022:
+            _reject("PROPOSAL_OUTPUT_UNSAFE")
+        stage._write(destination, output.name, proposal, 0o600)
+        os.fsync(destination)
+    return {
+        "status": "AUTHENTICATED_INITIAL_V2_PROPOSAL_PREPARED",
+        "proposed_state_sha256": hashlib.sha256(proposal).hexdigest(),
+        "state_generation": 1,
+        "requires_independent_review": True,
+        "authorizes_service_activation": False,
+    }
+
+
 def _read_proposal_at(state: int, name: str) -> bytes | None:
     if _named(state, name) is None:
         return None
@@ -390,14 +472,26 @@ def main() -> int:
     parser.add_argument("--assets", type=Path, required=True)
     parser.add_argument("--commit", required=True)
     parser.add_argument("--archive-sha256", required=True)
-    parser.add_argument("--stage-v2-proposal", type=Path)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--stage-v2-proposal", type=Path)
+    mode.add_argument("--prepare-initial-v2-proposal", type=Path)
     parser.add_argument("--proposal-sha256")
+    parser.add_argument("--proposal-output", type=Path)
+    parser.add_argument("--decision-sha256")
     args = parser.parse_args()
     if (args.stage_v2_proposal is None) != (args.proposal_sha256 is None):
         parser.error("--stage-v2-proposal and --proposal-sha256 must be supplied together")
+    preparing = args.prepare_initial_v2_proposal is not None
+    if preparing != (args.proposal_output is not None) or preparing != (args.decision_sha256 is not None):
+        parser.error("--prepare-initial-v2-proposal requires --proposal-output and --decision-sha256")
     pins = {"commit": args.commit, "archive_sha256": args.archive_sha256}
     try:
-        if args.stage_v2_proposal is None:
+        if preparing:
+            result = prepare_authenticated_initial_proposal(
+                args.assets, args.prepare_initial_v2_proposal, args.proposal_output,
+                decision_sha256=args.decision_sha256, **pins,
+            )
+        elif args.stage_v2_proposal is None:
             result = install_authenticated_worker(args.assets, **pins)
         else:
             result = stage_authenticated_proposal(
@@ -405,10 +499,9 @@ def main() -> int:
             )
     except (OSError, ValueError, subprocess.SubprocessError,
             signatures.SignatureError, upgrade.UpgradeError):
-        refused = (
-            "AUTHENTICATED_WORKER_PLACEMENT_REFUSED" if args.stage_v2_proposal is None
-            else "AUTHENTICATED_V2_PROPOSAL_REFUSED"
-        )
+        refused = "AUTHENTICATED_WORKER_PLACEMENT_REFUSED"
+        if preparing or args.stage_v2_proposal is not None:
+            refused = "AUTHENTICATED_V2_PROPOSAL_REFUSED"
         result = {"status": refused}
         status = 1
     else:

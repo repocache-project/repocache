@@ -81,6 +81,30 @@ authorized activation in the consolidated booted-host campaign.
 
 ## Stage a reviewed v2 proposal
 
+For a clean first installation, prepare the snapshot from the reviewed
+install-v1 document with `expected_state_generation` set to zero. The
+following preparation step can run without root in a private output parent.
+It authenticates the release candidate first and uses the adopted input
+validators and repository ID planner. Missing IDs receive deterministic
+initial suggestions. Existing deployment state and retired IDs require the
+separate update flow.
+
+~~~sh
+/usr/bin/python3 -IS scripts/install_native_root_worker.py \
+  --assets /absolute/incoming \
+  --commit "$REVIEWED_SOURCE_SHA" \
+  --archive-sha256 "$REVIEWED_ARCHIVE_SHA256" \
+  --prepare-initial-v2-proposal /absolute/reviewed-install.json \
+  --decision-sha256 "$REVIEWED_DECISION_SHA256" \
+  --proposal-output /absolute/private-stage/reviewed-state.json
+~~~
+
+The output is a new 0600 canonical snapshot with generation one. Existing
+output is refused. The JSON receipt includes its SHA-256 for independent
+review. The decision digest binds the recorded decision reference. The
+reference itself supplies no OS authorization. Review the complete output,
+including generated IDs, before using its exact digest for locked staging.
+
 Use a canonical v2 state snapshot and its independently reviewed SHA-256.
 Run the same installer with the authenticated release asset arguments plus
 `--stage-v2-proposal /absolute/reviewed-state.json --proposal-sha256 SHA256`.

@@ -18,10 +18,132 @@ from scripts import build_release, install_native_root_worker as install
 from scripts import stage_native_root_worker as stage
 from test_signatures import _openssl, _sign
 from test_v06_release_source_inventory import _candidate_source
+from test_server_proposed_state_v2_store import document, snapshot
 
 
 def _combined() -> bool:
     return os.environ.get("REPOCACHE_REQUIRE_CANONICAL_WORKER_VERIFIER") == "1"
+
+
+def test_initial_proposal_matches_adopted_snapshot_and_allocates_stable_ids():
+    config = document(count=3, generation=0)
+
+    def encoded(value):
+        return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii")
+
+    assert install._initial_proposal(encoded(config), "d" * 64) == encoded(snapshot(count=3))
+    for row in config["repositories"][1:]:
+        del row["id"]
+    raw = encoded(config)
+    first = install._initial_proposal(raw, "d" * 64)
+    assert install._initial_proposal(raw, "d" * 64) == first
+    proposed = json.loads(first)
+    ids = [row["id"] for row in proposed["repository_records"]]
+    assert ids[0] == "repo-0"
+    assert len(set(ids)) == 3
+    assert all(row.startswith("repo-") and len(row) == 37 for row in ids[1:])
+    assert all(row["status"] == "allocated" for row in proposed["id_reservations"])
+    assert proposed["approval_reference"]["expected_generation"] == 0
+    assert json.loads(raw) == config
+
+
+@pytest.mark.parametrize("fault", ["generation", "decision", "duplicate", "unsafe-upstream"])
+def test_initial_proposal_refuses_invalid_input(fault):
+    config = document(count=2, generation=0)
+    decision = "d" * 64
+    if fault == "generation":
+        config["expected_state_generation"] = 1
+    elif fault == "decision":
+        decision = "not-a-sha256"
+    elif fault == "duplicate":
+        config["repositories"][1]["id"] = "repo-0"
+    else:
+        config["repositories"][0]["upstream"]["base_url"] = "https://127.0.0.1/debian/"
+    with pytest.raises(ValueError):
+        install._initial_proposal(json.dumps(config).encode(), decision)
+
+
+def test_prepare_initial_proposal_authenticates_before_input_or_output(tmp_path, monkeypatch):
+    def refuse(*args, **kwargs):
+        raise stage.WorkerStageError("WORKER_STAGE_SIGNED_IDENTITY_MISMATCH")
+
+    monkeypatch.setattr(stage, "_authenticated_payloads", refuse)
+    output = tmp_path / "proposal.json"
+    with pytest.raises(stage.WorkerStageError, match="SIGNED_IDENTITY_MISMATCH"):
+        install.prepare_authenticated_initial_proposal(
+            tmp_path, tmp_path / "missing-input.json", output,
+            commit="a" * 40, archive_sha256="b" * 64, decision_sha256="d" * 64,
+        )
+    assert not output.exists()
+
+
+def test_prepare_initial_proposal_refuses_shared_output_parent(tmp_path, monkeypatch):
+    monkeypatch.setattr(stage, "_authenticated_payloads", lambda *args, **kwargs: ({}, {}))
+    source = tmp_path / "reviewed-install.json"
+    source.write_text(json.dumps(document(count=1, generation=0)))
+    parent = tmp_path / "shared"
+    parent.mkdir()
+    parent.chmod(0o777)
+    output = parent / "proposal.json"
+    with pytest.raises(stage.WorkerStageError, match="PROPOSAL_OUTPUT_UNSAFE"):
+        install.prepare_authenticated_initial_proposal(
+            tmp_path, source, output,
+            commit="a" * 40, archive_sha256="b" * 64, decision_sha256="d" * 64,
+        )
+    assert not output.exists()
+
+
+def test_prepare_initial_proposal_has_private_no_replace_output(candidate, tmp_path, monkeypatch):
+    authenticate = stage._authenticated_payloads
+
+    def compatible(*args, **kwargs):
+        if not _combined():
+            kwargs["system"] = {"ID": "debian", "VERSION_ID": "13"}
+        return authenticate(*args, **kwargs)
+
+    monkeypatch.setattr(stage, "_authenticated_payloads", compatible)
+    archive, digest, commit, _detached = candidate
+    source = tmp_path / "reviewed-install.json"
+    source.write_text(json.dumps(document(count=1, generation=0)))
+    output = tmp_path / "private" / "reviewed-state.json"
+    output.parent.mkdir(mode=0o700)
+    receipt = install.prepare_authenticated_initial_proposal(
+        archive.parent, source, output,
+        commit=commit, archive_sha256=digest, decision_sha256="d" * 64,
+    )
+    raw = output.read_bytes()
+    assert receipt["proposed_state_sha256"] == hashlib.sha256(raw).hexdigest()
+    assert receipt["requires_independent_review"]
+    assert not receipt["authorizes_service_activation"]
+    assert stat.S_IMODE(output.stat().st_mode) == 0o600
+    with pytest.raises(FileExistsError):
+        install.prepare_authenticated_initial_proposal(
+            archive.parent, source, output,
+            commit=commit, archive_sha256=digest, decision_sha256="d" * 64,
+        )
+    assert output.read_bytes() == raw
+
+
+@pytest.mark.parametrize("options", [
+    ["--prepare-initial-v2-proposal", "install.json"],
+    ["--decision-sha256", "d" * 64],
+    ["--proposal-output", "output.json"],
+    ["--prepare-initial-v2-proposal", "install.json", "--stage-v2-proposal", "state.json"],
+])
+def test_invalid_preparation_cli_never_falls_back_to_host_placement(monkeypatch, options):
+    def unexpected(*args, **kwargs):
+        pytest.fail("invalid preparation reached a host operation")
+
+    monkeypatch.setattr(install, "install_authenticated_worker", unexpected)
+    monkeypatch.setattr(install, "stage_authenticated_proposal", unexpected)
+    monkeypatch.setattr(install, "prepare_authenticated_initial_proposal", unexpected)
+    monkeypatch.setattr(sys, "argv", [
+        "install_native_root_worker.py", "--assets", "incoming",
+        "--commit", "a" * 40, "--archive-sha256", "b" * 64, *options,
+    ])
+    with pytest.raises(SystemExit) as error:
+        install.main()
+    assert error.value.code == 2
 
 
 @pytest.fixture
