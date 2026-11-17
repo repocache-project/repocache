@@ -222,10 +222,14 @@ def test_new_generation_is_immediately_due_regardless_of_old_slot():
 
 @pytest.mark.parametrize("bad_now", [
     -1, float("nan"), float("inf"), False, "100", 1e20,
+    pytest.param(1 << 4096, id="oversized-integer"),
 ])
 def test_bad_monotonic_clock_fails_closed(bad_now):
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("invalid clock must not query DNS")
+
     with pytest.raises(UpstreamScheduleError, match="SCHEDULE_INPUT_INVALID"):
-        tick(now=bad_now)
+        tick(now=bad_now, resolver=forbidden)
 
 
 @pytest.mark.parametrize("bad_slot", [
@@ -233,6 +237,8 @@ def test_bad_monotonic_clock_fails_closed(bad_now):
     RefreshSlot("wrong-repo", 0, 1200, 0),
     RefreshSlot("debian-trixie-main", True, 1200, 0),
     RefreshSlot("debian-trixie-main", 0, float("nan"), 0),
+    pytest.param(RefreshSlot("debian-trixie-main", 0, 1 << 4096, 0),
+                 id="oversized-deadline"),
     RefreshSlot("debian-trixie-main", 0, 1200, True),
     RefreshSlot("debian-trixie-main", 0, 1200, 13),
 ])

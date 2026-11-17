@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Isolated release-bundle smoke test; never use on a production host.
 set -Eeuo pipefail
-if [[ $# -ne 3 || ! "$1" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  echo "Usage: smoke_release_bundle.sh vX.Y.Z debian13|almalinux10 DIR" >&2
+if [[ ( $# -ne 3 && $# -ne 4 ) || ! "$1" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ||
+      ( $# -eq 4 && "$4" != "--v06-layout-smoke" ) ]]; then
+  echo "Usage: smoke_release_bundle.sh vX.Y.Z debian13|almalinux10 DIR [--v06-layout-smoke]" >&2
   exit 2
 fi
 version="$1"
@@ -21,6 +22,7 @@ docker run --rm --pull=always \
   --mount "type=bind,source=$suite/smoke_tui.py,target=/tmp/smoke_tui.py,readonly" \
   --mount "type=bind,source=$suite/ci_native_public_transport.py,target=/tmp/ci_native_public_transport.py,readonly" \
   -e "REPOCACHE_VERSION=$version" -e "REPOCACHE_PYTHON=$python" \
+  -e "REPOCACHE_LAYOUT_SMOKE=${4-}" \
   "$image" /bin/sh -eu -c '
 case "$(cat /etc/os-release)" in
   *"ID=debian"*)
@@ -83,6 +85,32 @@ test ! -e /usr/local/bin/repocache-client
 echo "PASS: invalid native client preflight refused before writing managed state"
 launcher_sha="$(sha256sum scripts/repocache-launcher.sh | cut -d " " -f1)"
 recovery_sha="$(sha256sum src/repocache/recovery.py | cut -d " " -f1)"
+if [ "$REPOCACHE_LAYOUT_SMOKE" = "--v06-layout-smoke" ]; then
+  test ! -e /var/lib/repocache
+  test ! -e /var/lib/repocache-runtime
+  install -d -o root -g root -m 0711 /var/lib/repocache
+  install -d -o root -g root -m 0700 /var/lib/repocache/server
+  install -o root -g root -m 0600 /dev/null /var/lib/repocache/server/.state-v1.lock
+  protected="$(stat -c "%d:%i:%u:%g:%a" /var/lib/repocache /var/lib/repocache/server /var/lib/repocache/server/.state-v1.lock)"
+  if /bin/bash scripts/bootstrap-rootless.sh --launcher-sha256 "$launcher_sha" --recovery-sha256 "$recovery_sha"; then
+    echo "Legacy bootstrap accepted the protected server directory" >&2
+    exit 1
+  fi
+  for attempt in 1 2; do
+    /bin/bash scripts/bootstrap-rootless.sh --launcher-sha256 "$launcher_sha" \
+      --recovery-sha256 "$recovery_sha" --server-layout-v06
+    test "$(getent passwd repocache | cut -d : -f 6)" = /var/lib/repocache-runtime
+    test "$(stat -c "%U:%G:%a" /var/lib/repocache-runtime)" = repocache:repocache:700
+    test "$protected" = "$(stat -c "%d:%i:%u:%g:%a" /var/lib/repocache /var/lib/repocache/server /var/lib/repocache/server/.state-v1.lock)"
+    /usr/sbin/runuser -u repocache -- /usr/bin/test -w /var/lib/repocache-runtime
+    if /usr/sbin/runuser -u repocache -- /usr/bin/test -x /var/lib/repocache/server; then
+      echo "Service UID can traverse the protected state directory" >&2
+      exit 1
+    fi
+  done
+  echo "PASS: separate v0.6 service home and fixed root-owned state coexist"
+  exit 0
+fi
 # Missing native prerequisites must fail before privileged bootstrap creates
 # accounts, managed state or launchers. All mutations are disposable-container
 # probes, with each OS binary restored before normal bootstrap.

@@ -5,11 +5,15 @@ set -Eeuo pipefail
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 umask 077
-if [[ $(id -u) -ne 0 || $# -ne 4 || "$1" != "--launcher-sha256" ||
+if [[ $(id -u) -ne 0 || ( $# -ne 4 && $# -ne 5 ) || "$1" != "--launcher-sha256" ||
       ! "$2" =~ ^[a-fA-F0-9]{64}$ || "$3" != "--recovery-sha256" ||
-      ! "$4" =~ ^[a-fA-F0-9]{64}$ ]]; then
-  echo "Usage (root): bootstrap-rootless.sh --launcher-sha256 VERIFIED_LAUNCHER_SHA256 --recovery-sha256 VERIFIED_RECOVERY_SHA256" >&2
+      ! "$4" =~ ^[a-fA-F0-9]{64}$ || ( $# -eq 5 && "$5" != "--server-layout-v06" ) ]]; then
+  echo "Usage (root): bootstrap-rootless.sh --launcher-sha256 VERIFIED_LAUNCHER_SHA256 --recovery-sha256 VERIFIED_RECOVERY_SHA256 [--server-layout-v06]" >&2
   exit 2
+fi
+service_home=/var/lib/repocache
+if [[ $# -eq 5 ]]; then
+  service_home=/var/lib/repocache-runtime
 fi
 # Verify the system environment before creating any users or directories.
 # Only OS-owned Python and embedded stdlib code execute while privileged.
@@ -56,7 +60,7 @@ printf '%s  %s\n' "$2" "$launcher" | sha256sum -c --status ||
 # Reject missing OS-owned command prerequisites before useradd or any filesystem
 # mutation. An incomplete util-linux/coreutils/shadow-utils install is not a
 # valid target; never attempt best-effort privileged bootstrap.
-for required in /usr/sbin/runuser /usr/sbin/useradd /usr/bin/install /usr/bin/stat /usr/bin/sha256sum /usr/bin/grep /usr/bin/id; do
+for required in /usr/sbin/runuser /usr/sbin/useradd /usr/bin/install /usr/bin/stat /usr/bin/sha256sum /usr/bin/grep /usr/bin/id /usr/bin/getent; do
   [[ -x "$required" && ! -L "$required" ]] || {
     echo "Missing or unsafe OS-owned bootstrap prerequisite: $required" >&2
     exit 1
@@ -67,9 +71,9 @@ for path in /opt /opt/repocache-cli /usr/local /usr/local/bin /usr/local/libexec
 done
 # Root must own every ancestor leading to the service-visible lock location.
 # A writable /opt would let another UID rename even a root-owned child dir.
-for trusted in / /opt; do
+for trusted in / /opt /var /var/lib; do
   [[ -d "$trusted" && ! -L "$trusted" &&
-      "$(stat -c %u "$trusted")" = 0 ]] ||
+      "$(stat -c %u:%g "$trusted")" = 0:0 ]] ||
     { echo "Untrusted system path: $trusted" >&2; exit 1; }
   mode="$(stat -c %a "$trusted")"
   if (( (8#$mode & 0022) != 0 )); then
@@ -89,8 +93,26 @@ if [[ -e /usr/bin/repocache || -L /usr/bin/repocache ]]; then
   echo "Unmanaged /usr/bin/repocache detected; migration is unsupported" >&2
   exit 1
 fi
-if ! id repocache >/dev/null 2>&1; then
-  useradd --system --user-group --home-dir /var/lib/repocache \
+if account=$(/usr/bin/getent passwd repocache); then
+  IFS=: read -r account_name _ account_uid account_gid _ account_home _ <<< "$account"
+  if [[ "$account_name" != repocache || "$account_home" != "$service_home"
+        || ! "$account_uid" =~ ^[1-9][0-9]*$ || ! "$account_gid" =~ ^[1-9][0-9]*$ ]]; then
+    echo 'Existing service identity has an unsupported home or owner' >&2
+    exit 1
+  fi
+  if [[ -e "$service_home" || -L "$service_home" ]]; then
+    if [[ ! -d "$service_home" || -L "$service_home"
+          || "$(stat -c %u:%g:%a "$service_home")" != "$account_uid:$account_gid:700" ]]; then
+      echo 'Existing service home has unsafe ownership or permissions' >&2
+      exit 1
+    fi
+  fi
+else
+  if [[ -e "$service_home" || -L "$service_home" ]]; then
+    echo 'Existing service home has no verified owner' >&2
+    exit 1
+  fi
+  useradd --system --user-group --home-dir "$service_home" \
     --shell /usr/sbin/nologin --no-create-home repocache
 fi
 [[ "$(id -u repocache)" != "0" ]] || { echo 'Unsafe service identity' >&2; exit 1; }
@@ -141,7 +163,9 @@ finally:
     os.close(rootfd)
 PY
 
-install -d -o repocache -g repocache -m 0700 /var/lib/repocache
+if [[ ! -d "$service_home" ]]; then
+  install -d -o repocache -g repocache -m 0700 "$service_home"
+fi
 install -d -o root -g root -m 0755 /usr/local/libexec
 install -o root -g root -m 0644 "$recovery" /usr/local/libexec/repocache-recover.py
 install -o root -g root -m 0755 "$launcher" /usr/local/bin/repocache

@@ -83,6 +83,9 @@ jobs:
       - name: Verify bundle, reject unsigned source and exercise client in Docker
         shell: bash
         run: bash scripts/smoke_release_bundle.sh "$RELEASE_TAG" '${{ matrix.platform }}' dist
+      - name: Verify the v0.6 runtime home and protected state coexist
+        shell: bash
+        run: bash scripts/smoke_release_bundle.sh "$RELEASE_TAG" '${{ matrix.platform }}' dist --v06-layout-smoke
       - name: Rehearse Node.js 24 artifact upload without publishing (#74)
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:

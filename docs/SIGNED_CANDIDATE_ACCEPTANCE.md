@@ -25,6 +25,16 @@ owner-held Ed25519 key/fingerprint and **schema-1, eight-asset offline
 wheelhouse** profile remain unchanged. Do not silently adopt the v0.7.0
 online/source-only profile or source a publisher key from a candidate.
 
+The trusted bootstrap selects the v0.6 layout with `--server-layout-v06`
+after authenticating the release and checking its bootstrap member digests.
+The unprivileged application's private home is `/var/lib/repocache-runtime`.
+The root-owned `/var/lib/repocache` namespace holds the separate protected
+server state. The bootstrap refuses accounts from the legacy layout, unsafe
+existing runtime homes and attempts to adopt the protected server directory as
+an application home. Repeating the same v0.6 bootstrap keeps both directories
+under their existing owners. The isolated bundle smoke exercises the two
+directories and the service UID on both target distributions.
+
 ## Prepublication trust and acceptance — mandatory
 
 1. Finish the working-server functional gates in #18/#19/#20/#24/#25/#26/

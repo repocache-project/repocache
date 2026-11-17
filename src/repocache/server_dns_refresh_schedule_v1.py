@@ -48,8 +48,9 @@ class RefreshSlot:
 
 
 def _valid_clock(value: Any) -> bool:
-    return (builtins_type(value) in (int, float)
-            and math.isfinite(value) and 0 <= value <= 1e15)
+    # Range comparisons also reject nonfinite floats without coercing a
+    # caller-supplied integer to float.
+    return builtins_type(value) in (int, float) and 0 <= value <= 1e15
 
 
 # Avoid accepting bool, which otherwise behaves as an integer.

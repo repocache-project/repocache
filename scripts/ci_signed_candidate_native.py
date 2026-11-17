@@ -161,6 +161,7 @@ def prepare_clean_candidate(tag: str) -> dict[str, bytes]:
         hashlib.sha256(checked["scripts/repocache-launcher.sh"]).hexdigest(),
         "--recovery-sha256",
         hashlib.sha256(checked["src/repocache/recovery.py"]).hexdigest(),
+        "--server-layout-v06",
     )
     need(
         (MANAGED.parent / ".updater.lock").is_file()
@@ -199,7 +200,7 @@ def install_first_signed_generation(tag: str, evidence: dict) -> None:
         run(
             "/usr/sbin/runuser", "-u", "repocache", "--",
             "/usr/bin/env", "-i",
-            "HOME=/var/lib/repocache", "PATH=/usr/local/bin:/usr/bin:/bin",
+            "HOME=/var/lib/repocache-runtime", "PATH=/usr/local/bin:/usr/bin:/bin",
             "LANG=C.UTF-8", "PYTHONPATH=/repo/src",
             "PYTHONNOUSERSITE=1", "PYTHONSAFEPATH=1",
             "/usr/bin/python3", "-c", bootstrap,

@@ -253,6 +253,31 @@ def _run(command: list[str], *, work: Path,
     return proc.stdout, ""
 
 
+def _candidate_code(distribution: str, output: str) -> str:
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if not lines:
+        return "NATIVE_PACKAGE_NOT_AVAILABLE"
+    if distribution == "debian":
+        # apt-cache may emit nothing for a package missing entirely from
+        # its lists or explicitly show a candidate of (none) for nginx.
+        candidates = [line.partition(":")[2].strip() for line in lines
+                      if line.startswith("Candidate:")]
+        if lines[0] != "nginx:" or lines.count("nginx:") != 1 or len(candidates) != 1:
+            return "NATIVE_MANAGER_OUTPUT_INVALID"
+        candidate = candidates[0]
+        if candidate == "(none)":
+            return "NATIVE_PACKAGE_NOT_AVAILABLE"
+        if not re.fullmatch(
+            r"(?:[0-9]+:)?[0-9][A-Za-z0-9.+~:-]{0,127}", candidate, re.ASCII,
+        ):
+            return "NATIVE_MANAGER_OUTPUT_INVALID"
+    elif len(lines) > 128 or any(line != "nginx" for line in lines):
+        # DNF repoquery uses a fixed name-only format. Multiple copies of
+        # the same name may be present across versions and repositories.
+        return "NATIVE_MANAGER_OUTPUT_INVALID"
+    return "NATIVE_CANDIDATE_OBSERVED"
+
+
 def inspect_native_nginx_metadata(
     *, os_release: str, python_version: tuple[int, int],
     document: dict[str, Any],
@@ -280,33 +305,8 @@ def inspect_native_nginx_metadata(
         output, error = _run(query, work=work, runner=runner)
         if error:
             return NativeMetadataEvidenceV1(distro, error, False, False)
-        if distro == "debian":
-            # Locale C apt-cache policy output: only accept an explicit
-            # nonempty candidate, never an installed-package-only result.
-            # A Candidate token alone is not a valid package policy query.
-            # Require the fixed nginx header and one Debian version token.
-            lines = [line.strip() for line in output.splitlines()
-                     if line.strip()]
-            candidates = [line.split(":", 1)[1].strip()
-                          for line in lines if line.startswith("Candidate:")]
-            available = (bool(lines) and lines[0] == "nginx:"
-                         and lines.count("nginx:") == 1
-                         and len(candidates) == 1
-                         and re.fullmatch(
-                             r"(?:[0-9]+:)?[0-9][A-Za-z0-9.+~:-]{0,127}",
-                             candidates[0], re.ASCII,
-                         ) is not None)
-        else:
-            # Force --available and fixed repository list. Reject ambiguous
-            # or untrusted output rather than assuming rc=0 means available.
-            lines = [line.strip() for line in output.splitlines() if line.strip()]
-            available = bool(lines) and len(lines) <= 128 and all(
-                line == "nginx" for line in lines
-            )
-        if not available:
-            return NativeMetadataEvidenceV1(
-                distro, "NATIVE_PACKAGE_NOT_AVAILABLE", True, False
-            )
+        code = _candidate_code(distro, output)
         return NativeMetadataEvidenceV1(
-            distro, "NATIVE_CANDIDATE_OBSERVED", True, True
+            distro, code, code != "NATIVE_MANAGER_OUTPUT_INVALID",
+            code == "NATIVE_CANDIDATE_OBSERVED",
         )
