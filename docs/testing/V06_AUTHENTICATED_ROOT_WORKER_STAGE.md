@@ -78,3 +78,15 @@ An unrelated destination or a different candidate halts before replacement.
 The placement command does not load, start or enable either unit. Review
 the effective loaded unit and native labels and perform separately
 authorized activation in the consolidated booted-host campaign.
+
+## Stage a reviewed v2 proposal
+
+Use a canonical v2 state snapshot and its independently reviewed SHA-256.
+Run the same installer with the authenticated release asset arguments plus
+`--stage-v2-proposal /absolute/reviewed-state.json --proposal-sha256 SHA256`.
+It verifies the installed worker files and binds the snapshot to the actual
+committed predecessor under the protected lock. A prior uncommitted proposal
+is preserved. An exact staged retry is idempotent. A native package-effects
+marker or pending WAL blocks staging and remains available for reconciliation.
+Staging leaves the active state, NGINX and the catalogue untouched. Actual
+activation still requires the separate kernel-credentialed worker operation.

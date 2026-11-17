@@ -23,6 +23,7 @@ from repocache.server_protected_state_store_v1 import LOCK_NAME
 from repocache.server_proposed_state_v2_store import V2_STATE
 from repocache.server_root_control_fixed_candidate_v1 import _NAME
 from test_server_proposed_state_v2_store import snapshot, document
+from scripts import install_native_root_worker as installer
 
 pytestmark = pytest.mark.skipif(
     os.geteuid() != 0, reason="requires disposable root-owned Linux directories",
@@ -186,6 +187,72 @@ def test_kernel_credentialed_dispatch_reaches_real_wal_only_for_admin(
                 ended, status = os.waitpid(child, 0)
                 assert ended == child and os.waitstatus_to_exitcode(status) == 0
     assert_no_pending(filesystem)
+
+
+def test_reviewed_proposal_is_staged_then_consumed_by_v2_worker(filesystem):
+    fd, state, include, catalog, events = filesystem
+    first = snapshot(count=1)
+    raw = _canon(first)
+    with pytest.raises(ValueError, match="PROPOSAL_PIN_MISMATCH"):
+        installer._stage_proposal_under_root(fd, raw, "0" * 64)
+    assert not (state / _NAME).exists()
+    receipt = installer._stage_proposal_under_root(fd, raw, hashlib.sha256(raw).hexdigest())
+    before = (state / _NAME).stat()
+    assert receipt["expected_generation"] == 0
+    assert not receipt["authorizes_service_activation"]
+    assert not include.exists() and not catalog.exists() and not events
+    installer._stage_proposal_under_root(fd, raw, receipt["proposed_state_sha256"])
+    assert (state / _NAME).stat().st_ino == before.st_ino
+    alternative = _canon(snapshot(count=2))
+    with pytest.raises(ValueError, match="UNCOMMITTED_PRIOR_PROPOSAL"):
+        installer._stage_proposal_under_root(fd, alternative, hashlib.sha256(alternative).hexdigest())
+    assert (state / _NAME).stat().st_ino == before.st_ino
+
+    apply(filesystem)
+    assert (state / V2_STATE).read_bytes() == raw
+    second = _canon(snapshot(count=1, generation=2, previous=first))
+    assert installer._stage_proposal_under_root(
+        fd, second, hashlib.sha256(second).hexdigest(),
+    )["expected_generation"] == 1
+    assert (state / V2_STATE).read_bytes() == raw
+
+
+@pytest.mark.parametrize("complete", [True, False])
+def test_reviewed_proposal_handles_interrupted_staging(filesystem, complete):
+    fd, state, include, catalog, events = filesystem
+    raw = _canon(snapshot(count=1))
+    digest = hashlib.sha256(raw).hexdigest()
+    installer._stage_proposal_under_root(fd, raw, digest)
+    envelope = (state / _NAME).read_bytes()
+    interrupted = state / installer._PROPOSAL_STAGE
+    interrupted.write_bytes(envelope if complete else envelope[:-1])
+    interrupted.chmod(0o600)
+    (state / _NAME).unlink()
+    if complete:
+        installer._stage_proposal_under_root(fd, raw, digest)
+        assert (state / _NAME).read_bytes() == envelope
+        assert not interrupted.exists()
+    else:
+        with pytest.raises(ValueError, match="FOREIGN_PROPOSAL_STAGE"):
+            installer._stage_proposal_under_root(fd, raw, digest)
+        assert interrupted.read_bytes() == envelope[:-1]
+        assert not (state / _NAME).exists()
+    assert not include.exists() and not catalog.exists() and not events
+
+
+def test_reviewed_proposal_refuses_unreconciled_native_package_effects(filesystem):
+    from repocache.server_native_nginx_package_journal_v1 import NATIVE_PENDING_NAME
+
+    fd, state, include, catalog, events = filesystem
+    marker = state / NATIVE_PENDING_NAME
+    marker.write_bytes(b"native effects awaiting reconciliation")
+    marker.chmod(0o600)
+    raw = _canon(snapshot(count=1))
+    with pytest.raises(ValueError, match="NATIVE_PACKAGE"):
+        installer._stage_proposal_under_root(fd, raw, hashlib.sha256(raw).hexdigest())
+    assert marker.read_bytes() == b"native effects awaiting reconciliation"
+    assert not (state / _NAME).exists()
+    assert not include.exists() and not catalog.exists() and not events
 
 
 def test_first_install_commits_real_three_resource_paths(filesystem, monkeypatch):

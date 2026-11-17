@@ -8,6 +8,7 @@ worker. It never reloads or enables a service.
 from __future__ import annotations
 
 import argparse
+import base64
 from contextlib import ExitStack
 import hashlib
 import json
@@ -24,7 +25,13 @@ if __name__ == "__main__":
 
 from repocache import signatures, upgrade
 from repocache.server_protected_namespace_bootstrap_v1 import bootstrap_protected_namespace_under_root
-from repocache.server_protected_state_store_v1 import _locked
+from repocache.server_locked_manifest_reconcile_v1 import preview_proposed_v2_state_transition
+from repocache.server_native_v2_transaction_v1 import _no_conflicting_pending, _write_private
+from repocache.server_proposed_state_v2_store import _read_v2
+from repocache.server_protected_state_store_v1 import _canonical, _locked, _unlink_known
+from repocache.server_root_control_fixed_candidate_v1 import (
+    _MAX_ENVELOPE, _MAX_STATE, _NAME as _PROPOSAL, _canonical_json, _proposal,
+)
 from repocache.server_root_control_host_preflight_v1 import require_native_host_preconditions
 from scripts import stage_native_root_worker as stage
 
@@ -295,19 +302,100 @@ def install_authenticated_worker(
     return {**receipt, "status": "AUTHENTICATED_WORKER_FILES_PLACED"}
 
 
+_PROPOSAL_STAGE = ".admin-candidate-v2.stage"
+
+
+def _read_proposal_at(state: int, name: str) -> bytes | None:
+    if _named(state, name) is None:
+        return None
+    return stage._asset_bytes(state, name, _MAX_ENVELOPE, installed_mode=0o600)
+
+
+def _stage_proposal_under_root(root_fd: int, raw: bytes, reviewed_sha: str) -> dict:
+    if not signatures.HEX64.fullmatch(reviewed_sha) or hashlib.sha256(raw).hexdigest() != reviewed_sha:
+        _reject("PROPOSAL_PIN_MISMATCH")
+    snapshot = _canonical_json(raw, _MAX_STATE)
+    with _locked(root_fd, 0) as state:
+        # Native package-effects markers and all unresolved WALs must stay
+        # in place. Proposal staging grants no recovery or activation authority.
+        _no_conflicting_pending(state)
+        previous, previous_raw = _read_v2(state, 0)
+        generation = 0 if previous is None else previous["state_generation"]
+        preview_proposed_v2_state_transition(
+            snapshot, expected_generation=generation, previous_snapshot=previous,
+        )
+        envelope = _canonical({
+            "request_schema_version": 1,
+            "expected_generation": generation,
+            "expected_state_sha256": (
+                None if previous_raw is None else hashlib.sha256(previous_raw).hexdigest()
+            ),
+            "next_state_base64": base64.b64encode(raw).decode("ascii"),
+            "next_state_sha256": reviewed_sha,
+        }, limit=_MAX_ENVELOPE)
+        _proposal(envelope)
+        prior = _read_proposal_at(state, _PROPOSAL)
+        interrupted = _read_proposal_at(state, _PROPOSAL_STAGE)
+        if interrupted is not None and interrupted != envelope:
+            _reject("FOREIGN_PROPOSAL_STAGE")
+        if prior is not None and prior != envelope:
+            # Replace only a proposal whose exact state is now committed.
+            # A different, still-pending operator decision remains untouched.
+            _, prior_state = _proposal(prior)
+            if prior_state != previous_raw:
+                _reject("UNCOMMITTED_PRIOR_PROPOSAL")
+        if interrupted is not None:
+            _unlink_known(state, _PROPOSAL_STAGE, envelope, 0, _MAX_ENVELOPE)
+        if prior != envelope:
+            _write_private(state, _PROPOSAL, _PROPOSAL_STAGE, prior, envelope, _MAX_ENVELOPE)
+    return {
+        "status": "AUTHENTICATED_V2_PROPOSAL_STAGED",
+        "proposed_state_sha256": reviewed_sha,
+        "expected_generation": generation,
+        "authorizes_service_activation": False,
+    }
+
+
+def stage_authenticated_proposal(
+    assets: Path, snapshot: Path, *, commit: str, archive_sha256: str, proposal_sha256: str,
+) -> dict:
+    """Verify the installed worker against the authenticated release before staging."""
+    require_native_host_preconditions()
+    stage.verify_installed_worker(assets, commit=commit, archive_sha256=archive_sha256)
+    with ExitStack() as stack:
+        source = os.open(snapshot.parent, stage._DIRECTORY)
+        stack.callback(os.close, source)
+        raw = stage._asset_bytes(source, snapshot.name, _MAX_STATE)
+        root = os.open("/", stage._DIRECTORY)
+        stack.callback(os.close, root)
+        return _stage_proposal_under_root(root, raw, proposal_sha256)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--assets", type=Path, required=True)
     parser.add_argument("--commit", required=True)
     parser.add_argument("--archive-sha256", required=True)
+    parser.add_argument("--stage-v2-proposal", type=Path)
+    parser.add_argument("--proposal-sha256")
     args = parser.parse_args()
+    if (args.stage_v2_proposal is None) != (args.proposal_sha256 is None):
+        parser.error("--stage-v2-proposal and --proposal-sha256 must be supplied together")
+    pins = {"commit": args.commit, "archive_sha256": args.archive_sha256}
     try:
-        result = install_authenticated_worker(
-            args.assets, commit=args.commit, archive_sha256=args.archive_sha256,
-        )
+        if args.stage_v2_proposal is None:
+            result = install_authenticated_worker(args.assets, **pins)
+        else:
+            result = stage_authenticated_proposal(
+                args.assets, args.stage_v2_proposal, proposal_sha256=args.proposal_sha256, **pins,
+            )
     except (OSError, ValueError, subprocess.SubprocessError,
             signatures.SignatureError, upgrade.UpgradeError):
-        result = {"status": "AUTHENTICATED_WORKER_PLACEMENT_REFUSED"}
+        refused = (
+            "AUTHENTICATED_WORKER_PLACEMENT_REFUSED" if args.stage_v2_proposal is None
+            else "AUTHENTICATED_V2_PROPOSAL_REFUSED"
+        )
+        result = {"status": refused}
         status = 1
     else:
         status = 0
