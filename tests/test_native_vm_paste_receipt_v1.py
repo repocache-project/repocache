@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -9,6 +10,7 @@ import sys
 import pytest
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/format_native_vm_paste_receipt.py"
+COLLECTOR = SCRIPT.with_name("collect_native_candidate_evidence.py")
 
 
 def sample():
@@ -80,6 +82,54 @@ def test_exact_digest_mismatch_remains_failure():
     assert code == 1
     assert result["status"] == "FAIL"
     assert not result["digest_matched"]
+
+
+@pytest.mark.parametrize("flag", ["--source-sha", "--sha256"])
+def test_invalid_collector_pin_remains_failure_in_paste_line(flag):
+    arguments = {
+        "--candidate": "/private/unavailable-candidate",
+        "--sha256": "b" * 64,
+        "--source-sha": "a" * 40,
+    }
+    arguments[flag] = "PRIVATE_INVALID_PIN"
+    completed = subprocess.run(
+        [sys.executable, "-B", str(COLLECTOR),
+         *(item for pair in arguments.items() for item in pair)],
+        env={**os.environ, "PYTHONPATH": str(SCRIPT.parents[1] / "src")},
+        capture_output=True, check=False,
+    )
+    assert completed.returncode == 1
+    assert completed.stderr == b""
+    code, result = run(completed.stdout)
+    assert code == 1
+    assert result == {
+        "kind": "repocache.native.candidate.paste.v1",
+        "status": "FAIL",
+        "code": "CANDIDATE_IDENTITY_INPUT_REFUSED",
+        "complete_server_acceptance_passed": False,
+        "authorizes_host_write": False,
+        "authorizes_publication": False,
+    }
+
+
+@pytest.mark.parametrize("change", [
+    {"status": "NOT VERIFIED"},
+    {"authorizes_host_write": 0},
+    {"authorizes_publication": True},
+    {"source_commit_sha": "a" * 40},
+])
+def test_formatter_refuses_contradictory_identity_failure(change):
+    value = {
+        "schema_version": 1, "status": "FAIL",
+        "code": "CANDIDATE_IDENTITY_INPUT_REFUSED",
+        "complete_server_acceptance_passed": False,
+        "authorizes_host_write": False,
+        "authorizes_publication": False,
+    }
+    value.update(change)
+    code, result = run(json.dumps(value).encode())
+    assert code == 2
+    assert result["code"] == "INPUT_REFUSED"
 
 
 def test_almalinux_selinux_and_native_refusal_survive_redaction():

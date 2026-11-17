@@ -48,9 +48,14 @@ SELinux labels and service behavior require separate native acceptance.
 ## Authorized file placement
 
 The fixed installer accepts the same independently authenticated offline
-assets and owner pins. Run from the trusted checkout as root after the
-native provisioner has created the protected server state and lock on a
-supported booted host.
+assets and owner pins. Run from the trusted checkout as root on a supported
+booted host. The command can prepare an absent fixed state namespace after
+checking existing unit and worker destinations. The root-owned namespace
+allows traversal to the public catalog directory (0711 parent, 0755 public).
+The independent server state directory and its shared lock stay private
+(0700 and 0600). The unprivileged application has a separate private home.
+Existing namespaces must already match those modes. An interruption before
+the complete protected lock exists requires operator reconciliation.
 
 ~~~sh
 /usr/bin/python3 -IS scripts/install_native_root_worker.py \

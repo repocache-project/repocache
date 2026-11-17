@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Place the authenticated fixed worker and units before native activation.
 
-Run from the independently reviewed checkout on an authorized host. The
-server provisioner must already have created the protected state and lock.
-This operation never reloads or enables a service.
+Run from the independently reviewed checkout on an authorized host. This
+operation prepares the fixed server namespace and places the authenticated
+worker. It never reloads or enables a service.
 """
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ if __name__ == "__main__":
     sys.path[:0] = [str(checkout / "src"), str(checkout)]
 
 from repocache import signatures, upgrade
+from repocache.server_protected_namespace_bootstrap_v1 import bootstrap_protected_namespace_under_root
 from repocache.server_protected_state_store_v1 import _locked
 from repocache.server_root_control_host_preflight_v1 import require_native_host_preconditions
 from scripts import stage_native_root_worker as stage
@@ -209,6 +210,7 @@ def _reject_conflicting_units(root: Path, unit_paths: tuple[str, ...]) -> None:
 
 def _place_worker_files(
     root: Path, payloads: dict[str, bytes], receipt: dict, *, unit_paths: tuple[str, ...],
+    prepare_namespace: bool = False,
 ) -> None:
     digest = hashlib.sha256(stage._json_line(receipt)).hexdigest()
     pending = _MARKER + "pending-" + digest
@@ -221,6 +223,19 @@ def _place_worker_files(
         units = fd
         for component in _UNIT_DIRECTORY:
             units = _open_directory(units, component, stack)
+        if prepare_namespace:
+            _reject_conflicting_units(root, unit_paths)
+            # A fresh namespace must not be created around unowned files.
+            # Existing namespaces are checked under the protected lock below.
+            if not os.path.lexists(root / "var/lib/repocache"):
+                worker = _worker_directory(usr, stack)
+                if (any(_named(units, name) is not None
+                        for unit in stage.UNITS for name in (unit, _TEMP + unit))
+                        or (worker is not None and any(_named(worker, name) is not None
+                            for name in (stage.WORKER, _TEMP + stage.WORKER)))
+                        or os.path.lexists(root / "run/repocache/server-control.sock")):
+                    _reject("FOREIGN_EXISTING_DESTINATION")
+            bootstrap_protected_namespace_under_root(fd, owner_uid=0, public_catalog=True)
         with _locked(fd, 0) as state:
             markers = {name for name in os.listdir(state) if name.startswith(_MARKER)}
             if markers - {pending, complete}:
@@ -275,7 +290,8 @@ def install_authenticated_worker(
     payloads, receipt = stage._authenticated_payloads(
         assets, commit=commit, archive_sha256=archive_sha256, system=None,
     )
-    _place_worker_files(Path("/"), payloads, receipt, unit_paths=_systemd_unit_paths())
+    _place_worker_files(Path("/"), payloads, receipt,
+                        unit_paths=_systemd_unit_paths(), prepare_namespace=True)
     return {**receipt, "status": "AUTHENTICATED_WORKER_FILES_PLACED"}
 
 

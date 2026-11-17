@@ -32,9 +32,10 @@ retains the read-only SELinux enforcing observation, even if the NGINX
 probe is still pending. A prior schema-1 receipt without platform fields
 remains readable and shows an unknown distribution.
 
-All valid results remain `NOT VERIFIED` (or `FAIL` on a mismatched
-candidate hash). Exit 2 = partial/pending evidence; exit 1 = detected digest
-mismatch; **no successful exit and no release GO are possible**. A matched
+All valid results remain `NOT VERIFIED` or `FAIL`. Exit 2 indicates partial
+or pending evidence. Exit 1 indicates a detected digest mismatch or invalid
+candidate identity input. An invalid source SHA or SHA-256 pin is reported
+without either supplied pin or the candidate path. A matched
 candidate digest and read-only systemd observation do not prove publisher
 signing, active NGINX, SELinux, actual APT/DNF signed package retrieval,
 cache HIT, upstream fallback, root permission boundaries or recovery.

@@ -6,6 +6,8 @@ import json
 import os
 from pathlib import Path
 import stat
+import subprocess
+import sys
 import time
 
 import pytest
@@ -161,13 +163,15 @@ def test_authenticated_installed_readback_refuses_drift(candidate, tmp_path):
 
 
 
-def _placement_root(tmp_path, *, worker_parent=True):
+def _placement_root(tmp_path, *, worker_parent=True, protected_state=True):
     root = tmp_path / "root-placement"
     state = root / "var/lib/repocache/server"
-    state.mkdir(parents=True, mode=0o700)
-    lock = state / LOCK_NAME
-    lock.touch(mode=0o600)
-    lock.chmod(0o600)
+    (root / "var/lib").mkdir(parents=True)
+    if protected_state:
+        state.mkdir(parents=True, mode=0o700)
+        lock = state / LOCK_NAME
+        lock.touch(mode=0o600)
+        lock.chmod(0o600)
     (root / "usr").mkdir()
     if worker_parent:
         (root / "usr/libexec/repocache").mkdir(parents=True)
@@ -176,6 +180,63 @@ def _placement_root(tmp_path, *, worker_parent=True):
 
 
 _UNIT_PATHS = ("/etc/systemd/system", "/usr/lib/systemd/system")
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="requires a disposable root-owned filesystem")
+def test_clean_placement_prepares_only_fixed_protected_and_public_directories(tmp_path):
+    root, state = _placement_root(tmp_path, worker_parent=False, protected_state=False)
+    payloads = {name: b"fixed signed payload" for name in (stage.WORKER, *stage.UNITS)}
+    receipt = {"source_sha": "a" * 40}
+    previous_umask = os.umask(0o077)
+    try:
+        install._place_worker_files(root, payloads, receipt, unit_paths=_UNIT_PATHS,
+                                    prepare_namespace=True)
+    finally:
+        os.umask(previous_umask)
+    catalog = state.parent / "public"
+    for path, mode in ((state.parent, 0o711), (state, 0o700),
+                       (catalog, 0o755), (state / LOCK_NAME, 0o600)):
+        info = path.stat()
+        assert (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) == (0, 0, mode)
+    assert not list(catalog.iterdir())
+    if _combined():
+        # Use an inherited directory descriptor so the probe tests these
+        # three directories, rather than the test runner's private parents.
+        fd = os.open(root / "var/lib", os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            check = subprocess.run(
+                [sys.executable, "-I", "-c",
+                 "from pathlib import Path; import os, sys; "
+                 "base = Path('/proc/self/fd') / sys.argv[1] / 'repocache'; "
+                 "assert list((base / 'public').iterdir()) == []; "
+                 "assert not os.access(base / 'server', os.X_OK)",
+                 str(fd)],
+                user=65534, group=65534, extra_groups=(), pass_fds=(fd,),
+                capture_output=True,
+            )
+        finally:
+            os.close(fd)
+        assert check.returncode == 0, check.stderr.decode()
+    lock_inode = (state / LOCK_NAME).stat().st_ino
+    install._place_worker_files(root, payloads, receipt, unit_paths=_UNIT_PATHS,
+                                prepare_namespace=True)
+    assert (state / LOCK_NAME).stat().st_ino == lock_inode
+    stage._audit_worker_files(root, payloads)
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="requires a disposable root-owned filesystem")
+def test_clean_placement_refuses_incompatible_existing_namespace(tmp_path):
+    root, state = _placement_root(tmp_path, worker_parent=False)
+    state.parent.chmod(0o700)
+    original = state.parent.stat()
+    payloads = {name: b"fixed signed payload" for name in (stage.WORKER, *stage.UNITS)}
+    with pytest.raises(ValueError, match="OWNERSHIP_OR_MOUNT_UNVERIFIED"):
+        install._place_worker_files(root, payloads, {"source_sha": "a" * 40},
+                                    unit_paths=_UNIT_PATHS, prepare_namespace=True)
+    assert state.parent.stat() == original
+    assert not (state.parent / "public").exists()
+    assert not (root / "usr/libexec").exists()
+    assert {path.name for path in state.iterdir()} == {LOCK_NAME}
 
 
 @pytest.mark.skipif(os.geteuid() != 0, reason="requires a disposable root-owned filesystem")
