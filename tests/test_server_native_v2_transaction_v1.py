@@ -247,6 +247,47 @@ def test_completed_proposal_retry_refuses_drift(filesystem, drift):
     assert not events
 
 
+def test_prepared_partial_repair_preserves_omitted_repositories_and_retries(filesystem):
+    stage(filesystem, snapshot(count=2))
+    apply(filesystem)
+    fd, state, include, catalog, events = filesystem
+    prior_raw = (state / V2_STATE).read_bytes()
+    prior_sha = hashlib.sha256(prior_raw).hexdigest()
+    partial = document(count=1, generation=1)
+    partial["deployment"]["cache_policy"]["global"]["inactive_seconds"] += 1
+    raw = installer._repair_proposal(_canon(partial), prior_raw, prior_sha, "e" * 64)
+    proposed = json.loads(raw)
+    assert len(proposed["repository_records"]) == 2
+    assert proposed["state_generation"] == 2
+    assert proposed["approval_reference"]["decision_sha256"] == "e" * 64
+    proposal_sha = hashlib.sha256(raw).hexdigest()
+    pending = (state / _NAME).read_bytes()
+    with pytest.raises(ValueError, match="PREVIOUS_STATE_PIN_MISMATCH"):
+        installer._stage_proposal_under_root(
+            fd, raw, proposal_sha, expected_state_sha256="0" * 64,
+        )
+    assert (state / _NAME).read_bytes() == pending
+    installer._stage_proposal_under_root(
+        fd, raw, proposal_sha, expected_state_sha256=prior_sha,
+    )
+    assert apply(filesystem)["state_generation"] == 2
+    before = [(p.read_bytes(), p.stat().st_ino) for p in (state / V2_STATE, include, catalog)]
+    events.clear()
+    assert installer._stage_proposal_under_root(
+        fd, raw, proposal_sha, expected_state_sha256=prior_sha,
+    )["status"] == "AUTHENTICATED_V2_PROPOSAL_ALREADY_COMMITTED"
+    assert installer._stage_proposal_under_root(
+        fd, raw, proposal_sha, expected_state_sha256=proposal_sha,
+    )["status"] == "AUTHENTICATED_V2_PROPOSAL_ALREADY_COMMITTED"
+    with pytest.raises(ValueError, match="PREVIOUS_STATE_PIN_MISMATCH"):
+        installer._stage_proposal_under_root(
+            fd, raw, proposal_sha, expected_state_sha256="0" * 64,
+        )
+    assert apply(filesystem)["status"] == "NATIVE_V2_NO_CHANGE"
+    assert before == [(p.read_bytes(), p.stat().st_ino) for p in (state / V2_STATE, include, catalog)]
+    assert not events
+
+
 def test_completed_proposal_retry_refuses_changed_intake(filesystem, monkeypatch):
     stage(filesystem, snapshot(count=1))
     apply(filesystem)

@@ -86,8 +86,8 @@ install-v1 document with `expected_state_generation` set to zero. The
 following preparation step can run without root in a private output parent.
 It authenticates the release candidate first and uses the adopted input
 validators and repository ID planner. Missing IDs receive deterministic
-initial suggestions. Existing deployment state and retired IDs require the
-separate update flow.
+initial suggestions. Existing deployment state and retired IDs use the
+repair flow below.
 
 ~~~sh
 /usr/bin/python3 -IS scripts/install_native_root_worker.py \
@@ -122,3 +122,42 @@ A native package-effects
 marker or pending WAL blocks staging and remains available for reconciliation.
 Staging leaves the active state, NGINX and the catalogue untouched. Actual
 activation still requires the separate kernel-credentialed worker operation.
+
+## Prepare a same-version repair
+
+Obtain a private read-only copy of the last committed
+`/var/lib/repocache/server/state-v2.json` through the authorized operator.
+Pin its independently reviewed SHA-256. Set the partial install document's
+`expected_state_generation` to that snapshot's generation.
+
+~~~sh
+/usr/bin/python3 -IS scripts/install_native_root_worker.py \
+  --assets /absolute/incoming \
+  --commit "$REVIEWED_SOURCE_SHA" \
+  --archive-sha256 "$REVIEWED_ARCHIVE_SHA256" \
+  --prepare-v2-repair /absolute/reviewed-repair.json \
+  --previous-v2-state /absolute/private-stage/committed-state.json \
+  --previous-state-sha256 "$REVIEWED_PREVIOUS_STATE_SHA256" \
+  --decision-sha256 "$REVIEWED_DECISION_SHA256" \
+  --proposal-output /absolute/private-stage/reviewed-repair-state.json
+~~~
+
+The existing declarative planner preserves every omitted repository and
+the all-time reservation ledger. A changed configuration advances one
+generation. An unchanged partial request preserves the exact committed
+snapshot, including its original approval reference. Adding and removing
+repositories use the #95 lifecycle workflow. A stale generation, v1 state,
+wrong predecessor hash or unallocated ID is refused before output.
+
+Review the full generated snapshot and its receipt. During separately
+authorized staging, also supply
+`--expected-state-sha256 "$REVIEWED_PREVIOUS_STATE_SHA256"`. The installer
+compares this pin with the actual protected predecessor under the same
+exclusive lock before replacing a proposal. Repeating a completed staging
+accepts either its recorded predecessor pin or the exact current snapshot
+pin. The worker still checks all owned resources before an apply no-op.
+
+The supplied snapshot remains untrusted input during preparation. Actual
+predecessor identity and authorization are verified separately at staging
+and execution. Package-effects reconciliation and booted-host acceptance
+remain mandatory.

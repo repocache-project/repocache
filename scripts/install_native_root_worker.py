@@ -26,7 +26,10 @@ if __name__ == "__main__":
 from repocache import signatures, upgrade
 from repocache.server_install_v1 import MAX_DOCUMENT_BYTES, parse_install_bytes
 from repocache.server_protected_namespace_bootstrap_v1 import bootstrap_protected_namespace_under_root
-from repocache.server_locked_manifest_reconcile_v1 import preview_proposed_v2_state_transition
+from repocache.server_locked_manifest_reconcile_v1 import (
+    _validate_proposed_v2_snapshot, preview_proposed_v2_state_transition,
+)
+from repocache.server_repository_reconcile_v1 import plan_declarative_reconciliation
 from repocache.server_native_v2_transaction_v1 import _no_conflicting_pending, _write_private
 from repocache.server_proposed_state_v2_store import _read_v2
 from repocache.server_protected_state_store_v1 import _canonical, _locked, _unlink_known
@@ -325,7 +328,12 @@ def _initial_proposal(raw: bytes, decision_sha256: str) -> bytes:
             row["id"] = suggestion["repository_id"]
             reserved.add(row["id"])
             identified.append(row)
-    document["expected_state_generation"] = 1
+    return _encode_proposal(document, decision_sha256)
+
+
+def _encode_proposal(document: dict, decision_sha256: str, previous: dict | None = None) -> bytes:
+    generation = document["expected_state_generation"]
+    document["expected_state_generation"] = generation + 1
     configuration = _canonical(document, limit=MAX_DOCUMENT_BYTES)
     records = [{
         "id": row["id"],
@@ -336,31 +344,59 @@ def _initial_proposal(raw: bytes, decision_sha256: str) -> bytes:
         "observed_state": "not-activated",
     } for row in document["repositories"]]
     digest = hashlib.sha256(configuration).hexdigest()
+    reservations = [{
+        "id": row["id"],
+        "canonical_identity_sha256": row["canonical_identity_sha256"],
+        "status": "allocated",
+    } for row in records]
+    if previous is not None:
+        present = {row["id"] for row in records}
+        reservations.extend({
+            **row, "status": "retired",
+        } for row in previous["id_reservations"] if row["id"] not in present)
     snapshot = {
         "state_schema_version": 2,
-        "state_generation": 1,
+        "state_generation": generation + 1,
         "configuration_base64": base64.b64encode(configuration).decode("ascii"),
         "configuration_sha256": digest,
         "repository_records": records,
-        "id_reservations": [{
-            "id": row["id"],
-            "canonical_identity_sha256": row["canonical_identity_sha256"],
-            "status": "allocated",
-        } for row in records],
+        "id_reservations": reservations,
         "approval_reference": {
             "source": "operator",
             "decision_sha256": decision_sha256,
             "configuration_sha256": digest,
-            "expected_generation": 0,
+            "expected_generation": generation,
         },
     }
-    preview_proposed_v2_state_transition(snapshot, expected_generation=0)
+    preview_proposed_v2_state_transition(
+        snapshot, expected_generation=generation, previous_snapshot=previous,
+    )
     return _canonical(snapshot, limit=_MAX_STATE)
 
 
-def prepare_authenticated_initial_proposal(
+def _repair_proposal(raw: bytes, prior_raw: bytes, prior_sha256: str, decision_sha256: str) -> bytes:
+    """Plan a partial same-version repair, preserving all omitted repositories."""
+    if (type(prior_sha256) is not str or not signatures.HEX64.fullmatch(prior_sha256)
+            or hashlib.sha256(prior_raw).hexdigest() != prior_sha256):
+        _reject("PREVIOUS_STATE_PIN_MISMATCH")
+    if type(decision_sha256) is not str or not signatures.HEX64.fullmatch(decision_sha256):
+        _reject("DECISION_DIGEST_INVALID")
+    previous = _canonical_json(prior_raw, _MAX_STATE)
+    generation = _validate_proposed_v2_snapshot(previous)["generation"]
+    current = parse_install_bytes(base64.b64decode(previous["configuration_base64"]), for_apply=True)
+    proposed = parse_install_bytes(raw, for_apply=True)
+    plan = plan_declarative_reconciliation(
+        current, proposed, current_generation=generation,
+    )
+    if not plan["changed"]:
+        return prior_raw
+    return _encode_proposal(plan["candidate_document"], decision_sha256, previous)
+
+
+def prepare_authenticated_proposal(
     assets: Path, document: Path, output: Path, *,
     commit: str, archive_sha256: str, decision_sha256: str,
+    previous: Path | None = None, previous_sha256: str | None = None,
 ) -> dict:
     """Authenticate the candidate, then create a private proposal for review."""
     stage._authenticated_payloads(
@@ -370,7 +406,15 @@ def prepare_authenticated_initial_proposal(
         source = os.open(document.parent, stage._DIRECTORY)
         stack.callback(os.close, source)
         raw = stage._asset_bytes(source, document.name, MAX_DOCUMENT_BYTES)
-        proposal = _initial_proposal(raw, decision_sha256)
+        if previous is None:
+            if previous_sha256 is not None:
+                _reject("PREVIOUS_STATE_REQUIRED")
+            proposal = _initial_proposal(raw, decision_sha256)
+        else:
+            prior_source = os.open(previous.parent, stage._DIRECTORY)
+            stack.callback(os.close, prior_source)
+            prior_raw = stage._asset_bytes(prior_source, previous.name, _MAX_STATE)
+            proposal = _repair_proposal(raw, prior_raw, previous_sha256, decision_sha256)
         destination = os.open(output.parent, stage._DIRECTORY)
         stack.callback(os.close, destination)
         parent = os.fstat(destination)
@@ -379,10 +423,11 @@ def prepare_authenticated_initial_proposal(
         stage._write(destination, output.name, proposal, 0o600)
         os.fsync(destination)
     return {
-        "status": "AUTHENTICATED_INITIAL_V2_PROPOSAL_PREPARED",
+        "status": "AUTHENTICATED_V2_PROPOSAL_PREPARED",
         "proposed_state_sha256": hashlib.sha256(proposal).hexdigest(),
-        "state_generation": 1,
-        "requires_independent_review": True,
+        "state_generation": _canonical_json(proposal, _MAX_STATE)["state_generation"],
+        "expected_state_sha256": previous_sha256,
+        "requires_operator_review": True,
         "authorizes_service_activation": False,
     }
 
@@ -393,10 +438,16 @@ def _read_proposal_at(state: int, name: str) -> bytes | None:
     return stage._asset_bytes(state, name, _MAX_ENVELOPE, installed_mode=0o600)
 
 
-def _stage_proposal_under_root(root_fd: int, raw: bytes, reviewed_sha: str) -> dict:
+def _stage_proposal_under_root(
+    root_fd: int, raw: bytes, reviewed_sha: str, *, expected_state_sha256: str | None = None,
+) -> dict:
     if not signatures.HEX64.fullmatch(reviewed_sha) or hashlib.sha256(raw).hexdigest() != reviewed_sha:
         _reject("PROPOSAL_PIN_MISMATCH")
     snapshot = _canonical_json(raw, _MAX_STATE)
+    if expected_state_sha256 is not None and (
+        type(expected_state_sha256) is not str or not signatures.HEX64.fullmatch(expected_state_sha256)
+    ):
+        _reject("PREVIOUS_STATE_PIN_MISMATCH")
     with _locked(root_fd, 0) as state:
         # Native package-effects markers and all unresolved WALs must stay
         # in place. Proposal staging grants no recovery or activation authority.
@@ -411,6 +462,10 @@ def _stage_proposal_under_root(root_fd: int, raw: bytes, reviewed_sha: str) -> d
             prior_report, prior_state = _proposal(prior)
             if prior_state != raw or prior_report["expected_generation"] != generation - 1:
                 _reject("COMMITTED_PROPOSAL_MISSING")
+            if expected_state_sha256 is not None and expected_state_sha256 not in (
+                reviewed_sha, prior_report["expected_state_sha256"],
+            ):
+                _reject("PREVIOUS_STATE_PIN_MISMATCH")
             if interrupted is not None:
                 _reject("PROPOSAL_STAGE_PENDING")
             return {
@@ -419,6 +474,10 @@ def _stage_proposal_under_root(root_fd: int, raw: bytes, reviewed_sha: str) -> d
                 "committed_generation": generation,
                 "authorizes_service_activation": False,
             }
+        if expected_state_sha256 is not None and (
+            previous_raw is None or hashlib.sha256(previous_raw).hexdigest() != expected_state_sha256
+        ):
+            _reject("PREVIOUS_STATE_PIN_MISMATCH")
         preview_proposed_v2_state_transition(
             snapshot, expected_generation=generation, previous_snapshot=previous,
         )
@@ -454,6 +513,7 @@ def _stage_proposal_under_root(root_fd: int, raw: bytes, reviewed_sha: str) -> d
 
 def stage_authenticated_proposal(
     assets: Path, snapshot: Path, *, commit: str, archive_sha256: str, proposal_sha256: str,
+    expected_state_sha256: str | None = None,
 ) -> dict:
     """Verify the installed worker against the authenticated release before staging."""
     require_native_host_preconditions()
@@ -464,7 +524,9 @@ def stage_authenticated_proposal(
         raw = stage._asset_bytes(source, snapshot.name, _MAX_STATE)
         root = os.open("/", stage._DIRECTORY)
         stack.callback(os.close, root)
-        return _stage_proposal_under_root(root, raw, proposal_sha256)
+        return _stage_proposal_under_root(
+            root, raw, proposal_sha256, expected_state_sha256=expected_state_sha256,
+        )
 
 
 def main() -> int:
@@ -475,27 +537,38 @@ def main() -> int:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--stage-v2-proposal", type=Path)
     mode.add_argument("--prepare-initial-v2-proposal", type=Path)
+    mode.add_argument("--prepare-v2-repair", type=Path)
     parser.add_argument("--proposal-sha256")
     parser.add_argument("--proposal-output", type=Path)
     parser.add_argument("--decision-sha256")
+    parser.add_argument("--previous-v2-state", type=Path)
+    parser.add_argument("--previous-state-sha256")
+    parser.add_argument("--expected-state-sha256")
     args = parser.parse_args()
     if (args.stage_v2_proposal is None) != (args.proposal_sha256 is None):
         parser.error("--stage-v2-proposal and --proposal-sha256 must be supplied together")
-    preparing = args.prepare_initial_v2_proposal is not None
+    repairing = args.prepare_v2_repair is not None
+    preparing = args.prepare_initial_v2_proposal is not None or repairing
     if preparing != (args.proposal_output is not None) or preparing != (args.decision_sha256 is not None):
-        parser.error("--prepare-initial-v2-proposal requires --proposal-output and --decision-sha256")
+        parser.error("proposal preparation requires --proposal-output and --decision-sha256")
+    if repairing != (args.previous_v2_state is not None) or repairing != (args.previous_state_sha256 is not None):
+        parser.error("--prepare-v2-repair requires --previous-v2-state and --previous-state-sha256")
+    if args.expected_state_sha256 is not None and args.stage_v2_proposal is None:
+        parser.error("--expected-state-sha256 requires --stage-v2-proposal")
     pins = {"commit": args.commit, "archive_sha256": args.archive_sha256}
     try:
         if preparing:
-            result = prepare_authenticated_initial_proposal(
-                args.assets, args.prepare_initial_v2_proposal, args.proposal_output,
-                decision_sha256=args.decision_sha256, **pins,
+            result = prepare_authenticated_proposal(
+                args.assets, args.prepare_v2_repair or args.prepare_initial_v2_proposal,
+                args.proposal_output, decision_sha256=args.decision_sha256,
+                previous=args.previous_v2_state, previous_sha256=args.previous_state_sha256, **pins,
             )
         elif args.stage_v2_proposal is None:
             result = install_authenticated_worker(args.assets, **pins)
         else:
             result = stage_authenticated_proposal(
-                args.assets, args.stage_v2_proposal, proposal_sha256=args.proposal_sha256, **pins,
+                args.assets, args.stage_v2_proposal, proposal_sha256=args.proposal_sha256,
+                expected_state_sha256=args.expected_state_sha256, **pins,
             )
     except (OSError, ValueError, subprocess.SubprocessError,
             signatures.SignatureError, upgrade.UpgradeError):

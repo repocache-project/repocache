@@ -63,6 +63,43 @@ def test_initial_proposal_refuses_invalid_input(fault):
         install._initial_proposal(json.dumps(config).encode(), decision)
 
 
+def test_partial_repair_preserves_reservations_and_exact_no_change():
+    old = snapshot(count=2)
+    prior = snapshot(count=1, generation=2, previous=old)
+    prior_raw = json.dumps(prior, sort_keys=True, separators=(",", ":")).encode()
+    prior_sha = hashlib.sha256(prior_raw).hexdigest()
+    proposed = document(count=0, generation=2)
+    raw = json.dumps(proposed).encode()
+    assert install._repair_proposal(raw, prior_raw, prior_sha, "e" * 64) == prior_raw
+    proposed["deployment"]["cache_policy"]["global"]["inactive_seconds"] += 1
+    result = json.loads(install._repair_proposal(
+        json.dumps(proposed).encode(), prior_raw, prior_sha, "e" * 64,
+    ))
+    assert result["state_generation"] == 3
+    assert result["id_reservations"] == prior["id_reservations"]
+    assert result["repository_records"] == prior["repository_records"]
+    assert result["approval_reference"]["expected_generation"] == 2
+
+
+@pytest.mark.parametrize("fault", ["digest", "stale", "new-id", "version", "decision"])
+def test_partial_repair_refuses_invalid_predecessor_or_intent(fault):
+    prior = snapshot(count=1)
+    proposed = document(count=1, generation=1)
+    decision = "d" * 64
+    if fault == "stale":
+        proposed["expected_state_generation"] = 0
+    elif fault == "new-id":
+        proposed["repositories"][0]["id"] = "unallocated"
+    elif fault == "version":
+        prior["state_schema_version"] = 1
+    elif fault == "decision":
+        decision = "bad-decision"
+    prior_raw = json.dumps(prior, sort_keys=True, separators=(",", ":")).encode()
+    digest = "0" * 64 if fault == "digest" else hashlib.sha256(prior_raw).hexdigest()
+    with pytest.raises(ValueError):
+        install._repair_proposal(json.dumps(proposed).encode(), prior_raw, digest, decision)
+
+
 def test_prepare_initial_proposal_authenticates_before_input_or_output(tmp_path, monkeypatch):
     def refuse(*args, **kwargs):
         raise stage.WorkerStageError("WORKER_STAGE_SIGNED_IDENTITY_MISMATCH")
@@ -70,7 +107,7 @@ def test_prepare_initial_proposal_authenticates_before_input_or_output(tmp_path,
     monkeypatch.setattr(stage, "_authenticated_payloads", refuse)
     output = tmp_path / "proposal.json"
     with pytest.raises(stage.WorkerStageError, match="SIGNED_IDENTITY_MISMATCH"):
-        install.prepare_authenticated_initial_proposal(
+        install.prepare_authenticated_proposal(
             tmp_path, tmp_path / "missing-input.json", output,
             commit="a" * 40, archive_sha256="b" * 64, decision_sha256="d" * 64,
         )
@@ -86,14 +123,15 @@ def test_prepare_initial_proposal_refuses_shared_output_parent(tmp_path, monkeyp
     parent.chmod(0o777)
     output = parent / "proposal.json"
     with pytest.raises(stage.WorkerStageError, match="PROPOSAL_OUTPUT_UNSAFE"):
-        install.prepare_authenticated_initial_proposal(
+        install.prepare_authenticated_proposal(
             tmp_path, source, output,
             commit="a" * 40, archive_sha256="b" * 64, decision_sha256="d" * 64,
         )
     assert not output.exists()
 
 
-def test_prepare_initial_proposal_has_private_no_replace_output(candidate, tmp_path, monkeypatch):
+@pytest.mark.parametrize("repair", [False, True])
+def test_prepare_proposal_has_private_no_replace_output(candidate, tmp_path, monkeypatch, repair):
     authenticate = stage._authenticated_payloads
 
     def compatible(*args, **kwargs):
@@ -104,22 +142,31 @@ def test_prepare_initial_proposal_has_private_no_replace_output(candidate, tmp_p
     monkeypatch.setattr(stage, "_authenticated_payloads", compatible)
     archive, digest, commit, _detached = candidate
     source = tmp_path / "reviewed-install.json"
-    source.write_text(json.dumps(document(count=1, generation=0)))
+    config = document(count=1, generation=int(repair))
+    options = {}
+    if repair:
+        prior = tmp_path / "previous-state.json"
+        prior.write_bytes(json.dumps(snapshot(count=1), sort_keys=True, separators=(",", ":")).encode())
+        options = {"previous": prior, "previous_sha256": hashlib.sha256(prior.read_bytes()).hexdigest()}
+        config["deployment"]["cache_policy"]["global"]["inactive_seconds"] += 1
+    source.write_text(json.dumps(config))
     output = tmp_path / "private" / "reviewed-state.json"
     output.parent.mkdir(mode=0o700)
-    receipt = install.prepare_authenticated_initial_proposal(
+    receipt = install.prepare_authenticated_proposal(
         archive.parent, source, output,
-        commit=commit, archive_sha256=digest, decision_sha256="d" * 64,
+        commit=commit, archive_sha256=digest, decision_sha256="d" * 64, **options,
     )
     raw = output.read_bytes()
     assert receipt["proposed_state_sha256"] == hashlib.sha256(raw).hexdigest()
-    assert receipt["requires_independent_review"]
+    assert receipt["requires_operator_review"]
+    assert receipt["state_generation"] == 1 + int(repair)
+    assert receipt["expected_state_sha256"] == options.get("previous_sha256")
     assert not receipt["authorizes_service_activation"]
     assert stat.S_IMODE(output.stat().st_mode) == 0o600
     with pytest.raises(FileExistsError):
-        install.prepare_authenticated_initial_proposal(
+        install.prepare_authenticated_proposal(
             archive.parent, source, output,
-            commit=commit, archive_sha256=digest, decision_sha256="d" * 64,
+            commit=commit, archive_sha256=digest, decision_sha256="d" * 64, **options,
         )
     assert output.read_bytes() == raw
 
@@ -128,6 +175,9 @@ def test_prepare_initial_proposal_has_private_no_replace_output(candidate, tmp_p
     ["--prepare-initial-v2-proposal", "install.json"],
     ["--decision-sha256", "d" * 64],
     ["--proposal-output", "output.json"],
+    ["--prepare-v2-repair", "install.json", "--proposal-output", "out.json", "--decision-sha256", "d" * 64],
+    ["--previous-v2-state", "state.json", "--previous-state-sha256", "e" * 64],
+    ["--expected-state-sha256", "e" * 64],
     ["--prepare-initial-v2-proposal", "install.json", "--stage-v2-proposal", "state.json"],
 ])
 def test_invalid_preparation_cli_never_falls_back_to_host_placement(monkeypatch, options):
@@ -136,7 +186,7 @@ def test_invalid_preparation_cli_never_falls_back_to_host_placement(monkeypatch,
 
     monkeypatch.setattr(install, "install_authenticated_worker", unexpected)
     monkeypatch.setattr(install, "stage_authenticated_proposal", unexpected)
-    monkeypatch.setattr(install, "prepare_authenticated_initial_proposal", unexpected)
+    monkeypatch.setattr(install, "prepare_authenticated_proposal", unexpected)
     monkeypatch.setattr(sys, "argv", [
         "install_native_root_worker.py", "--assets", "incoming",
         "--commit", "a" * 40, "--archive-sha256", "b" * 64, *options,
