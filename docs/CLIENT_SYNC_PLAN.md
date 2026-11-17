@@ -69,8 +69,10 @@ For the approved schema-1 discovery endpoint, the standalone client uses
 exactly one configured HTTPS server origin. A catalog read disables automatic
 HTTP redirects and ignores ambient proxy settings, requires native TLS CA and
 hostname verification, an exact HTTP 200 from the original URL, and a
-512,000-byte maximum body. Duplicate JSON fields and nonfinite JSON values
-are refused before interpreting any source-to-cache mapping.
+512,000-byte maximum body. The client refuses duplicate JSON fields,
+nonfinite values and input beyond the decoder's nesting limit before
+interpreting any source-to-cache mapping. The command reports a redacted
+catalog error and preserves the package-manager sources.
 
 Schema 1 has exactly the top-level `schema` integer and `repositories`
 array, with each entry containing exactly `upstream` and `cache` URLs.

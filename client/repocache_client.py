@@ -439,8 +439,8 @@ def _catalog(server: str) -> dict:
     try:
         doc = _fetch_json(server + "/.well-known/repocache/catalog.json",
                           max_bytes=MAX_CATALOG_BYTES)
-    except (OSError, ValueError) as exc:
-        raise ClientError("Catalog unavailable or invalid") from exc
+    except (OSError, ValueError, RecursionError):
+        raise ClientError("Catalog unavailable or invalid") from None
     if (type(doc) is not dict or set(doc) != {"schema", "repositories"}
             or type(doc["schema"]) is not int or doc["schema"] != 1):
         raise ClientError("Unsupported catalog schema")
