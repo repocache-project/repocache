@@ -86,7 +86,15 @@ Run the same installer with the authenticated release asset arguments plus
 `--stage-v2-proposal /absolute/reviewed-state.json --proposal-sha256 SHA256`.
 It verifies the installed worker files and binds the snapshot to the actual
 committed predecessor under the protected lock. A prior uncommitted proposal
-is preserved. An exact staged retry is idempotent. A native package-effects
+is preserved. An exact staged retry is idempotent. After commit, staging the
+same reviewed snapshot reports `AUTHENTICATED_V2_PROPOSAL_ALREADY_COMMITTED`
+and preserves the existing proposal. Repeating `APPLY_V2` with that same
+proposal returns `NATIVE_V2_NO_CHANGE` after verifying the complete owned
+resource set and re-reading the intake. It performs no reload, publication
+or generation increment. A proposal from an older committed generation,
+resource drift or a pending recovery journal still refuses.
+
+A native package-effects
 marker or pending WAL blocks staging and remains available for reconciliation.
 Staging leaves the active state, NGINX and the catalogue untouched. Actual
 activation still requires the separate kernel-credentialed worker operation.

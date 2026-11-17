@@ -710,6 +710,17 @@ def _apply_locked(root_fd: int, state_fd: int,
     report, candidate = _load_private_under_root(
         root_fd, owner_uid=0, owner_gid=0,
     )
+    if candidate == previous_raw and report["expected_generation"] == generation - 1:
+        # A completed request remains at the fixed intake path. Retrying it
+        # acknowledges only the exact owned bytes already committed above.
+        again, again_candidate = _load_private_under_root(
+            root_fd, owner_uid=0, owner_gid=0,
+        )
+        if again != report or again_candidate != candidate:
+            _deny("CANDIDATE_CHANGED")
+        if _read_all(state_fd, include_fd, public_fd) != old:
+            _deny("PREPARE_DRIFT")
+        return {"status": "NATIVE_V2_NO_CHANGE", "state_generation": generation}
     if report["expected_generation"] != generation or (
         report["expected_state_sha256"] != _hash(previous_raw)
     ):
@@ -751,8 +762,6 @@ def _apply_locked(root_fd: int, state_fd: int,
         V2_STATE: candidate, _INCLUDE: include, _CATALOG: catalog,
         _MANIFEST: _manifest_for(candidate, include, catalog),
     }
-    if previous is not None and all(old[name] == new[name] for name in _ORDER):
-        return {"status": "NATIVE_V2_NO_CHANGE", "state_generation": generation}
     # Re-read candidate before publishing any WAL or file.
     again, again_candidate = _load_private_under_root(
         root_fd, owner_uid=0, owner_gid=0,

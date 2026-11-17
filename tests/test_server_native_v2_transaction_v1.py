@@ -210,11 +210,65 @@ def test_reviewed_proposal_is_staged_then_consumed_by_v2_worker(filesystem):
 
     apply(filesystem)
     assert (state / V2_STATE).read_bytes() == raw
+    managed = [state / V2_STATE, state / _NAME, state / native._MANIFEST, include, catalog]
+    before_repeat = [(p.read_bytes(), p.stat().st_ino, p.stat().st_mtime_ns) for p in managed]
+    events.clear()
+    repeated = installer._stage_proposal_under_root(fd, raw, receipt["proposed_state_sha256"])
+    assert repeated["status"] == "AUTHENTICATED_V2_PROPOSAL_ALREADY_COMMITTED"
+    assert apply(filesystem) == {"status": "NATIVE_V2_NO_CHANGE", "state_generation": 1}
+    assert before_repeat == [(p.read_bytes(), p.stat().st_ino, p.stat().st_mtime_ns) for p in managed]
+    assert not events
     second = _canon(snapshot(count=1, generation=2, previous=first))
     assert installer._stage_proposal_under_root(
         fd, second, hashlib.sha256(second).hexdigest(),
     )["expected_generation"] == 1
     assert (state / V2_STATE).read_bytes() == raw
+
+
+@pytest.mark.parametrize("drift", ["include", "catalog", "manifest", "pending", "generation"])
+def test_completed_proposal_retry_refuses_drift(filesystem, drift):
+    stage(filesystem, snapshot(count=1))
+    apply(filesystem)
+    _fd, state, include, catalog, events = filesystem
+    committed = (state / V2_STATE).read_bytes()
+    if drift == "pending":
+        pending = state / native._WAL_TMP
+        pending.write_bytes(b"interrupted")
+        pending.chmod(0o600)
+    elif drift == "generation":
+        stage(filesystem, snapshot(count=1), expected=1, prior=hashlib.sha256(committed).hexdigest())
+    else:
+        target = {"include": include, "catalog": catalog, "manifest": state / native._MANIFEST}[drift]
+        target.write_bytes(target.read_bytes() + b"\n")
+    events.clear()
+    with pytest.raises(ValueError):
+        apply(filesystem)
+    assert (state / V2_STATE).read_bytes() == committed
+    assert not events
+
+
+def test_completed_proposal_retry_refuses_changed_intake(filesystem, monkeypatch):
+    stage(filesystem, snapshot(count=1))
+    apply(filesystem)
+    _fd, state, include, catalog, events = filesystem
+    original = native._load_private_under_root
+    calls = []
+    before = [(p.read_bytes(), p.stat().st_ino) for p in (state / V2_STATE, include, catalog)]
+
+    def changed(*args, **kwargs):
+        report, raw = original(*args, **kwargs)
+        calls.append(None)
+        if len(calls) == 2:
+            report = {**report, "next_state_sha256": "f" * 64}
+        return report, raw
+
+    monkeypatch.setattr(native, "_load_private_under_root", changed)
+    events.clear()
+    with pytest.raises(native.NativeV2TransactionError, match="CANDIDATE_CHANGED"):
+        apply(filesystem)
+    assert len(calls) == 2
+    assert before == [(p.read_bytes(), p.stat().st_ino) for p in (state / V2_STATE, include, catalog)]
+    assert not events
 
 
 @pytest.mark.parametrize("complete", [True, False])
@@ -484,13 +538,21 @@ def test_foreign_existing_path_not_adopted(filesystem, unsafe):
 
 
 def test_stale_candidate_replay_refused_with_no_mutation(filesystem):
-    stage(filesystem, snapshot(count=1))
+    first = snapshot(count=1)
+    staged = stage(filesystem, first)
+    stale_request = staged.read_bytes()
     apply(filesystem)
-    _fd, state, _include, _catalog, _events = filesystem
+    _fd, state, _include, _catalog, events = filesystem
+    prior = hashlib.sha256((state / V2_STATE).read_bytes()).hexdigest()
+    stage(filesystem, snapshot(count=1, generation=2, previous=first), expected=1, prior=prior)
+    apply(filesystem)
     before = (state / V2_STATE).read_bytes()
+    staged.write_bytes(stale_request)
+    events.clear()
     with pytest.raises(native.NativeV2TransactionError, match="STATE_STALE"):
         apply(filesystem)
     assert (state / V2_STATE).read_bytes() == before
+    assert not events
     assert_no_pending(filesystem)
 
 

@@ -321,6 +321,22 @@ def _stage_proposal_under_root(root_fd: int, raw: bytes, reviewed_sha: str) -> d
         _no_conflicting_pending(state)
         previous, previous_raw = _read_v2(state, 0)
         generation = 0 if previous is None else previous["state_generation"]
+        prior = _read_proposal_at(state, _PROPOSAL)
+        interrupted = _read_proposal_at(state, _PROPOSAL_STAGE)
+        if raw == previous_raw:
+            if prior is None:
+                _reject("COMMITTED_PROPOSAL_MISSING")
+            prior_report, prior_state = _proposal(prior)
+            if prior_state != raw or prior_report["expected_generation"] != generation - 1:
+                _reject("COMMITTED_PROPOSAL_MISSING")
+            if interrupted is not None:
+                _reject("PROPOSAL_STAGE_PENDING")
+            return {
+                "status": "AUTHENTICATED_V2_PROPOSAL_ALREADY_COMMITTED",
+                "proposed_state_sha256": reviewed_sha,
+                "committed_generation": generation,
+                "authorizes_service_activation": False,
+            }
         preview_proposed_v2_state_transition(
             snapshot, expected_generation=generation, previous_snapshot=previous,
         )
@@ -334,8 +350,6 @@ def _stage_proposal_under_root(root_fd: int, raw: bytes, reviewed_sha: str) -> d
             "next_state_sha256": reviewed_sha,
         }, limit=_MAX_ENVELOPE)
         _proposal(envelope)
-        prior = _read_proposal_at(state, _PROPOSAL)
-        interrupted = _read_proposal_at(state, _PROPOSAL_STAGE)
         if interrupted is not None and interrupted != envelope:
             _reject("FOREIGN_PROPOSAL_STAGE")
         if prior is not None and prior != envelope:
