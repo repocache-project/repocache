@@ -63,6 +63,13 @@ accepts that repository with `repo_gpgcheck=0`; we do not silently lower the
 requirement. GitHub-hosted synthetic fixtures cannot establish whether the
 actual supported distribution repositories meet this policy.
 
+An empty successful query, or APT explicitly reporting `Candidate: (none)`
+for NGINX, yields `NATIVE_PACKAGE_NOT_AVAILABLE`. Check availability in the
+authenticated distribution repositories. An invalid or ambiguous query
+response yields `NATIVE_MANAGER_OUTPUT_INVALID`. In that case, inspect the
+native manager diagnostics before treating the package as absent. Both
+outcomes withhold installation authority and omit raw manager output.
+
 The probe's PASS means only that **at the time of the read-only probe**
 native authenticated metadata was refreshed and an NGINX candidate was
 observed from its fixed allowed repositories. It is **not** proof of the
