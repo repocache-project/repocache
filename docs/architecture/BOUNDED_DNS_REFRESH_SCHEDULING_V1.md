@@ -11,6 +11,9 @@ The approved Option A requires normal upstream DNS/IP rotations without manual I
 
 The scheduler does not sleep, install a timer, write persistent state, mutate NGINX or invoke a service. Its slots are untrusted ephemeral scheduling metadata. The returned candidate is not evidence of administrator approval. A slot whose next due time is farther into the future than its policy-allowed horizon is discarded and refreshed immediately; an untrusted or wrong-epoch scheduling hint must never suppress DNS rotation indefinitely. This is not clock authentication or process-resume recovery.
 
+Malformed clock values and slot deadlines, including nonfinite floats and
+out-of-range integers, are refused with a fixed diagnostic before any DNS lookup.
+
 ## Mandatory operational integration
 
 PR #222 (protected inert journal/store) and PR #224 (read-only same-lock manifest/inode comparison) are now merged into the v0.6.0 integration ancestry. They are foundations, not privileged mutation or route-activation authority. Activation remains blocked on a verified privileged #31 transaction and the #95 trusted repository identity/authorization model. Do not duplicate their existing components.
