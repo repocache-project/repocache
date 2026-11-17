@@ -161,19 +161,68 @@ def test_authenticated_installed_readback_refuses_drift(candidate, tmp_path):
 
 
 
-def _placement_root(tmp_path):
+def _placement_root(tmp_path, *, worker_parent=True):
     root = tmp_path / "root-placement"
     state = root / "var/lib/repocache/server"
     state.mkdir(parents=True, mode=0o700)
     lock = state / LOCK_NAME
     lock.touch(mode=0o600)
     lock.chmod(0o600)
-    (root / "usr/libexec/repocache").mkdir(parents=True)
+    (root / "usr").mkdir()
+    if worker_parent:
+        (root / "usr/libexec/repocache").mkdir(parents=True)
     (root / "etc/systemd/system").mkdir(parents=True)
     return root, state
 
 
 _UNIT_PATHS = ("/etc/systemd/system", "/usr/lib/systemd/system")
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="requires a disposable root-owned filesystem")
+def test_clean_placement_recovers_interrupted_worker_directory_creation(tmp_path, monkeypatch):
+    root, state = _placement_root(tmp_path, worker_parent=False)
+    payloads = {name: b"fixed signed payload" for name in (stage.WORKER, *stage.UNITS)}
+    receipt = {"source_sha": "a" * 40}
+    mkdir = os.mkdir
+
+    def interrupted(name, *, mode, dir_fd):
+        mkdir(name, mode, dir_fd=dir_fd)
+        raise InterruptedError("after mkdir, before directory sync")
+
+    with monkeypatch.context() as point:
+        point.setattr(install.os, "mkdir", interrupted)
+        with pytest.raises(InterruptedError):
+            install._place_worker_files(root, payloads, receipt, unit_paths=_UNIT_PATHS)
+    assert list(state.glob(".native-worker-placement.pending-*"))
+    assert (root / "usr/libexec").is_dir()
+    assert not (root / "usr/libexec/repocache").exists()
+    assert not list((root / "etc/systemd/system").iterdir())
+
+    install._place_worker_files(root, payloads, receipt, unit_paths=_UNIT_PATHS)
+    stage._audit_worker_files(root, payloads)
+    assert not list(state.glob(".native-worker-placement.pending-*"))
+    assert len(list(state.glob(".native-worker-placement.complete-*"))) == 1
+    worker_parent = root / "usr/libexec/repocache"
+    before = worker_parent.stat()
+    install._place_worker_files(root, payloads, receipt, unit_paths=_UNIT_PATHS)
+    assert worker_parent.stat().st_ino == before.st_ino
+    assert worker_parent.stat().st_mtime_ns == before.st_mtime_ns
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="requires a disposable root-owned filesystem")
+def test_worker_directory_must_not_follow_existing_link(tmp_path):
+    root, state = _placement_root(tmp_path, worker_parent=False)
+    foreign = root / "alien"
+    foreign.mkdir()
+    (root / "usr/libexec").symlink_to(foreign, target_is_directory=True)
+    payloads = {name: b"fixed signed payload" for name in (stage.WORKER, *stage.UNITS)}
+    with pytest.raises(OSError):
+        install._place_worker_files(
+            root, payloads, {"source_sha": "a" * 40}, unit_paths=_UNIT_PATHS,
+        )
+    assert not list(foreign.iterdir())
+    assert not list(state.glob(".native-worker-placement.*"))
+    assert not list((root / "etc/systemd/system").iterdir())
 
 
 @pytest.mark.skipif(os.geteuid() != 0, reason="requires a disposable root-owned filesystem")
@@ -219,7 +268,7 @@ def test_authenticated_placement_recovers_interrupted_atomic_publish(candidate, 
     ("run/repocache/server-control.sock", "LIVE_CONTROL_SOCKET"),
 ])
 def test_placement_preserves_foreign_paths_before_any_write(tmp_path, conflict, code):
-    root, state = _placement_root(tmp_path)
+    root, state = _placement_root(tmp_path, worker_parent=False)
     foreign = root / conflict
     foreign.parent.mkdir(parents=True, exist_ok=True)
     foreign.write_bytes(b"foreign transport or unit file")
@@ -229,7 +278,7 @@ def test_placement_preserves_foreign_paths_before_any_write(tmp_path, conflict, 
                                     unit_paths=_UNIT_PATHS)
     assert foreign.read_bytes() == b"foreign transport or unit file"
     assert not tuple(state.glob(".native-worker-placement.*"))
-    assert not (root / "usr/libexec/repocache" / stage.WORKER).exists()
+    assert not (root / "usr/libexec/repocache").exists()
 
 
 def test_systemd_unit_paths_use_the_running_manager_and_refuse_unusable_values(monkeypatch):

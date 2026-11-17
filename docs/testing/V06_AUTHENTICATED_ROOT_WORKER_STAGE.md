@@ -48,9 +48,9 @@ SELinux labels and service behavior require separate native acceptance.
 ## Authorized file placement
 
 The fixed installer accepts the same independently authenticated offline
-assets and owner pins. Run from the trusted checkout as root only after the
-native provisioner has created the protected server state, its existing
-lock, and the worker directory on a supported booted host.
+assets and owner pins. Run from the trusted checkout as root after the
+native provisioner has created the protected server state and lock on a
+supported booted host.
 
 ~~~sh
 /usr/bin/python3 -IS scripts/install_native_root_worker.py \
@@ -63,8 +63,11 @@ It reads PID 1's UnitPath, refuses conflicting units, unit overrides,
 aliases, dependency links and an existing socket during incomplete work,
 and places the executable and units at the fixed paths with root ownership.
 A durable marker binds recovery to the same authenticated candidate.
-Re-executing with the same inputs resumes an interrupted no-replace
-placement or checks an already complete placement without rewriting it.
+Under that marker the placer creates missing fixed worker directories
+below /usr and syncs the directory entries. It preserves existing safe
+directory metadata. Re-executing with the same inputs resumes an interrupted
+directory creation or no-replace placement. A completed placement is
+checked without rewriting or creating directories.
 An unrelated destination or a different candidate halts before replacement.
 
 The placement command does not load, start or enable either unit. Review

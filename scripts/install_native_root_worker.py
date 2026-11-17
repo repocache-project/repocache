@@ -2,8 +2,8 @@
 """Place the authenticated fixed worker and units before native activation.
 
 Run from the independently reviewed checkout on an authorized host. The
-server provisioner must already have created the protected state/lock and
-worker directories. This operation never reloads or enables a service.
+server provisioner must already have created the protected state and lock.
+This operation never reloads or enables a service.
 """
 from __future__ import annotations
 
@@ -30,10 +30,7 @@ from scripts import stage_native_root_worker as stage
 
 _MARKER = ".native-worker-placement."
 _TEMP = ".repocache-worker-part-"
-_PATHS = (
-    (("usr", "libexec", "repocache"), (stage.WORKER,), 0o755),
-    (("etc", "systemd", "system"), stage.UNITS, 0o644),
-)
+_UNIT_DIRECTORY = ("etc", "systemd", "system")
 
 
 def _reject(reason: str) -> None:
@@ -137,16 +134,30 @@ def _place_file(directory: int, name: str, raw: bytes, mode: int) -> None:
     _finish_link(directory, name, part, raw, mode)
 
 
-def _open_targets(root_fd: int, stack: ExitStack) -> dict[str, tuple[int, int]]:
-    targets = {}
-    for components, names, mode in _PATHS:
-        directory = root_fd
-        for component in components:
-            directory = os.open(component, stage._DIRECTORY, dir_fd=directory)
-            stack.callback(os.close, directory)
-            stage._protected_directory(directory)
-        targets.update({name: (directory, mode) for name in names})
-    return targets
+def _open_directory(parent: int, name: str, stack: ExitStack) -> int:
+    fd = os.open(name, stage._DIRECTORY, dir_fd=parent)
+    stack.callback(os.close, fd)
+    stage._protected_directory(fd)
+    return fd
+
+
+def _worker_directory(usr: int, stack: ExitStack, *, create: bool = False) -> int | None:
+    directory = usr
+    for name in ("libexec", "repocache"):
+        parent = directory
+        try:
+            directory = _open_directory(parent, name, stack)
+        except FileNotFoundError:
+            if not create:
+                return None
+            os.mkdir(name, mode=0o755, dir_fd=parent)
+            directory = _open_directory(parent, name, stack)
+        if create:
+            # On recovery, make an earlier mkdir durable even if that
+            # process was interrupted before its directory sync.
+            os.fsync(directory)
+            os.fsync(parent)
+    return directory
 
 
 def _systemd_unit_paths() -> tuple[str, ...]:
@@ -206,7 +217,10 @@ def _place_worker_files(
         fd = os.open(root, stage._DIRECTORY)
         stack.callback(os.close, fd)
         stage._protected_directory(fd)
-        targets = _open_targets(fd, stack)
+        usr = _open_directory(fd, "usr", stack)
+        units = fd
+        for component in _UNIT_DIRECTORY:
+            units = _open_directory(units, component, stack)
         with _locked(fd, 0) as state:
             markers = {name for name in os.listdir(state) if name.startswith(_MARKER)}
             if markers - {pending, complete}:
@@ -217,9 +231,15 @@ def _place_worker_files(
                     _reject("MARKER_CHANGED")
                 _check_marker(info)
             _reject_conflicting_units(root, unit_paths)
+            worker = _worker_directory(usr, stack)
+            targets = [(units, unit) for unit in stage.UNITS]
+            if worker is not None:
+                targets.append((worker, stage.WORKER))
             if complete in markers:
+                if worker is None:
+                    _reject("MISSING_WORKER_DIRECTORY")
                 if any(_named(directory, _TEMP + name) is not None
-                       for name, (directory, _mode) in targets.items()):
+                       for directory, name in targets):
                     _reject("FOREIGN_PARTIAL_FILE")
                 stage._audit_worker_files(root, payloads)
             else:
@@ -230,12 +250,14 @@ def _place_worker_files(
                 else:
                     _reject("LIVE_CONTROL_SOCKET")
                 if pending not in markers:
-                    for name, (directory, _mode) in targets.items():
+                    for directory, name in targets:
                         if _named(directory, name) is not None or _named(directory, _TEMP + name) is not None:
                             _reject("FOREIGN_EXISTING_DESTINATION")
                     _create_marker(state, pending)
-                for name, (directory, mode) in targets.items():
-                    _place_file(directory, name, payloads[name], mode)
+                worker = _worker_directory(usr, stack, create=True)
+                _place_file(worker, stage.WORKER, payloads[stage.WORKER], 0o755)
+                for unit in stage.UNITS:
+                    _place_file(units, unit, payloads[unit], 0o644)
                 stage._audit_worker_files(root, payloads)
                 _create_marker(state, complete)
             final_pending = _named(state, pending)
