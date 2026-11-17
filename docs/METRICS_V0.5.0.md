@@ -71,6 +71,11 @@ valid records were found among malformed lines. Missing/unreadable/symlink
 sources are unavailable. No-observation windows report unavailable HIT-rate,
 bytes and duration rather than estimated values.
 
+HTTP status and byte counts are sampled from integer values or decimal
+strings. Fractional values and booleans do not contribute to those
+measurements. Boolean durations also remain unobserved. An otherwise
+valid timestamp can still contribute to the request count.
+
 Cache HIT rate is HIT divided by *all requests with a known cache status*,
 including MISS, BYPASS, EXPIRED, STALE, UPDATING and REVALIDATED. This
 is **not** byte-efficiency. Bytes and latency are sampled only where the
