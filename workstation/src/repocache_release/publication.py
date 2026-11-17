@@ -20,7 +20,9 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-REPOSITORY = "teixemf/repocache"
+REPOSITORY = "repocache-project/repocache"
+# The trusted release actor remains the individual maintainer, not the org.
+APPROVED_OPERATOR = "teixemf"
 API = "https://api.github.com/repos/" + REPOSITORY
 MAX_REPLY = 2_000_000
 
@@ -40,8 +42,8 @@ def token(c) -> str:
         user = json.loads(current)
     except (TypeError, ValueError):
         refuse(c, "AUTHORIZATION_REQUIRED", "GitHub account identity was not verified")
-    if not isinstance(user, dict) or user.get("login") != "teixemf":
-        refuse(c, "AUTHORIZATION_REQUIRED", "Only the repository owner may stage or publish")
+    if not isinstance(user, dict) or user.get("login") != APPROVED_OPERATOR:
+        refuse(c, "AUTHORIZATION_REQUIRED", "Only the approved release operator may stage or publish")
     return result
 
 
