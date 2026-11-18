@@ -21,6 +21,7 @@ on:
       - 'tests/test_server_native_nginx_prepackage_state_v1.py'
       - 'tests/test_server_native_nginx_package_journal_v1.py'
       - 'scripts/smoke_server_native_package_metadata.py'
+      - 'tests/test_smoke_server_native_package_metadata.py'
       - 'scripts/smoke_server_native_nginx_prepackage_state.py'
       - 'scripts/smoke_server_native_nginx_container_install.py'
       - 'scripts/ci_native_nginx_process_inode_smoke.py'
@@ -67,7 +68,10 @@ jobs:
                   dnf install -y python3 ca-certificates >/dev/null
                 fi
               fi
-              PYTHONPATH=src python3 scripts/smoke_server_native_package_metadata.py
+              PYTHONPATH=src python3 -B scripts/smoke_server_native_package_metadata.py > /tmp/native-metadata-result.jsonl
+              grep -Fq '"ci_native_negative_metadata": "absent_package"' /tmp/native-metadata-result.jsonl
+              grep -Fq '"ci_native_negative_metadata": "bad_metadata_key"' /tmp/native-metadata-result.jsonl
+              cat /tmp/native-metadata-result.jsonl
               # Disposable CI userspace only: preprovision the exact root-owned
               # #31 state lock after download-only evidence (without NGINX).
               # Never run this bootstrap on any real/managed host.
@@ -123,3 +127,4 @@ jobs:
               # Refuse Docker as a booted VM even with real distro NGINX installed.
               PYTHONPATH=src python3 -B scripts/ci_native_vm_preflight_container_refusal.py
             '
+
