@@ -3,6 +3,11 @@ name: Server v0.6 Journaled Native Package Installation (Containers)
 on:
   pull_request:
     paths:
+      - 'scripts/server_v06_preflight.py'
+      - 'src/repocache/server_install_v1.py'
+      - 'src/repocache/server_host_checks_v1.py'
+      - 'src/repocache/server_preflight_v1.py'
+      - 'src/repocache/server_preflight_guidance_v1.py'
       - '.github/workflows/server-v06-journaled-native-package.yml'
       - 'scripts/ci_v06_journaled_native_server_install.py'
       - 'src/repocache/server_native_package_effects_observe_v1.py'
@@ -21,6 +26,11 @@ on:
   push:
     branches: [main, 'integration/**']
     paths:
+      - 'scripts/server_v06_preflight.py'
+      - 'src/repocache/server_install_v1.py'
+      - 'src/repocache/server_host_checks_v1.py'
+      - 'src/repocache/server_preflight_v1.py'
+      - 'src/repocache/server_preflight_guidance_v1.py'
       - '.github/workflows/server-v06-journaled-native-package.yml'
       - 'scripts/ci_v06_journaled_native_server_install.py'
       - 'src/repocache/server_native_package_effects_observe_v1.py'
@@ -76,6 +86,8 @@ jobs:
               fi
               grep -Fq DISPOSABLE_JOURNALED_NATIVE_INSTALL_PASS /tmp/repocache-v06-journaled-result.json
               grep -Fq actual_pending_journal_identity_observed_after_install /tmp/repocache-v06-journaled-result.json
+              grep -Fq readonly_preflight_before_after_native_packages /tmp/repocache-v06-journaled-result.json
+              grep -Fq readonly_preflight_real_uid_port_capacity_and_preservation /tmp/repocache-v06-journaled-result.json
               cat /tmp/repocache-v06-journaled-result.json
               echo "PASS: real native NGINX install under retained lock"
               # Only after the root-owned pending journal and package result

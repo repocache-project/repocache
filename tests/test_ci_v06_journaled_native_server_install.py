@@ -23,9 +23,59 @@ def test_without_disposable_gate_refuses_before_any_mutation(monkeypatch):
                         lambda *_a, **_kw: pytest.fail("journal mutation reached"))
     monkeypatch.setattr(integration, "run_rehearsal",
                         lambda *_a, **_kw: pytest.fail("native package reached"))
+    monkeypatch.setattr(integration, "_verify_readonly_preflight",
+                        lambda *_a, **_kw: pytest.fail("CI preflight reached outside disposable gate"))
     with pytest.raises(integration.NativeIntegrationError,
                        match="^DISPOSABLE_NATIVE_CONTAINER_REQUIRED$"):
         integration.run()
+
+
+def _readonly_report():
+    return {
+        "schema_version": 1, "kind": "repocache.server.vm-preflight.partial",
+        "status": "NOT VERIFIED", "read_only": True, "authorizes_installation": False,
+        "checks": [{
+            "check": "supported_os_and_python", "status": "PASS",
+            "code": "SUPPORTED_OS_AND_PYTHON_VERSION",
+            "guidance": "Local observation only.",
+        }],
+    }
+
+
+@pytest.mark.parametrize("fault", ["none", "authority", "mutation", "guidance", "status", "malformed"])
+def test_native_preflight_acceptance_checks_boundary_and_preservation(tmp_path, monkeypatch, fault):
+    native = tmp_path / "nginx"
+    native.mkdir()
+    config = native / "nginx.conf"
+    config.write_text("unrelated configuration")
+    monkeypatch.setattr(integration, "_PREFLIGHT_PATHS", (native, tmp_path / "absent-state"))
+
+    def fake_run(command, **kwargs):
+        assert command[:3] == ["/usr/bin/python3", "-I", "-B"]
+        assert "--intent" in command and command[-1] == "install"
+        assert kwargs["stdin"] is integration.subprocess.DEVNULL
+        assert kwargs["timeout"] == 30
+        result = _readonly_report()
+        if fault == "authority":
+            result["authorizes_installation"] = True
+        elif fault == "mutation":
+            config.write_text("changed")
+        elif fault == "guidance":
+            result["checks"][0]["guidance"] = ""
+        elif fault == "status":
+            result["status"] = "PASS"
+        return SimpleNamespace(
+            returncode=3, stdout=b"bad JSON" if fault == "malformed" else json.dumps(result).encode(),
+            stderr=b"",
+        )
+
+    monkeypatch.setattr(integration.subprocess, "run", fake_run)
+    if fault == "none":
+        assert integration._run_readonly_preflight({})["supported_os_and_python"]["status"] == "PASS"
+        assert config.read_text() == "unrelated configuration"
+    else:
+        with pytest.raises(integration.NativeIntegrationError):
+            integration._run_readonly_preflight({})
 
 
 def test_cli_never_leaks_untrusted_exception_details(monkeypatch, capsys):
