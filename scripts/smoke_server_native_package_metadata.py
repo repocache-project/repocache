@@ -69,14 +69,16 @@ class NegativeMetadataRunner:
             combined = (process.stdout + process.stderr).casefold()
             # A network/TLS/option failure is not signature-refusal evidence.
             network_error = any(value in combined for value in (
-                "could not resolve", "could not connect", "certificate",
-                "ssl connection", "curl error", "unknown option",
+                "could not resolve", "could not connect", "ssl certificate",
+                "certificate verify failed", "ssl connection", "curl error",
+                "unknown option",
                 "unrecognized argument", "connection timed out",
             ))
             self.signature_refused = bool(process.returncode and not network_error
                 and any(value in combined for value in (
                     "no_pubkey", "not signed", "gpg error", "gpgkey",
-                    "openpgp", "public key", "gpg signature",
+                    "openpgp", "public key", "gpg signature", "gpg key",
+                    "gpg check failed",
                 )))
         return process
 
