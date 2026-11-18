@@ -1,5 +1,35 @@
 # v0.6.0 combined native package installation rehearsal (issue #27)
 
+## Local read-only preflight acceptance (#26)
+
+The same disposable image now runs the normal preflight command before
+NGINX installation and again after the authenticated native transaction.
+Both runs verify the supported OS/Python identity. Before installation,
+missing NGINX produces its actionable diagnostic. After installation, the
+native executable observation changes to present.
+The image includes the distribution's systemd client as a prerequisite.
+Unexpected failed local checks reject the positive case. The container's
+missing systemd PID 1 retains its explicit native-environment classification.
+
+The command is repeated with identical input and must produce identical
+diagnostics. The image also exercises a genuinely dropped UID/GID with no
+supplementary groups, a real loopback listener on the requested HTTPS port,
+and a configured capacity requirement above the observed filesystem space.
+These cases must respectively report missing root privilege, an occupied
+port and insufficient cache space.
+
+Each command invocation compares inode identities, ownership, modes,
+timestamps and file hashes across the existing NGINX configuration and
+protected state tree. A changed file, unexpected authority flag, invalid
+report or missing English guidance fails the job. The retained package
+effects marker remains present throughout post-package preflight.
+
+This is acceptance evidence for local non-mutating diagnostics and their
+composition with #27's separate package checks. Full installed-server
+acceptance remains tracked by #19 and the functional feature owners.
+The preflight report retains its non-authorizing JSON contract and
+explicitly unresolved broader readiness checks.
+
 ## Objective
 
 Before any real-host installation, verify that three independently developed
