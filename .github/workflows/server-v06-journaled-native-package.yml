@@ -74,9 +74,9 @@ jobs:
               set -eu
               if command -v apt-get >/dev/null 2>&1; then
                 apt-get update -qq
-                DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends python3 ca-certificates openssl >/dev/null
+                DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends python3 ca-certificates openssl systemd >/dev/null
               else
-                dnf -y -q install python3 ca-certificates openssl >/dev/null
+                dnf -y -q install python3 ca-certificates openssl systemd >/dev/null
               fi
               export PYTHONPATH=/workspace/src
               export REPOCACHE_NATIVE_TEST_CONTAINER=CONFIRMED_DISPOSABLE_DOCKER_ONLY

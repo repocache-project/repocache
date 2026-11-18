@@ -7,6 +7,9 @@ NGINX installation and again after the authenticated native transaction.
 Both runs verify the supported OS/Python identity. Before installation,
 missing NGINX produces its actionable diagnostic. After installation, the
 native executable observation changes to present.
+The image includes the distribution's systemd client as a prerequisite.
+Unexpected failed local checks reject the positive case. The container's
+missing systemd PID 1 retains its explicit native-environment classification.
 
 The command is repeated with identical input and must produce identical
 diagnostics. The image also exercises a genuinely dropped UID/GID with no

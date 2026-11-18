@@ -42,6 +42,18 @@ def _readonly_report():
     }
 
 
+@pytest.mark.parametrize("code", ["SYSTEMD_CLIENT_MISSING", "STATE_OR_LOG_SPACE_EXHAUSTED"])
+def test_positive_native_preflight_refuses_unexpected_local_failures(monkeypatch, code):
+    report = {
+        "supported_os_and_python": {"status": "PASS", "code": "SUPPORTED_OS_AND_PYTHON_VERSION"},
+        "nginx_native_binary": {"status": "PASS", "code": "NGINX_EXECUTABLE_OBSERVED_ONLY"},
+        "failed_check": {"status": "FAIL", "code": code},
+    }
+    monkeypatch.setattr(integration, "_run_readonly_preflight", lambda *a, **kw: report)
+    with pytest.raises(integration.NativeIntegrationError, match="POSITIVE_LOCAL_CHECK_FAILED"):
+        integration._verify_readonly_preflight({}, installed=True)
+
+
 @pytest.mark.parametrize("fault", ["none", "authority", "mutation", "guidance", "status", "malformed"])
 def test_native_preflight_acceptance_checks_boundary_and_preservation(tmp_path, monkeypatch, fault):
     native = tmp_path / "nginx"

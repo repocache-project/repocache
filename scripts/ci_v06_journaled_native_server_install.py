@@ -138,8 +138,13 @@ def _verify_readonly_preflight(document: dict, *, installed: bool) -> None:
         _deny("PREFLIGHT_PACKAGE_DIAGNOSTIC_UNVERIFIED")
     if not installed:
         return
+    if any(row["status"] == "FAIL"
+           and row["code"] != "SYSTEMD_NATIVE_PID1_NOT_OBSERVED"
+           for row in first.values()):
+        _deny("PREFLIGHT_POSITIVE_LOCAL_CHECK_FAILED")
     nonroot = _run_readonly_preflight(document, unprivileged=True)
-    if nonroot["effective_uid"]["code"] != "PRIVILEGED_INSTALL_REQUIRES_ROOT":
+    if (nonroot["effective_uid"]["code"] != "PRIVILEGED_INSTALL_REQUIRES_ROOT"
+            or nonroot["effective_uid"]["status"] != "FAIL"):
         _deny("PREFLIGHT_ROOT_DIAGNOSTIC_UNVERIFIED")
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.bind(("127.0.0.1", 0))
@@ -147,7 +152,8 @@ def _verify_readonly_preflight(document: dict, *, installed: bool) -> None:
         occupied = copy.deepcopy(document)
         occupied["deployment"]["listen"]["https_port"] = listener.getsockname()[1]
         report = _run_readonly_preflight(occupied)
-        if report["listen_port_conflicts"]["code"] != "HTTPS_PORT_ALREADY_LISTENING":
+        if (report["listen_port_conflicts"]["code"] != "HTTPS_PORT_ALREADY_LISTENING"
+                or report["listen_port_conflicts"]["status"] != "FAIL"):
             _deny("PREFLIGHT_PORT_DIAGNOSTIC_UNVERIFIED")
     cache = Path(document["deployment"]["paths"]["cache_root"])
     while not cache.exists():
@@ -159,7 +165,8 @@ def _verify_readonly_preflight(document: dict, *, installed: bool) -> None:
         "critical_free_bytes": critical, "warning_free_bytes": critical + 1,
     }
     report = _run_readonly_preflight(low)
-    if report["storage_free_space"]["code"] != "STORAGE_SPACE_BELOW_CRITICAL_THRESHOLD":
+    if (report["storage_free_space"]["code"] != "STORAGE_SPACE_BELOW_CRITICAL_THRESHOLD"
+            or report["storage_free_space"]["status"] != "FAIL"):
         _deny("PREFLIGHT_CAPACITY_DIAGNOSTIC_UNVERIFIED")
 
 
