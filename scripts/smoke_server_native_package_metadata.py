@@ -103,7 +103,14 @@ def verify_negative_metadata(release: str, version: tuple[int, int],
                 or report["metadata_signed"] != (fault == "absent_package")
                 or runner.stages != expected_stages
                 or (fault == "bad_metadata_key" and not runner.signature_refused)):
-            raise ValueError("native negative metadata acceptance failed")
+            # Only fixed report fields and code-owned labels. Native output
+            # stays captured even when diagnosing a new distro response.
+            raise ValueError("native negative metadata acceptance failed: " + json.dumps({
+                "fault": fault, "code": report["code"],
+                "metadata_signed": report["metadata_signed"],
+                "candidate_available": report["candidate_available"],
+                "stages": runner.stages, "signature_refused": runner.signature_refused,
+            }, sort_keys=True))
         print(json.dumps({"ci_native_negative_metadata": fault,
                           "distribution": distribution,
                           "code": expected, "passed": True,

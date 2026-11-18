@@ -69,8 +69,8 @@ jobs:
                 fi
               fi
               PYTHONPATH=src python3 -B scripts/smoke_server_native_package_metadata.py > /tmp/native-metadata-result.jsonl
-              grep -Fq '"ci_native_negative_metadata": "absent_package"' /tmp/native-metadata-result.jsonl
-              grep -Fq '"ci_native_negative_metadata": "bad_metadata_key"' /tmp/native-metadata-result.jsonl
+              grep -Fq "\"ci_native_negative_metadata\": \"absent_package\"" /tmp/native-metadata-result.jsonl
+              grep -Fq "\"ci_native_negative_metadata\": \"bad_metadata_key\"" /tmp/native-metadata-result.jsonl
               cat /tmp/native-metadata-result.jsonl
               # Disposable CI userspace only: preprovision the exact root-owned
               # #31 state lock after download-only evidence (without NGINX).
