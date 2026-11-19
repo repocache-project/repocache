@@ -18,12 +18,14 @@ import platform
 import re
 import stat
 import sys
-from repocache.server_install_v1 import InstallInputError, validate_os_identity
+from repocache.server_install_v1 import (
+    InstallInputError, validate_os_identity, validate_server_architecture,
+)
 
 MAX_OS_RELEASE_BYTES = 16 * 1024
 _NATIVE_MANAGER = {"debian": "/usr/bin/apt-get", "almalinux": "/usr/bin/dnf"}
+_NATIVE_PYTHON = {"debian": "/usr/bin/python3.13", "almalinux": "/usr/bin/python3.12"}
 _NOT_VERIFIED = (
-    ("architecture_supported", "NATIVE_ARCH_POLICY_UNVERIFIED"),
     ("python_package_origin", "OS_PYTHON_PROVENANCE_UNVERIFIED"),
     ("native_package_availability", "NATIVE_PACKAGE_METADATA_UNVERIFIED"),
     ("storage_ownership_and_capacity", "STORAGE_OWNERSHIP_CAPACITY_UNVERIFIED"),
@@ -64,6 +66,10 @@ _BASE_CODES: Mapping[str, Mapping[str, PreflightStatus]] = {
         "ARCHITECTURE_IDENTITY_OBSERVED": PreflightStatus.PASS,
         "INVALID_ARCHITECTURE_IDENTITY": PreflightStatus.FAIL,
     },
+    "architecture_supported": {
+        "SUPPORTED_NATIVE_ARCHITECTURE": PreflightStatus.PASS,
+        "UNSUPPORTED_NATIVE_ARCHITECTURE": PreflightStatus.FAIL,
+    },
     "effective_uid": {
         "INVALID_EFFECTIVE_UID": PreflightStatus.FAIL,
         "PRIVILEGED_INSTALL_REQUIRES_ROOT": PreflightStatus.FAIL,
@@ -81,6 +87,13 @@ _BASE_CODES: Mapping[str, Mapping[str, PreflightStatus]] = {
         "VENV_PYTHON_NOT_NATIVE_PROVENANCE": PreflightStatus.NOT_VERIFIED,
         "NO_ACTIVE_VENV_OBSERVED": PreflightStatus.PASS,
     },
+    "native_python_identity": {
+        "NATIVE_PYTHON_INODE_OBSERVED_ONLY": PreflightStatus.PASS,
+        "NATIVE_PYTHON_IDENTITY_UNVERIFIED": PreflightStatus.NOT_VERIFIED,
+        "NATIVE_PYTHON_NOT_OBSERVED": PreflightStatus.NOT_VERIFIED,
+        "INSTALL_REQUIRES_NATIVE_PYTHON": PreflightStatus.FAIL,
+        "INVALID_NATIVE_PYTHON_OBSERVATION": PreflightStatus.FAIL,
+    },
 }
 for _name, _code in _NOT_VERIFIED:
     _BASE_CODES.setdefault(_name, {})[_code] = PreflightStatus.NOT_VERIFIED
@@ -93,6 +106,7 @@ _PROBE_CODES: Mapping[str, Mapping[str, PreflightStatus]] = {
     "tls_reference_files": {
         "TLS_REFERENCE_PARENT_UNSAFE": PreflightStatus.FAIL,
         "TLS_REFERENCE_NONREGULAR": PreflightStatus.FAIL,
+        "TLS_REFERENCE_OWNER_OR_LINK_UNSAFE": PreflightStatus.FAIL,
         "TLS_REFERENCE_WRITABLE_BY_OTHERS": PreflightStatus.FAIL,
         "TLS_PRIVATE_KEY_WORLD_READABLE": PreflightStatus.FAIL,
         "TLS_REFERENCE_ACCESS_UNVERIFIED": PreflightStatus.NOT_VERIFIED,
@@ -200,6 +214,7 @@ class NativeHostFacts:
     euid: int
     native_manager_visible: bool | None
     running_in_venv: bool
+    native_python_identity: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -286,6 +301,14 @@ def assess_native_host(
     else:
         _add(checks, "architecture_identity", PreflightStatus.PASS,
              "ARCHITECTURE_IDENTITY_OBSERVED")
+    try:
+        validate_server_architecture(facts.machine)
+    except InstallInputError:
+        _add(checks, "architecture_supported", PreflightStatus.FAIL,
+             "UNSUPPORTED_NATIVE_ARCHITECTURE")
+    else:
+        _add(checks, "architecture_supported", PreflightStatus.PASS,
+             "SUPPORTED_NATIVE_ARCHITECTURE")
 
     if type(facts.euid) is not int or facts.euid < 0:
         _add(checks, "effective_uid", PreflightStatus.FAIL,
@@ -322,6 +345,22 @@ def assess_native_host(
     else:
         _add(checks, "python_environment", PreflightStatus.PASS,
              "NO_ACTIVE_VENV_OBSERVED")
+
+    if system is None or facts.machine != "x86_64" or facts.native_python_identity is None:
+        _add(checks, "native_python_identity", PreflightStatus.NOT_VERIFIED,
+             "NATIVE_PYTHON_IDENTITY_UNVERIFIED")
+    elif type(facts.native_python_identity) is not bool:
+        _add(checks, "native_python_identity", PreflightStatus.FAIL,
+             "INVALID_NATIVE_PYTHON_OBSERVATION")
+    elif facts.native_python_identity and facts.running_in_venv is False:
+        _add(checks, "native_python_identity", PreflightStatus.PASS,
+             "NATIVE_PYTHON_INODE_OBSERVED_ONLY")
+    elif intent == "install":
+        _add(checks, "native_python_identity", PreflightStatus.FAIL,
+             "INSTALL_REQUIRES_NATIVE_PYTHON")
+    else:
+        _add(checks, "native_python_identity", PreflightStatus.NOT_VERIFIED,
+             "NATIVE_PYTHON_NOT_OBSERVED")
 
     for name, code in _NOT_VERIFIED:
         _add(checks, name, PreflightStatus.NOT_VERIFIED, code)
@@ -382,6 +421,35 @@ def _manager_exists(system: str | None) -> bool | None:
     return stat.S_ISREG(info.st_mode) and bool(info.st_mode & 0o111)
 
 
+def _native_python_identity(system: str) -> bool | None:
+    """Observe fixed native interpreter inode and local root ownership.
+
+    The kernel's /proc/self/exe reference identifies the currently running
+    executable, even when invoked via /usr/bin/python3 or a symlink. This
+    does not authenticate the package database, publisher or executable bytes.
+    """
+    path = _NATIVE_PYTHON[system]
+    try:
+        for parent in ("/", "/usr", "/usr/bin"):
+            info = os.lstat(parent)
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0
+                    or info.st_mode & 0o022):
+                return False
+        fixed = os.lstat(path)
+        if (not stat.S_ISREG(fixed.st_mode) or fixed.st_uid != 0
+                or fixed.st_mode & 0o022 or not fixed.st_mode & 0o111):
+            return False
+        active = os.stat("/proc/self/exe")
+        final = os.lstat(path)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return None
+    identity = lambda value: (value.st_dev, value.st_ino, value.st_mode,
+                              value.st_uid, value.st_size, value.st_ctime_ns)
+    return identity(fixed) == identity(active) == identity(final)
+
+
 def capture_native_host_facts() -> NativeHostFacts:
     """Read only the fixed host OS identity, never a caller-provided path.
 
@@ -399,13 +467,19 @@ def capture_native_host_facts() -> NativeHostFacts:
         system = validate_os_identity(release_text, py_ver)
     except InstallInputError:
         pass
+    machine = platform.machine()
+    try:
+        validate_server_architecture(machine)
+    except InstallInputError:
+        system = None  # Do not inspect package-manager files on an unsupported host.
     return NativeHostFacts(
         os_release=release_text,
         python_version=py_ver,
-        machine=platform.machine(),
+        machine=machine,
         euid=os.geteuid(),
-        native_manager_visible=_manager_exists(system),
+        native_manager_visible=_manager_exists(system) if system is not None else None,
         running_in_venv=(sys.prefix != sys.base_prefix),
+        native_python_identity=_native_python_identity(system) if system is not None else None,
     )
 
 

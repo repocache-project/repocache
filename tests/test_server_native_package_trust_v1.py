@@ -179,6 +179,18 @@ def test_native_manager_failure_is_redacted_and_fails_closed(monkeypatch, mode):
     assert len(calls) == 1
 
 
+def test_unsupported_machine_never_calls_native_manager(monkeypatch):
+    import platform
+    monkeypatch.setattr(platform, "machine", lambda: "aarch64")
+    monkeypatch.setattr(native, "_trusted_key", lambda _: pytest.fail("trust probe reached"))
+    for release, version in ((DEBIAN, (3, 13)), (ALMA, (3, 12))):
+        with pytest.raises(InstallInputError, match="only x86_64"):
+            native.inspect_native_nginx_metadata(
+                os_release=release, python_version=version, document=document(),
+                runner=lambda *a, **kw: pytest.fail("native manager reached"),
+            )
+
+
 def test_invalid_os_or_policy_never_calls_native_manager(monkeypatch):
     def forbidden(*a, **kw):
         raise AssertionError("unsupported platform must fail before native command")
