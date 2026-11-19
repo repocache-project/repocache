@@ -61,6 +61,20 @@ def test_partial_diagnostics_never_authorize(entry, document, monkeypatch, capsy
     assert observed == [(1, intent)]
 
 
+def test_unsupported_machine_cli_refuses_with_actionable_guidance(entry, document, monkeypatch, capsys):
+    from repocache import server_host_checks_v1 as host
+    from repocache.server_preflight_v1 import NativeHostFacts
+    facts = NativeHostFacts("ID=debian\nVERSION_ID=13\n", (3, 13), "aarch64", 0, None, False)
+    monkeypatch.setattr(host, "capture_native_host_facts", lambda: facts)
+    monkeypatch.setattr(host, "_capture_host_probes", lambda *a: pytest.fail("host probes reached"))
+    assert entry.run(["--document", str(document), "--intent", "install"]) == 1
+    result = json.loads(capsys.readouterr().out)
+    check = next(c for c in result["checks"] if c["check"] == "architecture_supported")
+    assert check["code"] == "UNSUPPORTED_NATIVE_ARCHITECTURE"
+    assert check["status"] == "FAIL" and "x86_64" in check["guidance"]
+    assert not result["authorizes_installation"]
+
+
 def test_host_failure_is_not_ready(entry, document, monkeypatch, capsys):
     monkeypatch.setattr(entry, "inspect_deployment_host",
                         lambda *_args, **_kw: _report(fail=True))

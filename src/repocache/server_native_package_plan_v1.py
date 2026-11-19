@@ -7,12 +7,14 @@ a package name in this plan is *not* package availability or provenance proof.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import platform
 from types import MappingProxyType
 from typing import Any
 
 from repocache.server_install_v1 import (
     validate_install_document,
     validate_os_identity,
+    validate_server_architecture,
 )
 
 # The allowlist is implementation-owned, never read from an operator document.
@@ -108,11 +110,13 @@ def preview_nginx_packages(
 ) -> NativePackagePlanV1:
     """Validate native OS and closed v1 input before constructing a fixed plan.
 
-    No external call or host filesystem access occurs here. ``document`` is
+    Only the local machine identity is observed; no external call or host
+    filesystem access occurs here. ``document`` is
     revalidated; a caller's earlier parser validation is not an authority.
     Raises InstallInputError on unsupported OS, Python or configuration.
     """
     distribution = validate_os_identity(os_release, python_version)
+    validate_server_architecture(platform.machine())
     validated = validate_install_document(document, for_apply=False)
     if validated["deployment"]["native_packages"]["policy"] != "explicit-review":
         # The strict v1 validator already rejects this; keep a defensive guard

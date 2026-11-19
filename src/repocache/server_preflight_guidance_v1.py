@@ -14,7 +14,7 @@ from repocache.server_preflight_v1 import (
 _ACTIONS = MappingProxyType({
     "supported_os_and_python": "Use Debian 13 with OS Python 3.13 or AlmaLinux 10 with OS Python 3.12.",
     "architecture_identity": "Check the observed machine architecture; refuse malformed identities.",
-    "architecture_supported": "Verify an explicitly approved machine architecture before installing.",
+    "architecture_supported": "Use an x86_64 server; other machine architectures are unsupported in v0.6.0.",
     "effective_uid": "Inspect without elevation; use a separately authorized native root helper for installation.",
     "native_package_manager_binary": "Check apt-get or dnf presence; issue #27 owns actual native package availability and repository trust.",
     "python_environment": "Verify the OS Python environment; an active virtual environment is not native provenance.",

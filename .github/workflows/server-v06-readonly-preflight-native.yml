@@ -64,6 +64,9 @@ jobs:
                      for c in report["checks"])
           assert any(c["check"] == "supported_os_and_python" and c["status"] == "PASS"
                      for c in report["checks"]), report
+          assert any(c["check"] == "architecture_supported" and c["status"] == "PASS"
+                     and c["code"] == "SUPPORTED_NATIVE_ARCHITECTURE"
+                     for c in report["checks"]), report
           print("PASS: native OS identity observed; installation not authorized")
           PY
       - name: Verify invalid deployment refused before host inspection

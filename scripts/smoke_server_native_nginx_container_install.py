@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 
-from repocache.server_install_v1 import validate_os_identity
+from repocache.server_install_v1 import validate_os_identity, validate_server_architecture
 from repocache.server_native_nginx_service_unit_v1 import (
     VENDOR_UNIT, inspect_native_nginx_unit,
 )
@@ -125,6 +126,10 @@ def run_rehearsal(
     )
     if observed != distribution:
         _deny("CONTAINER_DISTRIBUTION_MISMATCH")
+    try:
+        validate_server_architecture(platform.machine())
+    except ValueError:
+        _deny("UNSUPPORTED_NATIVE_ARCHITECTURE")
     # First refuse any NGINX already installed or configured. This test must
     # never adopt or overwrite a pre-existing instance in the container.
     if any(os.path.lexists(path) for path in (

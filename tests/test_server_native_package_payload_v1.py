@@ -381,10 +381,11 @@ def test_accept_architecture_neutral_native_dependencies(
     ("debian", ".deb"),
     ("almalinux", ".rpm"),
 ])
+@pytest.mark.parametrize("machine", ["unreviewed-architecture", "aarch64", "s390x", "ppc64le"])
 def test_unknown_machine_architecture_refuses_before_payload_tools(
-    tmp_path, monkeypatch, distribution, extension,
+    tmp_path, monkeypatch, distribution, extension, machine,
 ):
-    monkeypatch.setattr(stage.platform, "machine", lambda: "unreviewed-architecture")
+    monkeypatch.setattr(stage.platform, "machine", lambda: machine)
     artifact = tmp_path / ("nginx" + extension)
     artifact.write_bytes(b"synthetic")
     def forbidden(*_args, **_kwargs):

@@ -426,7 +426,7 @@ def assess_deployment_host(
     # identity with otherwise positive host probes, even when injected by a
     # caller of this pure assembly API.
     identity_failed = any(
-        c.name in ("supported_os_and_python", "architecture_identity")
+        c.name in ("supported_os_and_python", "architecture_identity", "architecture_supported")
         and c.status is PreflightStatus.FAIL
         for c in baseline.checks
     )
@@ -465,7 +465,7 @@ def inspect_deployment_host(
     baseline = assess_native_host(facts, intent=intent)
     # Do not inspect local files, sockets or services after an invalid
     # OS/Python or architecture identity. The report stays non-authorizing.
-    if any(c.name in ("supported_os_and_python", "architecture_identity")
+    if any(c.name in ("supported_os_and_python", "architecture_identity", "architecture_supported")
            and c.status is PreflightStatus.FAIL for c in baseline.checks):
         return baseline
     from repocache.server_install_v1 import validate_os_identity

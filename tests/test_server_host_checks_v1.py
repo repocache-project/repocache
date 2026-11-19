@@ -263,8 +263,9 @@ def test_capture_skips_host_probes_on_unsupported_os_and_retains_false_auth(monk
     ("ID=debian\nVERSION_ID=13\n", (3, 13)),
     ("ID=almalinux\nVERSION_ID=10\n", (3, 12)),
 ])
+@pytest.mark.parametrize("machine", ["../unsupported", "aarch64", "s390x", "ppc64le", "i686"])
 def test_invalid_machine_identity_never_reaches_host_probes(
-    monkeypatch, release, python,
+    monkeypatch, release, python, machine,
 ):
     """Malformed architecture fails before any native host probe on both OSes."""
     from dataclasses import replace
@@ -273,7 +274,7 @@ def test_invalid_machine_identity_never_reaches_host_probes(
         (Path(__file__).parents[1] / "docs/examples/server-install-v1.json")
         .read_text(encoding="utf-8")
     )
-    invalid = replace(fact(release, python), machine="../unsupported")
+    invalid = replace(fact(release, python), machine=machine)
     monkeypatch.setattr(host, "capture_native_host_facts", lambda: invalid)
 
     def forbidden(*_args, **_kwargs):
@@ -282,7 +283,7 @@ def test_invalid_machine_identity_never_reaches_host_probes(
     monkeypatch.setattr(host, "_capture_host_probes", forbidden)
     report = host.inspect_deployment_host(doc)
     assert byname(report.checks, "supported_os_and_python").status is PreflightStatus.PASS
-    assert byname(report.checks, "architecture_identity").status is PreflightStatus.FAIL
+    assert byname(report.checks, "architecture_supported").status is PreflightStatus.FAIL
     # The baseline deliberately includes an unresolved listener readiness
     # marker. Only the probe-specific observation may never be appended.
     assert byname(report.checks, "listen_port_conflicts").code == "LISTENER_OWNERSHIP_UNVERIFIED"
@@ -291,7 +292,7 @@ def test_invalid_machine_identity_never_reaches_host_probes(
     )
     assert report.has_failures
     assert not report.all_verified and not report.authorizes_installation
-    assert "../unsupported" not in json.dumps(report.to_dict())
+    assert machine not in json.dumps(report.to_dict())
 
     # A caller cannot inject positive host observations after identity failure.
     injected = host.assess_deployment_host(invalid, complete_probes())

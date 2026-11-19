@@ -491,6 +491,12 @@ def parse_install_bytes(payload: bytes, *, for_apply: bool = False) -> dict:
     return validate_install_document(document, for_apply=for_apply)
 
 
+def validate_server_architecture(machine: str) -> None:
+    """Apply the v0.6.0 server installation architecture policy to an observation."""
+    if type(machine) is not str or machine != "x86_64":
+        _reject("server installation: only x86_64 is supported")
+
+
 def validate_os_identity(os_release: str, python_version: tuple[int, int]) -> str:
     """Read-only supported-OS identity gate; other host checks remain unimplemented.
 

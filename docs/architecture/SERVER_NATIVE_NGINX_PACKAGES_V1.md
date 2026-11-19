@@ -395,9 +395,11 @@ rehearsal checks every package's declared architecture against the observed
 native machine architecture. DEB dependencies may use the matching native
 architecture or `all`; RPM dependencies may use the native architecture
 or `noarch`. Unknown machines and foreign headers fail closed as
-`NATIVE_PAYLOAD_SET_UNSAFE`. This is not an approved architecture support
-matrix, host installation authorization, publisher signature claim or
-booted-VM acceptance.
+`NATIVE_PAYLOAD_SET_UNSAFE`. The maintainer-approved v0.6.0 server host policy
+is x86_64 only (#26, 2026-11-19). Native preparation refuses other machines
+before repository access; the download stage accepts only amd64/all DEBs or
+x86_64/noarch RPMs. This is not host installation authorization, a publisher
+signature claim or booted-VM acceptance.
 
 ### Native negative metadata diagnostics (Stage A, #26 AC3 / #27)
 
@@ -421,6 +423,6 @@ The workflow requires both successful negative-case markers before the later
 container-install job. Unit tests reject accidental candidate success, native
 success with a bad key, a different failure cause and unexpected source files.
 These are scratch-only fault injections with real package-manager responses,
-not deployed-host trust, a complete architecture support policy, native-effects
+not deployed-host trust, native-effects
 reconciliation, booted systemd/SELinux or full #26/#27 issue acceptance.
 
