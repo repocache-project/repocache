@@ -86,8 +86,10 @@ jobs:
           assert checks["supported_os_and_python"].status is PreflightStatus.PASS
           assert checks["architecture_identity"].status is PreflightStatus.PASS
           assert checks["native_package_manager_binary"].status is PreflightStatus.PASS
-          # A syntactically valid machine is NOT an approved architecture.
-          assert checks["architecture_supported"].status is PreflightStatus.NOT_VERIFIED
+          # v0.6.0 accepts only the maintainer-approved x86_64 host architecture.
+          assert facts.machine == "x86_64"
+          assert checks["architecture_supported"].status is PreflightStatus.PASS
+          assert checks["architecture_supported"].code == "SUPPORTED_NATIVE_ARCHITECTURE"
           assert checks["native_package_availability"].status is PreflightStatus.NOT_VERIFIED
           assert not report.all_verified and not report.authorizes_installation
           assert report.to_dict()["can_install"] is False
