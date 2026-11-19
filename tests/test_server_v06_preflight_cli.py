@@ -75,6 +75,22 @@ def test_unsupported_machine_cli_refuses_with_actionable_guidance(entry, documen
     assert not result["authorizes_installation"]
 
 
+@pytest.mark.parametrize("release,version", [("ID=debian\nVERSION_ID=13\n", (3, 12)),
+                                             ("ID=almalinux\nVERSION_ID=10\n", (3, 13))])
+def test_mismatched_python_version_refused_before_host_probes(entry, document, monkeypatch, capsys, release, version):
+    from repocache import server_host_checks_v1 as host
+    from repocache.server_preflight_v1 import NativeHostFacts
+    facts = NativeHostFacts(release, version, "x86_64", 0, None, False)
+    monkeypatch.setattr(host, "capture_native_host_facts", lambda: facts)
+    monkeypatch.setattr(host, "_capture_host_probes", lambda *a: pytest.fail("host probes reached"))
+    assert entry.run(["--document", str(document), "--intent", "install"]) == 1
+    report = json.loads(capsys.readouterr().out)
+    checks = {row["check"]: row for row in report["checks"]}
+    assert checks["supported_os_and_python"]["code"] == "UNSUPPORTED_OS_OR_PYTHON"
+    assert "nginx_native_binary" not in checks
+    assert report["authorizes_installation"] is False
+
+
 def test_host_failure_is_not_ready(entry, document, monkeypatch, capsys):
     monkeypatch.setattr(entry, "inspect_deployment_host",
                         lambda *_args, **_kw: _report(fail=True))
