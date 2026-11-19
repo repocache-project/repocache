@@ -11,11 +11,13 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import stat
 import sys
 from typing import Any
 
-from repocache.server_install_v1 import validate_os_identity
+from repocache.server_install_v1 import validate_os_identity, validate_server_architecture
+from repocache.server_preflight_v1 import _native_python_identity
 from repocache.server_native_v2_transaction_v1 import (
     NativeV2TransactionError, execute_native_fixed_v2_transaction,
 )
@@ -79,9 +81,16 @@ def _native_distro() -> str:
                 _deny("DISTRO_CHANGED")
         finally:
             os.close(fd)
-        return validate_os_identity(
+        distribution = validate_os_identity(
             raw.decode("ascii", "strict"), sys.version_info[:2],
         )
+        try:
+            validate_server_architecture(platform.machine())
+        except ValueError:
+            _deny("ARCHITECTURE_UNSUPPORTED")
+        if sys.prefix != sys.base_prefix or _native_python_identity(distribution) is not True:
+            _deny("NATIVE_PYTHON_REQUIRED")
+        return distribution
     except NativeControlDispatchError:
         raise
     except (OSError, UnicodeError, ValueError, TypeError):

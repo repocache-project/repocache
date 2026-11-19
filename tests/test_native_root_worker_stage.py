@@ -25,6 +25,28 @@ def _combined() -> bool:
     return os.environ.get("REPOCACHE_REQUIRE_CANONICAL_WORKER_VERIFIER") == "1"
 
 
+@pytest.mark.parametrize("operation", ["place", "stage"])
+def test_unsupported_native_target_refused_before_any_worker_or_proposal_effect(monkeypatch, operation, tmp_path):
+    from repocache.server_native_root_control_entrypoint_v1 import NativeControlDispatchError
+    def refuse():
+        raise NativeControlDispatchError("NATIVE_ROOT_CONTROL_DISTRO_UNAVAILABLE")
+    def forbidden(*a, **kw):
+        pytest.fail("host context, asset reads or persistent placement reached")
+    monkeypatch.setattr(install, "_native_distro", refuse)
+    monkeypatch.setattr(install, "require_native_host_preconditions", forbidden)
+    monkeypatch.setattr(stage, "_authenticated_payloads", forbidden)
+    monkeypatch.setattr(stage, "verify_installed_worker", forbidden)
+    monkeypatch.setattr(install, "_place_worker_files", forbidden)
+    monkeypatch.setattr(install, "_stage_proposal_under_root", forbidden)
+    with pytest.raises(NativeControlDispatchError):
+        if operation == "place":
+            install.install_authenticated_worker(tmp_path, commit="a" * 40, archive_sha256="b" * 64)
+        else:
+            install.stage_authenticated_proposal(tmp_path, tmp_path / "proposal", commit="a" * 40,
+                archive_sha256="b" * 64, proposal_sha256="c" * 64)
+    assert not list(tmp_path.iterdir())
+
+
 def test_initial_proposal_matches_adopted_snapshot_and_allocates_stable_ids():
     config = document(count=3, generation=0)
 

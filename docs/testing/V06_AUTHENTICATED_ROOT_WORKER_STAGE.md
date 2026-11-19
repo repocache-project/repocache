@@ -49,7 +49,13 @@ SELinux labels and service behavior require separate native acceptance.
 
 The fixed installer accepts the same independently authenticated offline
 assets and owner pins. Run from the trusted checkout as root on a supported
-booted host. The command can prepare an absent fixed state namespace after
+booted host. Before reading candidate assets or creating any persistent
+files, both worker placement and installed proposal staging require the
+fixed root-owned OS identity, supported OS Python version, x86_64 machine
+identity and exact native Python executable inode outside a virtual
+environment. The packaged worker repeats the same target guard before
+dispatching a fixed transaction. These observations do not attest package
+provenance or confer authorization. The command can prepare an absent fixed state namespace after
 checking existing unit and worker destinations. The root-owned namespace
 allows traversal to the public catalog directory (0711 parent, 0755 public).
 The independent server state directory and its shared lock stay private

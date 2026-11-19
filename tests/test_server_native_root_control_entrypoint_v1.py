@@ -6,7 +6,10 @@ systemd/SELinux, genuine exposure and signer acceptance require final VMs.
 from __future__ import annotations
 
 import json
+import os
 import socket
+import stat
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,6 +17,43 @@ import repocache.server_native_root_control_entrypoint_v1 as worker
 import repocache.server_native_v2_transaction_v1 as transaction
 from repocache.server_root_control_protocol_v1 import FixedRootControlError
 from test_server_proposed_state_v2_store import document
+
+
+@pytest.mark.parametrize("release,version,machine,native,venv,expected", [
+    ("ID=debian\nVERSION_ID=13\n", (3, 13), "x86_64", True, False, "debian"),
+    ("ID=almalinux\nVERSION_ID=10\n", (3, 12), "x86_64", True, False, "almalinux"),
+    ("ID=debian\nVERSION_ID=12\n", (3, 12), "x86_64", True, False, None),
+    ("ID=almalinux\nVERSION_ID=9\n", (3, 12), "x86_64", True, False, None),
+    ("ID=debian\nVERSION_ID=13\n", (3, 12), "x86_64", True, False, None),
+    ("ID=debian\nVERSION_ID=13\n", (3, 13), "aarch64", True, False, None),
+    ("ID=debian\nVERSION_ID=13\n", (3, 13), "x86_64", False, False, None),
+    ("ID=debian\nVERSION_ID=13\n", (3, 13), "x86_64", None, False, None),
+    ("ID=debian\nVERSION_ID=13\n", (3, 13), "x86_64", True, True, None),
+])
+def test_native_root_target_gate(tmp_path, monkeypatch, release, version, machine, native, venv, expected):
+    path = tmp_path / "os-release"
+    path.write_text(release, encoding="ascii")
+    monkeypatch.setattr(worker, "_RELEASE_ID", str(path))
+    real_lstat = os.lstat
+    def owned_metadata(name, *args, **kwargs):
+        if str(name) == "/usr/lib":
+            return SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0)
+        value = real_lstat(name, *args, **kwargs)
+        if str(name) == str(path):
+            return SimpleNamespace(st_mode=value.st_mode, st_uid=0, st_gid=0,
+                                   st_nlink=value.st_nlink, st_size=value.st_size,
+                                   st_dev=value.st_dev, st_ino=value.st_ino)
+        return value
+    monkeypatch.setattr(worker.os, "lstat", owned_metadata)
+    monkeypatch.setattr(worker, "sys", SimpleNamespace(version_info=version,
+        prefix="/tmp/venv" if venv else "/usr", base_prefix="/usr"))
+    monkeypatch.setattr(worker.platform, "machine", lambda: machine)
+    monkeypatch.setattr(worker, "_native_python_identity", lambda _: native)
+    if expected is None:
+        with pytest.raises(worker.NativeControlDispatchError):
+            worker._native_distro()
+    else:
+        assert worker._native_distro() == expected
 
 
 class Server:

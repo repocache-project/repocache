@@ -37,6 +37,7 @@ from repocache.server_root_control_fixed_candidate_v1 import (
     _MAX_ENVELOPE, _MAX_STATE, _NAME as _PROPOSAL, _canonical_json, _proposal,
 )
 from repocache.server_root_control_host_preflight_v1 import require_native_host_preconditions
+from repocache.server_native_root_control_entrypoint_v1 import _native_distro
 from repocache.server_repository_plan_v1 import _canonical_identity, propose_automatic_repository_id
 from scripts import stage_native_root_worker as stage
 
@@ -298,6 +299,7 @@ def install_authenticated_worker(
     assets: Path, *, commit: str, archive_sha256: str,
 ) -> dict:
     """Authenticated placement into fixed root paths, with no activation."""
+    _native_distro()
     require_native_host_preconditions()
     payloads, receipt = stage._authenticated_payloads(
         assets, commit=commit, archive_sha256=archive_sha256, system=None,
@@ -516,6 +518,7 @@ def stage_authenticated_proposal(
     expected_state_sha256: str | None = None,
 ) -> dict:
     """Verify the installed worker against the authenticated release before staging."""
+    _native_distro()
     require_native_host_preconditions()
     stage.verify_installed_worker(assets, commit=commit, archive_sha256=archive_sha256)
     with ExitStack() as stack:

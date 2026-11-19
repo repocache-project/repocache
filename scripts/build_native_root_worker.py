@@ -35,6 +35,7 @@ MODULES = (
     "server_nginx_pin_render_v1",
     "server_nginx_repository_bundle_v1",
     "server_nginx_tls_listener_candidate_v1",
+    "server_preflight_v1",
     "server_proposed_state_v2_store",
     "server_protected_state_inspect_v1",
     "server_protected_state_store_v1",
