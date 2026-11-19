@@ -80,6 +80,15 @@ def test_almalinux_selinux_enforcing_required_before_nginx(monkeypatch, mode):
     assert not any(x[0] == "nginx" for x in calls)
 
 
+def test_unsupported_architecture_refused_before_runtime_probe(monkeypatch):
+    calls = prepared(monkeypatch)
+    monkeypatch.setattr(vm.platform, "machine", lambda: "aarch64")
+    result = vm.inspect_booted_vm_nginx_readonly()
+    assert result["code"] == "UNSUPPORTED_NATIVE_ARCHITECTURE"
+    assert result["authorizes_host_write"] is False
+    assert calls == [("read", "/etc/os-release")]
+
+
 def test_invalid_os_refused_before_any_nginx_probe(monkeypatch):
     calls = prepared(monkeypatch)
     def reject(*_):

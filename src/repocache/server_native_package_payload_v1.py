@@ -136,12 +136,9 @@ def _artifacts(directory: Path, extension: str) -> tuple[Path, ...] | None:
 
 # Signed repository metadata and package signatures alone do not establish
 # ABI compatibility. This check is only a scratch-stage observation; it never
-# authorizes native package installation or defines approved host hardware.
+# authorizes native package installation. The v0.6.0 host policy is x86_64 only.
 _NATIVE_PACKAGE_ARCH = {
     "x86_64": ("amd64", "x86_64"),
-    "aarch64": ("arm64", "aarch64"),
-    "ppc64le": ("ppc64el", "ppc64le"),
-    "s390x": ("s390x", "s390x"),
 }
 
 

@@ -101,12 +101,14 @@ def test_venv_is_not_accepted_as_native_python_provenance():
     assert status(report, "python_environment") is PreflightStatus.NOT_VERIFIED
 
 
-def test_unknown_architecture_is_not_silently_accepted():
+@pytest.mark.parametrize("machine", ["aarch64", "ppc64le", "s390x", "i686", "amd64", "X86_64", "../amd64", "", None])
+def test_unknown_architecture_is_not_silently_accepted(machine):
     report = assess_native_host(facts(machine="x86_64"))
     assert status(report, "architecture_identity") is PreflightStatus.PASS
-    assert status(report, "architecture_supported") is PreflightStatus.NOT_VERIFIED
-    report = assess_native_host(facts(machine="../amd64"))
-    assert status(report, "architecture_identity") is PreflightStatus.FAIL
+    assert status(report, "architecture_supported") is PreflightStatus.PASS
+    report = assess_native_host(facts(machine=machine))
+    assert status(report, "architecture_supported") is PreflightStatus.FAIL
+    assert report.has_failures and not report.authorizes_installation
 
 
 def test_systemd_and_selinux_are_never_claimed_verified():
@@ -127,7 +129,7 @@ def test_systemd_and_selinux_are_never_claimed_verified():
 def test_no_unverified_critical_gates_are_omitted():
     report = assess_native_host(facts())
     required = {
-        "architecture_supported", "python_package_origin",
+        "python_package_origin",
         "native_package_availability", "storage_ownership_and_capacity",
         "listen_port_conflicts", "nginx_ownership_and_features",
         "tls_and_ca_trust", "systemd_native_runtime",
@@ -232,6 +234,16 @@ def test_current_host_inspection_without_system_activation(monkeypatch):
     report = inspect_native_host()
     assert status(report, "supported_os_and_python") is PreflightStatus.PASS
     assert report.authorizes_installation is False
+
+
+def test_unsupported_architecture_does_not_observe_native_manager(monkeypatch):
+    monkeypatch.setattr(native, "_read_os_release", lambda _: DEBIAN)
+    monkeypatch.setattr(native, "sys", SimpleNamespace(
+        version_info=SimpleNamespace(major=3, minor=13), prefix="/usr", base_prefix="/usr",
+    ))
+    monkeypatch.setattr(native.platform, "machine", lambda: "aarch64")
+    monkeypatch.setattr(native, "_manager_exists", lambda _: pytest.fail("manager inspected"))
+    assert capture_native_host_facts().native_manager_visible is None
 
 
 def test_manager_presence_only_checks_fixed_native_binary(monkeypatch):

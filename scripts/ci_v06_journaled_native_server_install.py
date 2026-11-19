@@ -13,6 +13,7 @@ import copy
 import hashlib
 import json
 import os
+import platform
 from pathlib import Path
 import stat
 import subprocess
@@ -21,7 +22,7 @@ import sys
 import tempfile
 from typing import Any
 
-from repocache.server_install_v1 import validate_os_identity
+from repocache.server_install_v1 import validate_os_identity, validate_server_architecture
 from repocache.server_native_nginx_local_boundary_v1 import (
     inspect_native_nginx_local_boundary,
 )
@@ -187,6 +188,10 @@ def _require_disposable_context() -> tuple[str, str]:
         _deny("UNSUPPORTED_NATIVE_USERSPACE")
     if distro not in ("debian", "almalinux"):
         _deny("UNSUPPORTED_NATIVE_USERSPACE")
+    try:
+        validate_server_architecture(platform.machine())
+    except ValueError:
+        _deny("UNSUPPORTED_NATIVE_ARCHITECTURE")
     # Never change a pre-existing state tree, NGINX instance or package DB
     # except the fresh disposable image explicitly bound by the CI runner.
     if (os.path.lexists("/var/lib/repocache")

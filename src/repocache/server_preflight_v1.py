@@ -18,12 +18,13 @@ import platform
 import re
 import stat
 import sys
-from repocache.server_install_v1 import InstallInputError, validate_os_identity
+from repocache.server_install_v1 import (
+    InstallInputError, validate_os_identity, validate_server_architecture,
+)
 
 MAX_OS_RELEASE_BYTES = 16 * 1024
 _NATIVE_MANAGER = {"debian": "/usr/bin/apt-get", "almalinux": "/usr/bin/dnf"}
 _NOT_VERIFIED = (
-    ("architecture_supported", "NATIVE_ARCH_POLICY_UNVERIFIED"),
     ("python_package_origin", "OS_PYTHON_PROVENANCE_UNVERIFIED"),
     ("native_package_availability", "NATIVE_PACKAGE_METADATA_UNVERIFIED"),
     ("storage_ownership_and_capacity", "STORAGE_OWNERSHIP_CAPACITY_UNVERIFIED"),
@@ -63,6 +64,10 @@ _BASE_CODES: Mapping[str, Mapping[str, PreflightStatus]] = {
     "architecture_identity": {
         "ARCHITECTURE_IDENTITY_OBSERVED": PreflightStatus.PASS,
         "INVALID_ARCHITECTURE_IDENTITY": PreflightStatus.FAIL,
+    },
+    "architecture_supported": {
+        "SUPPORTED_NATIVE_ARCHITECTURE": PreflightStatus.PASS,
+        "UNSUPPORTED_NATIVE_ARCHITECTURE": PreflightStatus.FAIL,
     },
     "effective_uid": {
         "INVALID_EFFECTIVE_UID": PreflightStatus.FAIL,
@@ -286,6 +291,14 @@ def assess_native_host(
     else:
         _add(checks, "architecture_identity", PreflightStatus.PASS,
              "ARCHITECTURE_IDENTITY_OBSERVED")
+    try:
+        validate_server_architecture(facts.machine)
+    except InstallInputError:
+        _add(checks, "architecture_supported", PreflightStatus.FAIL,
+             "UNSUPPORTED_NATIVE_ARCHITECTURE")
+    else:
+        _add(checks, "architecture_supported", PreflightStatus.PASS,
+             "SUPPORTED_NATIVE_ARCHITECTURE")
 
     if type(facts.euid) is not int or facts.euid < 0:
         _add(checks, "effective_uid", PreflightStatus.FAIL,
@@ -399,12 +412,17 @@ def capture_native_host_facts() -> NativeHostFacts:
         system = validate_os_identity(release_text, py_ver)
     except InstallInputError:
         pass
+    machine = platform.machine()
+    try:
+        validate_server_architecture(machine)
+    except InstallInputError:
+        system = None  # Do not inspect package-manager files on an unsupported host.
     return NativeHostFacts(
         os_release=release_text,
         python_version=py_ver,
-        machine=platform.machine(),
+        machine=machine,
         euid=os.geteuid(),
-        native_manager_visible=_manager_exists(system),
+        native_manager_visible=_manager_exists(system) if system is not None else None,
         running_in_venv=(sys.prefix != sys.base_prefix),
     )
 

