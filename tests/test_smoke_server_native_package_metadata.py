@@ -16,7 +16,7 @@ import smoke_server_native_package_metadata as smoke
 
 
 @pytest.mark.parametrize("distribution", ["debian", "almalinux"])
-@pytest.mark.parametrize("fault", ["none", "network", "candidate", "signature_success"])
+@pytest.mark.parametrize("fault", ["none", "gpgme", "rpm_key", "network", "candidate", "signature_success"])
 def test_negative_acceptance_requires_native_absence_and_signature_failure(
     monkeypatch, capsys, distribution, fault,
 ):
@@ -37,8 +37,11 @@ def test_negative_acceptance_requires_native_absence_and_signature_failure(
                 assert "APT::Get::AllowUnauthenticated=false" in command
             else:
                 assert "--setopt=rc-appstream.repo_gpgcheck=1" in command
-            output = ("GPG error: NO_PUBKEY SECRET-NATIVE-OUTPUT" if fault != "network"
-                      else "curl error: Could not resolve SECRET-NATIVE-OUTPUT")
+            output = {
+                "gpgme": "gpgme_op_import() error: No data SECRET-NATIVE-OUTPUT",
+                "rpm_key": "Error: Compute cert len failed SECRET-NATIVE-OUTPUT",
+                "network": "curl error: Could not resolve SECRET-NATIVE-OUTPUT",
+            }.get(fault, "GPG error: NO_PUBKEY SECRET-NATIVE-OUTPUT")
             return SimpleNamespace(returncode=0 if fault == "signature_success" else 1,
                                    stdout="", stderr=output)
         if stage.endswith("candidate"):
@@ -52,7 +55,7 @@ def test_negative_acceptance_requires_native_absence_and_signature_failure(
     document = json.loads((ROOT / "docs/examples/server-install-v1.json").read_text())
     release = f"ID={distribution}\nVERSION_ID={'13' if distribution == 'debian' else '10'}\n"
     version = (3, 13) if distribution == "debian" else (3, 12)
-    if fault == "none":
+    if fault in ("none", "gpgme", "rpm_key"):
         smoke.verify_negative_metadata(release, version, document, distribution)
         assert len(seen) == 3  # Two metadata refreshes and one missing query.
         records = [json.loads(row) for row in capsys.readouterr().out.splitlines()]

@@ -79,6 +79,9 @@ class NegativeMetadataRunner:
                     "no_pubkey", "not signed", "gpg error", "gpgkey",
                     "openpgp", "public key", "gpg signature", "gpg key",
                     "gpg check failed",
+                    # librepo's GPGME and RPM key-import backends use these
+                    # fixed diagnostics when the test key cannot be parsed.
+                    "gpgme_op_import() error:", "compute cert len failed",
                 )))
         return process
 
