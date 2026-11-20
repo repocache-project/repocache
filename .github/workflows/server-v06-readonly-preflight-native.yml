@@ -182,6 +182,52 @@ jobs:
               os.chown(work, 0, 0)
           print("PASS: real ownership and hardlink refusals preserve local TLS references")
           PY
+      - name: Verify protected state ownership and privacy without adopting storage
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          /usr/bin/python3 -I -B - <<'PY'
+          import json, os, subprocess, tempfile
+          from pathlib import Path
+          root = Path.cwd()
+          with tempfile.TemporaryDirectory(prefix="repocache-state-preflight-", dir="/srv") as scratch:
+              work = Path(scratch)
+              state, cache, logs = (work / name for name in ("state", "cache", "logs"))
+              for path in (state, cache, logs):
+                  path.mkdir(mode=0o700)
+              os.chown(cache, 65534, 65534)
+              os.chown(logs, 65534, 65534)
+              document = json.loads((root / "docs/examples/server-install-v1.json").read_text())
+              document["deployment"]["paths"].update(
+                  state_root=str(state), cache_root=str(cache), log_root=str(logs))
+              candidate = work / "install.json"
+              candidate.write_text(json.dumps(document))
+              def shape(path):
+                  value = path.lstat()
+                  return (value.st_ino, value.st_uid, value.st_gid, value.st_mode,
+                          value.st_size, value.st_ctime_ns, value.st_mtime_ns)
+              def check(code, status):
+                  before = [shape(path) for path in (state, cache, logs, candidate)]
+                  result = subprocess.run(["/usr/bin/python3", "-I", "-B",
+                      str(root / "scripts/server_v06_preflight.py"), "--document", str(candidate),
+                      "--intent", "install"], capture_output=True, timeout=30)
+                  assert result.returncode in (1, 3) and not result.stderr
+                  report = json.loads(result.stdout)
+                  checks = {row["check"]: row for row in report["checks"]}
+                  assert checks["storage_path_safety"]["code"] == code
+                  assert checks["storage_path_safety"]["status"] == status
+                  assert report["authorizes_installation"] is False
+                  assert [shape(path) for path in (state, cache, logs, candidate)] == before
+                  assert all(not list(path.iterdir()) for path in (state, cache, logs))
+              check("STORAGE_OWNERSHIP_MANIFEST_UNVERIFIED", "NOT VERIFIED")
+              state.chmod(0o755)
+              check("PROTECTED_STATE_DIRECTORY_UNSAFE", "FAIL")
+              state.chmod(0o700)
+              os.chown(state, 65534, 65534)
+              check("STORAGE_PATH_UNSAFE_OR_CONFLICTING", "FAIL")
+              os.chown(state, 0, 0)
+          print("PASS: protected root state privacy/owner verified; service-owned storage not adopted")
+          PY
 
   unsupported-native-preflight:
     name: Unsupported server target refusal (${{ matrix.platform }})

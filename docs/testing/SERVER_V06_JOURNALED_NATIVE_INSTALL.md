@@ -44,6 +44,14 @@ an actionable failure and leaves the reference files unchanged. Local owner,
 mode and inode observations do not prove signed package origin, valid TLS
 material, a managed ownership manifest or eventual host-install authority.
 
+The configured protected state root, if it exists, must be a root-owned
+private mode-0700 directory. A service-owned state root or a broader mode
+is an actionable preflight failure. An absent state root still reports
+only the closest parent; cache and log leaves may belong to the native
+service and are never treated as adopted solely from ownership. The
+normal CLI container tests exercise all three cases on actual filesystems
+and check that no file is created or changed by the observations.
+
 ## Objective
 
 Before any real-host installation, verify that three independently developed
