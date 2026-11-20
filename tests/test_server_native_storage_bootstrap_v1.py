@@ -103,6 +103,25 @@ def test_read_only_storage_observation_refuses_live_root():
         os.close(fd)
 
 
+@pytest.mark.parametrize("relative", [".", "var", "var/cache", "var/log"])
+def test_unreviewed_ancestor_attributes_refused_before_either_storage_write(storage_root, relative):
+    _, root, _, _ = storage_root
+    directory = root / relative
+    try:
+        os.setxattr(directory, "user.repocache-unreviewed", b"fixture attribute")
+    except OSError as exc:
+        pytest.skip("fixture filesystem lacks user xattrs: " + type(exc).__name__)
+    try:
+        for action in (inspect, provision):
+            with pytest.raises(NativeStorageBootstrapError, match="XATTR_OR_SELINUX_UNVERIFIED"):
+                action(storage_root)
+        for leaf in paths(root):
+            assert not leaf.exists() and not (leaf.parent / MARKER).exists()
+        assert os.getxattr(directory, "user.repocache-unreviewed") == b"fixture attribute"
+    finally:
+        os.removexattr(directory, "user.repocache-unreviewed")
+
+
 def test_new_roots_are_real_durable_and_marked_outside_worker_tree(storage_root):
     fd, root, uid, gid = storage_root
     result = provision(storage_root)

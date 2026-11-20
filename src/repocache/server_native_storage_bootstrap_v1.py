@@ -127,9 +127,12 @@ def _precheck_one(root_fd: int, stack: ExitStack, *,
     root partially provisioned. This is not a substitute for the normal
     *second* open/recheck during mutation (which handles concurrent swaps).
     """
+    root_before = _safe_directory(root_fd, root_uid)
+    _no_unverified_xattrs(root_fd)
     parent_fd, ancestry = _walk(root_fd, segments, stack, root_uid)
     parent = _safe_directory(parent_fd, root_uid)
-    _no_unverified_xattrs(parent_fd)
+    for _parent, _name, directory, _snapshot in ancestry:
+        _no_unverified_xattrs(directory)
     parent_identity = _structural(parent)
     try:
         os.stat(_LEAF, dir_fd=parent_fd, follow_symlinks=False)
@@ -166,6 +169,8 @@ def _precheck_one(root_fd: int, stack: ExitStack, *,
     if _structural(_safe_directory(parent_fd, root_uid)) != parent_identity:
         _deny("ROOT_CHANGED")
     _recheck(ancestry, root_uid)
+    if _identity(_safe_directory(root_fd, root_uid)) != _identity(root_before):
+        _deny("ROOT_CHANGED")
     return leaf_present
 
 
@@ -226,9 +231,15 @@ def _ensure_one(root_fd: int, stack: ExitStack, *,
                 root_uid: int, desired_uid: int, desired_gid: int,
                 mode: int, inject_fault: Callable[[str], None] | None
                 ) -> bool:
+    root_before = _safe_directory(root_fd, root_uid)
+    _no_unverified_xattrs(root_fd)
     parent_fd, ancestry = _walk(root_fd, segments, stack, root_uid)
     parent = _safe_directory(parent_fd, root_uid)
-    _no_unverified_xattrs(parent_fd)
+    for _parent, _name, directory, _snapshot in ancestry:
+        _no_unverified_xattrs(directory)
+    _recheck(ancestry, root_uid)
+    if _identity(_safe_directory(root_fd, root_uid)) != _identity(root_before):
+        _deny("ROOT_CHANGED")
     original = _structural(parent)
     try:
         os.stat(_LEAF, dir_fd=parent_fd, follow_symlinks=False)
@@ -299,6 +310,8 @@ def _ensure_one(root_fd: int, stack: ExitStack, *,
     # Only the immediate root-owned parent may change metadata due to our
     # own creation; all higher ancestors must retain full identities.
     _recheck(ancestry[:-1], root_uid)
+    if _identity(_safe_directory(root_fd, root_uid)) != _identity(root_before):
+        _deny("ROOT_CHANGED")
     return fresh
 
 

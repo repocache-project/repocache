@@ -89,3 +89,8 @@ native worker fixture verifies absence before creation and both identities
 after creation, comparing cache and log contents and metadata. This is a
 sequential observation of fixture ownership, not a cross-root atomic
 snapshot, installed package provenance or permission to adopt storage.
+Both the observer and bootstrap now reject unreviewed attributes on the
+detached root and every pinned ancestor before any directory creation;
+the actual write stage repeats those observations. Unknown labeling is
+not repaired or dropped, and SELinux-enabled installed storage still
+requires its separate reviewed native policy.
