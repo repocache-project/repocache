@@ -48,6 +48,12 @@ def _file_identity(info: os.stat_result) -> tuple[int, ...]:
             info.st_gid, info.st_size, info.st_nlink)
 
 
+def _read_stability(info: os.stat_result) -> tuple[int, ...]:
+    # Content may be rewritten to the same size and inode while a bounded
+    # read is in flight. Do not accept that as a stable snapshot.
+    return _file_identity(info) + (info.st_mtime_ns, info.st_ctime_ns)
+
+
 def _present(directory: int, basename: str) -> bool:
     try:
         os.stat(basename, dir_fd=directory, follow_symlinks=False)
@@ -70,7 +76,7 @@ def _read_owned(
                 or before.st_gid != group or before.st_nlink != 1
                 or stat.S_IMODE(before.st_mode) not in _ALLOWED_OLD_MODES
                 or before.st_size <= 0 or before.st_size > _MAX_BYTES
-                or _file_identity(before) != _file_identity(named)):
+                or _read_stability(before) != _read_stability(named)):
             _deny("MANAGED_INCLUDE_OWNER_OR_INODE_UNVERIFIED")
         chunks = bytearray()
         while len(chunks) <= _MAX_BYTES:
@@ -81,8 +87,8 @@ def _read_owned(
         after = os.fstat(fd)
         named_after = os.stat(basename, dir_fd=directory, follow_symlinks=False)
         if (len(chunks) != before.st_size
-                or _file_identity(before) != _file_identity(after)
-                or _file_identity(after) != _file_identity(named_after)):
+                or _read_stability(before) != _read_stability(after)
+                or _read_stability(after) != _read_stability(named_after)):
             _deny("MANAGED_INCLUDE_CHANGED_DURING_READ")
         return bytes(chunks), _file_identity(after)
     finally:
