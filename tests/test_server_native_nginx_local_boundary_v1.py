@@ -8,10 +8,21 @@ from types import SimpleNamespace
 import pytest
 
 from repocache import server_native_nginx_local_boundary_v1 as boundary
+from repocache import server_native_nginx_ownership_v1 as ownership
 from repocache.server_native_nginx_prepackage_state_v1 import (
     PrepackageStateInspectionError,
 )
 from repocache.server_install_v1 import InstallInputError
+
+
+
+@pytest.fixture(autouse=True)
+def _synthetic_process_snapshot_is_isolated_from_runner(monkeypatch):
+    """These filesystem/manager fixtures must not read the CI runner /proc."""
+    monkeypatch.setattr(
+        ownership, "_scan_nginx_process_footprint",
+        lambda: "PROCESS_NGINX_NOT_OBSERVED",
+    )
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "docs/examples/server-install-v1.json"
 DEBIAN = "ID=debian\nVERSION_ID=13\n"
