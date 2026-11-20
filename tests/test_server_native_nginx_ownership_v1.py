@@ -236,3 +236,154 @@ def test_custom_systemd_nginx_units_refuse_fresh_install_even_without_binary(
     assert out.metadata is None
     assert out.to_dict()["authorizes_package_transaction"] is False
     assert marker not in json.dumps(out.to_dict())
+
+
+@pytest.mark.parametrize("value,expected", [
+    (b"nginx\n", "PROCESS_NGINX_FOUND"),
+    (b"nginx: master pr\n", "PROCESS_NGINX_FOUND"),
+    (b"nginx: worker pr\n", "PROCESS_NGINX_FOUND"),
+    (b"python3\n", "PROCESS_NGINX_NOT_OBSERVED"),
+    (b"not-nginx\n", "PROCESS_NGINX_NOT_OBSERVED"),
+    (b"nginxd\n", "PROCESS_NGINX_NOT_OBSERVED"),
+])
+def test_bounded_proc_process_comm_snapshot(tmp_path, value, expected):
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    task = proc / "123"
+    task.mkdir()
+    (task / "comm").write_bytes(value)
+    (proc / "unrelated").mkdir()
+    assert ownership._scan_nginx_process_footprint(
+        proc_root=str(proc)
+    ) == expected
+
+
+def test_running_nginx_refuses_fresh_install_before_native_metadata(monkeypatch):
+    def forbidden(*a, **kw):
+        pytest.fail("native package manager must not run when nginx exists")
+
+    monkeypatch.setattr(ownership, "inspect_native_nginx_metadata", forbidden)
+    report = ownership.prepare_fresh_native_nginx(
+        os_release=ALMA, python_version=(3, 12),
+        document=document(), lstat=absent,
+        process_probe=lambda: "PROCESS_NGINX_FOUND",
+        runner=forbidden,
+    )
+    assert report.metadata is None
+    assert report.footprint.code == "NGINX_RUNNING_PROCESS_REFUSED"
+    assert report.footprint.to_dict()["status"] == "FAIL"
+    assert report.to_dict()["can_install"] is False
+    assert report.to_dict()["authorizes_nginx_activation"] is False
+
+
+@pytest.mark.parametrize("process_result", [
+    "PROCESS_SCAN_UNVERIFIED", None, True, "PROCESS_UNREVIEWED",
+])
+def test_uncertain_process_scan_refuses_native_metadata(
+    monkeypatch, process_result,
+):
+    monkeypatch.setattr(ownership, "inspect_native_nginx_metadata",
+                        lambda **kwargs: pytest.fail("native metadata invoked"))
+    result = ownership.prepare_fresh_native_nginx(
+        os_release=DEBIAN, python_version=(3, 13),
+        document=document(), lstat=absent,
+        process_probe=lambda: process_result,
+    )
+    assert result.footprint.code == "NGINX_PROCESS_SCAN_UNVERIFIED"
+    assert result.metadata is None
+    assert result.footprint.to_dict()["status"] == "NOT VERIFIED"
+
+
+def test_process_scan_access_exception_is_redacted(monkeypatch):
+    def protected_processes():
+        raise PermissionError("SECRET_RUNNING_PROCESS_PATH")
+
+    monkeypatch.setattr(ownership, "inspect_native_nginx_metadata",
+                        lambda **kwargs: pytest.fail("network invoked"))
+    report = ownership.prepare_fresh_native_nginx(
+        os_release=ALMA, python_version=(3, 12),
+        document=document(), lstat=absent,
+        process_probe=protected_processes,
+    )
+    assert report.footprint.code == "NGINX_PROCESS_SCAN_UNVERIFIED"
+    assert "SECRET_RUNNING_PROCESS_PATH" not in json.dumps(report.to_dict())
+
+
+def test_filesystem_conflict_precedes_proc_scan_and_network(monkeypatch):
+    monkeypatch.setattr(ownership, "inspect_native_nginx_metadata",
+                        lambda **kw: pytest.fail("native manager invoked"))
+
+    def marker(path):
+        if path == "/etc/nginx":
+            return SimpleNamespace(st_mode=stat.S_IFDIR | 0o755)
+        raise FileNotFoundError(path)
+
+    result = ownership.prepare_fresh_native_nginx(
+        os_release=DEBIAN, python_version=(3, 13),
+        document=document(), lstat=marker,
+        process_probe=lambda: pytest.fail("process scan invoked"),
+    )
+    assert result.footprint.code == "EXISTING_NGINX_OWNERSHIP_UNPROVEN"
+
+
+def test_proc_symlinked_comm_refuses_without_following(tmp_path):
+    proc = tmp_path / "proc"
+    task = proc / "123"
+    task.mkdir(parents=True)
+    target = tmp_path / "private-data"
+    target.write_bytes(b"nginx\n")
+    (task / "comm").symlink_to(target)
+    assert ownership._scan_nginx_process_footprint(
+        proc_root=str(proc)
+    ) == "PROCESS_SCAN_UNVERIFIED"
+    assert target.read_bytes() == b"nginx\n"
+
+
+def test_proc_disappearing_pid_is_not_an_install_authority(tmp_path, monkeypatch):
+    proc = tmp_path / "proc"
+    (proc / "123").mkdir(parents=True)
+    # A genuine /proc process can exit between directory listing and read.
+    assert ownership._scan_nginx_process_footprint(
+        proc_root=str(proc)
+    ) == "PROCESS_NGINX_NOT_OBSERVED"
+    # Even a successful snapshot is explicitly NOT VERIFIED.
+    report = ownership.inspect_fresh_nginx_footprint(
+        os_release=DEBIAN, python_version=(3, 13), document=document(),
+        lstat=absent,
+        process_probe=lambda: ownership._scan_nginx_process_footprint(
+            proc_root=str(proc)
+        ),
+    ).to_dict()
+    assert report["status"] == "NOT VERIFIED"
+    assert report["all_nginx_instances_inventoried"] is False
+    assert report["authorizes_package_transaction"] is False
+
+
+def test_unreadable_proc_comm_and_excess_processes_are_refused(tmp_path, monkeypatch):
+    proc = tmp_path / "proc"
+    for pid in (123, 124):
+        task = proc / str(pid)
+        task.mkdir(parents=True)
+        (task / "comm").write_bytes(b"python3\n")
+    monkeypatch.setattr(ownership, "_MAX_PROC_PIDS", 1)
+    assert ownership._scan_nginx_process_footprint(
+        proc_root=str(proc)
+    ) == "PROCESS_SCAN_UNVERIFIED"
+    monkeypatch.setattr(ownership, "_MAX_PROC_PIDS", 65536)
+    real_open = ownership.os.open
+
+    def reject_comm(path, flags, *args, **kwargs):
+        if str(path).endswith("/comm"):
+            raise PermissionError("redacted")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(ownership.os, "open", reject_comm)
+    assert ownership._scan_nginx_process_footprint(
+        proc_root=str(proc)
+    ) == "PROCESS_SCAN_UNVERIFIED"
+
+
+def test_missing_proc_root_fails_closed():
+    assert ownership._scan_nginx_process_footprint(
+        proc_root="/nonexistent/repocache-ci-proc",
+    ) == "PROCESS_SCAN_UNVERIFIED"
