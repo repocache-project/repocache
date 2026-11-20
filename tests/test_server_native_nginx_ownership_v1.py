@@ -38,6 +38,7 @@ def test_fresh_snapshot_is_not_install_authority(os_release, version, distro):
     report = ownership.inspect_fresh_nginx_footprint(
         os_release=os_release, python_version=version,
         document=document(), lstat=collect,
+        process_probe=lambda: "PROCESS_NGINX_NOT_OBSERVED",
     )
     assert report.distribution == distro
     assert report.allows_metadata_probe
@@ -181,7 +182,8 @@ def test_no_known_footprint_allows_only_noninstalling_native_metadata(
 
     evidence = ownership.prepare_fresh_native_nginx(
         os_release=os_release, python_version=version,
-        document=document(), lstat=absent, runner=runner,
+        document=document(), lstat=absent,
+        process_probe=lambda: "PROCESS_NGINX_NOT_OBSERVED", runner=runner,
     )
     assert len(calls) == 2
     assert evidence.metadata is not None
