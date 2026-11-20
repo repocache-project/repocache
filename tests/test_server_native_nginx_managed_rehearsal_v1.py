@@ -211,7 +211,8 @@ def test_world_writable_prior_target_refused(fixture_root):
 
 
 @pytest.mark.parametrize("bad", [
-    b"", b"missing newline", b"\x00malformed\n", "string", b"x" * (256 * 1024 + 1),
+    b"", b"missing newline", b"\x00malformed\n", b"\xff\n",
+    b"\x1b\n", "string", b"x" * (256 * 1024 + 1),
 ])
 def test_invalid_candidate_denied_without_io(fixture_root, bad):
     root, includedir = fixture_root
