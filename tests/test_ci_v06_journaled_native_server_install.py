@@ -172,6 +172,7 @@ def test_postpackage_stage_requires_read_only_correlated_binary_unit():
     assert 'inspect_current_namespace_native_postpackage_candidate(' in source
     assert '"native_binary_and_vendor_unit_correlated_in_container": True' in source
     assert '"native_postpackage_correlation_authorizes_no_reentry": True' in source
+    assert '"single_protected_lock_spanned_native_package_and_unit_reads"' in source
     for flag in (
         "native_package_signature_verified",
         "installed_host_root_authenticated",
