@@ -1,0 +1,55 @@
+name: Owned cache and private metrics native runtime (disposable)
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/ci_v06_owned_storage_metrics_runtime.py'
+      - '.github/workflows/server-v06-owned-storage-metrics-runtime.yml'
+      - 'src/repocache/server_native_storage_bootstrap_v1.py'
+      - 'src/repocache/server_native_repository_cache_v1.py'
+      - 'src/repocache/server_native_metrics_file_bootstrap_v1.py'
+      - 'src/repocache/server_nginx_metrics_bundle_join_v1.py'
+      - 'src/repocache/server_nginx_repository_bundle_v1.py'
+      - 'src/repocache/core.py'
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  native-owned-runtime:
+    name: Managed cache and private metrics (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: debian13
+            image: debian:trixie-slim
+          - platform: almalinux10
+            image: almalinux:10
+    container: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install native packaged NGINX, OpenSSL and Python
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [ '${{ matrix.platform }}' = debian13 ]; then
+            apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends nginx openssl python3
+          else
+            dnf -q -y install nginx openssl python3
+          fi
+      - name: Exercise owned cache, actual worker, private metrics and repeat provisioning
+        shell: bash
+        env:
+          PYTHONPATH: src
+          PYTHONDONTWRITEBYTECODE: '1'
+          REPOCACHE_NATIVE_OWNED_RUNTIME_CI: CONFIRMED_DISPOSABLE_DOCKER_ONLY
+        run: |
+          set -Eeuo pipefail
+          python3 -B scripts/ci_v06_owned_storage_metrics_runtime.py
