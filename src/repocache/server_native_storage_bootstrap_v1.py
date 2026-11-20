@@ -120,16 +120,19 @@ def _canonical(value: dict[str, Any]) -> bytes:
 def _precheck_one(root_fd: int, stack: ExitStack, *,
                   kind: str, segments: tuple[str, ...],
                   root_uid: int, desired_uid: int, desired_gid: int,
-                  mode: int) -> None:
+                  mode: int) -> bool:
     """Read-only two-root preflight, before the first mkdir or owner write.
 
     A later pre-existing foreign log/cache root must not leave the other
     root partially provisioned. This is not a substitute for the normal
     *second* open/recheck during mutation (which handles concurrent swaps).
     """
+    root_before = _safe_directory(root_fd, root_uid)
+    _no_unverified_xattrs(root_fd)
     parent_fd, ancestry = _walk(root_fd, segments, stack, root_uid)
     parent = _safe_directory(parent_fd, root_uid)
-    _no_unverified_xattrs(parent_fd)
+    for _parent, _name, directory, _snapshot in ancestry:
+        _no_unverified_xattrs(directory)
     parent_identity = _structural(parent)
     try:
         os.stat(_LEAF, dir_fd=parent_fd, follow_symlinks=False)
@@ -166,6 +169,61 @@ def _precheck_one(root_fd: int, stack: ExitStack, *,
     if _structural(_safe_directory(parent_fd, root_uid)) != parent_identity:
         _deny("ROOT_CHANGED")
     _recheck(ancestry, root_uid)
+    if _identity(_safe_directory(root_fd, root_uid)) != _identity(root_before):
+        _deny("ROOT_CHANGED")
+    return leaf_present
+
+
+def inspect_native_nginx_storage_under_root(
+    root_fd: int, *, root_uid: int, cache_uid: int, cache_gid: int,
+) -> dict[str, Any]:
+    """Read both fixed owner markers without creating or adopting anything.
+
+    An absent directory/marker pair remains absent; malformed or partial
+    pairs refuse the entire observation. Only detached fixtures are supported.
+    This is sequential metadata evidence, not atomic or installed-host proof.
+    """
+    if (type(root_fd) is not int or root_fd < 0
+            or any(type(v) is not int or not 0 <= v <= 2**32 - 2
+                   for v in (root_uid, cache_uid, cache_gid))):
+        _deny("ARGUMENT_INVALID")
+    try:
+        supplied = os.fstat(root_fd)
+        live = os.stat("/", follow_symlinks=False)
+        if (supplied.st_dev, supplied.st_ino) == (live.st_dev, live.st_ino):
+            _deny("LIVE_ROOT_FORBIDDEN")
+        with ExitStack() as stack:
+            root = _safe_directory(root_fd, root_uid)
+            cache = _precheck_one(
+                root_fd, stack, kind="cache", segments=_CACHE_PARENT,
+                root_uid=root_uid, desired_uid=cache_uid,
+                desired_gid=cache_gid, mode=0o700,
+            )
+            log = _precheck_one(
+                root_fd, stack, kind="log", segments=_LOG_PARENT,
+                root_uid=root_uid, desired_uid=root_uid,
+                desired_gid=root.st_gid, mode=0o750,
+            )
+            if _identity(_safe_directory(root_fd, root_uid)) != _identity(root):
+                _deny("ROOT_CHANGED")
+        return {
+            "schema_version": 1,
+            "status": "READ_ONLY_NATIVE_STORAGE_FIXTURE_OBSERVATION",
+            "cache_marker_and_directory_observed": cache,
+            "log_marker_and_directory_observed": log,
+            "atomic_storage_snapshot_verified": False,
+            "signed_nginx_package_identity_verified": False,
+            "host_root_provenance_verified": False,
+            "selinux_enforcing_verified": False,
+            "operator_authorization_verified": False,
+            "authorizes_host_installation": False,
+            "authorizes_nginx_activation": False,
+            "authorizes_cache_cleanup": False,
+        }
+    except NativeStorageBootstrapError:
+        raise
+    except (OSError, ValueError, TypeError, OverflowError):
+        _deny("UNVERIFIED_STATE")
 
 
 def _ensure_one(root_fd: int, stack: ExitStack, *,
@@ -173,9 +231,15 @@ def _ensure_one(root_fd: int, stack: ExitStack, *,
                 root_uid: int, desired_uid: int, desired_gid: int,
                 mode: int, inject_fault: Callable[[str], None] | None
                 ) -> bool:
+    root_before = _safe_directory(root_fd, root_uid)
+    _no_unverified_xattrs(root_fd)
     parent_fd, ancestry = _walk(root_fd, segments, stack, root_uid)
     parent = _safe_directory(parent_fd, root_uid)
-    _no_unverified_xattrs(parent_fd)
+    for _parent, _name, directory, _snapshot in ancestry:
+        _no_unverified_xattrs(directory)
+    _recheck(ancestry, root_uid)
+    if _identity(_safe_directory(root_fd, root_uid)) != _identity(root_before):
+        _deny("ROOT_CHANGED")
     original = _structural(parent)
     try:
         os.stat(_LEAF, dir_fd=parent_fd, follow_symlinks=False)
@@ -246,6 +310,8 @@ def _ensure_one(root_fd: int, stack: ExitStack, *,
     # Only the immediate root-owned parent may change metadata due to our
     # own creation; all higher ancestors must retain full identities.
     _recheck(ancestry[:-1], root_uid)
+    if _identity(_safe_directory(root_fd, root_uid)) != _identity(root_before):
+        _deny("ROOT_CHANGED")
     return fresh
 
 

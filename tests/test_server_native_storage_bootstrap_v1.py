@@ -10,6 +10,7 @@ import pytest
 
 from repocache.server_native_storage_bootstrap_v1 import (
     NativeStorageBootstrapError, bootstrap_native_nginx_storage_under_root,
+    inspect_native_nginx_storage_under_root,
 )
 
 MARKER = ".repocache-managed.owner-v1"
@@ -40,6 +41,85 @@ def provision(item, **kwargs):
 def paths(root):
     return (root / "var/cache/nginx" / LEAF,
             root / "var/log/nginx" / LEAF)
+
+
+def inspect(item):
+    fd, _, uid, gid = item
+    return inspect_native_nginx_storage_under_root(
+        fd, root_uid=uid, cache_uid=uid, cache_gid=gid,
+    )
+
+
+def test_read_only_storage_observation_absent_then_owned_preserves_bytes(storage_root):
+    _, root, _, _ = storage_root
+    cache, logs = paths(root)
+    def snapshot():
+        return {str(p.relative_to(root)): (p.lstat().st_ino, p.lstat().st_mode,
+                p.lstat().st_uid, p.lstat().st_gid, p.lstat().st_mtime_ns,
+                p.lstat().st_ctime_ns, p.read_bytes() if p.is_file() else None)
+                for p in root.rglob("*")}
+    before = snapshot()
+    empty = inspect(storage_root)
+    assert empty["cache_marker_and_directory_observed"] is False
+    assert empty["log_marker_and_directory_observed"] is False
+    assert snapshot() == before
+    provision(storage_root)
+    (cache / "package.fixture").write_bytes(b"retained package")
+    (logs / "history.fixture").write_bytes(b"retained history")
+    before = snapshot()
+    report = inspect(storage_root)
+    assert report["cache_marker_and_directory_observed"] is True
+    assert report["log_marker_and_directory_observed"] is True
+    assert all(value is False for key, value in report.items()
+               if key.startswith("authorizes_") or key.endswith("_verified"))
+    assert snapshot() == before
+
+
+@pytest.mark.parametrize("which", ["cache", "log"])
+def test_read_only_storage_observation_refuses_partial_pair(storage_root, which):
+    _, root, _, _ = storage_root
+    provision(storage_root)
+    cache, logs = paths(root)
+    (cache / "retained").write_bytes(b"cache")
+    (logs / "retained").write_bytes(b"logs")
+    target = cache if which == "cache" else logs
+    marker = target.parent / MARKER
+    marker.unlink()
+    with pytest.raises(NativeStorageBootstrapError, match="PARTIAL_OR_FOREIGN_ROOT"):
+        inspect(storage_root)
+    assert not marker.exists()
+    assert (cache / "retained").read_bytes() == b"cache"
+    assert (logs / "retained").read_bytes() == b"logs"
+
+
+def test_read_only_storage_observation_refuses_live_root():
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        with pytest.raises(NativeStorageBootstrapError, match="LIVE_ROOT_FORBIDDEN"):
+            inspect_native_nginx_storage_under_root(
+                fd, root_uid=os.geteuid(), cache_uid=os.geteuid(), cache_gid=os.getegid(),
+            )
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("relative", [".", "var", "var/cache", "var/log"])
+def test_unreviewed_ancestor_attributes_refused_before_either_storage_write(storage_root, relative):
+    _, root, _, _ = storage_root
+    directory = root / relative
+    try:
+        os.setxattr(directory, "user.repocache-unreviewed", b"fixture attribute")
+    except OSError as exc:
+        pytest.skip("fixture filesystem lacks user xattrs: " + type(exc).__name__)
+    try:
+        for action in (inspect, provision):
+            with pytest.raises(NativeStorageBootstrapError, match="XATTR_OR_SELINUX_UNVERIFIED"):
+                action(storage_root)
+        for leaf in paths(root):
+            assert not leaf.exists() and not (leaf.parent / MARKER).exists()
+        assert os.getxattr(directory, "user.repocache-unreviewed") == b"fixture attribute"
+    finally:
+        os.removexattr(directory, "user.repocache-unreviewed")
 
 
 def test_new_roots_are_real_durable_and_marked_outside_worker_tree(storage_root):
