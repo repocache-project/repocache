@@ -170,6 +170,7 @@ def test_forged_positive_or_privileged_input_rejected(field, forged):
 @pytest.mark.parametrize("corruption", [
     b"",
     b"not json",
+    b"[" * 1001 + b"]" * 1001,
     b"{}",
     b"[]",
     b'{"schema_version":1,"schema_version":1}',
