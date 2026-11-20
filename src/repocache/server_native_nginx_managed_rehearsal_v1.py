@@ -172,8 +172,19 @@ def rehearse_managed_include_under_root(
                     dst_dir_fd=directory, follow_symlinks=False,
                 )
                 os.fsync(directory)
-                backup = _read_owned(directory, _ROLLBACK, owner_uid, group)
-                if backup != previous:
+                # Both names refer to one hard-linked inode until the
+                # candidate replaces the target. Before that replacement
+                # st_nlink is 2: do not misclassify the pinned source as
+                # a normal standalone file (nlink == 1 only afterwards).
+                backup_stat = os.stat(
+                    _ROLLBACK, dir_fd=directory, follow_symlinks=False,
+                )
+                if (not stat.S_ISREG(backup_stat.st_mode)
+                        or backup_stat.st_dev != previous[1][0]
+                        or backup_stat.st_ino != previous[1][1]
+                        or backup_stat.st_uid != owner_uid
+                        or backup_stat.st_gid != group
+                        or backup_stat.st_nlink != 2):
                     _deny("MANAGED_INCLUDE_ROLLBACK_SOURCE_UNVERIFIED")
             else:
                 if _present(directory, MANAGED_NAME):
