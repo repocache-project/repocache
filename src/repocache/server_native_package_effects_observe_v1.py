@@ -187,32 +187,82 @@ def inspect_current_namespace_native_package_effects(
 
 
 
+def _collect_postpackage_facts_while_locked(
+    directory_fd: int, *, owner_uid: int, distribution: str,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Pin the same pending journal across native package DB and unit reads.
+
+    Caller must hold the #31 exclusive state lock through the entire read.
+    This helper is read-only, does not authenticate its caller's root/lock
+    provenance, and must never issue a marker-removal or install token.
+    """
+    before = _inspect_locked(
+        directory_fd, owner_uid=owner_uid, distribution=distribution,
+    )
+    package = inspect_stock_nginx_package_owner()
+    unit = inspect_native_nginx_unit(distribution).to_dict()
+    after = _inspect_locked(
+        directory_fd, owner_uid=owner_uid, distribution=distribution,
+    )
+    return before, package, unit, after
+
+
+def _collect_current_namespace_postpackage_facts(
+    *, distribution: str,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Use ONE exclusive protected lock across native package and unit reads.
+
+    The previous before/after observations each obtained and released a
+    separate lock, permitting a cooperating state-v2 writer to change the
+    journal between native reads. A single retained lock prevents that
+    particular race; foreign processes, signed provenance, host identity
+    and native package DB mutation remain separate, unauthenticated gates.
+    """
+    if os.geteuid() != 0:
+        _deny("ROOT_READ_ONLY_OBSERVATION_REQUIRED")
+    try:
+        root_fd = os.open("/", _DIRECTORY_FLAGS)
+    except OSError:
+        _deny("ROOT_OPEN_REFUSED")
+    try:
+        try:
+            _verify_current_root_fd(root_fd)
+            with _locked(root_fd, 0) as directory_fd:
+                _verify_current_root_fd(root_fd)
+                facts = _collect_postpackage_facts_while_locked(
+                    directory_fd, owner_uid=0, distribution=distribution,
+                )
+                _verify_current_root_fd(root_fd)
+            _verify_current_root_fd(root_fd)
+            return facts
+        except NativeEffectsReconciliationError:
+            raise
+        except (StockNginxPackageOwnerError,
+                NginxServiceUnitInspectionError):
+            _deny("NATIVE_FACTS_UNVERIFIED")
+        except (ProtectedStateStoreError, OSError, TypeError, ValueError):
+            _deny("PROTECTED_STATE_UNVERIFIED")
+    finally:
+        os.close(root_fd)
+
+
 def inspect_current_namespace_native_postpackage_candidate(
     *, distribution: str,
 ) -> dict[str, Any]:
     """Correlate three independent read-only native install observations.
 
-    The native package marker is deliberately observed both before and
-    after package DB + vendor-unit reads. The in-between window is NOT a
-    root-held transaction; this candidate cannot clear the irreversible
-    APT/DNF effects marker or authorize NGINX/service activation. It only
-    advances diagnostics of an interrupted or freshly installed package.
+    The native package marker is deliberately observed before and after
+    package DB + vendor-unit reads, all within ONE retained exclusive #31
+    lock. That prevents cooperating state writers from entering between the
+    observations, but still cannot authenticate native package signatures,
+    installed host root, SELinux or any noncooperating foreign process.
+    This candidate cannot clear the irreversible APT/DNF effects marker,
+    authorize NGINX/service activation or attest production readiness.
     """
     _validate_args(distribution, 0)
-    try:
-        before = inspect_current_namespace_native_package_effects(
-            distribution=distribution
-        )
-        package = inspect_stock_nginx_package_owner()
-        unit = inspect_native_nginx_unit(distribution).to_dict()
-        after = inspect_current_namespace_native_package_effects(
-            distribution=distribution
-        )
-    except NativeEffectsReconciliationError:
-        raise
-    except (StockNginxPackageOwnerError, NginxServiceUnitInspectionError,
-            OSError, TypeError, ValueError):
-        _deny("NATIVE_FACTS_UNVERIFIED")
+    before, package, unit, after = _collect_current_namespace_postpackage_facts(
+        distribution=distribution,
+    )
 
     expected_platform = ("debian13" if distribution == "debian"
                          else "almalinux10")
@@ -259,6 +309,7 @@ def inspect_current_namespace_native_postpackage_candidate(
         "package": expected_package,
         "vendor_unit_sha256": unit["vendor_unit_sha256"],
         "pending_journal_stable_across_observations": True,
+        "single_protected_lock_spanned_native_package_and_unit_reads": True,
         "native_package_db_owner_observed": True,
         "native_vendor_unit_shape_observed": True,
         "native_package_signature_verified": False,
