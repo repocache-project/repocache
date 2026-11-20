@@ -15,6 +15,7 @@ import subprocess
 
 from repocache.server_native_nginx_managed_rehearsal_v1 import (
     ManagedIncludeRehearsalError, rehearse_managed_include_under_root,
+    recover_interrupted_owned_include_fixture_under_root,
 )
 
 _DIRECTORY = Path("/etc/nginx/conf.d")
@@ -191,6 +192,88 @@ def run() -> dict[str, object]:
         os.unlink(_STAGE)
         _require(not any(os.path.lexists(p) for p in (_TARGET, _STAGE, _ROLLBACK)),
                  "NGINX_INCLUDE_FIXTURE_DIRTY")
+
+        # Simulate a *real separate-process death* after stage promotion
+        # but before finally/rollback runs. The recovery below must require
+        # both independently expected old/new digests and a single known
+        # post-promotion phase. No live systemd/nginx reload occurs here.
+        original_fd = os.open(
+            _TARGET,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o640,
+        )
+        try:
+            os.write(original_fd, _PREVIOUS)
+            os.fsync(original_fd)
+        finally:
+            os.close(original_fd)
+        original = os.stat(_TARGET)
+        previous_digest = hashlib.sha256(_PREVIOUS).hexdigest()
+        candidate_digest = hashlib.sha256(_VALID).hexdigest()
+
+        child = os.fork()
+        if child == 0:
+            try:
+                rehearse_managed_include_under_root(
+                    fd, _VALID, owner_uid=0,
+                    expected_previous_sha256=previous_digest,
+                    syntax_check=lambda: os._exit(73),
+                )
+            except BaseException:
+                os._exit(74)
+            os._exit(75)
+        _, code = os.waitpid(child, 0)
+        _require(
+            os.WIFEXITED(code) and os.WEXITSTATUS(code) == 73,
+            "CRASH_DID_NOT_OCCUR_AFTER_INCLUDE_PROMOTION",
+        )
+        _require(
+            not os.path.lexists(_STAGE)
+            and _TARGET.read_bytes() == _VALID
+            and _ROLLBACK.read_bytes() == _PREVIOUS
+            and _ROLLBACK.stat().st_ino == original.st_ino,
+            "CRASH_LEFT_UNKNOWN_INCLUDE_PHASE",
+        )
+        _require(
+            _run_nginx() == 0,
+            "CRASHED_CANDIDATE_IS_NOT_NATIVE_NGINX_SYNTAX_VALID",
+        )
+        recovered = recover_interrupted_owned_include_fixture_under_root(
+            fd, owner_uid=0, expected_previous_sha256=previous_digest,
+            expected_candidate_sha256=candidate_digest,
+        )
+        _require(
+            recovered["status"] == "FIXTURE_INTERRUPTED_OWNED_INCLUDE_RESTORED"
+            and recovered["previous_file_inode_and_bytes_restored"]
+            and recovered["pending_package_effects_reconciled"] is False
+            and recovered["authorizes_host_installation"] is False
+            and recovered["authorizes_nginx_reload"] is False
+            and _TARGET.read_bytes() == _PREVIOUS
+            and _TARGET.stat().st_ino == original.st_ino
+            and not os.path.lexists(_STAGE)
+            and not os.path.lexists(_ROLLBACK)
+            and _run_nginx() == 0,
+            "CRASHED_NATIVE_NGINX_INCLUDE_NOT_RESTORED",
+        )
+        try:
+            recover_interrupted_owned_include_fixture_under_root(
+                fd, owner_uid=0, expected_previous_sha256=previous_digest,
+                expected_candidate_sha256=candidate_digest,
+            )
+        except ManagedIncludeRehearsalError as exc:
+            _require(
+                str(exc) == "MANAGED_INCLUDE_RECOVERY_PHASE_UNVERIFIED",
+                "REPEATED_RECOVERY_WRONG_REFUSAL",
+            )
+        else:
+            _require(False, "REPEATED_RECOVERY_AUTO_ADOPTED")
+
+        os.unlink(_TARGET)
+        _require(
+            not any(os.path.lexists(p) for p in (_TARGET, _STAGE, _ROLLBACK)),
+            "POST_CRASH_FIXTURE_NOT_EMPTY",
+        )
+        _require(_run_nginx() == 0, "FINAL_STOCK_NGINX_SYNTAX_INVALID")
         return {
             "schema_version": 1,
             "status": "DISPOSABLE_NATIVE_MANAGED_INCLUDE_RESTORE_PASS",
@@ -199,6 +282,9 @@ def run() -> dict[str, object]:
             "previous_owned_include_inode_preserved": True,
             "foreign_include_refused": True,
             "interrupted_transaction_refused": True,
+            "crashed_child_exit_before_restore_detected": True,
+            "digest_pinned_previous_inode_recovered_after_crash": True,
+            "second_recovery_without_backup_refused": True,
             "original_nginx_syntax_restored": True,
             "booted_systemd_tested": False,
             "host_root_authorized": False,

@@ -61,7 +61,13 @@ jobs:
                 exit 1
               }
               grep -Fq DISPOSABLE_NATIVE_MANAGED_INCLUDE_RESTORE_PASS /tmp/repocache-managed-restore.json
+              for flag in crashed_child_exit_before_restore_detected digest_pinned_previous_inode_recovered_after_crash second_recovery_without_backup_refused; do
+                grep -Fq "\"$flag\":true" /tmp/repocache-managed-restore.json
+              done
+              for flag in booted_systemd_tested host_root_authorized nginx_service_reload_performed; do
+                grep -Fq "\"$flag\":false" /tmp/repocache-managed-restore.json
+              done
               cat /tmp/repocache-managed-restore.json
-              echo "PASS: real native NGINX include parser rejected bad candidate; prior inode restored"
+              echo "PASS: real native NGINX syntax and SIGEXIT-crash recovery restored original owned inode"
               echo "NOT VERIFIED: privileged host integration, active systemd, SELinux, full durable rollback"
             '
