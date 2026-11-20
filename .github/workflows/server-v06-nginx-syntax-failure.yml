@@ -64,16 +64,14 @@ jobs:
                 cat /tmp/repocache-nginx-failure-evidence.json
                 exit 1
               fi
-              python3 -B -c '"'"'
-import json
-from pathlib import Path
-data=json.loads(Path("/tmp/repocache-nginx-failure-evidence.json").read_text())
-required={"actual_native_package_installation","real_invalid_nginx_syntax_refused","stock_nginx_config_restored_after_fixture","root_owned_pending_effects_marker_preserved","exclusive_lock_retained_during_native_commands","retry_blocked_until_independent_reconciliation"}
-assert data["status"] == "DISPOSABLE_NATIVE_SYNTAX_FAILURE_RECOVERY_PASS"
-assert all(data.get(flag) is True for flag in required)
-assert all(data.get(flag) is False for flag in ("booted_systemd_tested","selinux_enforcing_tested","native_package_effects_reconciled","real_host_installation_authorized","nginx_service_reload_authorized"))
-assert data["distribution"] in ("debian","almalinux")
-'"'"'
+              grep -Fq '"status":"DISPOSABLE_NATIVE_SYNTAX_FAILURE_RECOVERY_PASS"' /tmp/repocache-nginx-failure-evidence.json
+              for flag in actual_native_package_installation real_invalid_nginx_syntax_refused stock_nginx_config_restored_after_fixture root_owned_pending_effects_marker_preserved exclusive_lock_retained_during_native_commands retry_blocked_until_independent_reconciliation; do
+                grep -Fq "\"$flag\":true" /tmp/repocache-nginx-failure-evidence.json
+              done
+              for flag in booted_systemd_tested selinux_enforcing_tested native_package_effects_reconciled real_host_installation_authorized nginx_service_reload_authorized; do
+                grep -Fq "\"$flag\":false" /tmp/repocache-nginx-failure-evidence.json
+              done
+              grep -Eq '"distribution":"(debian|almalinux)"' /tmp/repocache-nginx-failure-evidence.json
               cat /tmp/repocache-nginx-failure-evidence.json
               echo "PASS: native NGINX syntax failure kept durable package-effects journal and restored test-only config"
               echo "NOT VERIFIED: booted systemd, SELinux, authorized installed-host recovery"
