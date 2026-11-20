@@ -1,0 +1,80 @@
+name: Server v0.6 Native NGINX Syntax Failure (Containers)
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/ci_v06_native_nginx_syntax_failure.py'
+      - 'tests/test_ci_v06_native_nginx_syntax_failure.py'
+      - '.github/workflows/server-v06-nginx-syntax-failure.yml'
+      - 'docs/testing/SERVER_V06_NATIVE_SYNTAX_FAILURE_JOURNAL.md'
+      - 'src/repocache/server_native_nginx_package_journal_v1.py'
+      - 'src/repocache/server_native_package_effects_observe_v1.py'
+      - 'scripts/smoke_server_native_nginx_container_install.py'
+  push:
+    branches: [main, 'integration/**']
+    paths:
+      - 'scripts/ci_v06_native_nginx_syntax_failure.py'
+      - 'tests/test_ci_v06_native_nginx_syntax_failure.py'
+      - '.github/workflows/server-v06-nginx-syntax-failure.yml'
+      - 'docs/testing/SERVER_V06_NATIVE_SYNTAX_FAILURE_JOURNAL.md'
+      - 'src/repocache/server_native_nginx_package_journal_v1.py'
+      - 'src/repocache/server_native_package_effects_observe_v1.py'
+      - 'scripts/smoke_server_native_nginx_container_install.py'
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  native-syntax-fault:
+    name: Native NGINX syntax-failure journal (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: debian13
+            image: debian:trixie-slim
+          - platform: almalinux10
+            image: almalinux:10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run real native install, inject syntax failure, verify durable pending marker
+        shell: bash
+        env:
+          DISTRO_IMAGE: ${{ matrix.image }}
+        run: |
+          set -Eeuo pipefail
+          docker run --rm --network bridge \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace,readonly" \
+            --workdir /workspace "$DISTRO_IMAGE" sh -ec '
+              set -eu
+              if command -v apt-get >/dev/null 2>&1; then
+                apt-get update -qq
+                DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends python3 ca-certificates openssl systemd >/dev/null
+              else
+                dnf -y -q install python3 ca-certificates openssl systemd >/dev/null
+              fi
+              export PYTHONPATH=/workspace/src
+              export REPOCACHE_NATIVE_TEST_CONTAINER=CONFIRMED_DISPOSABLE_DOCKER_ONLY
+              if ! python3 -B scripts/ci_v06_native_nginx_syntax_failure.py > /tmp/repocache-nginx-failure-evidence.json; then
+                cat /tmp/repocache-nginx-failure-evidence.json
+                exit 1
+              fi
+              python3 -B -c '"'"'
+import json
+from pathlib import Path
+data=json.loads(Path("/tmp/repocache-nginx-failure-evidence.json").read_text())
+required={"actual_native_package_installation","real_invalid_nginx_syntax_refused","stock_nginx_config_restored_after_fixture","root_owned_pending_effects_marker_preserved","exclusive_lock_retained_during_native_commands","retry_blocked_until_independent_reconciliation"}
+assert data["status"] == "DISPOSABLE_NATIVE_SYNTAX_FAILURE_RECOVERY_PASS"
+assert all(data.get(flag) is True for flag in required)
+assert all(data.get(flag) is False for flag in ("booted_systemd_tested","selinux_enforcing_tested","native_package_effects_reconciled","real_host_installation_authorized","nginx_service_reload_authorized"))
+assert data["distribution"] in ("debian","almalinux")
+'"'"'
+              cat /tmp/repocache-nginx-failure-evidence.json
+              echo "PASS: native NGINX syntax failure kept durable package-effects journal and restored test-only config"
+              echo "NOT VERIFIED: booted systemd, SELinux, authorized installed-host recovery"
+            '
