@@ -74,6 +74,7 @@ V06_EXTRA_FILES = (
     "src/repocache/server_native_min_free_syntax_probe_v1.py",
     "src/repocache/server_native_nginx_effective_unit_v1.py",
     "src/repocache/server_native_nginx_local_boundary_v1.py",
+    "src/repocache/server_native_nginx_managed_rehearsal_v1.py",
     "src/repocache/server_native_nginx_ownership_v1.py",
     "src/repocache/server_native_nginx_package_journal_v1.py",
     "src/repocache/server_native_nginx_prepackage_state_v1.py",
