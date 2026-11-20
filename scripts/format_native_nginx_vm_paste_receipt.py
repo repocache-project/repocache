@@ -131,7 +131,7 @@ def main() -> int:
         if len(sys.argv) != 1:
             raise ValueError("no arguments accepted")
         result = _receipt(sys.stdin.buffer.read(_MAX_BYTES + 1))
-    except (OSError, ValueError, TypeError, UnicodeError):
+    except (OSError, ValueError, TypeError, UnicodeError, RecursionError):
         result = {
             "kind": "repocache.nginx.vm.prerequisites.v1",
             "status": "NOT VERIFIED",
