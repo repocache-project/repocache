@@ -58,9 +58,18 @@ def test_late_recheck_requires_real_held_state_lock_and_pending_marker(
     journal_root, distribution,
 ):
     fd, state, uid = journal_root
-    with _locked(fd, uid) as directory:
+    # A free lock is never proof of an active package-effects transaction.
+    free_fd = os.open(state, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
         with pytest.raises(ownership.NativeNginxPreinstallGuardError,
                            match="^NATIVE_PREINSTALL_LOCK_NOT_HELD$"):
+            recheck(free_fd, uid, distribution)
+    finally:
+        os.close(free_fd)
+    # Even a genuinely held lock cannot replace the durable pending marker.
+    with _locked(fd, uid) as directory:
+        with pytest.raises(ownership.NativeNginxPreinstallGuardError,
+                           match="^NATIVE_PREINSTALL_PROTECTED_STATE_OR_PROCESS_UNVERIFIED$"):
             recheck(directory, uid, distribution)
     _prepare_native_journal_under_root(
         fd, owner_uid=uid, distribution=distribution,
