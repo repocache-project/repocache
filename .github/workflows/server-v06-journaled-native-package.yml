@@ -106,7 +106,7 @@ jobs:
       - name: Refuse foreign NGINX footprints before native package effects
         shell: bash
         env:
-          DISTRO_IMAGE: \${{ matrix.image }}
+          DISTRO_IMAGE: ${{ matrix.image }}
         run: |
           set -Eeuo pipefail
           docker run --rm --network bridge \
