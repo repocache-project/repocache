@@ -84,10 +84,17 @@ def bootstrap_private_metrics_file_under_root(
         if (supplied.st_dev, supplied.st_ino) == (actual.st_dev, actual.st_ino):
             _deny("LIVE_ROOT_FORBIDDEN")
         with ExitStack() as stack:
-            _safe_directory(root_fd, owner_uid)
+            fixture_root = _safe_directory(root_fd, owner_uid)
+            _no_unverified_xattrs(root_fd)
             parent_fd, ancestry = _walk(root_fd, _PARENT, stack, owner_uid)
             parent = _safe_directory(parent_fd, owner_uid)
-            _no_unverified_xattrs(parent_fd)
+            # Every pinned ancestor, not just the immediate log parent,
+            # must reject unreviewed ACLs/labels before creating a file.
+            for _parent, _name, directory, _snapshot in ancestry:
+                _no_unverified_xattrs(directory)
+            _recheck(ancestry, owner_uid)
+            if _identity(_safe_directory(root_fd, owner_uid)) != _identity(fixture_root):
+                _deny("ROOT_CHANGED")
             if parent.st_gid != owner_gid:
                 _deny("PARENT_UNTRUSTED")
             log_fd = os.open(_LEAF, _DIRECTORY_FLAGS, dir_fd=parent_fd)
@@ -157,7 +164,8 @@ def bootstrap_private_metrics_file_under_root(
             proof = _existing(log_fd, parent_fd, owner_uid, owner_gid)
             if (_structural(os.fstat(log_fd))[:5] != _structural(root)[:5]
                     or _structural(os.fstat(parent_fd))[:5]
-                       != _structural(parent)[:5]):
+                       != _structural(parent)[:5]
+                    or _identity(_safe_directory(root_fd, owner_uid)) != _identity(fixture_root)):
                 _deny("ROOT_CHANGED")
             _recheck(ancestry[:-1], owner_uid)
         return {
