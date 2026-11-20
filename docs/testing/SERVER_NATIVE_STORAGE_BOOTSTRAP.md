@@ -80,3 +80,12 @@ explicit reconciliation; the code never recursively removes cache data.
 Actual host-root authority, NGINX UID/GID provenance, SELinux enforcing
 and installed service operation remain NOT VERIFIED until the final
 native campaign and independently approved privileged installer.
+
+The separate `inspect_native_nginx_storage_under_root` entry point now
+exposes this bounded validation without calling the writer. It reports
+whether each fixed directory/marker pair is absent or matches its recorded
+identity, refusing an incomplete or conflicting pair without repair. The
+native worker fixture verifies absence before creation and both identities
+after creation, comparing cache and log contents and metadata. This is a
+sequential observation of fixture ownership, not a cross-root atomic
+snapshot, installed package provenance or permission to adopt storage.
