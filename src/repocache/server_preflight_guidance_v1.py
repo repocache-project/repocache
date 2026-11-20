@@ -31,7 +31,7 @@ _ACTIONS = MappingProxyType({
     "managed_state_and_rollback": "Verify protected state ownership, generation, locking and recovery before any write.",
     "tls_reference_files": "Use root-owned TLS parents and single-link root-owned certificate/key files with restrictive modes; do not read or display private key material.",
     "native_package_binaries": "Check fixed native executables; issue #27 handles missing packages with trusted APT/DNF.",
-    "storage_path_safety": "Reject symlinks and unsafe parents; require verified ownership before using existing paths.",
+    "storage_path_safety": "Reject symlinks; require root-owned safe parents and a private root-owned mode-0700 state directory; verify cache/log ownership before adoption.",
     "storage_free_space": "Check that state, cache and log mounts are writable and meet the required free byte and inode thresholds.",
     "nginx_native_binary": "Check NGINX executable presence; issue #27 must verify its native package provenance.",
     "nginx_managed_include_collision": "Do not overwrite or adopt a foreign NGINX include without verified ownership.",
