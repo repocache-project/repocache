@@ -92,6 +92,17 @@ def test_read_only_storage_observation_refuses_partial_pair(storage_root, which)
     assert (logs / "retained").read_bytes() == b"logs"
 
 
+def test_read_only_storage_observation_refuses_live_root():
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        with pytest.raises(NativeStorageBootstrapError, match="LIVE_ROOT_FORBIDDEN"):
+            inspect_native_nginx_storage_under_root(
+                fd, root_uid=os.geteuid(), cache_uid=os.geteuid(), cache_gid=os.getegid(),
+            )
+    finally:
+        os.close(fd)
+
+
 def test_new_roots_are_real_durable_and_marked_outside_worker_tree(storage_root):
     fd, root, uid, gid = storage_root
     result = provision(storage_root)
