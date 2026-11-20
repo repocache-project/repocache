@@ -151,6 +151,22 @@ def rehearse_managed_include_under_root(
             or not callable(syntax_check)):
         _deny("MANAGED_INCLUDE_ARGUMENT_INVALID")
     try:
+        # A real native host root is NEVER an acceptable caller-supplied
+        # fixture. The only exact current-namespace '/' exception is the
+        # separately guarded disposable Docker CI image. The host-root
+        # transaction belongs to the future authenticated #31/#64 worker.
+        pinned = os.fstat(root_fd)
+        namespace_root = os.stat("/", follow_symlinks=False)
+        if (pinned.st_dev, pinned.st_ino) == (
+            namespace_root.st_dev, namespace_root.st_ino,
+        ):
+            if (os.environ.get("REPOCACHE_NATIVE_TEST_CONTAINER")
+                    != "CONFIRMED_DISPOSABLE_DOCKER_ONLY"
+                    or not os.path.isfile("/.dockerenv")
+                    or os.geteuid() != 0
+                    or open("/proc/1/comm", encoding="ascii").read().strip()
+                    == "systemd"):
+                _deny("MANAGED_INCLUDE_LIVE_HOST_ROOT_REFUSED")
         with ExitStack() as stack:
             directory, ancestry = _walk(
                 root_fd, _INCLUDE_SEGMENTS, stack, owner_uid,
