@@ -23,6 +23,11 @@ authenticate:
   identity, SELinux context, actual network routes or an NGINX reload;
 - rollback of a multi-resource or power-loss transaction.
 
+An exact current-namespace root directory FD is explicitly rejected unless
+this is the guarded disposable root Docker CI fixture, with the CI environment
+marker, Docker sentinel and non-systemd PID 1. This defense does not replace
+#64 authentication and does not grant production root access.
+
 The caller-supplied expected SHA-256 is a **test fixture precondition**, not
 a proof of ownership. A real executor must first authenticate the package,
 root, operator, protected v2 state, manifest and lock through #31/#64, then
