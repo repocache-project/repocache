@@ -6,6 +6,9 @@ the durable effects marker or authorize any host mutation.
 from __future__ import annotations
 
 import copy
+from contextlib import contextmanager
+import os
+from pathlib import Path
 
 import pytest
 
@@ -76,9 +79,14 @@ def observed(monkeypatch, distribution, *, before=None, after=None,
         events.append("unit")
         return FakeUnit()
 
-    monkeypatch.setattr(mod, "inspect_current_namespace_native_package_effects", pending)
-    monkeypatch.setattr(mod, "inspect_stock_nginx_package_owner", check_package)
-    monkeypatch.setattr(mod, "inspect_native_nginx_unit", check_unit)
+    def collected(*, distribution):
+        first_observation = pending(distribution=distribution)
+        actual_package = check_package()
+        actual_unit = check_unit(distribution).to_dict()
+        last_observation = pending(distribution=distribution)
+        return first_observation, actual_package, actual_unit, last_observation
+
+    monkeypatch.setattr(mod, "_collect_current_namespace_postpackage_facts", collected)
     return events
 
 
@@ -99,6 +107,7 @@ def test_consistent_native_package_and_pending_journal_remain_non_authorizing(
     assert report["package"] == expected
     assert report["vendor_unit_sha256"] == SHA
     assert report["pending_journal_stable_across_observations"] is True
+    assert report["single_protected_lock_spanned_native_package_and_unit_reads"] is True
     assert report["native_package_db_owner_observed"] is True
     assert report["native_vendor_unit_shape_observed"] is True
     assert report["pending_native_effects_block_reentry"] is True
@@ -166,16 +175,40 @@ def test_any_mismatched_observation_fails_closed(monkeypatch, variation):
         )
 
 
-def test_readonly_probe_error_is_redacted(monkeypatch):
-    observed(monkeypatch, "almalinux")
-    def untrusted():
-        raise OSError("secret /etc/pki/unsafe.key")
-    monkeypatch.setattr(mod, "inspect_stock_nginx_package_owner", untrusted)
-    with pytest.raises(mod.NativeEffectsReconciliationError) as exc:
-        mod.inspect_current_namespace_native_postpackage_candidate(
-            distribution="almalinux"
+def test_readonly_probe_error_is_redacted(monkeypatch, tmp_path):
+    from repocache.server_native_nginx_package_journal_v1 import (
+        _prepare_native_journal_under_root,
+    )
+    from repocache.server_protected_state_store_v1 import LOCK_NAME, _locked
+
+    root = tmp_path / "root"
+    root.mkdir(mode=0o700)
+    folder = root
+    for name in ("var", "lib", "repocache", "server"):
+        folder = folder / name
+        folder.mkdir(mode=0o700)
+    (folder / LOCK_NAME).write_bytes(b"")
+    (folder / LOCK_NAME).chmod(0o600)
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        _prepare_native_journal_under_root(
+            fd, owner_uid=os.geteuid(), distribution="almalinux",
         )
-    assert str(exc.value) == "NATIVE_EFFECTS_NATIVE_FACTS_UNVERIFIED"
+        with _locked(fd, os.geteuid()) as directory:
+            monkeypatch.setattr(
+                mod, "inspect_stock_nginx_package_owner",
+                lambda: (_ for _ in ()).throw(
+                    OSError("secret native RPM package path"),
+                ),
+            )
+            with pytest.raises(mod.NativeEffectsReconciliationError) as exc:
+                mod._collect_postpackage_facts_while_locked(
+                    directory, owner_uid=os.geteuid(),
+                    distribution="almalinux",
+                )
+            assert str(exc.value) == "NATIVE_EFFECTS_NATIVE_FACTS_UNVERIFIED"
+    finally:
+        os.close(fd)
 
 
 def test_source_has_no_native_write_or_service_calls():
@@ -184,3 +217,103 @@ def test_source_has_no_native_write_or_service_calls():
     for token in ("os.replace(", "os.unlink(", "subprocess.run(", '"systemctl"',
                   "apt-get", "dnf install", "os.chown("):
         assert token not in code
+
+
+@pytest.mark.parametrize("distribution", ["debian", "almalinux"])
+def test_package_and_unit_are_observed_while_one_real_lock_is_held(
+    tmp_path, monkeypatch, distribution,
+):
+    """A competing #31 state writer must not acquire the lock mid-probe."""
+    from repocache.server_native_nginx_package_journal_v1 import (
+        NATIVE_PENDING_NAME, _prepare_native_journal_under_root,
+    )
+    from repocache.server_protected_state_store_v1 import (
+        LOCK_NAME, ProtectedStateStoreError, _locked,
+    )
+
+    root = tmp_path / "real-root"
+    root.mkdir(mode=0o700)
+    folder = root
+    for name in ("var", "lib", "repocache", "server"):
+        folder = folder / name
+        folder.mkdir(mode=0o700)
+    (folder / LOCK_NAME).write_bytes(b"")
+    (folder / LOCK_NAME).chmod(0o600)
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        _prepare_native_journal_under_root(
+            fd, owner_uid=os.geteuid(), distribution=distribution,
+        )
+        marker = folder / NATIVE_PENDING_NAME
+        marker_before = marker.read_bytes()
+        identity = marker.stat().st_ino
+        observed = []
+
+        def check_pending_exclusive(operation):
+            with pytest.raises(ProtectedStateStoreError,
+                               match="^PROTECTED_LOCK_UNAVAILABLE$"):
+                with _locked(fd, os.geteuid()):
+                    pytest.fail("competing state writer acquired lock")
+            assert marker.read_bytes() == marker_before
+            observed.append(operation)
+
+        def actual_package():
+            check_pending_exclusive("package")
+            return package(distribution)
+
+        class FakeVendor:
+            def to_dict(self):
+                check_pending_exclusive("unit-data")
+                return unit()
+
+        def actual_unit(dist):
+            assert dist == distribution
+            check_pending_exclusive("unit")
+            return FakeVendor()
+
+        monkeypatch.setattr(mod, "inspect_stock_nginx_package_owner", actual_package)
+        monkeypatch.setattr(mod, "inspect_native_nginx_unit", actual_unit)
+        with _locked(fd, os.geteuid()) as directory:
+            before, pkg, vendor, after = (
+                mod._collect_postpackage_facts_while_locked(
+                    directory, owner_uid=os.geteuid(),
+                    distribution=distribution,
+                )
+            )
+        assert before == after
+        assert before["pending_native_effects_block_reentry"] is True
+        assert pkg["package_name"] == (
+            "nginx" if distribution == "debian" else "nginx-core"
+        )
+        assert vendor["vendor_unit_sha256"] == SHA
+        assert observed == ["package", "unit", "unit-data"]
+        assert marker.read_bytes() == marker_before
+        assert marker.stat().st_ino == identity
+        assert (folder / NATIVE_PENDING_NAME).is_file()
+    finally:
+        os.close(fd)
+
+
+def test_current_host_probe_refuses_nonroot_before_any_lock_or_subprocess(
+    monkeypatch,
+):
+    monkeypatch.setattr(mod.os, "geteuid", lambda: 1001)
+    monkeypatch.setattr(
+        mod, "_locked",
+        lambda *_a, **_kw: pytest.fail("unexpected protected lock attempt"),
+    )
+    with pytest.raises(
+        mod.NativeEffectsReconciliationError,
+        match="^NATIVE_EFFECTS_ROOT_READ_ONLY_OBSERVATION_REQUIRED$",
+    ):
+        mod._collect_current_namespace_postpackage_facts(distribution="debian")
+
+
+def test_correlation_does_not_reconcile_irreversible_package_effects():
+    import inspect
+    code = inspect.getsource(mod._collect_postpackage_facts_while_locked)
+    assert "os.unlink(" not in code
+    assert "os.replace(" not in code
+    assert "subprocess.run(" not in code
+    assert "os.system(" not in code
+    assert "systemctl" not in code
