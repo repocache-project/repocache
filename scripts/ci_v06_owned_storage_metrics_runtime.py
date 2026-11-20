@@ -7,6 +7,7 @@ real host log, package trust, systemd or SELinux acceptance is implied.
 from __future__ import annotations
 
 import collections
+import base64
 from datetime import datetime, timezone
 import grp
 import hashlib
@@ -198,6 +199,13 @@ def main() -> None:
             assert _cache_snapshot(cache) == saved_cache
             assert log.read_bytes() == saved_log and _identity(log) == original_log
             assert marker.read_bytes() == marker_before
+            # Only the deliberately generated, privacy-limited fixture rows
+            # may leave the disposable job for the separate actual CLI test.
+            assert len(saved_log) <= 8192 and len(saved_log.splitlines()) == 8
+            assert all(set(json.loads(line)) == {"time_iso8601", "repocache_repository", "status",
+                       "upstream_cache_status", "body_bytes_sent", "request_time"}
+                       for line in saved_log.splitlines())
+            print("METRICS_FIXTURE_BASE64:" + base64.b64encode(saved_log).decode("ascii"), flush=True)
             print("PASS: actual native NGINX worker cache MISS/HIT and private root-owned metrics; repeat provisioning preserves cache/history", flush=True)
         finally:
             os.close(fd)

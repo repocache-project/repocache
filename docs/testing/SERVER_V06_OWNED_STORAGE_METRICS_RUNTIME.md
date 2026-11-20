@@ -19,4 +19,11 @@ live installed log, prove signed repository metadata, start systemd or
 authenticate a host root. SELinux context policy and full installed
 transaction/recovery remain separate #29/#31/#19 acceptance gates.
 
+The workflow passes only the eight disposable privacy-limited log rows
+as a short-lived CI artifact. A separate ordinary unprivileged CI job
+runs the actual `repocache metrics show` JSON command on each exact
+sample and checks observed counts and byte totals against the source
+rows. It does not run the CLI with host-root privileges or transfer any
+operator credentials, certificates, or production logs.
+
 CI: `.github/workflows/server-v06-owned-storage-metrics-runtime.yml`.
