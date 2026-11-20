@@ -27,6 +27,9 @@ on:
       - 'tests/test_server_root_control_fixed_candidate_v1.py'
       - 'tests/test_server_root_control_pinned_tls_pair_v1.py'
       - 'scripts/smoke_server_fixed_nginx_syntax.py'
+      - 'scripts/ci_v06_root_worker_target_guard.py'
+      - 'scripts/install_native_root_worker.py'
+      - 'src/repocache/server_preflight_v1.py'
       - 'tests/test_server_root_control_units_v1.py'
       - 'docs/examples/systemd/repocache-control.socket'
       - 'docs/examples/systemd/repocache-control.service'
@@ -44,6 +47,9 @@ on:
       - 'src/repocache/server_root_control_pre_reload_v1.py'
       - 'src/repocache/server_root_control_fixed_candidate_v1.py'
       - 'src/repocache/server_root_control_pinned_tls_pair_v1.py'
+      - 'scripts/ci_v06_root_worker_target_guard.py'
+      - 'scripts/install_native_root_worker.py'
+      - 'src/repocache/server_preflight_v1.py'
       - 'tests/test_server_root_control_protocol_v1.py'
       - 'tests/test_server_root_control_host_preflight_v1.py'
       - 'tests/test_server_root_control_worker_v1.py'
@@ -110,3 +116,51 @@ jobs:
             python3 -B scripts/smoke_server_fixed_nginx_syntax.py
           # No privileged broker, systemd service, NGINX process, real reload
           # or host authorization is installed or executed here.
+      - name: Exercise actual supported target and refuse foreign interpreter before effects
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [ '${{ matrix.platform }}' = 'debian13' ]; then
+            expected=debian
+          else
+            expected=almalinux
+          fi
+          /usr/bin/python3 -I -B scripts/ci_v06_root_worker_target_guard.py "$expected"
+          scratch=$(mktemp -d)
+          cp -L /usr/bin/python3 "$scratch/python3"
+          "$scratch/python3" -I -B scripts/ci_v06_root_worker_target_guard.py foreign
+
+  unsupported-target:
+    name: Root worker refuses actual unsupported target (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: debian12
+            image: debian:12-slim
+          - platform: almalinux9
+            image: almalinux:9
+          - platform: ubuntu2404
+            image: ubuntu:24.04
+    container: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Exercise genuine target refusal before worker placement or proposal staging
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if command -v apt-get >/dev/null 2>&1; then
+            apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends python3
+            interpreter=/usr/bin/python3
+          else
+            # Use the distribution's optional Python 3.12: AlmaLinux 9
+            # must be refused even when the interpreter version matches.
+            dnf -q -y install python3.12
+            interpreter=/usr/bin/python3.12
+          fi
+          "$interpreter" -I -B scripts/ci_v06_root_worker_target_guard.py unsupported
