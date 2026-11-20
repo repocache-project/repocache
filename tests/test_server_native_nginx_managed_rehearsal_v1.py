@@ -260,3 +260,68 @@ def test_exclusive_stage_name_protects_dangling_symlink(fixture_root):
     ):
         exercise(root)
     assert (includedir / STAGE).is_symlink()
+
+
+def test_failed_atomic_promotion_preserves_previous_and_refuses_retry(
+    fixture_root, monkeypatch,
+):
+    import repocache.server_native_nginx_managed_rehearsal_v1 as native
+
+    root, includedir = fixture_root
+    target = includedir / NAME
+    target.write_bytes(OLD)
+    target.chmod(0o640)
+    original_replace = native.os.replace
+
+    def deny_promotion(source, destination, **kwargs):
+        if source == STAGE:
+            raise OSError("synthetic failed rename")
+        return original_replace(source, destination, **kwargs)
+
+    monkeypatch.setattr(native.os, "replace", deny_promotion)
+    with pytest.raises(
+        ManagedIncludeRehearsalError,
+        match="^MANAGED_INCLUDE_TRANSACTION_UNVERIFIED$",
+    ):
+        exercise(root, previous_sha=hashlib.sha256(OLD).hexdigest())
+    assert target.read_bytes() == OLD
+    assert (includedir / STAGE).read_bytes() == OK
+    assert (includedir / BACKUP).read_bytes() == OLD
+    with pytest.raises(
+        ManagedIncludeRehearsalError,
+        match="^MANAGED_INCLUDE_INTERRUPTED_TRANSACTION_REFUSED$",
+    ):
+        exercise(root, previous_sha=hashlib.sha256(OLD).hexdigest())
+
+
+def test_failed_restoration_is_never_reported_as_success(
+    fixture_root, monkeypatch,
+):
+    import repocache.server_native_nginx_managed_rehearsal_v1 as native
+
+    root, includedir = fixture_root
+    target = includedir / NAME
+    target.write_bytes(OLD)
+    target.chmod(0o640)
+    original_replace = native.os.replace
+
+    def deny_restoration(source, destination, **kwargs):
+        if source == BACKUP:
+            raise OSError("synthetic disk failure")
+        return original_replace(source, destination, **kwargs)
+
+    monkeypatch.setattr(native.os, "replace", deny_restoration)
+    with pytest.raises(
+        ManagedIncludeRehearsalError,
+        match="^MANAGED_INCLUDE_TRANSACTION_UNVERIFIED$",
+    ):
+        exercise(root, previous_sha=hashlib.sha256(OLD).hexdigest())
+    # We cannot claim successful restoration when the filesystem prevents
+    # it. The backed-up last-known-good bytes remain intact for recovery.
+    assert target.read_bytes() == OK
+    assert (includedir / BACKUP).read_bytes() == OLD
+    with pytest.raises(
+        ManagedIncludeRehearsalError,
+        match="^MANAGED_INCLUDE_INTERRUPTED_TRANSACTION_REFUSED$",
+    ):
+        exercise(root, previous_sha=hashlib.sha256(OLD).hexdigest())
