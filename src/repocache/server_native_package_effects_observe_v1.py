@@ -199,8 +199,12 @@ def _collect_postpackage_facts_while_locked(
     before = _inspect_locked(
         directory_fd, owner_uid=owner_uid, distribution=distribution,
     )
-    package = inspect_stock_nginx_package_owner()
-    unit = inspect_native_nginx_unit(distribution).to_dict()
+    try:
+        package = inspect_stock_nginx_package_owner()
+        unit = inspect_native_nginx_unit(distribution).to_dict()
+    except (StockNginxPackageOwnerError, NginxServiceUnitInspectionError,
+            OSError, TypeError, ValueError):
+        _deny("NATIVE_FACTS_UNVERIFIED")
     after = _inspect_locked(
         directory_fd, owner_uid=owner_uid, distribution=distribution,
     )
