@@ -55,6 +55,7 @@ class NativeNginxLocalBoundaryV1:
             "status": ("FAIL" if self.code == "NGINX_FOOTPRINT_REFUSED"
                        and self.footprint_code in (
                            "EXISTING_NGINX_OWNERSHIP_UNPROVEN",
+                           "NGINX_RUNNING_PROCESS_REFUSED",
                            "NGINX_NONINITIAL_STATE_REFUSED",
                        ) else "NOT VERIFIED"),
             "footprint_code": self.footprint_code,
