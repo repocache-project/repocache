@@ -1,0 +1,67 @@
+name: Server v0.6 Managed NGINX Include Restore (Containers)
+
+on:
+  pull_request:
+    paths:
+      - 'src/repocache/server_native_nginx_managed_rehearsal_v1.py'
+      - 'tests/test_server_native_nginx_managed_rehearsal_v1.py'
+      - 'scripts/ci_v06_native_managed_include_restore.py'
+      - 'docs/testing/SERVER_NATIVE_MANAGED_INCLUDE_RESTORE_V1.md'
+      - '.github/workflows/server-v06-nginx-managed-restore.yml'
+  push:
+    branches: [main, 'integration/**']
+    paths:
+      - 'src/repocache/server_native_nginx_managed_rehearsal_v1.py'
+      - 'tests/test_server_native_nginx_managed_rehearsal_v1.py'
+      - 'scripts/ci_v06_native_managed_include_restore.py'
+      - 'docs/testing/SERVER_NATIVE_MANAGED_INCLUDE_RESTORE_V1.md'
+      - '.github/workflows/server-v06-nginx-managed-restore.yml'
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  native-managed-include-restore:
+    name: Native managed NGINX include rollback (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: debian13
+            image: debian:trixie-slim
+          - platform: almalinux10
+            image: almalinux:10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Native NGINX include candidate, syntax refusal and restoration (disposable image)
+        shell: bash
+        env:
+          DISTRO_IMAGE: ${{ matrix.image }}
+        run: |
+          set -Eeuo pipefail
+          docker run --rm --network bridge \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace,readonly" \
+            --workdir /workspace "$DISTRO_IMAGE" sh -ec '
+              set -eu
+              if command -v apt-get >/dev/null 2>&1; then
+                apt-get update -qq
+                DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends python3 nginx ca-certificates >/dev/null
+              else
+                dnf -y -q install python3 nginx ca-certificates >/dev/null
+              fi
+              export PYTHONPATH=/workspace/src
+              export REPOCACHE_NATIVE_TEST_CONTAINER=CONFIRMED_DISPOSABLE_DOCKER_ONLY
+              python3 -B scripts/ci_v06_native_managed_include_restore.py > /tmp/repocache-managed-restore.json || {
+                cat /tmp/repocache-managed-restore.json
+                exit 1
+              }
+              grep -Fq DISPOSABLE_NATIVE_MANAGED_INCLUDE_RESTORE_PASS /tmp/repocache-managed-restore.json
+              cat /tmp/repocache-managed-restore.json
+              echo "PASS: real native NGINX include parser rejected bad candidate; prior inode restored"
+              echo "NOT VERIFIED: privileged host integration, active systemd, SELinux, full durable rollback"
+            '
