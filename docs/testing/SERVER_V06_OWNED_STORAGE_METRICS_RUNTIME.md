@@ -12,18 +12,34 @@ TLS fixture. This is not an installed service or production configuration.
 Each repository must return unchanged metadata and artifact bytes with observable
 MISS/HIT, one origin request, real worker-owned cache files, a root-owned
 0600 metrics inode and eight correctly parsed events (four hits and four
-misses) through the CLI's metrics reader. After stopping the process,
+misses) through the CLI's metrics reader. The native stock logrotate
+then performs two rotations, using the existing fixture marker
+reconciliation and a test-only validated master reload. The old worker
+generation must drain before requests resume; each subsequent fetch is
+a HIT with the original bytes, private root-owned log mode, and unchanged
+cache identities. The initial eight rows and two sets of four new rows
+must be retained in the current file, `.1` and `.2.gz`. After stopping the process,
 repeat preparation must preserve cached bytes/inodes, historical metrics
 bytes, private inode and ownership marker. The test does not rotate a
 live installed log, prove signed repository metadata, start systemd or
 authenticate a host root. SELinux context policy and full installed
 transaction/recovery remain separate #29/#31/#19 acceptance gates.
 
-The workflow passes only the eight disposable privacy-limited log rows
+The workflow passes only the sixteen disposable privacy-limited log rows
 as a short-lived CI artifact. A separate ordinary unprivileged CI job
 runs the actual `repocache metrics show` JSON command on each exact
 sample and checks observed counts and byte totals against the source
 rows. It does not run the CLI with host-root privileges or transfer any
 operator credentials, certificates, or production logs.
+
+The current installed rotation candidate uses a fixed USR1 reopen hook.
+This fixture does not exercise or endorse that hook with a private root-only
+log directory. It uses an explicit validated reload of its own spawned master
+and drains the old worker generation, not systemd or the host's NGINX. An
+installed lock-coordinated strategy remains a separate acceptance gate;
+no production reload authorization or label changes follow from this test.
+An invalid private configuration is rejected by the syntax check before
+any rotation or marker change; the running fixture and historical bytes
+remain unchanged.
 
 CI: `.github/workflows/server-v06-owned-storage-metrics-runtime.yml`.
