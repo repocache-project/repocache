@@ -12,6 +12,10 @@ marker in the existing protected NGINX log parent.
 Before the first write it verifies the closed installer-owned log root
 and its existing durable owner marker, denies foreign directories,
 unsupported modes/ACL/xattrs and partial pre-existing file/marker pairs.
+The detached root and every pinned log ancestor must also have no
+unreviewed extended attributes; a refusal preserves both the attribute
+and any existing historical log bytes and marker. This is a conservative
+fixture gate, not an installed SELinux policy or label repair mechanism.
 It opens relative to fixed pinned directory FDs with O_NOFOLLOW and
 O_EXCL, fsyncs file and directories, then persists a 0600 owner marker
 with device/inode/UID/GID/mode. Repeat execution checks the marker and

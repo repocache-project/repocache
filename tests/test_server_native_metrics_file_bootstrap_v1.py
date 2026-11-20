@@ -133,6 +133,41 @@ def test_foreign_owned_log_root_marker_refused_before_write(owned):
     assert not paths(owned)[0].exists()
 
 
+@pytest.mark.parametrize("relative", [".", "var", "var/log", "var/log/nginx"])
+def test_unreviewed_ancestor_attribute_refused_before_metrics_creation(owned, relative):
+    directory = owned[0] / relative
+    log, marker = paths(owned)
+    try:
+        os.setxattr(directory, "user.repocache-unreviewed", b"fixture attribute")
+    except OSError as exc:
+        pytest.skip("fixture filesystem lacks user xattrs: " + type(exc).__name__)
+    try:
+        with pytest.raises(NativeMetricsBootstrapError):
+            run(owned)
+        assert not log.exists() and not marker.exists()
+        assert os.getxattr(directory, "user.repocache-unreviewed") == b"fixture attribute"
+    finally:
+        os.removexattr(directory, "user.repocache-unreviewed")
+
+
+def test_unreviewed_ancestor_refuses_reentry_preserving_log_history(owned):
+    run(owned)
+    log, marker = paths(owned)
+    log.write_bytes(b'{"retained":true}\n')
+    original = (log.stat().st_ino, log.read_bytes(), marker.read_bytes())
+    directory = owned[0] / "var/log"
+    try:
+        os.setxattr(directory, "user.repocache-unreviewed", b"fixture attribute")
+    except OSError as exc:
+        pytest.skip("fixture filesystem lacks user xattrs: " + type(exc).__name__)
+    try:
+        with pytest.raises(NativeMetricsBootstrapError):
+            run(owned)
+        assert (log.stat().st_ino, log.read_bytes(), marker.read_bytes()) == original
+    finally:
+        os.removexattr(directory, "user.repocache-unreviewed")
+
+
 @pytest.mark.parametrize("wrong", [{"owner_uid": True}, {"owner_gid": -1},
                                     {"inject_fault": "bad"}])
 def test_bad_inputs_do_not_mutate(owned, wrong):
