@@ -323,7 +323,14 @@ def run() -> dict[str, Any]:
         _require(
             _MARKER.read_bytes() == marker_before and
             _INCLUDE.read_bytes() == _PRIOR and
-            _syntax_check(distribution, observations=[]) is True,
+            subprocess.run(
+                ["/usr/sbin/nginx", "-t", "-q"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                timeout=20, cwd="/",
+                env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+                check=False,
+            ).returncode == 0,
             "POST_LOCK_INCLUDE_OR_JOURNAL_UNVERIFIED",
         )
         return {
