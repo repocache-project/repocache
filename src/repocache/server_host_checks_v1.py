@@ -161,12 +161,11 @@ def _storage_checks(spec: HostInspectionSpec) -> tuple[PreflightCheck, Preflight
     if any(code.startswith("UNSAFE_") for _, code in observations):
         path_check = _check("storage_path_safety", PreflightStatus.FAIL,
                             "STORAGE_PATH_UNSAFE_OR_CONFLICTING")
-    elif any(directory is None for directory, _ in observations):
-        path_check = _check("storage_path_safety", PreflightStatus.NOT_VERIFIED,
-                            "STORAGE_PATH_ACCESS_UNVERIFIED")
     else:
         path_check = _check("storage_path_safety", PreflightStatus.NOT_VERIFIED,
-                            "STORAGE_OWNERSHIP_MANIFEST_UNVERIFIED")
+                            "STORAGE_PATH_ACCESS_UNVERIFIED"
+                            if any(directory is None for directory, _ in observations)
+                            else "STORAGE_OWNERSHIP_MANIFEST_UNVERIFIED")
         # The protected state leaf is private and root-owned; cache/log leaves
         # may belong to the native service. Never infer adoption from metadata.
         if observations[0] == (spec.state_root, "EXISTING_PATH_OWNERSHIP_UNVERIFIED"):

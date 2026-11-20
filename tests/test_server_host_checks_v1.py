@@ -171,6 +171,19 @@ def test_protected_state_leaf_private_root_owned_and_cache_service_leaf_not_adop
     assert host._safe_existing_ancestor(cfg.cache_root)[1] == "EXISTING_PATH_OWNERSHIP_UNVERIFIED"
 
 
+def test_unsafe_protected_state_reported_even_when_other_storage_unobservable(monkeypatch):
+    import stat
+    cfg = spec(state_root="/srv/state", cache_root="/srv/cache", log_root="/srv/logs")
+    def observed(path):
+        if path == cfg.cache_root:
+            raise PermissionError("unobservable cache")
+        return SimpleNamespace(st_uid=0, st_mode=stat.S_IFDIR | 0o755)
+    monkeypatch.setattr(host.os, "lstat", observed)
+    result, capacity = host._storage_checks(cfg)
+    assert (result.status, result.code) == (PreflightStatus.FAIL, "PROTECTED_STATE_DIRECTORY_UNSAFE")
+    assert capacity.status is PreflightStatus.NOT_VERIFIED
+
+
 @pytest.mark.parametrize("owner,links", [(1000, 1), (0, 2)])
 def test_tls_reference_foreign_owner_or_hardlink_refused(monkeypatch, owner, links):
     import stat
