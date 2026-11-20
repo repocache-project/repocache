@@ -156,7 +156,8 @@ def _safe_existing_ancestor(path: str, *, require_root_leaf: bool = False) -> tu
 
 def _storage_checks(spec: HostInspectionSpec) -> tuple[PreflightCheck, PreflightCheck]:
     roots = (spec.state_root, spec.cache_root, spec.log_root)
-    observations = [_safe_existing_ancestor(path) for path in roots]
+    observations = [_safe_existing_ancestor(path, require_root_leaf=(index == 0))
+                    for index, path in enumerate(roots)]
     if any(code.startswith("UNSAFE_") for _, code in observations):
         path_check = _check("storage_path_safety", PreflightStatus.FAIL,
                             "STORAGE_PATH_UNSAFE_OR_CONFLICTING")
@@ -166,6 +167,18 @@ def _storage_checks(spec: HostInspectionSpec) -> tuple[PreflightCheck, Preflight
     else:
         path_check = _check("storage_path_safety", PreflightStatus.NOT_VERIFIED,
                             "STORAGE_OWNERSHIP_MANIFEST_UNVERIFIED")
+        # The protected state leaf is private and root-owned; cache/log leaves
+        # may belong to the native service. Never infer adoption from metadata.
+        if observations[0] == (spec.state_root, "EXISTING_PATH_OWNERSHIP_UNVERIFIED"):
+            try:
+                state = os.lstat(spec.state_root)
+                if (not stat.S_ISDIR(state.st_mode) or state.st_uid != 0
+                        or stat.S_IMODE(state.st_mode) != 0o700):
+                    path_check = _check("storage_path_safety", PreflightStatus.FAIL,
+                                        "PROTECTED_STATE_DIRECTORY_UNSAFE")
+            except OSError:
+                path_check = _check("storage_path_safety", PreflightStatus.NOT_VERIFIED,
+                                    "STORAGE_PATH_ACCESS_UNVERIFIED")
     if any(directory is None for directory, _ in observations):
         return path_check, _check("storage_free_space", PreflightStatus.NOT_VERIFIED,
                                   "STORAGE_CAPACITY_UNVERIFIED")

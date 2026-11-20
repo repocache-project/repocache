@@ -122,6 +122,7 @@ _PROBE_CODES: Mapping[str, Mapping[str, PreflightStatus]] = {
     },
     "storage_path_safety": {
         "STORAGE_PATH_UNSAFE_OR_CONFLICTING": PreflightStatus.FAIL,
+        "PROTECTED_STATE_DIRECTORY_UNSAFE": PreflightStatus.FAIL,
         "STORAGE_PATH_ACCESS_UNVERIFIED": PreflightStatus.NOT_VERIFIED,
         "STORAGE_OWNERSHIP_MANIFEST_UNVERIFIED": PreflightStatus.NOT_VERIFIED,
     },
