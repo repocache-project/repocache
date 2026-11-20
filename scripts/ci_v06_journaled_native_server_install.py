@@ -134,15 +134,21 @@ def _verify_readonly_preflight(document: dict, *, installed: bool) -> None:
         _deny("PREFLIGHT_REPEAT_CHANGED")
     if first["supported_os_and_python"]["status"] != "PASS":
         _deny("PREFLIGHT_SUPPORTED_TARGET_REJECTED")
+    if (first["architecture_supported"]["code"] != "SUPPORTED_NATIVE_ARCHITECTURE"
+            or first["native_python_identity"]["code"] != "NATIVE_PYTHON_INODE_OBSERVED_ONLY"):
+        _deny("PREFLIGHT_SUPPORTED_TARGET_REJECTED")
     expected = "NGINX_EXECUTABLE_OBSERVED_ONLY" if installed else "NGINX_EXECUTABLE_MISSING"
     if first["nginx_native_binary"]["code"] != expected:
         _deny("PREFLIGHT_PACKAGE_DIAGNOSTIC_UNVERIFIED")
+    allowed_failures = {"SYSTEMD_NATIVE_PID1_NOT_OBSERVED"}
     if not installed:
-        return
+        allowed_failures.update({"NGINX_EXECUTABLE_MISSING", "REQUIRED_NATIVE_EXECUTABLE_MISSING"})
     if any(row["status"] == "FAIL"
-           and row["code"] != "SYSTEMD_NATIVE_PID1_NOT_OBSERVED"
+           and row["code"] not in allowed_failures
            for row in first.values()):
         _deny("PREFLIGHT_POSITIVE_LOCAL_CHECK_FAILED")
+    if not installed:
+        return
     nonroot = _run_readonly_preflight(document, unprivileged=True)
     if (nonroot["effective_uid"]["code"] != "PRIVILEGED_INSTALL_REQUIRES_ROOT"
             or nonroot["effective_uid"]["status"] != "FAIL"):

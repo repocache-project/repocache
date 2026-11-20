@@ -42,16 +42,19 @@ def _readonly_report():
     }
 
 
-@pytest.mark.parametrize("code", ["SYSTEMD_CLIENT_MISSING", "STATE_OR_LOG_SPACE_EXHAUSTED"])
-def test_positive_native_preflight_refuses_unexpected_local_failures(monkeypatch, code):
+@pytest.mark.parametrize("installed", [False, True])
+@pytest.mark.parametrize("code", ["SYSTEMD_CLIENT_MISSING", "STATE_OR_LOG_SPACE_EXHAUSTED", "TLS_REFERENCE_OWNER_OR_LINK_UNSAFE"])
+def test_positive_native_preflight_refuses_unexpected_local_failures(monkeypatch, code, installed):
     report = {
         "supported_os_and_python": {"status": "PASS", "code": "SUPPORTED_OS_AND_PYTHON_VERSION"},
-        "nginx_native_binary": {"status": "PASS", "code": "NGINX_EXECUTABLE_OBSERVED_ONLY"},
+        "architecture_supported": {"status": "PASS", "code": "SUPPORTED_NATIVE_ARCHITECTURE"},
+        "native_python_identity": {"status": "PASS", "code": "NATIVE_PYTHON_INODE_OBSERVED_ONLY"},
+        "nginx_native_binary": {"status": "PASS" if installed else "FAIL", "code": "NGINX_EXECUTABLE_OBSERVED_ONLY" if installed else "NGINX_EXECUTABLE_MISSING"},
         "failed_check": {"status": "FAIL", "code": code},
     }
     monkeypatch.setattr(integration, "_run_readonly_preflight", lambda *a, **kw: report)
     with pytest.raises(integration.NativeIntegrationError, match="POSITIVE_LOCAL_CHECK_FAILED"):
-        integration._verify_readonly_preflight({}, installed=True)
+        integration._verify_readonly_preflight({}, installed=installed)
 
 
 @pytest.mark.parametrize("fault", ["none", "authority", "mutation", "guidance", "status", "malformed"])

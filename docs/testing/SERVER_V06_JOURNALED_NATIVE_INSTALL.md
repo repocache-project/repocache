@@ -4,11 +4,14 @@
 
 The same disposable image now runs the normal preflight command before
 NGINX installation and again after the authenticated native transaction.
-Both runs verify the supported OS/Python identity. Before installation,
+Both runs verify the supported OS/Python identity, x86_64 policy and actual
+native interpreter inode. Before installation,
 missing NGINX produces its actionable diagnostic. After installation, the
 native executable observation changes to present.
 The image includes the distribution's systemd client as a prerequisite.
-Unexpected failed local checks reject the positive case. The container's
+Unexpected failed local checks reject the positive case both before and after
+package effects. Only the intended absent-NGINX diagnostics and the missing
+container systemd PID 1 are permitted before the fresh package transaction. The container's
 missing systemd PID 1 retains its explicit native-environment classification.
 
 The command is repeated with identical input and must produce identical
@@ -29,6 +32,17 @@ composition with #27's separate package checks. Full installed-server
 acceptance remains tracked by #19 and the functional feature owners.
 The preflight report retains its non-authorizing JSON contract and
 explicitly unresolved broader readiness checks.
+
+The independent normal-CLI workflow also verifies the native Python inode
+and observes expected DEB/RPM package ownership outside preflight. A same-version
+copy of the interpreter is refused on install intent before local host probes.
+Real Debian 12, AlmaLinux 9 and Ubuntu 24.04 images exercise the unsupported
+target refusal and preserve protected NGINX/state/package-source metadata.
+In supported images, root-owned TLS references are observed without reading
+key contents; a foreign-owned leaf, hardlink or foreign-owned parent gives
+an actionable failure and leaves the reference files unchanged. Local owner,
+mode and inode observations do not prove signed package origin, valid TLS
+material, a managed ownership manifest or eventual host-install authority.
 
 ## Objective
 
