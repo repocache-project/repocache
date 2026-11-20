@@ -171,7 +171,7 @@ def inspect_fresh_nginx_footprint(
     *, os_release: str, python_version: tuple[int, int],
     document: dict[str, Any],
     lstat: Callable[[str], os.stat_result] = os.lstat,
-    process_probe: Callable[[], str] = _scan_nginx_process_footprint,
+    process_probe: Callable[[], str] | None = None,
 ) -> FreshNginxFootprintV1:
     """Validate input first; inspect fixed paths without following leaf links.
 
@@ -204,7 +204,12 @@ def inspect_fresh_nginx_footprint(
         code = "NGINX_FOOTPRINT_ACCESS_UNVERIFIED"
     else:
         try:
-            observed_processes = process_probe()
+            # Late binding keeps the real /proc probe as the production
+            # default while synthetic tests can inject a separate simulated
+            # process snapshot alongside their simulated lstat results.
+            probe = (_scan_nginx_process_footprint
+                     if process_probe is None else process_probe)
+            observed_processes = probe()
         except (OSError, ValueError, TypeError):
             observed_processes = "PROCESS_SCAN_UNVERIFIED"
         if observed_processes == "PROCESS_NGINX_FOUND":
@@ -252,7 +257,7 @@ def prepare_fresh_native_nginx(
     *, os_release: str, python_version: tuple[int, int],
     document: dict[str, Any],
     lstat: Callable[[str], os.stat_result] = os.lstat,
-    process_probe: Callable[[], str] = _scan_nginx_process_footprint,
+    process_probe: Callable[[], str] | None = None,
     runner: Callable[..., Any] = subprocess.run,
 ) -> NativeFreshNginxPreparationV1:
     """Optional network metadata check only after conservative path refusal.
