@@ -142,7 +142,9 @@ def rehearse_managed_include_under_root(
     if (type(root_fd) is not int or root_fd < 0
             or type(owner_uid) is not int or not 0 <= owner_uid < 2**32 - 1
             or type(candidate) is not bytes or not 0 < len(candidate) <= _MAX_BYTES
-            or b"\x00" in candidate or not candidate.endswith(b"\n")
+            or any(octet not in (9, 10) and not 32 <= octet <= 126
+                   for octet in candidate)
+            or not candidate.endswith(b"\n")
             or (expected_previous_sha256 is not None
                 and (type(expected_previous_sha256) is not str
                      or not _HEX.fullmatch(expected_previous_sha256)))
