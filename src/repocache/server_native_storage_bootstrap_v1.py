@@ -120,7 +120,7 @@ def _canonical(value: dict[str, Any]) -> bytes:
 def _precheck_one(root_fd: int, stack: ExitStack, *,
                   kind: str, segments: tuple[str, ...],
                   root_uid: int, desired_uid: int, desired_gid: int,
-                  mode: int) -> bool:
+                  mode: int, health: dict[str, Any] | None = None) -> bool:
     """Read-only two-root preflight, before the first mkdir or owner write.
 
     A later pre-existing foreign log/cache root must not leave the other
@@ -162,6 +162,29 @@ def _precheck_one(root_fd: int, stack: ExitStack, *,
             "schema": 1, "kind": kind, **_proof(leaf),
         }:
             _deny("MARKER_MISMATCH")
+        if health is not None:
+            # Only measure the very same pinned, marker-verified leaf.
+            # POSIX mode and statvfs are observations, never proof of a
+            # successful service write (ACLs, labels, quota and runtime
+            # worker identity still require independent authentication).
+            health["owner_mode_observed"] = True
+            ancestors = [root_before, *(os.fstat(fd) for _, _, fd, _ in ancestry)]
+            def search_mode(info):
+                bit = (stat.S_IXUSR if info.st_uid == desired_uid else
+                       stat.S_IXGRP if info.st_gid == desired_gid else stat.S_IXOTH)
+                return bool(info.st_mode & bit)
+            health["expected_owner_ancestor_search_mode_observed"] = all(
+                search_mode(info) for info in ancestors
+            )
+            try:
+                from repocache.server_cache_pressure_observe_v1 import _capacity
+                free_bytes, free_inodes, readonly = _capacity(leaf_fd)
+            except (OSError, ValueError, TypeError, AttributeError, OverflowError):
+                pass
+            else:
+                health.update(free_bytes_observed=free_bytes,
+                              free_inodes_observed=free_inodes,
+                              mount_write_refusal_observed=True if readonly else None)
         if (_structural(os.fstat(leaf_fd)) != _structural(
                 os.stat(_LEAF, dir_fd=parent_fd, follow_symlinks=False)
         )):
@@ -174,15 +197,8 @@ def _precheck_one(root_fd: int, stack: ExitStack, *,
     return leaf_present
 
 
-def inspect_native_nginx_storage_under_root(
-    root_fd: int, *, root_uid: int, cache_uid: int, cache_gid: int,
-) -> dict[str, Any]:
-    """Read both fixed owner markers without creating or adopting anything.
-
-    An absent directory/marker pair remains absent; malformed or partial
-    pairs refuse the entire observation. Only detached fixtures are supported.
-    This is sequential metadata evidence, not atomic or installed-host proof.
-    """
+def _inspect_roots(root_fd: int, *, root_uid: int, cache_uid: int, cache_gid: int,
+                   health: dict[str, dict[str, Any]] | None = None) -> tuple[bool, bool]:
     if (type(root_fd) is not int or root_fd < 0
             or any(type(v) is not int or not 0 <= v <= 2**32 - 2
                    for v in (root_uid, cache_uid, cache_gid))):
@@ -197,33 +213,94 @@ def inspect_native_nginx_storage_under_root(
             cache = _precheck_one(
                 root_fd, stack, kind="cache", segments=_CACHE_PARENT,
                 root_uid=root_uid, desired_uid=cache_uid,
-                desired_gid=cache_gid, mode=0o700,
+                desired_gid=cache_gid, mode=0o700, health=None if health is None else health["cache"],
             )
             log = _precheck_one(
                 root_fd, stack, kind="log", segments=_LOG_PARENT,
                 root_uid=root_uid, desired_uid=root_uid,
-                desired_gid=root.st_gid, mode=0o750,
+                desired_gid=root.st_gid, mode=0o750, health=None if health is None else health["log"],
             )
             if _identity(_safe_directory(root_fd, root_uid)) != _identity(root):
                 _deny("ROOT_CHANGED")
-        return {
-            "schema_version": 1,
-            "status": "READ_ONLY_NATIVE_STORAGE_FIXTURE_OBSERVATION",
-            "cache_marker_and_directory_observed": cache,
-            "log_marker_and_directory_observed": log,
-            "atomic_storage_snapshot_verified": False,
-            "signed_nginx_package_identity_verified": False,
-            "host_root_provenance_verified": False,
-            "selinux_enforcing_verified": False,
-            "operator_authorization_verified": False,
-            "authorizes_host_installation": False,
-            "authorizes_nginx_activation": False,
-            "authorizes_cache_cleanup": False,
-        }
+        return cache, log
     except NativeStorageBootstrapError:
         raise
     except (OSError, ValueError, TypeError, OverflowError):
         _deny("UNVERIFIED_STATE")
+
+
+def inspect_native_nginx_storage_under_root(
+    root_fd: int, *, root_uid: int, cache_uid: int, cache_gid: int,
+) -> dict[str, Any]:
+    """Read both fixed owner markers without creating or adopting anything.
+
+    An absent directory/marker pair remains absent; malformed or partial
+    pairs refuse the entire observation. Only detached fixtures are supported.
+    This is sequential metadata evidence, not atomic or installed-host proof.
+    """
+    cache, log = _inspect_roots(root_fd, root_uid=root_uid, cache_uid=cache_uid, cache_gid=cache_gid)
+    return {
+        "schema_version": 1,
+        "status": "READ_ONLY_NATIVE_STORAGE_FIXTURE_OBSERVATION",
+        "cache_marker_and_directory_observed": cache,
+        "log_marker_and_directory_observed": log,
+        "atomic_storage_snapshot_verified": False,
+        "signed_nginx_package_identity_verified": False,
+        "host_root_provenance_verified": False,
+        "selinux_enforcing_verified": False,
+        "operator_authorization_verified": False,
+        "authorizes_host_installation": False,
+        "authorizes_nginx_activation": False,
+        "authorizes_cache_cleanup": False,
+    }
+
+
+def inspect_native_nginx_storage_health_under_root(
+    root_fd: int, *, root_uid: int, cache_uid: int, cache_gid: int,
+    warning_free_bytes: int, critical_free_bytes: int, recovery_margin_bytes: int,
+    previous_level: str,
+) -> dict[str, Any]:
+    """Observe both marked fixture roots without creating a write probe.
+
+    Reuse #97's cache pressure policy. A missing/inaccessible capacity
+    observation stays unknown, never zero or normal. A log mount refusal or
+    exhaustion is explicit; otherwise actual root-master writes are unproven.
+    """
+    from repocache.server_cache_pressure_policy_v1 import preview_cache_pressure
+    policy = dict(warning_free_bytes=warning_free_bytes, critical_free_bytes=critical_free_bytes,
+                  recovery_margin_bytes=recovery_margin_bytes, previous_level=previous_level,
+                  measurements_complete=False)
+    preview_cache_pressure(free_bytes=None, disk_writable=None, **policy)
+    def blank():
+        return {"owner_mode_observed": False, "expected_owner_ancestor_search_mode_observed": None,
+                "free_bytes_observed": None, "free_inodes_observed": None,
+                "mount_write_refusal_observed": None, "actual_service_write_verified": False}
+    health = {"cache": blank(), "log": blank()}
+    cache, log = _inspect_roots(root_fd, root_uid=root_uid, cache_uid=cache_uid,
+                                cache_gid=cache_gid, health=health)
+    cache_health, log_health = health["cache"], health["log"]
+    pressure = preview_cache_pressure(free_bytes=cache_health["free_bytes_observed"],
+        disk_writable=False if cache_health["mount_write_refusal_observed"] else None, **policy)
+    if cache_health["free_inodes_observed"] == 0:
+        pressure.update(pressure_level="critical", reason_code="FILESYSTEM_INODES_EXHAUSTED")
+    blocked = (log_health["mount_write_refusal_observed"] is True
+               or log_health["free_bytes_observed"] == 0 or log_health["free_inodes_observed"] == 0)
+    return {
+        "schema_version": 1,
+        "status": "READ_ONLY_NATIVE_STORAGE_HEALTH_FIXTURE_OBSERVATION",
+        "cache_marker_and_directory_observed": cache,
+        "log_marker_and_directory_observed": log,
+        "cache": cache_health, "log": log_health,
+        "cache_pressure": pressure,
+        "log_health_code": "LOG_STORAGE_EXHAUSTED_OR_READ_ONLY" if blocked else "LOG_WRITE_ACCESS_UNVERIFIED",
+        "atomic_storage_snapshot_verified": False,
+        "actual_service_write_verified": False,
+        "selinux_enforcing_verified": False,
+        "host_root_provenance_verified": False,
+        "authorizes_host_installation": False,
+        "authorizes_nginx_activation": False,
+        "authorizes_cache_cleanup": False,
+    }
 
 
 def _ensure_one(root_fd: int, stack: ExitStack, *,

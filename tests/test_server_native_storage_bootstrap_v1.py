@@ -11,6 +11,7 @@ import pytest
 from repocache.server_native_storage_bootstrap_v1 import (
     NativeStorageBootstrapError, bootstrap_native_nginx_storage_under_root,
     inspect_native_nginx_storage_under_root,
+    inspect_native_nginx_storage_health_under_root,
 )
 
 MARKER = ".repocache-managed.owner-v1"
@@ -48,6 +49,72 @@ def inspect(item):
     return inspect_native_nginx_storage_under_root(
         fd, root_uid=uid, cache_uid=uid, cache_gid=gid,
     )
+
+
+def health(item):
+    fd, _, uid, gid = item
+    return inspect_native_nginx_storage_health_under_root(
+        fd, root_uid=uid, cache_uid=uid, cache_gid=gid,
+        warning_free_bytes=1_000_000, critical_free_bytes=500_000,
+        recovery_margin_bytes=250_000, previous_level="unknown",
+    )
+
+
+def test_health_missing_then_real_owned_roots_never_invent_write_success(storage_root):
+    _, root, _, _ = storage_root
+    result = health(storage_root)
+    for kind in ("cache", "log"):
+        assert result[kind]["free_bytes_observed"] is None
+        assert not result[kind]["owner_mode_observed"]
+        assert not result[kind]["actual_service_write_verified"]
+    assert result["cache_pressure"]["pressure_level"] == "unknown"
+    assert all(not leaf.exists() for leaf in paths(root))
+    provision(storage_root)
+    cache, logs = paths(root)
+    (cache / "artifact").write_bytes(b"retain cache")
+    (logs / "history").write_bytes(b"retain history")
+    before = {p: (p.lstat().st_ino, p.lstat().st_mode, p.lstat().st_mtime_ns,
+                  p.lstat().st_ctime_ns, p.read_bytes() if p.is_file() else None)
+              for p in root.rglob("*")}
+    result = health(storage_root)
+    assert result["cache_marker_and_directory_observed"] and result["log_marker_and_directory_observed"]
+    for name in ("cache", "log"):
+        assert result[name]["owner_mode_observed"]
+        assert result[name]["expected_owner_ancestor_search_mode_observed"] is True
+        assert type(result[name]["free_bytes_observed"]) is int
+        assert type(result[name]["free_inodes_observed"]) is int
+        assert not result[name]["actual_service_write_verified"]
+    assert result["cache_pressure"]["pressure_level"] != "normal"
+    assert result["authorizes_host_installation"] is False
+    assert {p: (p.lstat().st_ino, p.lstat().st_mode, p.lstat().st_mtime_ns,
+                p.lstat().st_ctime_ns, p.read_bytes() if p.is_file() else None)
+            for p in root.rglob("*")} == before
+
+
+@pytest.mark.parametrize("problem", ["unavailable", "readonly", "inodes", "bytes"])
+def test_log_capacity_independent_and_exhaustion_is_never_reported_healthy(storage_root, monkeypatch, problem):
+    from types import SimpleNamespace
+    _, root, _, _ = storage_root
+    provision(storage_root)
+    cache, logs = paths(root)
+    log_inode = logs.stat().st_ino
+    actual = os.fstatvfs
+    def sample(fd):
+        if os.fstat(fd).st_ino != log_inode:
+            return actual(fd)
+        if problem == "unavailable":
+            raise OSError("unavailable")
+        return SimpleNamespace(f_frsize=4096, f_bavail=0 if problem == "bytes" else 1000,
+                               f_favail=0 if problem == "inodes" else 1000,
+                               f_flag=os.ST_RDONLY if problem == "readonly" else 0)
+    monkeypatch.setattr(os, "fstatvfs", sample)
+    result = health(storage_root)
+    assert result["cache"]["free_bytes_observed"] is not None
+    assert result["log"]["owner_mode_observed"] is True
+    assert not result["log"]["actual_service_write_verified"]
+    assert result["log_health_code"] == ("LOG_WRITE_ACCESS_UNVERIFIED" if problem == "unavailable" else "LOG_STORAGE_EXHAUSTED_OR_READ_ONLY")
+    if problem == "unavailable":
+        assert result["log"]["free_bytes_observed"] is None
 
 
 def test_read_only_storage_observation_absent_then_owned_preserves_bytes(storage_root):

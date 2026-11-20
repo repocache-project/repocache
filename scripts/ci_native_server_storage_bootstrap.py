@@ -19,6 +19,7 @@ from repocache.server_install_v1 import validate_os_identity
 from repocache.server_native_storage_bootstrap_v1 import (
     bootstrap_native_nginx_storage_under_root,
     inspect_native_nginx_storage_under_root,
+    inspect_native_nginx_storage_health_under_root,
 )
 from repocache.server_cache_pressure_observe_v1 import (
     observe_cache_pressure_under_root,
@@ -107,6 +108,19 @@ def main() -> int:
             assert owned["log_marker_and_directory_observed"]
             assert not owned["authorizes_host_installation"]
             assert snapshot() == before
+            health = inspect_native_nginx_storage_health_under_root(
+                fd, **kwargs, warning_free_bytes=1_000_000,
+                critical_free_bytes=500_000, recovery_margin_bytes=250_000,
+                previous_level="unknown",
+            )
+            for name in ("cache", "log"):
+                assert health[name]["owner_mode_observed"]
+                assert health[name]["expected_owner_ancestor_search_mode_observed"] is True
+                assert type(health[name]["free_bytes_observed"]) is int
+                assert type(health[name]["free_inodes_observed"]) is int
+                assert not health[name]["actual_service_write_verified"]
+            assert health["cache_pressure"]["pressure_level"] != "normal"
+            assert snapshot() == before and not health["authorizes_host_installation"]
             report = observe_cache_pressure_under_root(
                 fd, root_uid=0, cache_uid=worker.pw_uid,
                 warning_free_bytes=1_000_000,
@@ -132,6 +146,7 @@ def main() -> int:
                 "root_only_log_dir_enforced": True,
                 "ownership_marker_and_repeat_preservation_passed": True,
                 "read_only_owner_marker_and_history_preservation_passed": True,
+                "both_marked_roots_capacity_and_mode_observation_passed": True,
                 "read_only_free_space_observation_passed": True,
                 "booted_systemd_verified": False,
                 "selinux_enforcing_verified": False,
