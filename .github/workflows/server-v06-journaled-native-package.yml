@@ -9,6 +9,8 @@ on:
       - 'src/repocache/server_preflight_v1.py'
       - 'src/repocache/server_preflight_guidance_v1.py'
       - '.github/workflows/server-v06-journaled-native-package.yml'
+      - 'tests/test_ci_v06_foreign_nginx_guard.py'
+      - 'docs/testing/SERVER_NATIVE_NGINX_FOREIGN_REFUSAL_CI_V1.md'
       - 'scripts/ci_v06_journaled_native_server_install.py'
       - 'src/repocache/server_native_package_effects_observe_v1.py'
       - 'scripts/ci_v06_journaled_cache_continuation.py'
@@ -32,6 +34,8 @@ on:
       - 'src/repocache/server_preflight_v1.py'
       - 'src/repocache/server_preflight_guidance_v1.py'
       - '.github/workflows/server-v06-journaled-native-package.yml'
+      - 'tests/test_ci_v06_foreign_nginx_guard.py'
+      - 'docs/testing/SERVER_NATIVE_NGINX_FOREIGN_REFUSAL_CI_V1.md'
       - 'scripts/ci_v06_journaled_native_server_install.py'
       - 'src/repocache/server_native_package_effects_observe_v1.py'
       - 'scripts/ci_v06_journaled_cache_continuation.py'
@@ -101,4 +105,60 @@ jobs:
               grep -Fq "PASS: actual generated pinned TLS/cache fragments carried 4 MISS/HIT objects" /tmp/repocache-v06-cache-smoke.log
               grep -Fq "NOT VERIFIED: real authenticated DNS" /tmp/repocache-v06-cache-smoke.log
               echo "PASS: same disposable Debian/Alma image completed journaled native install and rootless generated HTTPS cache HIT/MISS; no VM GO"
+            '
+
+      - name: Refuse foreign NGINX footprints before native package effects
+        shell: bash
+        env:
+          DISTRO_IMAGE: ${{ matrix.image }}
+        run: |
+          set -Eeuo pipefail
+          docker run --rm --network bridge \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace,readonly" \
+            --workdir /workspace "$DISTRO_IMAGE" sh -ec '
+              set -eu
+              # Prerequisites only; never install nginx in this negative test.
+              if command -v apt-get >/dev/null 2>&1; then
+                apt-get update -qq
+                DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends python3 >/dev/null
+              else
+                dnf -y -q install python3 >/dev/null
+              fi
+              export PYTHONPATH=/workspace/src
+              export REPOCACHE_NATIVE_TEST_CONTAINER=CONFIRMED_DISPOSABLE_DOCKER_ONLY
+              test ! -e /var/lib/repocache
+              test ! -e /usr/sbin/nginx
+              for footprint in foreign-config foreign-binary; do
+                if [ "$footprint" = foreign-config ]; then
+                  mkdir -p /etc/nginx
+                  fixture=/etc/nginx/nginx.conf
+                else
+                  fixture=/usr/sbin/nginx
+                fi
+                printf "%s\n" "UNMANAGED_NGINX_FIXTURE_DO_NOT_REPLACE" > "$fixture"
+                before_stat="$(stat -c "%d:%i:%h:%a:%u:%g:%s:%Y" "$fixture")"
+                before_digest="$(sha256sum "$fixture")"
+                if python3 -B scripts/ci_v06_journaled_native_server_install.py \
+                    > /tmp/foreign-nginx-refusal.json 2> /tmp/foreign-nginx-stderr.log; then
+                  echo "FAIL: foreign NGINX footprint was accepted"
+                  exit 1
+                fi
+                test ! -s /tmp/foreign-nginx-stderr.log
+                grep -Fq "\"code\": \"DISPOSABLE_HOST_NOT_FRESH\"" /tmp/foreign-nginx-refusal.json
+                grep -Fq "\"status\": \"FAIL\"" /tmp/foreign-nginx-refusal.json
+                grep -Fq "\"authorizes_host_installation\": false" /tmp/foreign-nginx-refusal.json
+                test "$(stat -c "%d:%i:%h:%a:%u:%g:%s:%Y" "$fixture")" = "$before_stat"
+                test "$(sha256sum "$fixture")" = "$before_digest"
+                test ! -e /var/lib/repocache
+                test ! -e /var/log/nginx
+                if [ "$footprint" = foreign-config ]; then
+                  test ! -e /usr/sbin/nginx
+                  rm "$fixture"
+                  rmdir /etc/nginx
+                else
+                  test ! -e /etc/nginx
+                  rm "$fixture"
+                fi
+              done
+              echo "PASS: foreign NGINX config and executable refused before state or native package effects (CI only)"
             '
