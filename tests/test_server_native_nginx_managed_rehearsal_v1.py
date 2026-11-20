@@ -326,3 +326,22 @@ def test_failed_restoration_is_never_reported_as_success(
         match="^MANAGED_INCLUDE_INTERRUPTED_TRANSACTION_REFUSED$",
     ):
         exercise(root, previous_sha=hashlib.sha256(OLD).hexdigest())
+
+
+def test_actual_namespace_root_fd_refuses_fixture_mutation(monkeypatch):
+    # This MUST fail before the function inspects or stages any host
+    # NGINX include, even when the caller is root.
+    monkeypatch.delenv("REPOCACHE_NATIVE_TEST_CONTAINER", raising=False)
+    root_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        with pytest.raises(
+            ManagedIncludeRehearsalError,
+            match="^MANAGED_INCLUDE_LIVE_HOST_ROOT_REFUSED$",
+        ):
+            rehearse_managed_include_under_root(
+                root_fd, OK, owner_uid=os.geteuid(),
+                expected_previous_sha256=None,
+                syntax_check=lambda: pytest.fail("host root syntax invoked"),
+            )
+    finally:
+        os.close(root_fd)
