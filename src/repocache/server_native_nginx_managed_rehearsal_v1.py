@@ -15,6 +15,7 @@ from __future__ import annotations
 from contextlib import ExitStack
 import hashlib
 import os
+from pathlib import Path
 import re
 import stat
 from typing import Any, Callable
@@ -164,7 +165,7 @@ def rehearse_managed_include_under_root(
                     != "CONFIRMED_DISPOSABLE_DOCKER_ONLY"
                     or not os.path.isfile("/.dockerenv")
                     or os.geteuid() != 0
-                    or open("/proc/1/comm", encoding="ascii").read().strip()
+                    or Path("/proc/1/comm").read_text(encoding="ascii").strip()
                     == "systemd"):
                 _deny("MANAGED_INCLUDE_LIVE_HOST_ROOT_REFUSED")
         with ExitStack() as stack:
