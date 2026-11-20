@@ -73,8 +73,8 @@ def _rehearse(root_fd: int, candidate: bytes, previous: bytes | None,
     def native_checker() -> None:
         _require(_TARGET.read_bytes() == candidate,
                  "CANDIDATE_NOT_PUBLISHED_FOR_REAL_PARSER")
-        hits.append(1)
         status = _run_nginx()
+        hits.append(status)
         if expect_invalid:
             _require(status != 0, "INVALID_NGINX_DIRECTIVE_ACCEPTED")
             raise ManagedNativeSmokeError("REAL_NGINX_SYNTAX_REJECTED")
@@ -99,7 +99,9 @@ def _rehearse(root_fd: int, candidate: bytes, previous: bytes | None,
                  and result["authorizes_nginx_reload"] is False
                  and result["authorizes_host_installation"] is False,
                  "INVALID_RESTORATION_REPORT")
-    _require(len(hits) == 1, "NATIVE_NGINX_PARSER_NOT_CALLED")
+    _require(len(hits) == 1 and
+             (hits[0] != 0 if expect_invalid else hits[0] == 0),
+             "NATIVE_NGINX_PARSER_NOT_CALLED_OR_WRONG_STATUS")
     _require(not os.path.lexists(_STAGE) and not os.path.lexists(_ROLLBACK),
              "NGINX_TRANSACTION_ARTIFACT_LEFTOVER")
     _require(
