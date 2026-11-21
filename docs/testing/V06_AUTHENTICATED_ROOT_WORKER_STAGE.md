@@ -187,3 +187,17 @@ The supplied snapshot remains untrusted input during preparation. Actual
 predecessor identity and authorization are verified separately at staging
 and execution. Package-effects reconciliation and booted-host acceptance
 remain mandatory.
+
+## Native package-effects reconciliation boundary (Stage A)
+
+The post-APT/DNF read-only correlation now also executes the distro's
+fixed `dpkg --verify nginx nginx-common` (Debian 13) or
+`rpm -V nginx nginx-core` (AlmaLinux 10), requiring a zero exit and
+an empty discrepancy listing, with the stock NGINX binary identity
+unchanged across the check. This detects additional installed-file
+drift before considering reconciliation; it is not signed package
+provenance. The native effects marker **remains durable and blocking**:
+local package-database consistency, a vendor unit and a signed release
+worker do not alone justify removal after an ambiguous APT/DNF crash.
+No new package, privileged operation, marker clearing or service
+activation authority is introduced here.

@@ -20,6 +20,13 @@ _MANAGERS = {
 }
 _ENV = {"PATH": "/usr/bin:/bin", "LC_ALL": "C", "LANG": "C"}
 _MAX_RESULT = 2048
+# Optional stricter *read-only* installed-file integrity for the post-APT/DNF
+# effects audit. These checks compare installed files with the native package
+# database, not with an independently signed payload.
+_VERIFY = {
+    "debian13": ["/usr/bin/dpkg", "--verify", "nginx", "nginx-common"],
+    "almalinux10": ["/usr/bin/rpm", "-V", "nginx", "nginx-core"],
+}
 
 
 class StockNginxPackageOwnerError(ValueError):
@@ -155,3 +162,42 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+def inspect_stock_nginx_package_file_integrity() -> dict[str, Any]:
+    """Verify installed stock NGINX file bytes against native package metadata.
+
+    This is a read-only reconciliation prerequisite, never an approval to
+    retire an APT/DNF effects marker: a compromised local package database,
+    changed repository signatures or failed native install are NOT excluded.
+    It deliberately accepts no package name, executable or path from a peer.
+    """
+    try:
+        platform = _platform(Path("/etc/os-release").read_text(encoding="utf-8"))
+        before = _safe_binary()
+        result = subprocess.run(
+            _VERIFY[platform], stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            check=False, timeout=20, env=_ENV, cwd="/",
+        )
+        if (type(result.returncode) is not int or result.returncode != 0
+                or type(result.stdout) is not str or result.stdout != ""
+                or type(result.stderr) is not str
+                or len(result.stderr) > _MAX_RESULT):
+            _deny("PACKAGE_FILE_INTEGRITY_UNVERIFIED")
+        if _safe_binary() != before:
+            _deny("BINARY_CHANGED")
+    except StockNginxPackageOwnerError:
+        raise
+    except (OSError, ValueError, TypeError, UnicodeError,
+            subprocess.SubprocessError):
+        _deny("PACKAGE_FILE_INTEGRITY_UNVERIFIED")
+    return {
+        "schema_version": 1,
+        "status": "READ_ONLY_STOCK_NGINX_PACKAGE_FILE_INTEGRITY_OBSERVED",
+        "platform": platform,
+        "native_package_file_integrity_verified": True,
+        "native_package_signature_verified": False,
+        "installed_host_root_authenticated": False,
+        "authorizes_native_marker_removal": False,
+        "authorizes_nginx_activation": False,
+    }

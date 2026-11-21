@@ -13,6 +13,7 @@ from typing import Any
 
 from repocache.server_stock_nginx_package_owner_v1 import (
     StockNginxPackageOwnerError, inspect_stock_nginx_package_owner,
+    inspect_stock_nginx_package_file_integrity,
 )
 from repocache.server_native_nginx_service_unit_v1 import (
     NginxServiceUnitInspectionError, inspect_native_nginx_unit,
@@ -189,7 +190,7 @@ def inspect_current_namespace_native_package_effects(
 
 def _collect_postpackage_facts_while_locked(
     directory_fd: int, *, owner_uid: int, distribution: str,
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Pin the same pending journal across native package DB and unit reads.
 
     Caller must hold the #31 exclusive state lock through the entire read.
@@ -201,6 +202,7 @@ def _collect_postpackage_facts_while_locked(
     )
     try:
         package = inspect_stock_nginx_package_owner()
+        integrity = inspect_stock_nginx_package_file_integrity()
         unit = inspect_native_nginx_unit(distribution).to_dict()
     except (StockNginxPackageOwnerError, NginxServiceUnitInspectionError,
             OSError, TypeError, ValueError):
@@ -208,12 +210,12 @@ def _collect_postpackage_facts_while_locked(
     after = _inspect_locked(
         directory_fd, owner_uid=owner_uid, distribution=distribution,
     )
-    return before, package, unit, after
+    return before, package, integrity, unit, after
 
 
 def _collect_current_namespace_postpackage_facts(
     *, distribution: str,
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Use ONE exclusive protected lock across native package and unit reads.
 
     The previous before/after observations each obtained and released a
@@ -264,7 +266,7 @@ def inspect_current_namespace_native_postpackage_candidate(
     authorize NGINX/service activation or attest production readiness.
     """
     _validate_args(distribution, 0)
-    before, package, unit, after = _collect_current_namespace_postpackage_facts(
+    before, package, integrity, unit, after = _collect_current_namespace_postpackage_facts(
         distribution=distribution,
     )
 
@@ -292,6 +294,16 @@ def inspect_current_namespace_native_postpackage_candidate(
             or package.get("authorizes_nginx_adoption") is not False):
         _deny("PACKAGE_OWNER_UNVERIFIED")
 
+    if (type(integrity) is not dict
+            or integrity.get("status") !=
+               "READ_ONLY_STOCK_NGINX_PACKAGE_FILE_INTEGRITY_OBSERVED"
+            or integrity.get("platform") != expected_platform
+            or integrity.get("native_package_file_integrity_verified") is not True
+            or integrity.get("native_package_signature_verified") is not False
+            or integrity.get("authorizes_native_marker_removal") is not False
+            or integrity.get("authorizes_nginx_activation") is not False):
+        _deny("PACKAGE_INTEGRITY_UNVERIFIED")
+
     if (type(unit) is not dict
             or unit.get("unit_name") != "nginx.service"
             or unit.get("code") != "VENDOR_NGINX_UNIT_OBSERVED"
@@ -315,6 +327,7 @@ def inspect_current_namespace_native_postpackage_candidate(
         "pending_journal_stable_across_observations": True,
         "single_protected_lock_spanned_native_package_and_unit_reads": True,
         "native_package_db_owner_observed": True,
+        "native_package_file_integrity_verified": True,
         "native_vendor_unit_shape_observed": True,
         "native_package_signature_verified": False,
         "installed_host_root_authenticated": False,
