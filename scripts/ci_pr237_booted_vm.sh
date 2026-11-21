@@ -122,4 +122,16 @@ test "$boot_after" != "$boot_before"
 printf 'boot_before=%s\nboot_after=%s\n' "$boot_before" "$boot_after" > "$out/reboot-ids.txt"
 stage=after-reboot-nginx
 sshguest "sudo bash /home/pr237ci/source/scripts/ci_pr237_guest.sh '$PR237_PLATFORM' after" > "$out/after-reboot.txt" 2>&1 || { cat "$out/after-reboot.txt"; exit 1; }
+stage=synthetic-pending-journal
+sshguest "sudo bash /home/pr237ci/source/scripts/ci_pr237_guest.sh '$PR237_PLATFORM' journal-prepare" > "$out/pending-journal-before-reboot.txt" 2>&1 || { cat "$out/pending-journal-before-reboot.txt"; exit 1; }
+stage=second-guest-kernel-reboot
+boot_second_before="$(sshguest 'cat /proc/sys/kernel/random/boot_id')"
+sshguest 'sudo systemctl reboot' >/dev/null 2>&1 || true
+sleep 8
+waitssh
+boot_second_after="$(sshguest 'cat /proc/sys/kernel/random/boot_id')"
+test "$boot_second_after" != "$boot_second_before"
+printf 'before_second=%s\nafter_second=%s\n' "$boot_second_before" "$boot_second_after" > "$out/second-reboot-ids.txt"
+stage=synthetic-pending-refusal-after-reboot
+sshguest "sudo bash /home/pr237ci/source/scripts/ci_pr237_guest.sh '$PR237_PLATFORM' journal-after" > "$out/pending-journal-after-reboot.txt" 2>&1 || { cat "$out/pending-journal-after-reboot.txt"; exit 1; }
 stage=complete

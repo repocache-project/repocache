@@ -68,5 +68,11 @@ case "$phase" in
     python3 -m pytest -q tests/test_server_native_nginx_package_journal_v1.py tests/test_server_stock_nginx_package_owner_v1.py
     echo 'PASS: existing journal/package-owner fixture tests executed in native guest'
     ;;
+  journal-prepare)
+    python3 -B /home/pr237ci/source/scripts/ci_pr237_native_journal_reboot.py "$(test "$platform" = debian13 && echo debian || echo almalinux)" prepare
+    ;;
+  journal-after)
+    python3 -B /home/pr237ci/source/scripts/ci_pr237_native_journal_reboot.py "$(test "$platform" = debian13 && echo debian || echo almalinux)" after
+    ;;
   *) exit 2 ;;
 esac

@@ -58,3 +58,26 @@ pr237-ci image context, and runs privileged mutations exclusively in that
 discarded guest. It never installs or starts the REPOCACHE worker. If the
 negative scenario fails, the workflow must fail rather than silently
 falling back to fixture-only acceptance.
+
+## Two actual guest reboots and persistent *synthetic* pending journal
+
+After the live NGINX syntax/reload/foreign-unit exercises, the independent
+native guest fixture calls the real protected-namespace bootstrap and the real
+exclusive-lock durable package-journal preparer against the guest's fixed
+/var/lib/repocache/server path. It **does not invoke APT/DNF in this phase**
+and is **not** a recovery of an actual package-manager interruption. The
+fixture intentionally records a synthetic pending marker and masks NGINX,
+reboots the guest kernel **again**, and verifies:
+
+- A changed second kernel boot ID and intact root-owned pending marker,
+  inode and canonical contents, with mode 0600 and a retained state lock.
+- A persistent NGINX mask and inactive service after the second reboot.
+- Two genuine calls to the protected native journal preparer refuse
+  re-entry and preserve the original marker bytes, inode and metadata.
+
+This demonstrates the fail-closed *journal persistence and retry refusal*
+mechanics under real systemd reboot. It does **not** prove rollback of native
+APT/DNF side effects, owner-signed installed worker, REPOCACHE v2 transaction
+recovery or production service behavior. A genuine interrupted package
+manager acceptance case remains NOT VERIFIED. No marker is cleared: the
+entire VM is discarded after the experiment.
