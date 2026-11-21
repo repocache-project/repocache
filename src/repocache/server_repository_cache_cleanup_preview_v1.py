@@ -31,7 +31,7 @@ from repocache.server_fixture_multi_resource_wal_v1 import (
     _validate_old as _validate_multi_owner,
 )
 from repocache.server_proposed_state_v2_store import (
-    _legacy_refusal, _pending, _read_v2,
+    V2_STATE, _legacy_refusal, _pending, _read_v2,
 )
 from repocache.server_protected_state_store_v1 import _locked
 
@@ -285,7 +285,7 @@ def preview_locked_retired_repository_cache_cleanup_under_root(
             if state is None or raw is None:
                 _deny("LOCKED_STATE_REQUIRED")
             resources = _read_multi_resources(state_fd, root_uid)
-            if resources["state-v2.json"] != raw:
+            if resources[V2_STATE] != raw:
                 _deny("LOCKED_STATE_CHANGED")
             if any(resources[name] is not None for name in (
                 _MULTI_INCLUDE, _MULTI_CATALOG, _MULTI_MANIFEST,
