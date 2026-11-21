@@ -449,3 +449,118 @@ def test_completion_callback_is_single_use_even_after_failure(
         with pytest.raises(NativePackageJournalError, match="NATIVE_COMPLETION_SCOPE_EXPIRED"):
             finish()
     assert (folder / NATIVE_PENDING_NAME).exists()
+
+
+def _synthetic_host_native_package(monkeypatch, distribution, *, failure=None):
+    """Mock host effects, retain real root-FD journal, lock and audit receipt."""
+    from types import SimpleNamespace
+    from scripts import install_native_root_worker as install
+    from repocache import server_native_package_effects_observe_v1 as observe
+    mask = {"active": False, "disabled": False, "actions": [], "commands": []}
+    original_lexists = os.path.lexists
+    monkeypatch.setattr(install.os.path, "lexists", lambda path: (
+        mask["active"] if path == install._NGINX_MASK else original_lexists(path)))
+    monkeypatch.setattr(install, "_owned_nginx_mask", lambda: mask["active"])
+    monkeypatch.setattr(install, "_native_workspace_is_root_owned", lambda _path: True)
+    monkeypatch.setattr(install, "_fresh_nginx_under_lock", lambda *_args: None)
+    monkeypatch.setattr(install, "_trusted_key", lambda _path: True)
+    monkeypatch.setattr(install, "_native_install_commands",
+                        lambda distro, work: (["REFRESH"], ["INSTALL"]))
+    def systemctl(action):
+        mask["actions"].append(action)
+        if action == "mask":
+            mask["active"] = True
+            return 0, b""
+        if action == "disable":
+            mask["disabled"] = True
+            return 0, b""
+        if action == "unmask":
+            mask["active"] = False
+            return 0, b""
+        if action == "is-enabled":
+            return (1, b"disabled\n") if mask["disabled"] else (0, b"enabled\n")
+        if action == "is-active":
+            return 3, b"inactive\n"
+        pytest.fail("unexpected systemctl operation")
+    monkeypatch.setattr(install, "_nginx_systemctl", systemctl)
+    def run(argv, _work):
+        mask["commands"].append(tuple(argv))
+        if failure == "manager" and argv[0] == "INSTALL":
+            raise ValueError("simulated package transaction failure")
+        if argv[0] == "/usr/bin/dpkg-query":
+            return "install ok installed"
+        if argv[0] == "/usr/bin/rpm":
+            return "nginx"
+        return ""
+    monkeypatch.setattr(install, "_native_package_command", run)
+    platform = "debian13" if distribution == "debian" else "almalinux10"
+    pkg = {"platform": platform, "package_name": "nginx" if distribution == "debian" else "nginx-core",
+           "binary_path": "/usr/sbin/nginx",
+           "status": "READ_ONLY_STOCK_NGINX_PACKAGE_OWNER_OBSERVED",
+           "native_package_db_owner_observed": True,
+           "native_package_signature_verified": False, "authorizes_nginx_adoption": False}
+    integrity = {"status": "READ_ONLY_STOCK_NGINX_PACKAGE_FILE_INTEGRITY_OBSERVED",
+                 "platform": platform, "native_package_file_integrity_verified": True,
+                 "native_package_signature_verified": False,
+                 "authorizes_native_marker_removal": False, "authorizes_nginx_activation": False}
+    unit = {"unit_name": "nginx.service", "code": "VENDOR_NGINX_UNIT_OBSERVED",
+            "vendor_unit_sha256": "a" * 64, "vendor_unit_bounded_and_owned": True,
+            "native_package_file_ownership_verified": False,
+            "authorizes_systemctl": False, "authorizes_nginx_reload": False}
+    observed = {"status": "NATIVE_PACKAGE_EFFECTS_PENDING_RECONCILIATION",
+                "distribution": distribution, "journal_identity_verified": True,
+                "pending_native_effects_block_reentry": True,
+                "authorizes_native_marker_removal": False}
+    monkeypatch.setattr(install, "inspect_stock_nginx_package_owner", lambda: pkg)
+    monkeypatch.setattr(install, "inspect_stock_nginx_package_file_integrity", lambda: integrity)
+    monkeypatch.setattr(install, "inspect_native_nginx_unit",
+                        lambda distro: SimpleNamespace(to_dict=lambda: unit))
+    def audit(_state, *, owner_uid, distribution):
+        if failure == "audit":
+            raise observe.NativeEffectsReconciliationError("simulated audit failure")
+        return observed, pkg, integrity, unit, dict(observed)
+    monkeypatch.setattr(observe, "_collect_postpackage_facts_while_locked", audit)
+    return install, mask
+
+
+@pytest.mark.parametrize("distribution", ["debian", "almalinux"])
+def test_signed_native_host_scope_completes_only_after_service_disabled_and_audit(
+    protected_root, monkeypatch, distribution,
+):
+    from repocache.server_native_nginx_package_journal_v1 import NATIVE_COMPLETE_NAME
+    root_fd, state, uid = protected_root
+    install, mask = _synthetic_host_native_package(monkeypatch, distribution)
+    result = install._execute_native_nginx_install_locked(
+        root_fd, distribution=distribution, document={}, os_release="", owner_uid=uid,
+    )
+    assert result["status"] == "AUTHENTICATED_NATIVE_NGINX_PACKAGE_INSTALLED"
+    assert result["authorizes_service_activation"] is False
+    assert mask["actions"] == ["mask", "disable", "unmask", "is-enabled", "is-active"]
+    assert not mask["active"]
+    assert (state / NATIVE_COMPLETE_NAME).is_file()
+    assert not (state / NATIVE_PENDING_NAME).exists()
+    with pytest.raises(NativePackageJournalError):
+        install._execute_native_nginx_install_locked(
+            root_fd, distribution=distribution, document={}, os_release="", owner_uid=uid,
+        )
+
+
+@pytest.mark.parametrize("distribution", ["debian", "almalinux"])
+@pytest.mark.parametrize("failure", ["manager", "audit"])
+def test_signed_native_host_scope_rejects_partial_effects_and_retains_durable_mask(
+    protected_root, monkeypatch, distribution, failure,
+):
+    from repocache.server_native_nginx_package_journal_v1 import NATIVE_COMPLETE_NAME
+    root_fd, state, uid = protected_root
+    install, mask = _synthetic_host_native_package(monkeypatch, distribution, failure=failure)
+    with pytest.raises(ValueError):
+        install._execute_native_nginx_install_locked(
+            root_fd, distribution=distribution, document={}, os_release="", owner_uid=uid,
+        )
+    assert (state / NATIVE_PENDING_NAME).is_file()
+    assert not (state / NATIVE_COMPLETE_NAME).exists()
+    assert mask["active"]
+    with pytest.raises(NativePackageJournalError):
+        install._execute_native_nginx_install_locked(
+            root_fd, distribution=distribution, document={}, os_release="", owner_uid=uid,
+        )
