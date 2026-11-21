@@ -46,7 +46,8 @@ stage=vm-guest-script-syntax
 python3 - <<'PY'
 import ast
 from pathlib import Path
-ast.parse(Path("scripts/ci_pr237_native_socket_guest.py").read_text(encoding="utf-8"))
+for script in ("scripts/ci_pr237_native_socket_guest.py", "scripts/ci_pr237_native_package_interrupt_guest.py"):
+    ast.parse(Path(script).read_text(encoding="utf-8"), filename=script)
 PY
 stage=runner-probe
 {
