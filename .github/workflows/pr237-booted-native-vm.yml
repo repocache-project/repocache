@@ -12,6 +12,7 @@ on:
       - 'scripts/ci_pr237_synthetic_worker_guest.py'
       - 'scripts/ci_pr237_native_package_guest.py'
       - 'scripts/ci_pr237_native_socket_guest.py'
+      - 'scripts/ci_pr237_native_package_interrupt_guest.py'
       - 'docs/testing/PR237_BOOTED_VM.md'
   workflow_dispatch:
 
@@ -44,6 +45,16 @@ jobs:
             image_sha512: f46f0671a6e5bdec5291ab8972bae2f10e5408c2f64a74078f11efc2f06a436a9d0313ed50e0472542eeabf780e9f7c792ac0a314c6c20507fcd9fd81b468c3d
             image_sha256: ''
           - scenario: native-installer
+            platform: almalinux10
+            image_url: https://repo.almalinux.org/almalinux/10/cloud/x86_64/images/AlmaLinux-10-GenericCloud-10.3-20261116.0.x86_64.qcow2
+            image_sha512: ''
+            image_sha256: 845d3a4e41fde973bdbf9763b62a88538c1a1fadc2332a89f6ea01e2c17c78ee
+          - scenario: native-package-interruption
+            platform: debian13
+            image_url: https://cloud.debian.org/images/cloud/trixie/20261001-2618/debian-13-genericcloud-amd64-20261001-2618.qcow2
+            image_sha512: f46f0671a6e5bdec5291ab8972bae2f10e5408c2f64a74078f11efc2f06a436a9d0313ed50e0472542eeabf780e9f7c792ac0a314c6c20507fcd9fd81b468c3d
+            image_sha256: ''
+          - scenario: native-package-interruption
             platform: almalinux10
             image_url: https://repo.almalinux.org/almalinux/10/cloud/x86_64/images/AlmaLinux-10-GenericCloud-10.3-20261116.0.x86_64.qcow2
             image_sha512: ''
