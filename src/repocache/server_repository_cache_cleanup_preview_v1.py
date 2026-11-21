@@ -6,6 +6,7 @@ levels=1:2 cache layout. This is NOT cleanup authorization or a root helper.
 from __future__ import annotations
 
 from contextlib import ExitStack
+import hashlib
 import os
 import re
 import stat
@@ -21,6 +22,10 @@ from repocache.server_native_storage_bootstrap_v1 import (
 from repocache.server_protected_state_inspect_v1 import (
     _DIRECTORY_FLAGS, _identity, _recheck, _safe_directory, _walk,
 )
+from repocache.server_proposed_state_v2_store import (
+    _legacy_refusal, _pending, _read_v2,
+)
+from repocache.server_protected_state_store_v1 import _locked
 
 _FILE_FLAGS = (os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
                | getattr(os, "O_CLOEXEC", 0))
@@ -223,3 +228,89 @@ def preview_repository_cache_cleanup_under_root(
         raise
     except (OSError, ValueError, TypeError, OverflowError, RecursionError):
         _deny("OBSERVATION_UNVERIFIED")
+
+
+def preview_locked_retired_repository_cache_cleanup_under_root(
+    root_fd: int, *, root_uid: int, cache_uid: int, cache_gid: int,
+    repository_id: str, expected_state_generation: int,
+    expected_state_sha256: str,
+) -> dict[str, Any]:
+    """Join actual *fixture* retired-v2 history and owned cache under one lock.
+
+    Unlike a caller-supplied 'retired' flag, this opens the persisted state-v2
+    record through the existing owner-pinned exclusive descriptor lock. It
+    refuses pending recovery, absent or still-allocated IDs, stale generation
+    and whole-state digest mismatch BEFORE scanning even one cache object.
+    The selected repository's complete cache is then inspected by the strict
+    existing bounded, O_NOFOLLOW ownership/layout preview under that lock.
+
+    No host-root authority, trusted operator intent or NGINX quiescence is
+    established by a test root descriptor. This is strictly read-only and
+    cannot grant permission to unlink a single file, even on a passing
+    fixture report. An installed native writer must recheck all invariants
+    inside its independently authorized transaction and prove live worker
+    quiescence before any explicit force cleanup.
+    """
+    if (type(root_fd) is not int or root_fd < 0
+            or any(type(v) is not int or not 0 <= v <= 2**32 - 2
+                   for v in (root_uid, cache_uid, cache_gid))
+            or type(repository_id) is not str
+            or ID.fullmatch(repository_id) is None
+            or type(expected_state_generation) is not int
+            or not 1 <= expected_state_generation < 2**63
+            or type(expected_state_sha256) is not str
+            or len(expected_state_sha256) != 64
+            or any(ch not in "0123456789abcdef"
+                   for ch in expected_state_sha256)):
+        _deny("LOCKED_ARGUMENT_INVALID")
+    try:
+        with _locked(root_fd, root_uid) as state_fd:
+            _legacy_refusal(state_fd, root_uid)
+            if _pending(state_fd, root_uid):
+                _deny("LOCKED_RECOVERY_REQUIRED")
+            state, raw = _read_v2(state_fd, root_uid)
+            if state is None or raw is None:
+                _deny("LOCKED_STATE_REQUIRED")
+            digest = hashlib.sha256(raw).hexdigest()
+            if (state["state_generation"] != expected_state_generation
+                    or digest != expected_state_sha256):
+                _deny("LOCKED_STATE_CHANGED")
+
+            historical = {entry["id"]: entry
+                          for entry in state["id_reservations"]}
+            entry = historical.get(repository_id)
+            if (entry is None or entry["status"] != "retired"
+                    or any(row["id"] == repository_id
+                           for row in state["repository_records"])):
+                _deny("LOCKED_REPOSITORY_NOT_RETIRED")
+
+            # The immutable tombstone and cache directory identity must
+            # agree on the exact selected ID; a forged caller-side reservation
+            # snapshot cannot substitute for the persisted ledger.
+            observed = preview_repository_cache_cleanup_under_root(
+                root_fd, root_uid=root_uid, cache_uid=cache_uid,
+                cache_gid=cache_gid, repository_id=repository_id,
+            )
+            again, current = _read_v2(state_fd, root_uid)
+            _legacy_refusal(state_fd, root_uid)
+            if (_pending(state_fd, root_uid) or again != state
+                    or current != raw):
+                _deny("LOCKED_STATE_CHANGED")
+            return {
+                **observed,
+                "status": "LOCKED_RETIRED_CACHE_PREVIEW_ONLY",
+                "state_generation": expected_state_generation,
+                "protected_state_sha256": digest,
+                "fixture_retirement_and_cache_correspondence_observed": True,
+                "state_lock_held_during_inspection": True,
+                "state_lock_still_held_after_return": False,
+                "installed_nginx_quiescence_verified": False,
+                "signed_operator_force_cleanup_verified": False,
+                "authorizes_cache_cleanup": False,
+                "authorizes_repository_removal": False,
+                "authorizes_nginx_reload": False,
+            }
+    except RepositoryCacheCleanupPreviewError:
+        raise
+    except (OSError, ValueError, TypeError, OverflowError, RecursionError):
+        _deny("LOCKED_PROTECTED_UNVERIFIED")
