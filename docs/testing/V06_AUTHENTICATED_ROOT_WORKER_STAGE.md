@@ -207,3 +207,13 @@ changelog, manual and license files. Those exact missing-doc entries
 are recorded as omissions and **never** imply verification of all package
 bytes. Any binary, systemd-unit, runtime configuration, package-manager
 failure or unknown discrepancy is still a hard refusal.
+
+On AlmaLinux 10 the stock RPM may report exactly two metadata-only
+differences on package-created ghost log files
+`/var/log/nginx/{access,error}.log`. These are accepted only when their
+on-disk objects are single-linked regular files owned by root or the
+distro's `nginx` UID, with a trusted root-owned non-writable log
+directory and no group/world-write permissions. Their owner/mode
+differences are counted explicitly; they do not attest every package
+byte or NGINX log-retention behavior. Any other runtime discrepancy
+or untrusted log inode remains a refusal.

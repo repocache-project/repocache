@@ -201,3 +201,62 @@ def test_native_file_audit_never_claims_stripped_documentation_is_intact():
     assert report["all_native_package_bytes_verified"] is False
     assert report["native_package_signature_verified"] is False
     assert report["authorizes_native_marker_removal"] is False
+
+@pytest.mark.parametrize("variation", [
+    ".M...U...  g /var/log/nginx/access.log",
+    ".M...U...  g /var/log/nginx/error.log",
+])
+def test_expected_native_rpm_ghost_log_variation_requires_safe_fixed_inodes(
+    variation,
+):
+    root = SimpleNamespace(st_mode=stat.S_IFDIR | 0o755,
+                           st_uid=0, st_dev=2)
+    logfile = SimpleNamespace(st_mode=stat.S_IFREG | 0o640,
+                              st_uid=979, st_nlink=1, st_dev=2)
+    with mock.patch.object(p.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=979)), \
+         mock.patch.object(p.os, "lstat", side_effect=[root, logfile]):
+        assert p._ignored_native_rpm_ghost_log_variations(variation) == ("", 1)
+
+
+@pytest.mark.parametrize("mode,uid,links", [
+    (stat.S_IFLNK | 0o777, 979, 1),
+    (stat.S_IFREG | 0o666, 979, 1),
+    (stat.S_IFREG | 0o640, 500, 1),
+    (stat.S_IFREG | 0o640, 979, 2),
+])
+def test_native_rpm_log_variation_refuses_foreign_ownership_or_inode(mode, uid, links):
+    root = SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0, st_dev=2)
+    logfile = SimpleNamespace(st_mode=mode, st_uid=uid, st_nlink=links, st_dev=2)
+    with mock.patch.object(p.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=979)), \
+         mock.patch.object(p.os, "lstat", side_effect=[root, logfile]):
+        with pytest.raises(p.StockNginxPackageOwnerError):
+            p._ignored_native_rpm_ghost_log_variations(
+                ".M...U...  g /var/log/nginx/access.log"
+            )
+
+
+@pytest.mark.parametrize("raw", [
+    ".M...U...  g /var/log/nginx/foreign.log",
+    ".M...U...  g /usr/sbin/nginx",
+])
+def test_native_rpm_unknown_variations_never_bypass_distro_verifier(raw):
+    root = SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0, st_dev=2)
+    logfile = SimpleNamespace(st_mode=stat.S_IFREG | 0o640,
+                              st_uid=979, st_nlink=1, st_dev=2)
+    with mock.patch.object(p.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=979)), \
+         mock.patch.object(p.os, "lstat", side_effect=[root, logfile]):
+        remainder, count = p._ignored_native_rpm_ghost_log_variations(raw)
+        assert remainder == raw
+        assert count == 0
+
+def test_native_rpm_duplicate_expected_log_is_refused():
+    root = SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0, st_dev=2)
+    logfile = SimpleNamespace(st_mode=stat.S_IFREG | 0o640,
+                              st_uid=979, st_nlink=1, st_dev=2)
+    with mock.patch.object(p.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=979)), \
+         mock.patch.object(p.os, "lstat", side_effect=[root, logfile]):
+        with pytest.raises(p.StockNginxPackageOwnerError):
+            p._ignored_native_rpm_ghost_log_variations(
+                ".M...U...  g /var/log/nginx/access.log\n"
+                ".M...U...  g /var/log/nginx/access.log"
+            )

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import pwd
 import re
 import stat
 import subprocess
@@ -183,6 +184,52 @@ def _ignored_minimal_image_documentation(raw: str) -> int:
     return omitted
 
 
+_RPM_GHOST_LOGS = frozenset({
+    ".M...U...  g /var/log/nginx/access.log",
+    ".M...U...  g /var/log/nginx/error.log",
+})
+
+
+def _ignored_native_rpm_ghost_log_variations(raw: str) -> tuple[str, int]:
+    """Ignore only stock log metadata changes after validating fixed inodes.
+
+    NGINX/packaging may adjust these two ghost log ownership/modes at
+    installation; the executable, vendor unit, and other package files
+    remain mandatory RPM integrity checks. No arbitrary path is accepted.
+    """
+    if type(raw) is not str or len(raw) > _MAX_RESULT:
+        _deny("PACKAGE_FILE_INTEGRITY_UNVERIFIED")
+    try:
+        uid = pwd.getpwnam("nginx").pw_uid
+        directory = os.lstat("/var/log/nginx")
+    except (KeyError, OSError, ValueError, TypeError):
+        _deny("PACKAGE_LOG_IDENTITY_UNVERIFIED")
+    if (type(uid) is not int or uid < 0
+            or not stat.S_ISDIR(directory.st_mode) or directory.st_uid != 0
+            or directory.st_mode & 0o022):
+        _deny("PACKAGE_LOG_IDENTITY_UNVERIFIED")
+    selected: set[str] = set()
+    remaining: list[str] = []
+    for line in raw.splitlines():
+        if line not in _RPM_GHOST_LOGS:
+            remaining.append(line)
+            continue
+        if line in selected:
+            _deny("PACKAGE_LOG_IDENTITY_UNVERIFIED")
+        selected.add(line)
+        filename = line.rsplit(" ", 1)[1]
+        try:
+            info = os.lstat(filename)
+        except OSError:
+            _deny("PACKAGE_LOG_IDENTITY_UNVERIFIED")
+        if (not stat.S_ISREG(info.st_mode)
+                or info.st_uid not in (0, uid) or info.st_nlink != 1
+                or info.st_dev != directory.st_dev
+                or info.st_mode & 0o022):
+            _deny("PACKAGE_LOG_IDENTITY_UNVERIFIED")
+    return "\n".join(remaining), len(selected)
+
+
 def inspect_stock_nginx_package_file_integrity() -> dict[str, Any]:
     """Verify installed stock NGINX file bytes against native package metadata.
 
@@ -199,12 +246,25 @@ def inspect_stock_nginx_package_file_integrity() -> dict[str, Any]:
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             check=False, timeout=20, env=_ENV, cwd="/",
         )
-        if (type(result.returncode) is not int or result.returncode != 0
-                or type(result.stderr) is not str or result.stderr != ""):
+        if (type(result.returncode) is not int
+                or type(result.stderr) is not str or result.stderr != ""
+                or type(result.stdout) is not str
+                or len(result.stdout) > _MAX_RESULT):
             _deny("PACKAGE_FILE_INTEGRITY_UNVERIFIED")
-        # Distro base images intentionally omit man pages and changelogs.
-        # Do not confuse those safe omissions with verified completeness.
-        missing_docs = _ignored_minimal_image_documentation(result.stdout)
+        log_omissions = 0
+        remaining = result.stdout
+        if platform == "almalinux10" and result.stdout:
+            remaining, log_omissions = _ignored_native_rpm_ghost_log_variations(
+                result.stdout,
+            )
+        # Distro images may strip strictly bounded docs; the RPM may also
+        # report stock ghost-log metadata drift from the official package.
+        missing_docs = _ignored_minimal_image_documentation(remaining)
+        expected_return = (0,) if platform == "debian13" else (0, 1)
+        if (result.returncode not in expected_return
+                or (result.returncode != 0
+                    and not (log_omissions or missing_docs))):
+            _deny("PACKAGE_FILE_INTEGRITY_UNVERIFIED")
         if _safe_binary() != before:
             _deny("BINARY_CHANGED")
     except StockNginxPackageOwnerError:
@@ -218,7 +278,8 @@ def inspect_stock_nginx_package_file_integrity() -> dict[str, Any]:
         "platform": platform,
         "native_package_file_integrity_verified": True,
         "native_package_documentation_omissions": missing_docs,
-        "all_native_package_bytes_verified": missing_docs == 0,
+        "native_package_ghost_log_variations": log_omissions,
+        "all_native_package_bytes_verified": missing_docs == 0 and log_omissions == 0,
         "native_package_signature_verified": False,
         "installed_host_root_authenticated": False,
         "authorizes_native_marker_removal": False,
