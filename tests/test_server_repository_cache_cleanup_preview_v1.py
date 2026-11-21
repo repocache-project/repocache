@@ -224,3 +224,64 @@ def test_preview_has_no_cache_write_delete_or_subprocess_boundary():
     ):
         assert disallowed not in source
     assert "authorizes_cache_cleanup" in source
+
+@pytest.mark.parametrize("kind", ["fifo", "symlink", "world-write", "directory"])
+def test_untrusted_leaf_is_refused_before_any_file_open(owned, tmp_path,
+                                                         monkeypatch, kind):
+    """A special cache leaf must never be opened even with O_NONBLOCK."""
+    target = populate(owned) / DIGEST1
+    external = tmp_path / "external"
+    external.write_bytes(b"foreign-private-payload")
+    target.unlink()
+    if kind == "fifo":
+        os.mkfifo(target, mode=0o600)
+    elif kind == "symlink":
+        target.symlink_to(external)
+    elif kind == "world-write":
+        target.write_bytes(b"unsafe")
+        target.chmod(0o666)
+    else:
+        target.mkdir(mode=0o700)
+
+    original_open = preview.os.open
+    attempted = []
+
+    def observe_open(path, flags, *args, **kwargs):
+        if path == DIGEST1:
+            attempted.append(flags)
+            pytest.fail("untrusted leaf reached os.open before stat refusal")
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(preview.os, "open", observe_open)
+    with pytest.raises(preview.RepositoryCacheCleanupPreviewError,
+                       match="CACHE_CLEANUP_CONTENT_UNTRUSTED"):
+        inspect(owned)
+    assert attempted == []
+    assert external.read_bytes() == b"foreign-private-payload"
+
+
+def test_untrusted_directory_is_refused_before_open(owned, tmp_path,
+                                                     monkeypatch):
+    populate(owned)
+    first = owned[3] / "a"
+    foreign = tmp_path / "foreign-directory"
+    foreign.mkdir()
+    # Replace a known cache directory with a symlink, preserving foreign
+    # contents and ensuring the descriptor scanner never dereferences it.
+    (first / "bc" / DIGEST1).unlink()
+    (first / "bc" / DIGEST2).unlink()
+    (first / "bc").rmdir()
+    first.rmdir()
+    first.symlink_to(foreign, target_is_directory=True)
+
+    original = preview.os.open
+
+    def deny_bad_directory_open(name, flags, *args, **kwargs):
+        if name == "a":
+            pytest.fail("foreign cache directory reached os.open")
+        return original(name, flags, *args, **kwargs)
+
+    monkeypatch.setattr(preview.os, "open", deny_bad_directory_open)
+    with pytest.raises(preview.RepositoryCacheCleanupPreviewError,
+                       match="CACHE_CLEANUP_CONTENT_UNTRUSTED"):
+        inspect(owned)
