@@ -118,3 +118,35 @@ process** on the verified temporary assets, confirms exact signed installed
 worker and unit readback still PASS, and proves neither REPOCACHE control
 service/socket is active. The signing key is synthetic and was erased from
 the guest after creating the detached signature.
+
+## First actual native APT/DNF installation through the signed-worker entrypoint
+
+A separate two-distro `native-installer` matrix scenario boots a **fresh**
+second guest (no existing NGINX). It reuses the same pinned official qcow2
+images and exact SHA-prerequisite synthetic Ed25519 fixture described above.
+The source branch and package manager are never executed on the GitHub runner.
+
+After installing the authenticated worker's real fixed executable and two
+systemd unit files, the guest obtains the reviewed example install-v1 document
+from the same pinned source. The real
+`install_authenticated_native_nginx(...)` Python host-root entrypoint is
+called rather than a test substitute. The guest first sends an intentionally
+wrong document SHA-256 and checks there are **no NGINX package effects or
+native pending markers**. For the positive path, it requires the genuine
+native APT/DNF package transaction, root lock, persistent mask/no autostart,
+strict package database/file integrity and vendor-unit checks, signed-fixture
+worker readback and durable canonical package-completion receipt. Re-running
+the exact fresh installation must refuse with no new package effects.
+
+The guest then reboots its actual kernel, and requires the native receipt to
+retain its SHA-256, the same synthetic installed worker to verify, NGINX to
+remain disabled/inactive, and the REPOCACHE control service/socket to remain
+inactive. The independent `smoke` scenario still tests a live stock NGINX
+HTTP reload failure and repeated journal recovery refusal. Neither path
+exercises real publisher signing, production activation, deployed v2 APPLY,
+safe same-version repair with TLS/cache/log retention, or actual hard-power
+loss mid-APT/DNF. These remain NOT VERIFIED until separately run and accepted.
+
+The package scenario is deliberately **non-required** and limited to PR #237.
+A failure is a FAIL for this experiment and must be investigated rather than
+interpreted as a permission to bypass native checks.

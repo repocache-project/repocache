@@ -22,6 +22,21 @@ esac
 echo "PASS: actual OS=$ID version=$VERSION_ID kernel=$(uname -r) PID1=$(cat /proc/1/comm) manager=$manager"
 if test "$platform" = almalinux10; then echo 'PASS: kernel SELinux enforcing'; fi
 case "$phase" in
+  prepare-installer)
+    if test "$platform" = debian13; then
+      apt-get update -qq
+      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends python3-cryptography python3-pytest openssl curl
+    else
+      dnf -y -q install python3-cryptography python3-pytest openssl curl
+    fi
+    test ! -e /usr/sbin/nginx
+    test ! -e /etc/nginx
+    test ! -e /var/lib/repocache
+    cd /home/pr237ci/source
+    export PYTHONPATH=/home/pr237ci/source/src
+    python3 -B scripts/ci_v06_root_worker_target_guard.py "$(test "$platform" = debian13 && echo debian || echo almalinux)"
+    echo 'PASS: fresh native root/systemd interpreter, NGINX absent before authenticated REPOCACHE install'
+    ;;
   prepare)
     if test "$platform" = debian13; then
       apt-get update -qq
