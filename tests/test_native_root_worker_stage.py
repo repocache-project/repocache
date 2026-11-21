@@ -705,16 +705,16 @@ def test_synthetic_signed_candidate_enters_exact_native_journal_once(
             distribution=distribution, code="LOCAL_READ_ONLY_SNAPSHOT_OBSERVED",
         ),
     )
-    install, effects = _synthetic_host_native_package(monkeypatch, distribution)
+    host, effects = _synthetic_host_native_package(monkeypatch, distribution)
 
     fake_root = os.open(sysroot, os.O_RDONLY | os.O_DIRECTORY)
     try:
         def isolated_native_effects(_real_host_root, **kwargs):
             return old_execute(fake_root, **kwargs)
         monkeypatch.setattr(
-            install, "_execute_native_nginx_install_locked", isolated_native_effects,
+            host, "_execute_native_nginx_install_locked", isolated_native_effects,
         )
-        first = install.install_authenticated_native_nginx(
+        first = host.install_authenticated_native_nginx(
             archive.parent, install_document, pinned_document,
             commit=commit, archive_sha256=digest,
         )
@@ -726,7 +726,7 @@ def test_synthetic_signed_candidate_enters_exact_native_journal_once(
         receipt = (state / NATIVE_COMPLETE_NAME).read_bytes()
         actions_before_retry = list(effects["actions"])
         with pytest.raises(ValueError):
-            install.install_authenticated_native_nginx(
+            host.install_authenticated_native_nginx(
                 archive.parent, install_document, pinned_document,
                 commit=commit, archive_sha256=digest,
             )
@@ -737,14 +737,14 @@ def test_synthetic_signed_candidate_enters_exact_native_journal_once(
         # independently rechecked before any further native side effects.
         install_document.write_bytes(b"tampered")
         with pytest.raises(ValueError):
-            install.install_authenticated_native_nginx(
+            host.install_authenticated_native_nginx(
                 archive.parent, install_document, pinned_document,
                 commit=commit, archive_sha256=digest,
             )
         assert effects["actions"] == actions_before_retry
         detached.write_bytes(b"invalid synthetic signature")
         with pytest.raises((signatures.SignatureError, stage.WorkerStageError)):
-            install.install_authenticated_native_nginx(
+            host.install_authenticated_native_nginx(
                 archive.parent, install_document, pinned_document,
                 commit=commit, archive_sha256=digest,
             )
