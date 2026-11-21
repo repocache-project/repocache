@@ -46,6 +46,8 @@ READ_ONLY_APT_BYTES = b"DISPOSABLE-APT-INDEX-CACHE-WRITE-DENIAL\n"
 BYPASS_READY_APT_PATH = "/apt/dists/trixie/BypassReadiness"
 RECOVERY_READY_APT_PATH = "/apt/dists/trixie/RecoveryReadiness"
 READY_APT_BYTES = b"DISPOSABLE-APT-ROUTE-READINESS\n"
+HELD_DNF_PATH = "/dnf/repodata/held-transfer"
+HELD_DNF_BYTES = b"NONROOT-NGINX-INFLIGHT-TRANSFER-SURVIVES-WITHDRAWAL\n"
 
 
 @contextmanager
@@ -99,7 +101,7 @@ def await_worker_generation_drained(
     raise AssertionError("NGINX old worker generation did not drain")
 
 
-def trusted_fixture_origin(counts, lock):
+def trusted_fixture_origin(counts, lock, held_entered, held_release):
     class Origin(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             names = (
@@ -138,8 +140,18 @@ def trusted_fixture_origin(counts, lock):
                 BYPASS_READY_APT_PATH: READY_APT_BYTES,
                 RECOVERY_READY_APT_PATH: READY_APT_BYTES,
             }
-            item = (("application/octet-stream", probes[path])
-                    if path in probes else FIXTURES.get(path))
+            if path == HELD_DNF_PATH:
+                # Explicit barrier: test a genuine request accepted by the
+                # OLD worker before the generated DNF route is withdrawn.
+                # A bounded wait prevents CI hangs on an unexpected reload.
+                held_entered.set()
+                if not held_release.wait(timeout=12):
+                    self.send_error(504)
+                    return
+                item = ("application/octet-stream", HELD_DNF_BYTES)
+            else:
+                item = (("application/octet-stream", probes[path])
+                        if path in probes else FIXTURES.get(path))
             if item is None:
                 self.send_error(404)
                 return
@@ -154,7 +166,11 @@ def trusted_fixture_origin(counts, lock):
             self.send_response(200)
             self.send_header("Content-Type", mimetype)
             self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "public, max-age=600")
+            self.send_header(
+                "Cache-Control",
+                "private, no-store" if path == HELD_DNF_PATH
+                else "public, max-age=600",
+            )
             if path == "/apt/accel":
                 self.send_header("X-Accel-Redirect", "/__repocache_canary")
             self.end_headers()
@@ -312,8 +328,10 @@ def main() -> None:
 
         counts: collections.Counter[str] = collections.Counter()
         lock = threading.Lock()
+        held_entered, held_release = threading.Event(), threading.Event()
         origin = ThreadingHTTPServer(
-            ("127.0.0.1", origin_port), trusted_fixture_origin(counts, lock)
+            ("127.0.0.1", origin_port),
+            trusted_fixture_origin(counts, lock, held_entered, held_release),
         )
         tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         tls.load_cert_chain(str(origin_cert), str(origin_key))
@@ -824,9 +842,43 @@ def main() -> None:
                 and projected["actual_active_exposure_verified"] is False,
                 "derived catalog candidate withdraws removed DNF entry",
             )
+            # A normal removal must not tear down an already accepted
+            # transfer. Hold the DNF origin response behind an Event while
+            # the OLD NGINX worker serves a fresh path; then SIGHUP to the
+            # newly validated config and release the response before waiting
+            # for the old worker to exit. Cache-Control: no-store keeps the
+            # in-flight test from changing the retained-cache snapshot.
+            held_url = base + "almalinux-baseos/repodata/held-transfer"
+            held_result: dict[str, object] = {}
+
+            def fetch_inflight() -> None:
+                try:
+                    held_result["response"] = request(held_url, client_tls)
+                except Exception as exc:
+                    held_result["error_type"] = type(exc).__name__
+
+            in_flight = threading.Thread(target=fetch_inflight, daemon=True)
+            in_flight.start()
+            if not held_entered.wait(timeout=5):
+                held_release.set()
+                raise AssertionError("INFLIGHT_DNF_ORIGIN_NOT_REACHED")
             removal_workers = nginx_master_children(process.pid)
-            run(nginx, "-s", "reload", "-e", str(root / "remove-reload.log"),
-                "-p", str(root), "-c", str(config))
+            try:
+                require(in_flight.is_alive(), "DNF transfer must still be in flight")
+                run(nginx, "-s", "reload", "-e", str(root / "remove-reload.log"),
+                    "-p", str(root), "-c", str(config))
+                require(in_flight.is_alive(),
+                        "NGINX reload must preserve accepted old-worker transfer")
+            finally:
+                held_release.set()
+            in_flight.join(timeout=8)
+            require(
+                not in_flight.is_alive()
+                and held_result.get("response", (None, None))[:2]
+                    == (200, HELD_DNF_BYTES)
+                and "error_type" not in held_result,
+                "accepted pre-withdrawal DNF transfer survived NGINX reload",
+            )
             await_worker_generation_drained(process, removal_workers)
             refused = request(dnf_url, client_tls)
             continued = request(apt_url, client_tls)
@@ -837,7 +889,7 @@ def main() -> None:
                 ) and retained_snapshot() == retained_before
                 and process.poll() is None,
                 "real NGINX route removal returns 404; APT stays HIT and "
-                "all DNF cache bytes/inodes survive",
+                "all DNF cache bytes/inodes and the accepted transfer survive",
             )
 
             # Restore the exact original configuration through another
