@@ -562,13 +562,16 @@ def test_batch_fixture_adds_two_new_sources_with_durable_auto_ids(protected_fixt
     assert read_catalog(directory)["active_ids"] == []
     assert not (directory / JOURNAL).exists()
     assert recover_multi(fd, owner_uid=uid)["status"] == "CLEAN_INERT_FIXTURE"
-    # Source history is read again from disk, not from the prior caller object.
-    with pytest.raises(FixtureRepositoryTransactionError,
-                       match="BATCH_PREPARE_REFUSED"):
-        fixture_batch(
-            protected_fixture, operation="add", expected=2,
-            proposed=(first,),
-        )
+    # The durable ledger recognizes an identical repeated add as idempotent.
+    # It must neither allocate a second ID nor advance the generation.
+    prior_inode = (directory / V2_STATE).stat().st_ino
+    replay = fixture_batch(
+        protected_fixture, operation="add", expected=2,
+        proposed=(first,),
+    )
+    assert replay["status"] == "NO_CHANGE_INERT_FIXTURE_REPOSITORY_BATCH"
+    assert replay["state_generation"] == 2
+    assert (directory / V2_STATE).stat().st_ino == prior_inode
     assert read_state(directory) == persisted
 
 
