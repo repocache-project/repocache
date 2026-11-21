@@ -265,3 +265,46 @@ retains its independent WAL compensation path so a missing audit receipt
 does not by itself disable emergency rollback. Fixture-only tests may
 exercise the underlying transaction without a production host receipt;
 this exception is never available to the installed worker protocol.
+
+
+## Authenticated native NGINX package install — explicit opt-in
+
+The first-install APT/DNF operation is now connected to the same signed
+candidate installer as the fixed root worker. It is never implicit in worker
+placement and is not exposed over the local administrator socket.
+
+The operator first authenticates and places the worker and fixed systemd units
+from the owner-signed exact v0.6 release candidate. After independent review
+of the install-v1 document, the operator may separately select
+--install-native-nginx with that document's exact --document-sha256 and the
+same --assets, --commit, and --archive-sha256 publisher pins. The installer
+requires matching installed worker bytes, a genuine initial user/root/systemd
+host namespace, supported x86_64 native Python and distro, an unchanged
+pinned document, initial generation zero, clean NGINX ownership observations,
+and the OS distributor's protected signing anchor BEFORE any package effects.
+
+One protected exclusive state lock spans the durable APT/DNF effects marker,
+a fresh within-lock NGINX conflict observation, the exact approved official
+distro APT/DNF refresh and install commands, package DB status, packaged
+NGINX syntax and file ownership/integrity, and the existing audited durable
+completion receipt. Debian reads the host dpkg status; AlmaLinux uses the
+host's root with the fixed signature-enforcing BaseOS/AppStream sources,
+not arbitrary enabled third-party repositories. The signed input never
+supplies package-manager argv, shell, URLs or trust keys.
+
+Because a package postinstall script may enable or start NGINX, a persistent
+systemd service mask is placed only AFTER the irreversible-effects journal
+and BEFORE the manager starts. It survives reboot following interruption.
+After a successful install, the vendor unit is disabled while masked, the
+known owned mask is removed, and both disabled and inactive states must be
+observed before the same-lock completion receipt can be issued. Any failure
+retains the blocking journal and never silently retries or clears ambiguous
+package effects; if the mask had been removed, restoration is best-effort.
+Do not manually delete an uncertain journal or mask based solely on a
+successful package database read.
+
+The operation does NOT enable, start or reload NGINX, publish the active
+catalog, or claim publisher/SELinux/booted-service acceptance. Those remain
+separately authorized steps of the coordinated final Debian 13 / AlmaLinux
+10 booted-host campaign. Disposable CI validates the shared native package
+commands and guarded WAL/receipt code, not real booted systemd behavior.
