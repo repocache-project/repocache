@@ -93,10 +93,10 @@ jobs:
           VM_SCENARIO: ${{ matrix.scenario }}
           EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
-          python3 -B scripts/collect_v06_vm_campaign_coverage.py \\
-            --evidence-dir pr237-vm-evidence \\
-            --platform "$VM_PLATFORM" \\
-            --scenario "$VM_SCENARIO" \\
+          python3 -B scripts/collect_v06_vm_campaign_coverage.py \
+            --evidence-dir pr237-vm-evidence \
+            --platform "$VM_PLATFORM" \
+            --scenario "$VM_SCENARIO" \
             --expected-head "$EXPECTED_HEAD"
       - name: Publish summary even when experiment fails
         if: always()
