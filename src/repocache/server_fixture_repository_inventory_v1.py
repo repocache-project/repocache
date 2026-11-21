@@ -39,7 +39,10 @@ def inspect_locked_fixture_repository_inventory_under_root(
     catalog entry and real NGINX exposure are *different evidence*. No
     approval or authorization may be inferred from any inventory field.
     """
-    _refuse_actual_root_fixture_write(root_fd)
+    try:
+        _refuse_actual_root_fixture_write(root_fd)
+    except (ValueError, OSError):
+        _deny("FIXTURE_ROOT_REFUSED")
     if (type(owner_uid) is not int or not 0 <= owner_uid <= 2**32 - 2
             or type(expected_generation) is not int
             or not 1 <= expected_generation < 2**63
