@@ -599,3 +599,165 @@ def test_fresh_native_package_can_follow_exact_authenticated_worker_placement_re
     result = _prepare_native_journal_under_root(root, owner_uid=owner, distribution="debian")
     assert result["status"] == "NATIVE_PACKAGE_EFFECTS_JOURNAL_DURABLE"
     assert marker.exists() and (state / NATIVE_PENDING_NAME).is_file()
+
+
+@pytest.mark.parametrize("distribution", ["debian", "almalinux"])
+@pytest.mark.parametrize("action", ["mask", "disable", "unmask", "is-enabled", "is-active"])
+@pytest.mark.parametrize("failure", ["reported_error", "raised_error"])
+def test_native_service_fault_matrix_retains_pending_and_prevents_retry(
+    protected_root, monkeypatch, distribution, action, failure,
+):
+    """Every systemctl failure is non-committing; unmask errors re-mask."""
+    from repocache.server_native_nginx_package_journal_v1 import NATIVE_COMPLETE_NAME
+
+    root, state, owner = protected_root
+    install, effects = _synthetic_host_native_package(monkeypatch, distribution)
+    original = install._nginx_systemctl
+    seen = []
+
+    def failed_systemctl(operation):
+        if operation != action or seen:
+            return original(operation)
+        seen.append(operation)
+        original(operation)  # Error after an observable effect, not a no-op.
+        if failure == "raised_error":
+            raise ValueError("interrupted systemctl")
+        if operation == "is-enabled":
+            return 0, b"enabled\n"
+        if operation == "is-active":
+            return 0, b"active\n"
+        return 1, b"failed\n"
+
+    monkeypatch.setattr(install, "_nginx_systemctl", failed_systemctl)
+    with pytest.raises(ValueError):
+        install._execute_native_nginx_install_locked(
+            root, distribution=distribution, document={}, os_release="", owner_uid=owner,
+        )
+    assert seen == [action]
+    assert effects["active"], "must remain masked or re-mask after service fault"
+    if action == "mask":
+        assert not effects["commands"], "package manager ran without a proven mask"
+    else:
+        assert ("INSTALL",) in effects["commands"]
+    marker = state / NATIVE_PENDING_NAME
+    raw = marker.read_bytes()
+    assert json.loads(raw)["native_package_effects"] == "REQUIRES_EXPLICIT_RECONCILIATION"
+    assert not (state / NATIVE_COMPLETE_NAME).exists()
+    with pytest.raises(NativePackageJournalError):
+        install._execute_native_nginx_install_locked(
+            root, distribution=distribution, document={}, os_release="", owner_uid=owner,
+        )
+    assert marker.read_bytes() == raw
+
+
+@pytest.mark.parametrize("distribution", ["debian", "almalinux"])
+@pytest.mark.parametrize("phase", [
+    "refresh", "install", "package-status", "nginx-syntax",
+    "stock-owner", "file-integrity", "vendor-unit", "completion-audit",
+])
+def test_native_package_and_audit_fault_matrix_never_commits_partial_effects(
+    protected_root, monkeypatch, distribution, phase,
+):
+    """Inject errors after effects, between APT/DNF and the fsynced receipt."""
+    from repocache.server_native_nginx_package_journal_v1 import NATIVE_COMPLETE_NAME
+    from repocache import server_native_package_effects_observe_v1 as observe
+
+    root, state, owner = protected_root
+    install, effects = _synthetic_host_native_package(monkeypatch, distribution)
+    reached = []
+
+    def interrupted(func):
+        def call(*args, **kwargs):
+            value = func(*args, **kwargs)
+            reached.append(phase)
+            raise ValueError("interrupted " + phase)
+        return call
+
+    if phase in ("refresh", "install", "package-status", "nginx-syntax"):
+        original = install._native_package_command
+
+        def command(argv, work):
+            value = original(argv, work)
+            current = (
+                "refresh" if argv[0] == "REFRESH" else
+                "install" if argv[0] == "INSTALL" else
+                "package-status" if argv[0] in ("/usr/bin/dpkg-query", "/usr/bin/rpm") else
+                "nginx-syntax" if argv[0] == "/usr/sbin/nginx" else None
+            )
+            if current == phase:
+                reached.append(phase)
+                raise ValueError("interrupted " + phase)
+            return value
+
+        monkeypatch.setattr(install, "_native_package_command", command)
+    else:
+        target, attr = {
+            "stock-owner": (install, "inspect_stock_nginx_package_owner"),
+            "file-integrity": (install, "inspect_stock_nginx_package_file_integrity"),
+            "vendor-unit": (install, "inspect_native_nginx_unit"),
+            "completion-audit": (observe, "_collect_postpackage_facts_while_locked"),
+        }[phase]
+        monkeypatch.setattr(target, attr, interrupted(getattr(target, attr)))
+
+    with pytest.raises(ValueError):
+        install._execute_native_nginx_install_locked(
+            root, distribution=distribution, document={}, os_release="", owner_uid=owner,
+        )
+    assert reached == [phase]
+    assert effects["active"]
+    marker = state / NATIVE_PENDING_NAME
+    raw = marker.read_bytes()
+    assert json.loads(raw)["distribution"] == distribution
+    assert not (state / NATIVE_COMPLETE_NAME).exists()
+    with pytest.raises(NativePackageJournalError):
+        _prepare_native_journal_under_root(
+            root, owner_uid=owner, distribution=distribution,
+        )
+    assert marker.read_bytes() == raw
+
+
+@pytest.mark.parametrize("distribution", ["debian", "almalinux"])
+@pytest.mark.parametrize("phase", [
+    "post-install", "post-disable", "post-unmask", "post-is-enabled", "post-is-active",
+])
+def test_non_exception_abrupt_stop_keeps_reentry_blocked(
+    protected_root, monkeypatch, distribution, phase,
+):
+    """Model unexpected process termination (not actual SIGKILL or service proof)."""
+    from repocache.server_native_nginx_package_journal_v1 import NATIVE_COMPLETE_NAME
+    root, state, owner = protected_root
+    install, _ = _synthetic_host_native_package(monkeypatch, distribution)
+    systemctl, package = install._nginx_systemctl, install._native_package_command
+    hit = []
+
+    def control(action):
+        result = systemctl(action)
+        if phase == "post-" + action:
+            hit.append(phase)
+            raise KeyboardInterrupt("abrupt native stop")
+        return result
+
+    def command(argv, work):
+        result = package(argv, work)
+        if phase == "post-install" and argv[0] == "INSTALL":
+            hit.append(phase)
+            raise KeyboardInterrupt("abrupt native stop")
+        return result
+
+    monkeypatch.setattr(install, "_nginx_systemctl", control)
+    monkeypatch.setattr(install, "_native_package_command", command)
+    with pytest.raises(KeyboardInterrupt, match="abrupt native stop"):
+        install._execute_native_nginx_install_locked(
+            root, distribution=distribution, document={}, os_release="", owner_uid=owner,
+        )
+    assert hit == [phase]
+    marker = state / NATIVE_PENDING_NAME
+    raw = marker.read_bytes()
+    assert not (state / NATIVE_COMPLETE_NAME).exists()
+    with pytest.raises(NativePackageJournalError):
+        _prepare_native_journal_under_root(
+            root, owner_uid=owner, distribution=distribution,
+        )
+    assert marker.read_bytes() == raw
+    # After unmask, the service mask can be absent until native reconciliation.
+    # This test proves journal durability, not booted-host service containment.
