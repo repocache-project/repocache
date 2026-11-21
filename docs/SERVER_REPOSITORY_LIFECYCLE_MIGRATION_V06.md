@@ -247,8 +247,12 @@ The preview validates the exact proposed native state bytes and reports its
 SHA-256, proposed generation and per-repository IDs/results (including
 suggested automatic IDs), but **does not create the candidate file**. Repeat
 without `--dry-run` and with a new private `--proposal-output` path only after
-review. The two reports must agree on predecessor, proposed SHA and IDs; a
-changed protected predecessor requires a fresh proposal. No stdout field
+review. For an automatic exact-byte comparison, provide the digest from the
+`--dry-run` report as `--expected-proposed-state-sha256` on the later
+create-only command; the tool refuses a different proposed snapshot **before
+creating any output file**. See the [review pin walkthrough](testing/SERVER_REPOSITORY_PROPOSAL_REVIEW_PIN.md).
+The two reports must agree on predecessor, proposed SHA and IDs; a changed
+protected predecessor requires a fresh proposal. No stdout field
 contains upstream URLs, signing/trust references, credentials or cache paths.
 A preview neither reserves an ID nor authenticates approval, proves deployed
 NGINX exposure or authorizes the #237 signed native stager. The original
