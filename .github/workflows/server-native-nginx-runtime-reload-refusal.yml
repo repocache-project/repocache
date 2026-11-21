@@ -34,7 +34,7 @@ jobs:
           if [ '${{ matrix.platform }}' = debian13 ]; then
             export DEBIAN_FRONTEND=noninteractive
             apt-get update -qq
-            apt-get install -y -qq --no-install-recommends nginx python3 util-linux
+            apt-get install -y -qq --no-install-recommends nginx python3 util-linux ca-certificates
           else
             dnf -y -q --enablerepo=crb install nginx python3 util-linux
           fi
@@ -50,4 +50,5 @@ jobs:
           test -f /.dockerenv
           setpriv --reuid 65534 --regid 65534 --clear-groups \
             env PYTHONDONTWRITEBYTECODE=1 REPOCACHE_DISPOSABLE_NGINX_RELOAD_CI=1 \
+              PYTHONPATH="$GITHUB_WORKSPACE/src" \
             python3 -B scripts/ci_v06_nginx_reload_runtime_failure.py
