@@ -272,6 +272,15 @@ repocache service reload --yes
 - Per-repository cache measurements must not be fabricated from total filesystem usage. Metrics derived from NGINX logs must disclose incomplete coverage/rotation when relevant, and avoid exposing request secrets.
 - `logs tail --json` may return a bounded document once its schema is implemented. The continuous `logs follow` defaults to plain text; **reject `--json` for an unbounded stream** until a distinct, explicitly versioned streaming format is approved.
 - `service reload --yes` retains acknowledgement from the existing command contract. `--yes` is not OS authorization. NGINX config validation precedes delegated reload; refuse unmanaged instances and unsafe paths. No global `sudo` privileges or generic privileged subprocess runner.
+
+For a managed installation the command selects exactly one `reload-v2`
+socket operation. The worker verifies the committed generation, the exact
+managed include in `nginx -T`, and the existing HTTPS generation and catalog.
+It runs validation before reloading the fixed `nginx.service` unit, then
+checks exposure again. The reload leaves state and catalog bytes intact.
+An unavailable or revoked managed socket returns an error without falling
+back to direct service commands. Existing operator-owned installations use
+their existing OS permissions and validation path.
 - `config apply` owns only explicitly declared, validated managed files. It does not overwrite arbitrary operator NGINX configuration, trust stores, certificates, package-manager sources or unrelated service state.
 
 **Read-only server configuration validation (PR #209, #107, v0.6.0 increment):**

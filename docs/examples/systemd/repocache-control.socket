@@ -1,0 +1,15 @@
+# NON-INSTALLED REFERENCE ONLY (#64). NOT a deployment artifact.
+# Never enable this unit until the host-root broker, SELinux and reviewed
+# signed installation plus complete #31 NGINX/catalog transaction exist.
+[Unit]
+Description=REPOCACHE fixed root-control socket (non-installed reference)
+
+[Socket]
+ListenSequentialPacket=/run/repocache/server-control.sock
+SocketUser=root
+SocketGroup=repocache-admin
+SocketMode=0660
+DirectoryMode=0755
+Accept=no
+RemoveOnStop=yes
+Service=repocache-control.service

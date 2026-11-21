@@ -15,7 +15,7 @@ import tarfile
 
 import pytest
 
-from scripts import build_release
+from scripts import build_native_root_worker, build_release
 from repocache import upgrade
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -79,15 +79,50 @@ def test_complete_first_party_source_and_client_modules_in_inventory():
         assert observed.issubset(included)
     for path in (
         "scripts/server_v06_preflight.py",
+        "scripts/build_native_root_worker.py",
+    "scripts/stage_native_root_worker.py",
+    "scripts/install_native_root_worker.py",
         "scripts/collect_native_candidate_evidence.py",
         "scripts/inspect_native_vm_nginx_prerequisites.py",
         "scripts/format_native_vm_paste_receipt.py",
         "docs/examples/server-install-v1.json",
+        "docs/examples/systemd/repocache-control.service",
+        "docs/examples/systemd/repocache-control.socket",
     ):
         assert path in included
     assert all((ROOT / path).is_file()
                and not (ROOT / path).is_symlink()
                for path in included)
+
+
+def test_fixed_worker_archive_is_reproducible_from_closed_release_sources(tmp_path):
+    import io
+    import os
+    import subprocess
+    import sys
+    import zipfile
+
+    source = _candidate_source(tmp_path)
+    payload = build_native_root_worker.build(source)
+    assert payload == build_native_root_worker.build(source)
+    assert payload.startswith(b"#!/usr/bin/python3 -IS\n")
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        assert archive.namelist() == ["__main__.py", *(
+            f"repocache/{module}.py" for module in build_native_root_worker.MODULES
+        )]
+    target = tmp_path / "server-control-worker"
+    target.write_bytes(payload)
+    unrelated = tmp_path / "repocache"
+    unrelated.mkdir()
+    (unrelated / "__init__.py").write_text("raise RuntimeError('wrong import')\n")
+    run = subprocess.run(
+        [sys.executable, "-IS", str(target), "--unexpected"],
+        env={**os.environ, "PYTHONPATH": str(tmp_path)}, cwd=tmp_path,
+        check=False, capture_output=True, timeout=10,
+    )
+    assert run.returncode == 2
+    assert run.stdout == b'{"code":"NATIVE_ROOT_CONTROL_ARGUMENTS_REFUSED"}\n'
+    assert run.stderr == b""
 
 
 def test_v06_candidate_archive_is_complete_deterministic_and_bounded(

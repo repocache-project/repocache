@@ -138,6 +138,50 @@ def test_server_object_help_and_stream_json_refusal_are_read_only(monkeypatch):
         assert json.loads(refused.stdout)["error"]["code"] == "UNSUPPORTED_OUTPUT_MODE"
 
 
+def test_managed_reload_has_no_direct_command_fallback(monkeypatch):
+    from repocache import server_native_root_control_client_v1 as broker
+
+    calls = []
+    monkeypatch.setattr(cli, "_has_managed_nginx_control", lambda: True)
+    monkeypatch.setattr(cli, "command", lambda *_a, **_kw: pytest.fail("direct command"))
+    runner = CliRunner()
+    monkeypatch.setattr(broker, "request_native_fixed_v2", calls.append)
+    assert runner.invoke(cli.app, ["service", "reload"]).exit_code == 2
+    assert calls == []
+    assert runner.invoke(cli.app, ["service", "reload", "--yes"]).exit_code == 0
+    assert calls == ["RELOAD_V2"]
+
+    def denied(_operation):
+        raise broker.NativeRootControlClientError("DO_NOT_PRINT_PRIVATE_DETAIL")
+
+    monkeypatch.setattr(broker, "request_native_fixed_v2", denied)
+    result = runner.invoke(cli.app, ["service", "reload", "--yes"])
+    assert result.exit_code == 1
+    assert "DO_NOT_PRINT_PRIVATE_DETAIL" not in result.output
+
+
+def test_operator_owned_reload_retains_validate_then_reload_order(monkeypatch):
+    calls = []
+    monkeypatch.setattr(cli, "_has_managed_nginx_control", lambda: False)
+    monkeypatch.setattr(cli, "command", lambda argv, **_opts: (
+        calls.append(argv) or {"ok": True}
+    ))
+    result = CliRunner().invoke(cli.app, ["service", "reload", "--yes"])
+    assert result.exit_code == 0
+    assert calls[0][1:] == ["-t"]
+    assert calls[1] == ["systemctl", "reload", "nginx"]
+
+
+def test_managed_include_without_worker_or_socket_cannot_use_legacy_reload(monkeypatch):
+    def inspect(path):
+        if path == "/etc/nginx/conf.d/repocache-managed.conf":
+            return object()
+        raise FileNotFoundError
+
+    monkeypatch.setattr(cli.os, "lstat", inspect)
+    assert cli._has_managed_nginx_control()
+
+
 def test_client_aliases_and_global_option_placement_do_not_mutate(monkeypatch, tmp_path, capsys):
     calls = []
     monkeypatch.setattr(client, "discover", lambda *_: calls.append("discover") or [])
