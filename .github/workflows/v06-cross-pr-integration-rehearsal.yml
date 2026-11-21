@@ -159,15 +159,22 @@ jobs:
           # explicit HTTPS server selection, read-only package source helper,
           # installer argument safety and signed-release provenance parser.
           # The owners' full independent CI still governs original criteria.
-          python3 -B -m pytest -q -rs \
-            tests/test_client.py \
-            tests/test_client_source_helper_preview.py \
-            tests/test_client_install_contract.py \
-            tests/test_v06_release_source_inventory.py \
-            tests/test_release_provenance.py \
-            tests/test_public_release_acceptance.py
-          REPOCACHE_REQUIRE_CANONICAL_WORKER_VERIFIER=1 \
-            python3 -B -m pytest -q -rs tests/test_native_root_worker_stage.py
+          if [ '${{ matrix.variant }}' = 'with-pr249' ]; then
+            # #249 owns the canonical v0.6 signing/source identity changes.
+            # Its still-unmerged code is required for signed staging fixtures,
+            # but NOT for validating #31's protected v2 transaction.
+            python3 -B -m pytest -q -rs \
+              tests/test_client.py \
+              tests/test_client_source_helper_preview.py \
+              tests/test_client_install_contract.py \
+              tests/test_v06_release_source_inventory.py \
+              tests/test_release_provenance.py \
+              tests/test_public_release_acceptance.py
+            REPOCACHE_REQUIRE_CANONICAL_WORKER_VERIFIER=1 \
+              python3 -B -m pytest -q -rs tests/test_native_root_worker_stage.py
+          else
+            echo "NOT VERIFIED: #249 source/signing acceptance in server-only rehearsal"
+          fi
           # Fixed package-root syntax inspection is only exercised in this
           # disposable CI container. The root worker remains non-activating.
           REPOCACHE_NATIVE_TEST_CONTAINER=CONFIRMED_DISPOSABLE_DOCKER_ONLY \
