@@ -833,17 +833,22 @@ def test_fixture_purge_foreign_objects_fail_before_unlink(
     digest = _retire_owned_repo(owned_with_locked_state)
     outside = tmp_path / "outside-package"
     outside.write_bytes(b"critical-other-repo")
+    verified = _locked_cleanup_preview(
+        owned_with_locked_state, generation=2, digest=digest,
+    )
     if kind == "symlink":
         (directory / DIGEST1).unlink()
         (directory / DIGEST1).symlink_to(outside)
     elif kind == "hardlink":
+        outside.unlink()
         os.link(directory / DIGEST1, outside, follow_symlinks=False)
     else:
         (directory / "not-a-digest").write_bytes(b"not-owned")
     with pytest.raises(FixtureRetiredCacheCleanupError):
         _fixture_purge(
             layout, generation=2, digest=digest,
-            files=2, allocated=0,
+            files=verified["cache_files_observed"],
+            allocated=verified["allocated_file_bytes_observed"],
         )
     assert outside.read_bytes() in (b"critical-other-repo",
                                     b"immutable-cached-package" * 10)
