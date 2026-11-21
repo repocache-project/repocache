@@ -351,9 +351,9 @@ def test_batch_exercises_one_durable_state_include_catalog_wal_per_operation(
         current, operation="enable", repository_ids=(APT, DNF),
     )["proposed_snapshot"]
     persist(enabled, previous_generation=1, catalog_ids=(APT, DNF), label="enable-two")
-    assert json.loads((directory / CATALOG).read_bytes())["active_ids"] == [
-        DNF, APT,
-    ] if DNF < APT else [APT, DNF]
+    assert json.loads((directory / CATALOG).read_bytes())[
+        "active_ids"
+    ] == sorted((APT, DNF))
     assert json.loads((directory / V2_STATE).read_bytes())[
         "state_generation"
     ] == 2
