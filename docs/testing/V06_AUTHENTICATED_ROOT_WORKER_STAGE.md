@@ -130,9 +130,12 @@ committed predecessor under the protected lock. A prior uncommitted proposal
 is preserved. An exact staged retry is idempotent. After commit, staging the
 same reviewed snapshot reports `AUTHENTICATED_V2_PROPOSAL_ALREADY_COMMITTED`
 and preserves the existing proposal. Repeating `APPLY_V2` with that same
-proposal returns `NATIVE_V2_NO_CHANGE` after verifying the complete owned
-resource set and re-reading the intake. It performs no reload, publication
-or generation increment. A separately requested `RELOAD_V2` validates
+proposal returns `NATIVE_V2_NO_CHANGE` only after verifying the complete owned
+resource set, re-reading the intake, validating the pinned TLS pair, matching
+the fixed effective NGINX include, and observing the currently exposed HTTPS
+generation and active-only catalogue. An absent/stale/foreign live exposure
+refuses the no-op rather than claiming operational success. It performs no
+reload, publication or generation increment. A separately requested `RELOAD_V2` validates
 the fixed NGINX include section both before and after the service reload.
 If the post-reload NGINX configuration dump differs despite matching
 generation health and unchanged protected files, it refuses success and

@@ -229,12 +229,51 @@ def test_reviewed_proposal_is_staged_then_consumed_by_v2_worker(filesystem):
     assert repeated["status"] == "AUTHENTICATED_V2_PROPOSAL_ALREADY_COMMITTED"
     assert apply(filesystem) == {"status": "NATIVE_V2_NO_CHANGE", "state_generation": 1}
     assert before_repeat == [(p.read_bytes(), p.stat().st_ino, p.stat().st_mtime_ns) for p in managed]
-    assert not events
+    assert ("reload", "debian") not in events and "syntax" not in events
+    assert ("exposure", 1) in events
+    assert any(isinstance(e, tuple) and e[0] == "catalog-exposure" for e in events)
     second = _canon(snapshot(count=1, generation=2, previous=first))
     assert installer._stage_proposal_under_root(
         fd, second, hashlib.sha256(second).hexdigest(),
     )["expected_generation"] == 1
     assert (state / V2_STATE).read_bytes() == raw
+
+
+@pytest.mark.parametrize("lost", ["tls", "effective-include", "health", "catalog"])
+def test_completed_proposal_noop_refuses_unverified_live_exposure(
+    filesystem, monkeypatch, lost,
+):
+    stage(filesystem, snapshot(count=1))
+    apply(filesystem)
+    _fd, state, include, catalog, events = filesystem
+    paths = (state / V2_STATE, state / _NAME, state / native._MANIFEST,
+             include, catalog)
+    before = [(p.read_bytes(), p.stat().st_ino, p.stat().st_mtime_ns)
+              for p in paths]
+    events.clear()
+
+    def deny(*_args):
+        raise native.NativeV2TransactionError("UNVERIFIED_" + lost.upper())
+
+    if lost == "tls":
+        monkeypatch.setattr(native, "_verify_tls_pair", deny)
+    elif lost == "effective-include":
+        monkeypatch.setattr(
+            native, "_capture_default_nginx_dump_private",
+            lambda: b"# configuration file /etc/nginx/nginx.conf:\nhttp {}\n",
+        )
+    elif lost == "health":
+        monkeypatch.setattr(native, "_local_https_generation", deny)
+    else:
+        monkeypatch.setattr(native, "_local_https_catalog", deny)
+    expected = "NGINX_DUMP_MISMATCH" if lost == "effective-include" else "UNVERIFIED_"
+    with pytest.raises(native.NativeV2TransactionError, match=expected):
+        apply(filesystem)
+    assert ("reload", "debian") not in events
+    assert "syntax" not in events
+    assert [(p.read_bytes(), p.stat().st_ino, p.stat().st_mtime_ns)
+            for p in paths] == before
+    assert_no_pending(filesystem)
 
 
 @pytest.mark.parametrize("drift", ["include", "catalog", "manifest", "pending", "generation"])
@@ -297,7 +336,8 @@ def test_prepared_partial_repair_preserves_omitted_repositories_and_retries(file
         )
     assert apply(filesystem)["status"] == "NATIVE_V2_NO_CHANGE"
     assert before == [(p.read_bytes(), p.stat().st_ino) for p in (state / V2_STATE, include, catalog)]
-    assert not events
+    assert ("reload", "debian") not in events and "syntax" not in events
+    assert ("exposure", 2) in events
 
 
 def test_completed_proposal_retry_refuses_changed_intake(filesystem, monkeypatch):

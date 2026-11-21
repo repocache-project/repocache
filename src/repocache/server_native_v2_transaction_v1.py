@@ -740,6 +740,17 @@ def _apply_locked(root_fd: int, state_fd: int,
         )
         if again != report or again_candidate != candidate:
             _deny("CANDIDATE_CHANGED")
+        # An idempotent replay must not certify working exposure solely
+        # from saved bytes. The service may be stopped, serving a stale
+        # generation, or loading a foreign effective managed include.
+        document = parse_install_bytes(
+            base64.b64decode(previous["configuration_base64"], validate=True),
+            for_apply=True,
+        )
+        _verify_tls_pair(root_fd, document)
+        _verify_owned_include_in_dump(old[_INCLUDE])
+        _local_https_generation(document, generation)
+        _local_https_catalog(document, old[_CATALOG])
         if _read_all(state_fd, include_fd, public_fd) != old:
             _deny("PREPARE_DRIFT")
         return {"status": "NATIVE_V2_NO_CHANGE", "state_generation": generation}
