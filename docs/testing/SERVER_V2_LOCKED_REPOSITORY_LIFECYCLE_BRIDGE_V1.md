@@ -7,33 +7,30 @@ bridge for disposable Linux filesystem fixtures**, not a native root daemon,
 installer, administrator command or live service activator. It brings
 together existing, independently implemented components:
 
-1. Use the reusable, pure
-   `server_repository_v2_transition_v1.py` builder to bind each
-   add/update/enable/disable/remove operation to a **canonical predecessor
-   digest**, the complete historical ID/identity ledger, an exact generation
-   and a validated next-v2 snapshot. The builder neither reads state nor
-   grants operator approval, so it can later be reused by the separate
-   installed native candidate-staging workflow in PR #237.
-2. Read the existing canonical state-v2 snapshot and **all-time**
+1. Read the existing canonical state-v2 snapshot and **all-time**
    repository-ID reservations under the fixed #31 owner-pinned lock.
    Validate the multi-resource owner manifest, reject pending journals,
    legacy v1 coexistence, foreign files and stale generations.
-2. Use the existing strict #95 add/update/enable/disable/remove planner.
-   For additions without an ID, derive the deterministic suggestion from
-   the *locked, persisted* all-time ledger rather than a caller-owned set.
-3. Rebuild a complete state-v2 generation: validated canonical install-v1
-   configuration, records, historical reservations/tombstones and a bounded
-   decision-reference digest. The digest is fixture data, **not operator
-   authorization**. Preserve every retired ID and identity.
+2. Use the reusable, pure
+   `server_repository_v2_transition_v1.py` builder, which combines the
+   strict #95 add/update/enable/disable/remove planner with the exact
+   canonical predecessor digest, the complete historical ID/identity ledger
+   and expected generation. Automatic IDs use the **locked, persisted**
+   all-time history rather than a caller-owned set. The builder grants
+   no operator authority and can later support native candidate staging.
+3. Build and validate the complete next state-v2 generation: canonical
+   install-v1 configuration, records, historical reservations/tombstones
+   and a bounded decision-reference digest. The digest is fixture data,
+   **not operator authorization**. Preserve every retired ID and identity.
 4. Render all desired-active NGINX upstreams and routes from the same
    proposed configuration and complete public-IP pins. Build exactly one
    matching, private **fixture-only** catalog.
 5. Commit state, managed include, catalog and owner manifest with the
    existing same-directory, fsynced, multi-resource WAL. The WAL reopens the
-   state under a **new exclusive lock** and performs generation/transition
+   state under a **new exclusive lock** and performs generation, transition
    **and exact predecessor SHA-256** checks before any write. A concurrent
    change cannot substitute another state with the same generation or use
-   the older planning snapshot to overwrite a later generation.
+   an older planning snapshot to overwrite a later generation.
 6. Require a disposable fixture prepublication callback. While it runs,
    the state/include are durable and the old catalog remains intact; a
    failure leaves the WAL for explicit, fail-closed recovery. Callback
