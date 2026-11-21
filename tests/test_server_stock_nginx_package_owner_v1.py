@@ -134,10 +134,10 @@ def test_fixed_installed_file_integrity_is_read_only_and_never_authorizes_reentr
     info = SimpleNamespace(st_dev=2, st_ino=19, st_mode=stat.S_IFREG | 0o755,
         st_uid=0, st_gid=0, st_nlink=1, st_size=345678,
         st_mtime_ns=5, st_ctime_ns=5)
-    release = ("ID=debian\\nVERSION_ID=13\\n" if platform == "debian13"
-               else "ID=almalinux\\nVERSION_ID=10\\n")
-    with mock.patch.object(Path, "read_text", return_value=release), \\
-         mock.patch.object(p.os, "lstat", return_value=info) as identity, \\
+    release = ("ID=debian\nVERSION_ID=13\n" if platform == "debian13"
+               else "ID=almalinux\nVERSION_ID=10\n")
+    with mock.patch.object(Path, "read_text", return_value=release), \
+         mock.patch.object(p.os, "lstat", return_value=info) as identity, \
          mock.patch.object(p.subprocess, "run",
                            return_value=subprocess.CompletedProcess([], 0, "", "")) as run:
         report = p.inspect_stock_nginx_package_file_integrity()
@@ -159,10 +159,10 @@ def test_installed_file_integrity_failure_cannot_be_reconciled(failure):
     changed = SimpleNamespace(**{**vars(info), "st_ino": 20})
     result = subprocess.CompletedProcess([], 1 if failure == "returncode" else 0,
         "S.5....T /usr/sbin/nginx" if failure == "stdout" else "", "")
-    with mock.patch.object(Path, "read_text", return_value="ID=debian\\nVERSION_ID=13\\n"), \\
+    with mock.patch.object(Path, "read_text", return_value="ID=debian\nVERSION_ID=13\n"), \
          mock.patch.object(p.os, "lstat",
                            side_effect=[info, changed] if failure == "changed-binary"
-                           else [info, info]), \\
+                           else [info, info]), \
          mock.patch.object(p.subprocess, "run", return_value=result):
         with pytest.raises(p.StockNginxPackageOwnerError):
             p.inspect_stock_nginx_package_file_integrity()
