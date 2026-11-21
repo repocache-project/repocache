@@ -250,14 +250,15 @@ def test_auto_id_uses_protected_all_time_ledger_and_is_restart_stable(
     assert next(x for x in reserved["id_reservations"] if x["id"] == first_id)[
         "status"
     ] == "retired"
-    recreated = update(
-        protected_fixture, operation="add", expected=3,
-        repository_id=None, proposed=candidate,
-    )
-    assert recreated["repository_id"] != first_id
-    assert first_id in {
-        x["id"] for x in read_state(directory)["id_reservations"]
-    }
+    # The adopted v2 schema also reserves historical identity digests:
+    # a tombstoned publisher identity cannot be silently rebound to a new
+    # ID/cache namespace. A separately approved recovery policy is needed.
+    with pytest.raises(FixtureRepositoryTransactionError, match="PREPARE_REFUSED"):
+        update(
+            protected_fixture, operation="add", expected=3,
+            repository_id=None, proposed=candidate,
+        )
+    assert read_state(directory) == reserved
 
 
 def test_failed_prepublication_barrier_leaves_pending_wal_for_recovery(
