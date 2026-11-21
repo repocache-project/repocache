@@ -122,6 +122,26 @@ test "$boot_after" != "$boot_before"
 printf 'boot_before=%s\nboot_after=%s\n' "$boot_before" "$boot_after" > "$out/reboot-ids.txt"
 stage=after-reboot-nginx
 sshguest "sudo bash /home/pr237ci/source/scripts/ci_pr237_guest.sh '$PR237_PLATFORM' after" > "$out/after-reboot.txt" 2>&1 || { cat "$out/after-reboot.txt"; exit 1; }
+stage=pinned-pr249-synthetic-candidate
+# This combines already-reviewed source only in a local throwaway worktree.
+# It never fetches publisher keys or modifies the #249 PR/branch.
+PR249_SHA=fba69bc8baad0dc6b5d6be7d59812572928f5efa
+git fetch --no-tags origin +refs/heads/fix/76-repository-transfer-v06-candidate-20261107:refs/remotes/origin/pr249
+test "$(git rev-parse refs/remotes/origin/pr249)" = "$PR249_SHA"
+git worktree add --detach "$tmp/combined-source" "$sha" >/dev/null
+git -C "$tmp/combined-source" switch -c pr237-synthetic-vm-merge >/dev/null
+git -C "$tmp/combined-source" config user.email "pr237-fixture@repocache.invalid"
+git -C "$tmp/combined-source" config user.name "PR237 disposable synthetic CI"
+git -C "$tmp/combined-source" merge --no-ff --no-edit "$PR249_SHA" >/dev/null
+combined_sha="$(git -C "$tmp/combined-source" rev-parse HEAD)"
+printf 'pr237_head=%s\npr249_dependency=%s\ncombined_disposable=%s\n' "$sha" "$PR249_SHA" "$combined_sha" > "$out/synthetic-source-provenance.txt"
+git -C "$tmp/combined-source" archive HEAD | gzip -1 > "$tmp/combined-source.tar.gz"
+scp -i "$tmp/id_ed25519" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
+  -o "UserKnownHostsFile=$tmp/known_hosts" -o LogLevel=ERROR \
+  -P 2222 "$tmp/combined-source.tar.gz" pr237ci@127.0.0.1:combined.tar.gz
+sshguest 'mkdir -p ~/combined && tar -xf ~/combined.tar.gz -C ~/combined'
+stage=synthetic-native-worker-placement
+sshguest "sudo /usr/bin/python3 -B /home/pr237ci/source/scripts/ci_pr237_synthetic_worker_guest.py /home/pr237ci/combined '$combined_sha'" > "$out/synthetic-installed-worker.txt" 2>&1 || { cat "$out/synthetic-installed-worker.txt"; exit 1; }
 stage=synthetic-pending-journal
 sshguest "sudo bash /home/pr237ci/source/scripts/ci_pr237_guest.sh '$PR237_PLATFORM' journal-prepare" > "$out/pending-journal-before-reboot.txt" 2>&1 || { cat "$out/pending-journal-before-reboot.txt"; exit 1; }
 stage=second-guest-kernel-reboot

@@ -81,3 +81,40 @@ APT/DNF side effects, owner-signed installed worker, REPOCACHE v2 transaction
 recovery or production service behavior. A genuine interrupted package
 manager acceptance case remains NOT VERIFIED. No marker is cleared: the
 entire VM is discarded after the experiment.
+
+## Actual installed worker: pinned synthetic #249 prerequisite, never publisher acceptance
+
+The native guest now additionally receives a disposable **exact-source combined
+tree**: the current PR #237 HEAD plus the *read-only, pinned* #249 source
+`fba69bc8baad0dc6b5d6be7d59812572928f5efa`. The CI runner uses a
+throwaway Git worktree and records all three identities (PR head, dependency,
+ephemeral local merge). It refuses an unexpectedly moved dependency. There is
+**no GitHub merge, queue operation, publisher signing or production key**.
+
+Only after the actual full-VM kernel/systemd/NGINX tests, the guest generates
+its own short-lived **synthetic Ed25519 private key** and host trust anchor,
+builds the exact v0.6.0 candidate from the assembled source inventory and
+uses the unchanged real root installer to exercise:
+
+- Explicit invalid detached Ed25519 signature refusal before any persistent
+  worker, unit or namespace placement.
+- Real authenticated worker and two root-owned systemd unit files installed
+  at the actual fixed Linux paths, followed by a full signed readback.
+- Second real installer call with exact unchanged inode, timestamps and bytes.
+- Corrupted installed unit bytes refused; restored bytes independently match.
+- A systemd daemon reload observing the installed units **without starting,
+  enabling, masking or exposing any REPOCACHE control service**.
+
+Synthetic asset key material stays in the disposable guest, never Actions
+artifacts. The later test-only journal phase reuses the already created
+protected namespace with its exact empty completed placement marker, rather
+than creating an unrelated fixture namespace. These results are credible
+**native installed-worker mechanics with synthetic trust**, not real signed
+publisher release acceptance, authorization to activate services, production
+rollback or proof of enforcing SELinux for the worker.
+
+The final post-reboot check also runs a **fresh isolated signed-worker CLI
+process** on the verified temporary assets, confirms exact signed installed
+worker and unit readback still PASS, and proves neither REPOCACHE control
+service/socket is active. The signing key is synthetic and was erased from
+the guest after creating the detached signature.

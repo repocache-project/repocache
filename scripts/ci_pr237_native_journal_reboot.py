@@ -57,11 +57,11 @@ def marker_bytes() -> bytes:
 
 
 def prepare(distribution: str) -> None:
-    assert not Path("/var/lib/repocache").exists()
+    assert Path("/var/lib/repocache/server").exists()
     root = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         bootstrap = bootstrap_protected_namespace_under_root(root, owner_uid=0)
-        assert bootstrap["status"] == "FRESH_PROTECTED_LOCK_DURABLE"
+        assert bootstrap["status"] == "EXISTING_PROTECTED_LOCK_VALIDATED"
         result = _prepare_native_journal_under_root(
             root, owner_uid=0, distribution=distribution,
         )
@@ -119,6 +119,34 @@ def after_reboot(distribution: str) -> None:
             )
     finally:
         os.close(root)
+    # A second, freshly launched Python process re-authenticates the
+    # synthetic candidate against the installed root files after reboot.
+    # This is NOT real publisher acceptance or service activation.
+    pins_file = Path("/root/pr237-synthetic-fixture/pins.json")
+    assert pins_file.stat().st_uid == 0 and stat.S_IMODE(pins_file.stat().st_mode) == 0o600
+    pins = json.loads(pins_file.read_bytes())
+    assert set(pins) == {"commit", "archive_sha256"}
+    check = subprocess.run(
+        ["/usr/bin/python3", "-I", "-B",
+         "/home/pr237ci/combined/scripts/stage_native_root_worker.py",
+         "--assets", "/root/pr237-synthetic-fixture/assets",
+         "--verify-installed", "--commit", pins["commit"],
+         "--archive-sha256", pins["archive_sha256"]],
+        check=False, capture_output=True, text=True, timeout=60,
+        env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+    )
+    assert check.returncode == 0 and not check.stderr, "Signed synthetic worker reboot readback refused"
+    receipt = json.loads(check.stdout)
+    assert receipt["status"] == "AUTHENTICATED_WORKER_FILES_MATCH"
+    assert receipt["authorizes_host_installation"] is False
+    assert receipt["authorizes_service_activation"] is False
+    for unit_name in ("repocache-control.service", "repocache-control.socket"):
+        assert subprocess.run(
+            ["/usr/bin/systemctl", "is-active", "--quiet", unit_name],
+            check=False, timeout=15,
+        ).returncode != 0
+    print("PASS: native installed worker and units re-authenticated after reboot with synthetic Ed25519")
+    print("PASS: both REPOCACHE control units remained inactive after guest reboot")
     print("PASS: real guest reboot retained exact root journal inode and service mask")
     print("PASS: repeated native-package re-entry refused without mutation")
     print("synthetic_pending_sha256=" + hashlib.sha256(raw).hexdigest())

@@ -9,6 +9,7 @@ on:
       - 'scripts/ci_pr237_guest.sh'
       - 'scripts/ci_pr237_native_host_integration.py'
       - 'scripts/ci_pr237_native_journal_reboot.py'
+      - 'scripts/ci_pr237_synthetic_worker_guest.py'
       - 'docs/testing/PR237_BOOTED_VM.md'
   workflow_dispatch:
 
@@ -38,6 +39,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Prepare QEMU and NoCloud tooling on disposable runner
         shell: bash
