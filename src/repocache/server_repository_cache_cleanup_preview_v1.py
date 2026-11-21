@@ -74,6 +74,14 @@ def _scan(fd: int, *, level: int, uid: int, gid: int, dev: int,
                 _deny("UNEXPECTED_CACHE_LAYOUT")
             expected_directory = level < 2
             first = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            # Never *open* a special node merely to discover its type.
+            # O_NONBLOCK avoids one FIFO hang, but a device can still have
+            # observable open-side effects. Refuse foreign inode kind,
+            # ownership, links, mount and permissions before any open(2).
+            # The opened descriptor is rechecked against this preflight
+            # immediately below to detect substitution between the calls.
+            _metadata(first, uid=uid, gid=gid, dev=dev,
+                      directory=expected_directory)
             opened = os.open(
                 name, _DIRECTORY_FLAGS if expected_directory else _FILE_FLAGS,
                 dir_fd=fd,
