@@ -474,6 +474,36 @@ def test_managed_reload_keeps_committed_files_and_checks_exact_context(
     assert_no_pending(filesystem)
 
 
+def test_managed_reload_refuses_foreign_effective_include_after_reload(
+    filesystem, monkeypatch,
+):
+    stage(filesystem, snapshot(count=1))
+    apply(filesystem)
+    _fd, state, include, catalog, events = filesystem
+    paths = (state / V2_STATE, include, catalog, state / native._MANIFEST)
+    before = [(path.read_bytes(), path.stat().st_ino, path.stat().st_mtime_ns)
+              for path in paths]
+    events.clear()
+    snapshots = iter((
+        b"# configuration file /etc/nginx/conf.d/repocache-managed.conf:\n"
+        + include.read_bytes() + b"\n",
+        b"# configuration file /etc/nginx/conf.d/repocache-managed.conf:\n"
+        b"# foreign post-reload include\n",
+    ))
+    monkeypatch.setattr(
+        native, "_capture_default_nginx_dump_private",
+        lambda: b"# configuration file /etc/nginx/nginx.conf:\nhttp {}\n"
+                + next(snapshots),
+    )
+    with pytest.raises(native.NativeV2TransactionError, match="NGINX_DUMP_MISMATCH"):
+        reload_owned(filesystem)
+    assert events.count(("reload", "debian")) == 1
+    assert events.count(("exposure", 1)) == 2
+    assert [(path.read_bytes(), path.stat().st_ino, path.stat().st_mtime_ns)
+            for path in paths] == before
+    assert_no_pending(filesystem)
+
+
 def test_reload_refuses_unmanaged_state_without_any_native_effect(filesystem):
     with pytest.raises(native.NativeV2TransactionError, match="MANAGED_GENERATION_REQUIRED"):
         reload_owned(filesystem)

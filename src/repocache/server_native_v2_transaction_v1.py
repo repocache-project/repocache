@@ -707,6 +707,12 @@ def _reload_owned_locked(
     _reload_native(distribution)
     _local_https_generation(document, generation)
     _local_https_catalog(document, old[_CATALOG])
+    # The reloaded service is not allowed to report success if the fixed
+    # NGINX -T include section changed during reload, even when the saved
+    # state/catalog bytes and the generation health endpoint still match.
+    # This is a refusal to certify success, not authority to mutate or
+    # compensate an independently changed host configuration.
+    _verify_owned_include_in_dump(old[_INCLUDE])
     if _read_all(state_fd, include_fd, public_fd) != old:
         _deny("POST_RELOAD_DRIFT")
     return {"status": "NATIVE_V2_RELOADED", "state_generation": generation}

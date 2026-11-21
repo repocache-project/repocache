@@ -132,7 +132,13 @@ same reviewed snapshot reports `AUTHENTICATED_V2_PROPOSAL_ALREADY_COMMITTED`
 and preserves the existing proposal. Repeating `APPLY_V2` with that same
 proposal returns `NATIVE_V2_NO_CHANGE` after verifying the complete owned
 resource set and re-reading the intake. It performs no reload, publication
-or generation increment. A proposal from an older committed generation,
+or generation increment. A separately requested `RELOAD_V2` validates
+the fixed NGINX include section both before and after the service reload.
+If the post-reload NGINX configuration dump differs despite matching
+generation health and unchanged protected files, it refuses success and
+leaves the managed files untouched for explicit operator investigation.
+This source check alone does not establish live process provenance or
+booted-systemd acceptance. A proposal from an older committed generation,
 resource drift or a pending recovery journal still refuses.
 
 A native package-effects
