@@ -1,6 +1,10 @@
 """Fixture-only native cache cleanup preflight: real inode and adversarial tests."""
 from __future__ import annotations
 
+import base64
+import copy
+import hashlib
+import json
 import os
 from pathlib import Path
 
@@ -13,6 +17,13 @@ from repocache.server_native_repository_cache_v1 import (
 from repocache.server_native_storage_bootstrap_v1 import (
     bootstrap_native_nginx_storage_under_root,
 )
+from repocache.server_proposed_state_v2_store import (
+    V2_JOURNAL, V2_STATE,
+    _commit_proposed_v2_under_root as commit_v2,
+)
+from repocache.server_repository_plan_v1 import _canonical_identity
+from repocache.server_repository_v2_transition_v1 import plan_repository_v2_transition
+from repocache.server_protected_state_store_v1 import LOCK_NAME, _locked
 
 RID = "debian-trixie-main"
 DIGEST1 = "0123456789abcdef0123456789abcdef"
@@ -285,3 +296,215 @@ def test_untrusted_directory_is_refused_before_open(owned, tmp_path,
     with pytest.raises(preview.RepositoryCacheCleanupPreviewError,
                        match="CACHE_CLEANUP_CONTENT_UNTRUSTED"):
         inspect(owned)
+
+
+def _canonical_state_bytes(payload):
+    return json.dumps(
+        payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"),
+    ).encode("ascii")
+
+
+def _initial_cache_v2_state():
+    source = Path(__file__).resolve().parents[1] / (
+        "docs/examples/server-install-v1.json"
+    )
+    config = json.loads(source.read_text(encoding="utf-8"))
+    config["expected_state_generation"] = 1
+    config["repositories"][1]["id"] = "almalinux-baseos"
+    raw = _canonical_state_bytes(config)
+    digest = hashlib.sha256(raw).hexdigest()
+    records = [{
+        "id": repo["id"],
+        "canonical_identity_sha256": hashlib.sha256(
+            _canonical_identity(repo).encode("utf-8"),
+        ).hexdigest(),
+        "desired_state": repo["desired_state"],
+        "observed_state": "not-activated",
+    } for repo in config["repositories"]]
+    return {
+        "state_schema_version": 2,
+        "state_generation": 1,
+        "configuration_base64": base64.b64encode(raw).decode("ascii"),
+        "configuration_sha256": digest,
+        "repository_records": records,
+        "id_reservations": [{
+            "id": row["id"],
+            "canonical_identity_sha256": row["canonical_identity_sha256"],
+            "status": "allocated",
+        } for row in records],
+        "approval_reference": {
+            "source": "operator",
+            "decision_sha256": "a" * 64,
+            "configuration_sha256": digest,
+            "expected_generation": 0,
+        },
+    }
+
+
+@pytest.fixture
+def owned_with_locked_state(owned):
+    fd, uid, gid, cache_root, cache, root = owned
+    for segment in (
+        "var/lib", "var/lib/repocache", "var/lib/repocache/server",
+    ):
+        (root / segment).mkdir(mode=0o700)
+    lock = root / "var/lib/repocache/server" / LOCK_NAME
+    lock.write_bytes(b"")
+    lock.chmod(0o600)
+    initial = _initial_cache_v2_state()
+    initial_report = commit_v2(fd, initial, owner_uid=uid, expected_generation=0)
+    assert initial_report["state_generation"] == 1
+    state_file = root / "var/lib/repocache/server" / V2_STATE
+    return owned, initial, state_file
+
+
+def _locked_cleanup_preview(owned_with_state, *, generation, digest,
+                            rid=RID):
+    layout, _, _ = owned_with_state
+    fd, uid, gid, *_ = layout
+    return preview.preview_locked_retired_repository_cache_cleanup_under_root(
+        fd, root_uid=uid, cache_uid=uid, cache_gid=gid,
+        repository_id=rid,
+        expected_state_generation=generation,
+        expected_state_sha256=digest,
+    )
+
+
+def _retire_owned_repo(owned_with_state):
+    layout, initial, state_file = owned_with_state
+    fd, uid, _, *_ = layout
+    original = state_file.read_bytes()
+    next_plan = plan_repository_v2_transition(
+        initial, expected_generation=1,
+        expected_previous_state_sha256=hashlib.sha256(original).hexdigest(),
+        operation="remove", repository_id=RID,
+        decision_sha256="b" * 64,
+    )
+    next_state = next_plan["proposed_snapshot"]
+    assert next_state["state_generation"] == 2
+    report = commit_v2(fd, next_state, owner_uid=uid, expected_generation=1)
+    assert report["state_generation"] == 2
+    return hashlib.sha256(state_file.read_bytes()).hexdigest()
+
+
+def test_locked_cleanup_preflight_refuses_allocated_repository_before_cache_scan(
+    owned_with_locked_state, monkeypatch,
+):
+    owned, _, state_file = owned_with_locked_state
+    digest = hashlib.sha256(state_file.read_bytes()).hexdigest()
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("active repository must never reach cache scan")
+    monkeypatch.setattr(preview, "preview_repository_cache_cleanup_under_root",
+                        forbidden)
+    with pytest.raises(preview.RepositoryCacheCleanupPreviewError,
+                       match="LOCKED_REPOSITORY_NOT_RETIRED"):
+        _locked_cleanup_preview(
+            owned_with_locked_state, generation=1, digest=digest,
+        )
+
+
+def test_locked_retired_cache_preflight_checks_persisted_ledger_and_cache(
+    owned_with_locked_state,
+):
+    layout, initial, state_file = owned_with_locked_state
+    original = populate(layout)
+    cache_file = original / DIGEST1
+    before = (cache_file.read_bytes(), cache_file.stat().st_ino)
+    digest = _retire_owned_repo(owned_with_locked_state)
+    report = _locked_cleanup_preview(
+        owned_with_locked_state, generation=2, digest=digest,
+    )
+    assert report["status"] == "LOCKED_RETIRED_CACHE_PREVIEW_ONLY"
+    assert report["repository_id"] == RID
+    assert report["state_generation"] == 2
+    assert report["protected_state_sha256"] == digest
+    assert report["fixture_retirement_and_cache_correspondence_observed"] is True
+    assert report["state_lock_held_during_inspection"] is True
+    assert report["state_lock_still_held_after_return"] is False
+    assert report["cache_files_observed"] == 2
+    assert report["cache_directories_observed"] == 2
+    assert report["apparent_file_bytes_observed"] > 0
+    for flag in (
+        "trusted_repository_deletion_approval_verified",
+        "nginx_quiescence_verified", "installed_root_provenance_verified",
+        "installed_nginx_quiescence_verified",
+        "signed_operator_force_cleanup_verified",
+        "authorizes_cache_cleanup", "authorizes_repository_removal",
+        "authorizes_nginx_reload",
+    ):
+        assert report[flag] is False
+    assert (cache_file.read_bytes(), cache_file.stat().st_ino) == before
+    assert state_file.is_file()
+    # The other active DNF state remains present, with no implicit cleanup.
+    assert [r["id"] for r in initial["repository_records"]] == [
+        "debian-trixie-main", "almalinux-baseos"
+    ]
+
+
+def test_locked_retired_cache_preflight_refuses_stale_digest_or_generation(
+    owned_with_locked_state,
+):
+    _retire_owned_repo(owned_with_locked_state)
+    _, _, state_file = owned_with_locked_state
+    digest = hashlib.sha256(state_file.read_bytes()).hexdigest()
+    for generation, claimed in (
+        (1, digest), (2, "0" * 64), (3, digest),
+    ):
+        with pytest.raises(preview.RepositoryCacheCleanupPreviewError,
+                           match="LOCKED_STATE_CHANGED"):
+            _locked_cleanup_preview(
+                owned_with_locked_state, generation=generation,
+                digest=claimed,
+            )
+    for rid in ("almalinux-baseos", "unknown-repo"):
+        with pytest.raises(preview.RepositoryCacheCleanupPreviewError,
+                           match="LOCKED_REPOSITORY_NOT_RETIRED"):
+            _locked_cleanup_preview(
+                owned_with_locked_state, generation=2,
+                digest=digest, rid=rid,
+            )
+    assert state_file.is_file()
+
+
+def test_locked_retired_cleanup_refuses_pending_state_wal_without_scanning(
+    owned_with_locked_state,
+):
+    _retire_owned_repo(owned_with_locked_state)
+    layout, _, state_file = owned_with_locked_state
+    digest = hashlib.sha256(state_file.read_bytes()).hexdigest()
+    pending = state_file.with_name(V2_JOURNAL)
+    pending.write_bytes(b'not-a-clean-recovery-journal')
+    pending.chmod(0o600)
+    with pytest.raises(preview.RepositoryCacheCleanupPreviewError,
+                       match="LOCKED_RECOVERY_REQUIRED"):
+        _locked_cleanup_preview(
+            owned_with_locked_state, generation=2, digest=digest,
+        )
+    assert pending.read_bytes() == b'not-a-clean-recovery-journal'
+
+
+def test_locked_retired_cleanup_unsafe_cache_objects_and_lock_contention(
+    owned_with_locked_state, tmp_path,
+):
+    layout, _, state_file = owned_with_locked_state
+    digest = _retire_owned_repo(owned_with_locked_state)
+    _, uid, _, directory, *_ = layout
+    external = tmp_path / "foreign"
+    external.write_bytes(b"foreign-immutable")
+    (directory / "a").mkdir(mode=0o700)
+    (directory / "a" / "bc").mkdir(mode=0o700)
+    (directory / "a" / "bc" / DIGEST1).symlink_to(external)
+    with pytest.raises(preview.RepositoryCacheCleanupPreviewError):
+        _locked_cleanup_preview(
+            owned_with_locked_state, generation=2, digest=digest,
+        )
+    assert external.read_bytes() == b"foreign-immutable"
+    (directory / "a" / "bc" / DIGEST1).unlink()
+
+    with _locked(layout[0], uid):
+        with pytest.raises(preview.RepositoryCacheCleanupPreviewError,
+                           match="LOCKED_PROTECTED_UNVERIFIED"):
+            _locked_cleanup_preview(
+                owned_with_locked_state, generation=2, digest=digest,
+            )
+    assert state_file.is_file()
