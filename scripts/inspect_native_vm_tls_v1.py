@@ -91,11 +91,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Observe loopback TLS identity; never authorize deployment")
     parser.add_argument("--hostname", required=True, help="Expected DNS SAN and SNI (not included in output)")
     parser.add_argument("--connect-ip", required=True, help="Loopback IP only (not included in output)")
-    parser.add_argument("--port", type=int, required=True)
+    parser.add_argument("--port", required=True)
     parser.add_argument("--ca-file", help="Optional independently supplied CA PEM path (not included in output)")
     args = parser.parse_args(argv)
+    # Parse rather than letting argparse print a malformed user-supplied port.
+    port = int(args.port) if re.fullmatch(r"[1-9][0-9]{0,4}", args.port) else -1
     result = inspect_tls(hostname=args.hostname, connect_ip=args.connect_ip,
-                         port=args.port, ca_file=args.ca_file)
+                         port=port, ca_file=args.ca_file)
     print(_PREFIX + json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0 if result["check_code"] == "TLS_IDENTITY_OBSERVED" else 2
 

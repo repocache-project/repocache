@@ -122,3 +122,13 @@ def test_untrusted_ca_rejected(tls_server, tmp_path):
                                 "--port", port, "--ca-file", ca)
     assert code == 2
     assert result["check_code"] == "TRUST_STORE_UNAVAILABLE"
+
+@pytest.mark.parametrize("bad_port", ["secret-port", "0", "65536", "+443", "443abc"])
+def test_invalid_port_never_echoes_user_value(bad_port):
+    code, result, line = run_probe("--hostname", HOST, "--connect-ip", "127.0.0.1",
+                                   "--port", bad_port)
+    assert code == 2
+    assert result["check_code"] == "INPUT_REFUSED"
+    assert "\"port\"" not in line
+    if len(bad_port) > 2:
+        assert bad_port not in line
