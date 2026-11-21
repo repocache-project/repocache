@@ -304,8 +304,14 @@ def report(distribution: str) -> None:
                         _require_audited_native_package_for_activation(
                             directory, distribution=distribution,
                         )
-                    except NativeV2TransactionError as error:
-                        assert str(error) == "NATIVE_V2_NATIVE_PACKAGE_PROVENANCE_UNVERIFIED"
+                    except (NativeV2TransactionError, NativePackageJournalError) as error:
+                        # The legacy-state gate checks the same protected
+                        # receipt before the activation gate catches it. Both
+                        # are fail-closed, and neither may mutate any resource.
+                        assert str(error) in (
+                            "NATIVE_COMPLETION_RECEIPT_INVALID",
+                            "NATIVE_V2_NATIVE_PACKAGE_PROVENANCE_UNVERIFIED",
+                        )
                     else:
                         raise AssertionError("Real native APPLY/RELOAD audit gate accepted a corrupted package receipt")
             finally:
