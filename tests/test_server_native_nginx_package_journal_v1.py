@@ -578,7 +578,12 @@ def test_fresh_native_package_never_adopts_v2_or_unknown_protected_state(
     unexpected = state / name
     unexpected.write_bytes(b"")
     unexpected.chmod(0o600)
-    with pytest.raises(NativePackageJournalError, match="NATIVE_FOREIGN_PROTECTED_STATE"):
+    # The protected lock can detect legacy/v2 cohabitation even before the
+    # native fresh-state allowlist runs. Both paths MUST refuse without writes.
+    with pytest.raises(
+        NativePackageJournalError,
+        match="NATIVE_(?:FOREIGN_PROTECTED_STATE|JOURNAL_STATE_UNVERIFIED)",
+    ):
         _prepare_native_journal_under_root(root, owner_uid=owner, distribution="debian")
     assert unexpected.is_file()
     assert not (state / NATIVE_PENDING_NAME).exists()
