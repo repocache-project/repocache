@@ -70,3 +70,20 @@ candidate activation is never performed by the forward path. New tests
 assert successful two-sided observation and exact previous-include bytes
 on the compensating reload after a foreign-context refusal. These are
 source and disposable CI guarantees, not booted systemd/SELinux evidence.
+
+
+## WAL recovery verifies the restored NGINX context
+
+A successful compensating `nginx.service` reload, old-generation HTTPS
+health response and on-disk ownership manifest are not sufficient evidence
+that a foreign/duplicate managed include was not loaded. Native WAL recovery
+now reads the bounded fixed `nginx -T` context **after restoring the old
+include and reloading the vendor unit**, before removing the durable WAL. It
+requires the exact previous managed section for a repair/upgrade rollback,
+or **no managed section** for an interrupted initial installation. An absent,
+foreign, duplicated or modified managed section is a fixed refusal and
+retains the WAL for controlled subsequent recovery. This adds a further
+failure condition; it does not permit deleting a journal on unverifiable
+host state. Fixtures verify the WAL survives refusal, and strict dump unit
+tests cover initial absence versus unexpected residual configuration.
+Real booted-host acceptance remains NOT VERIFIED.

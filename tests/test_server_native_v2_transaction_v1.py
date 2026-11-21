@@ -70,6 +70,10 @@ def filesystem(tmp_path, monkeypatch):
                             ("exposure", generation)))
     monkeypatch.setattr(native, "_route_dump_check",
                         lambda *_args: events.append("dump"))
+    # Native nginx -T cannot inspect the detached fixture root. Individual
+    # strict dump-validator tests below use explicit captured bytes instead.
+    monkeypatch.setattr(native, "_verify_owned_include_in_dump",
+                        lambda *_args, **_kwargs: None)
     monkeypatch.setattr(native, "_local_https_catalog",
                         lambda _doc, raw: events.append(("catalog-exposure", len(raw))))
     try:
@@ -986,6 +990,58 @@ def test_foreign_completed_public_stage_not_deleted_even_with_valid_wal(
         recover(filesystem)
     assert (state / native._WAL).exists()
     assert (include.parent / native._STAGE).read_bytes() == b"foreign complete stage"
+
+
+def test_rollback_retains_wal_until_restored_nginx_context_is_verified(
+    filesystem, monkeypatch,
+):
+    """Keep a recoverable WAL when the old managed context is unprovable."""
+    initial = snapshot(count=1)
+    stage(filesystem, initial)
+    apply(filesystem)
+    _fd, state, include, catalog, _events = filesystem
+    old = [(path, path.read_bytes()) for path in (
+        state / V2_STATE, include, catalog, state / native._MANIFEST,
+    )]
+    stage(filesystem, snapshot(count=1, generation=2, previous=initial),
+          expected=1, prior=hashlib.sha256(old[0][1]).hexdigest())
+    actual_reload = native._reload_native
+
+    def interrupted_reload(*_args):
+        raise KeyboardInterrupt("test interruption after WAL and candidate write")
+
+    monkeypatch.setattr(native, "_reload_native", interrupted_reload)
+    with pytest.raises(KeyboardInterrupt):
+        apply(filesystem)
+    monkeypatch.setattr(native, "_reload_native", actual_reload)
+    assert (state / native._WAL).is_file()
+    ordinary_dump_check = native._verify_owned_include_in_dump
+
+    def foreign_restored_dump(*_args, **_kwargs):
+        raise native.NativeV2TransactionError("NGINX_DUMP_MISMATCH")
+
+    monkeypatch.setattr(native, "_verify_owned_include_in_dump", foreign_restored_dump)
+    with pytest.raises(native.NativeV2TransactionError,
+                       match="NGINX_DUMP_MISMATCH"):
+        recover(filesystem)
+    assert (state / native._WAL).is_file()
+    assert [path.read_bytes() for path, _raw in old] == [raw for _path, raw in old]
+    monkeypatch.setattr(native, "_verify_owned_include_in_dump", ordinary_dump_check)
+    assert recover(filesystem)["status"] == "NATIVE_V2_ROLLED_BACK"
+    assert_no_pending(filesystem)
+
+
+def test_native_dump_rollback_requires_managed_section_absent_for_initial_state():
+    """A torn initial install is not recovered while its include is active."""
+    ordinary = b"# configuration file /etc/nginx/nginx.conf:\nhttp {}\n"
+    native._verify_owned_include_in_dump(None, captured_dump=ordinary)
+    injected = ordinary + (
+        b"# configuration file /etc/nginx/conf.d/repocache-managed.conf:\n"
+        b"# foreign managed include\n"
+    )
+    with pytest.raises(native.NativeV2TransactionError,
+                       match="NGINX_DUMP_MISMATCH"):
+        native._verify_owned_include_in_dump(None, captured_dump=injected)
 
 
 # #31/#64 strict live dump binding: catalog publication may never be

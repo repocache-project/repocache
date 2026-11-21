@@ -659,20 +659,25 @@ def _native_syntax_check() -> None:
 
 
 def _verify_owned_include_in_dump(
-    include: bytes, *, captured_dump: bytes | None = None,
+    include: bytes | None, *, captured_dump: bytes | None = None,
 ) -> None:
-    """Require exactly one full fixed managed-file section in the native -T.
+    """Match native -T to the exact managed include, including absence.
 
-    Apply and explicit reload share this stricter identity check. Reuse the
-    *same* captured dump for apply so catalog parsing cannot depend on a
-    different NGINX configuration observation.
+    Apply, explicit reload and WAL recovery share the strict identity check.
+    Recovery must verify no managed section after rolling back an initial
+    installation, or the exact prior section after a managed update.
     """
     header = b"/etc/nginx/conf.d/repocache-managed.conf:\n"
     dump = (_capture_default_nginx_dump_private()
             if captured_dump is None else captured_dump)
     sections = re.split(rb"(?m)^# configuration file ", dump)[1:]
     managed = [section[len(header):] for section in sections if section.startswith(header)]
-    if len(managed) != 1 or managed[0] not in (include, include + b"\n"):
+    if include is None:
+        # A failed first install must restore an *absent* managed include;
+        # foreign configuration must not reintroduce it before WAL cleanup.
+        if managed:
+            _deny("NGINX_DUMP_MISMATCH")
+    elif len(managed) != 1 or managed[0] not in (include, include + b"\n"):
         _deny("NGINX_DUMP_MISMATCH")
 
 
@@ -970,6 +975,11 @@ def _recover_locked(state_fd: int, include_fd: int,
             _deny("PREVIOUS_STATE_INVALID")
         _local_https_generation(prior_doc, prior_state["state_generation"])
         _local_https_catalog(prior_doc, old[_CATALOG])
+    # A successful syntax check and a matching health endpoint do not prove
+    # that the *exact old managed include* is loaded (or absent for an
+    # interrupted fresh install). Retain the durable WAL until the fixed
+    # effective -T dump agrees with the restored filesystem generation.
+    _verify_owned_include_in_dump(old[_INCLUDE])
     _verify_owned(_read_all(state_fd, include_fd, public_fd))
     _unlink_known(state_fd, _WAL, raw, 0, _MAX_WAL)
     return {"status": "NATIVE_V2_ROLLED_BACK", "recovery_required": False}
