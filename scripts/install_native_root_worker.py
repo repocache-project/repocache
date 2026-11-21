@@ -378,6 +378,76 @@ def _native_workspace_is_root_owned(work: Path) -> bool:
             and stat.S_ISDIR(info.st_mode))
 
 
+def _ensure_fixed_nginx_cache_parent_under_root(root_fd: int, *, owner_uid: int = 0) -> None:
+    """Provision only the missing native systemd ReadWritePaths cache parent.
+
+    The stock APT/DNF package may not create /var/cache/nginx. Both the signed
+    control unit and the native host-preflight require that exact directory;
+    enabling the socket before it exists fails with systemd 226/NAMESPACE.
+    Never follow symlinks, replace an existing directory, change foreign modes,
+    choose a caller-provided path, or weaken the installed systemd sandbox.
+    This is a private post-package step under the durable native install lock.
+    """
+    if (type(root_fd) is not int or root_fd < 0
+            or type(owner_uid) is not int or owner_uid < 0):
+        _reject("NATIVE_CACHE_PARENT_UNVERIFIED")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+    def checked(fd: int, *, parent_dev: int | None = None) -> os.stat_result:
+        info = os.fstat(fd)
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != owner_uid
+                or info.st_gid != os.fstat(root_fd).st_gid
+                or info.st_mode & 0o022
+                or (parent_dev is not None and info.st_dev != parent_dev)):
+            _reject("NATIVE_CACHE_PARENT_UNSAFE")
+        return info
+
+    try:
+        with ExitStack() as stack:
+            root = checked(root_fd)
+            directory = root_fd
+            for name in ("var", "cache"):
+                nxt = os.open(name, flags, dir_fd=directory)
+                stack.callback(os.close, nxt)
+                checked(nxt, parent_dev=os.fstat(directory).st_dev)
+                directory = nxt
+
+            parent = directory
+            try:
+                fd = os.open("nginx", flags, dir_fd=parent)
+            except FileNotFoundError:
+                # A concurrent foreign inode is a conflict, not an adoption.
+                os.mkdir("nginx", 0o700, dir_fd=parent)
+                fd = os.open("nginx", flags, dir_fd=parent)
+                stack.callback(os.close, fd)
+                created = os.fstat(fd)
+                if (created.st_uid != owner_uid
+                        or created.st_gid != root.st_gid
+                        or not stat.S_ISDIR(created.st_mode)
+                        or created.st_dev != os.fstat(parent).st_dev
+                        or stat.S_IMODE(created.st_mode) != 0o700):
+                    _reject("NATIVE_CACHE_PARENT_UNSAFE")
+                os.fchmod(fd, 0o755)
+                os.fsync(fd)
+                os.fsync(parent)
+            else:
+                stack.callback(os.close, fd)
+            leaf = checked(fd, parent_dev=os.fstat(parent).st_dev)
+            if stat.S_IMODE(leaf.st_mode) != 0o755:
+                _reject("NATIVE_CACHE_PARENT_UNSAFE")
+            again = os.stat("nginx", dir_fd=parent, follow_symlinks=False)
+            if ((again.st_dev, again.st_ino, again.st_mode, again.st_uid, again.st_gid)
+                    != (leaf.st_dev, leaf.st_ino, leaf.st_mode, leaf.st_uid, leaf.st_gid)):
+                _reject("NATIVE_CACHE_PARENT_CHANGED")
+            # Verify fixed ancestry once more after any mkdir/fchmod/fsync.
+            checked(root_fd)
+            checked(parent, parent_dev=root.st_dev)
+    except stage.WorkerStageError:
+        raise
+    except (OSError, ValueError, TypeError):
+        _reject("NATIVE_CACHE_PARENT_UNVERIFIED")
+
+
 def _execute_native_nginx_install_locked(
     root_fd: int, *, distribution: str, document: dict, os_release: str,
     owner_uid: int = 0,
@@ -439,6 +509,10 @@ def _execute_native_nginx_install_locked(
             unit = inspect_native_nginx_unit(distribution).to_dict()
             if unit.get("code") != "VENDOR_NGINX_UNIT_OBSERVED":
                 _reject("NATIVE_VENDOR_UNIT_UNVERIFIED")
+            # The signed control unit requires this fixed ReadWritePaths
+            # directory. Some native nginx packages do not provision it.
+            # Complete the package receipt only after its owned parent is safe.
+            _ensure_fixed_nginx_cache_parent_under_root(root_fd, owner_uid=owner_uid)
             # The atomic completion primitive independently repeats the
             # protected-state, package, file and vendor-unit checks.
             result = transaction["_complete_under_lock"]()
