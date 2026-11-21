@@ -114,3 +114,22 @@ preconditions with its **authenticated root**, trusted OS NGINX package and
 locked installed state, then actually activate the NGINX generation and
 observe its catalog. Never call this fixture routine as a privileged
 production endpoint.
+
+
+### CI runtime compatibility repair (test harness only)
+
+The existing native owned-cache/metrics NGINX smoke imports the shared
+`trusted_fixture_origin` from the generated-route smoke. The latter
+recently added **two required in-flight transfer barrier Events**, while the
+existing metrics smoke still called it with only the request counter and
+lock. Its two-distro Actions job failed with a Python `TypeError` before
+NGINX started, unrelated to a cache-root ownership failure. The shared
+CI-only HTTPS origin now supports **both events omitted** (legacy metrics
+smoke, no held-transfer case), or **both explicitly supplied** (strict
+worker-drain scenario). Supplying only one event, or an invalid event
+type, is refused rather than silently reducing the worker-drain guard.
+
+No production renderer, upstream/TLS policy, journal, user CLI, privilege
+boundary or active runtime service was changed by this compatibility fix.
+The previously failing Debian13/AlmaLinux10 native owned-cache/metrics job
+must PASS at the same source HEAD before this PR can enter the queue.
