@@ -121,3 +121,44 @@ The v0.6.0 original #95 force-cleanup, selective isolation and native
 Debian 13 / AlmaLinux 10 end-to-end criteria remain NOT VERIFIED; final
 host acceptance belongs to #19. This preview does not expose any CLI
 command, root broker or production-operation switch.
+
+## Explicit retired-object deletion rehearsal (fixture only)
+
+The new `server_fixture_retired_cache_cleanup_v1.py` contains a deliberately
+**detached-test-root-only**, actual unlink/rmdir rehearsal for explicit #95
+force-cleanup. This is separate from the existing strictly read-only preview.
+It reads and verifies the canonical retired state-v2 ID under the owner-pinned
+exclusive lock, refuses pending journals and foreign owner manifests, and
+requires the exact expected state generation/hash plus expected observed
+file count and allocated bytes. Its bounded two-pass inode inventory
+rejects unfamiliar levels=1:2 layouts, symlinks, devices, hardlinks,
+foreign ACL/xattrs and changed contents before starting deletion. It only
+unlinks verified objects below the **selected retired repository root**,
+rechecks each descriptor and ancestor, and fsyncs the parent after each
+removal. The protected tombstone and root-owned repository marker remain.
+
+The mandatory `assert_fixture_quiescent` callback is deliberately untrusted
+test code; its successful return is **not** native NGINX worker-drain
+evidence, root/administrator authorization or an installed cleanup capability.
+This function absolutely refuses `/` and must never be exposed through a
+CLI/socket/privileged host process. Do not treat the fixture's byte removal
+as the original #95 production force-cleanup acceptance.
+
+**Crash semantics:** cache object deletion is not atomic. If a fault occurs
+after some verified unlinks, preserve the retired ledger and marker, run a
+**fresh locked preflight** to inspect the reduced scope, then repeat the
+explicit fixture-only operation. No rollback of deleted package bytes is
+claimed. The installed worker must separately authenticate operator intent,
+enforce true NGINX transfer quiescence/reload, verify shared objects, audit
+live root/SELinux boundaries and implement its approved recovery contract.
+
+CI regression command:
+
+```sh
+python -m pytest -q tests/test_server_repository_cache_cleanup_preview_v1.py
+```
+
+Tests cover positive per-ID purge with another repository untouched,
+zero-object repeat, still-allocated/stale IDs and mismatched space estimate,
+symlink/hardlink/foreign layout, callback refusal and mutation, interrupted
+deletion with exact subsequent preflight/resume, and refusal to access `/`.

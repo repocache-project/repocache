@@ -123,6 +123,7 @@ V06_EXTRA_FILES = frozenset((
     "src/repocache/server_protected_namespace_bootstrap_v1.py",
     "src/repocache/server_protected_state_inspect_v1.py",
     "src/repocache/server_protected_state_store_v1.py",
+    "src/repocache/server_fixture_retired_cache_cleanup_v1.py",
     "src/repocache/server_repository_cache_cleanup_preview_v1.py",
     "src/repocache/server_repository_cache_usage_v1.py",
     "src/repocache/server_repository_plan_v1.py",
