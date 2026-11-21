@@ -11,6 +11,7 @@ import pytest
 from repocache.server_native_nginx_managed_rehearsal_v1 import (
     ManagedIncludeRehearsalError,
     rehearse_managed_include_under_root,
+    recover_interrupted_owned_include_fixture_under_root,
 )
 
 NAME = "repocache-managed.conf"
@@ -345,3 +346,196 @@ def test_actual_namespace_root_fd_refuses_fixture_mutation(monkeypatch):
             )
     finally:
         os.close(root_fd)
+
+
+def _simulate_post_promotion_process_crash(root_fd, directory):
+    """A separate Linux process dies while candidate is actually published."""
+    target = directory / NAME
+    target.write_bytes(OLD)
+    target.chmod(0o640)
+    original = target.stat()
+    previous_sha = hashlib.sha256(OLD).hexdigest()
+    candidate_sha = hashlib.sha256(OK).hexdigest()
+
+    child = os.fork()
+    if child == 0:
+        try:
+            # Do not execute Python finally blocks in this test process.
+            rehearse_managed_include_under_root(
+                root_fd, OK, owner_uid=os.geteuid(),
+                expected_previous_sha256=previous_sha,
+                syntax_check=lambda: os._exit(73),
+            )
+        except BaseException:
+            os._exit(74)
+        os._exit(75)
+    _, status = os.waitpid(child, 0)
+    assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 73
+    assert target.read_bytes() == OK
+    assert (directory / BACKUP).read_bytes() == OLD
+    assert (directory / BACKUP).stat().st_ino == original.st_ino
+    assert not (directory / STAGE).exists()
+    return original, previous_sha, candidate_sha
+
+
+def _recover_crash(root_fd, previous_sha, candidate_sha):
+    return recover_interrupted_owned_include_fixture_under_root(
+        root_fd, owner_uid=os.geteuid(),
+        expected_previous_sha256=previous_sha,
+        expected_candidate_sha256=candidate_sha,
+    )
+
+
+def test_crashed_child_known_good_original_inode_recovered(fixture_root):
+    root, directory = fixture_root
+    old, prior_digest, candidate_digest = (
+        _simulate_post_promotion_process_crash(root, directory)
+    )
+    report = _recover_crash(root, prior_digest, candidate_digest)
+    restored = (directory / NAME).stat()
+    assert report["status"] == "FIXTURE_INTERRUPTED_OWNED_INCLUDE_RESTORED"
+    assert report["previous_file_inode_and_bytes_restored"] is True
+    assert report["pending_package_effects_reconciled"] is False
+    assert report["authorizes_nginx_reload"] is False
+    assert report["external_state_lock_authenticated"] is False
+    assert report["host_root_authenticated"] is False
+    assert ((restored.st_dev, restored.st_ino, restored.st_mode)
+            == (old.st_dev, old.st_ino, old.st_mode))
+    assert (directory / NAME).read_bytes() == OLD
+    assert set(x.name for x in directory.iterdir()) == {NAME}
+    with pytest.raises(ManagedIncludeRehearsalError,
+                       match="^MANAGED_INCLUDE_RECOVERY_PHASE_UNVERIFIED$"):
+        _recover_crash(root, prior_digest, candidate_digest)
+
+
+@pytest.mark.parametrize("bad_previous,bad_candidate", [
+    ("0" * 64, None),
+    (None, "0" * 64),
+    ("f" * 64, "f" * 64),
+])
+def test_wrong_or_ambiguous_recovery_digest_never_overwrites_previous(
+    fixture_root, bad_previous, bad_candidate,
+):
+    root, directory = fixture_root
+    old, previous, candidate = _simulate_post_promotion_process_crash(
+        root, directory,
+    )
+    old_backup = (directory / BACKUP).read_bytes()
+    with pytest.raises(ManagedIncludeRehearsalError):
+        _recover_crash(
+            root, previous if bad_previous is None else bad_previous,
+            candidate if bad_candidate is None else bad_candidate,
+        )
+    assert (directory / NAME).read_bytes() == OK
+    assert (directory / BACKUP).read_bytes() == old_backup
+    assert (directory / BACKUP).stat().st_ino == old.st_ino
+
+
+def test_recovery_refuses_stage_and_leaves_all_artifacts(fixture_root):
+    root, directory = fixture_root
+    _, previous, candidate = _simulate_post_promotion_process_crash(
+        root, directory,
+    )
+    (directory / STAGE).write_bytes(b"unreconciled stale phase\n")
+    with pytest.raises(ManagedIncludeRehearsalError,
+                       match="^MANAGED_INCLUDE_RECOVERY_PHASE_UNVERIFIED$"):
+        _recover_crash(root, previous, candidate)
+    assert (directory / NAME).read_bytes() == OK
+    assert (directory / BACKUP).read_bytes() == OLD
+    assert (directory / STAGE).read_bytes() == b"unreconciled stale phase\n"
+
+
+def test_recovery_refuses_unknown_backup_symlink_without_following(fixture_root):
+    root, directory = fixture_root
+    _, previous, candidate = _simulate_post_promotion_process_crash(
+        root, directory,
+    )
+    backup = directory / BACKUP
+    backup.unlink()
+    foreign = directory / "foreign-owned-secret"
+    foreign.write_bytes(OLD)
+    backup.symlink_to(foreign)
+    with pytest.raises(ManagedIncludeRehearsalError):
+        _recover_crash(root, previous, candidate)
+    assert backup.is_symlink()
+    assert foreign.read_bytes() == OLD
+    assert (directory / NAME).read_bytes() == OK
+
+
+def test_recovery_refuses_modified_current_candidate_even_if_backup_is_sound(
+    fixture_root,
+):
+    root, directory = fixture_root
+    old, previous, candidate = _simulate_post_promotion_process_crash(
+        root, directory,
+    )
+    (directory / NAME).write_bytes(b"# attacker post-crash bytes\n")
+    with pytest.raises(ManagedIncludeRehearsalError,
+                       match="^MANAGED_INCLUDE_RECOVERY_IDENTITY_UNVERIFIED$"):
+        _recover_crash(root, previous, candidate)
+    assert (directory / BACKUP).read_bytes() == OLD
+    assert (directory / BACKUP).stat().st_ino == old.st_ino
+    assert (directory / NAME).read_bytes() == b"# attacker post-crash bytes\n"
+
+
+def test_recovery_refuses_hardlinked_backup(fixture_root):
+    root, directory = fixture_root
+    _, previous, candidate = _simulate_post_promotion_process_crash(
+        root, directory,
+    )
+    os.link(directory / BACKUP, directory / "unauthorized-link")
+    with pytest.raises(ManagedIncludeRehearsalError):
+        _recover_crash(root, previous, candidate)
+    assert (directory / NAME).read_bytes() == OK
+    assert (directory / BACKUP).read_bytes() == OLD
+
+
+def test_recovery_does_not_promote_missing_backup_or_first_install(fixture_root):
+    root, directory = fixture_root
+    (directory / NAME).write_bytes(OK)
+    (directory / NAME).chmod(0o640)
+    with pytest.raises(ManagedIncludeRehearsalError,
+                       match="^MANAGED_INCLUDE_RECOVERY_PHASE_UNVERIFIED$"):
+        _recover_crash(
+            root, hashlib.sha256(OLD).hexdigest(),
+            hashlib.sha256(OK).hexdigest(),
+        )
+    assert (directory / NAME).read_bytes() == OK
+
+
+def test_interrupted_fixture_recovery_denies_live_host_root(monkeypatch):
+    monkeypatch.delenv("REPOCACHE_NATIVE_TEST_CONTAINER", raising=False)
+    host_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        with pytest.raises(ManagedIncludeRehearsalError,
+                           match="^MANAGED_INCLUDE_LIVE_HOST_ROOT_REFUSED$"):
+            _recover_crash(
+                host_fd, hashlib.sha256(OLD).hexdigest(),
+                hashlib.sha256(OK).hexdigest(),
+            )
+    finally:
+        os.close(host_fd)
+
+
+def test_recovery_restoration_rename_failure_retains_good_backup(
+    fixture_root, monkeypatch,
+):
+    import repocache.server_native_nginx_managed_rehearsal_v1 as mod
+
+    root, directory = fixture_root
+    _, previous, candidate = _simulate_post_promotion_process_crash(
+        root, directory,
+    )
+    normal_replace = mod.os.replace
+
+    def denied(source, destination, **kwargs):
+        if source == BACKUP:
+            raise OSError("secret simulated disk failure")
+        return normal_replace(source, destination, **kwargs)
+
+    monkeypatch.setattr(mod.os, "replace", denied)
+    with pytest.raises(ManagedIncludeRehearsalError,
+                       match="^MANAGED_INCLUDE_RECOVERY_TRANSACTION_UNVERIFIED$"):
+        _recover_crash(root, previous, candidate)
+    assert (directory / NAME).read_bytes() == OK
+    assert (directory / BACKUP).read_bytes() == OLD
