@@ -469,9 +469,16 @@ def install_authenticated_native_nginx(
     """Opt-in first-install from owner-authenticated release; no NGINX start."""
     distribution = _native_distro()
     require_native_host_preconditions()
-    stage.verify_installed_worker(
+    attested = stage.verify_installed_worker(
         assets, commit=commit, archive_sha256=archive_sha256,
     )
+    if (type(attested) is not dict
+            or attested.get("status") != "AUTHENTICATED_WORKER_FILES_MATCH"
+            or attested.get("source_sha") != commit
+            or attested.get("archive_sha256") != archive_sha256
+            or attested.get("authorizes_host_installation") is not False
+            or attested.get("authorizes_service_activation") is not False):
+        _reject("NATIVE_SIGNED_WORKER_AUDIT_UNVERIFIED")
     if (type(document_sha256) is not str
             or signatures.HEX64.fullmatch(document_sha256) is None):
         _reject("NATIVE_DOCUMENT_PIN_INVALID")

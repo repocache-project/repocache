@@ -588,7 +588,12 @@ def test_native_installer_refuses_unpinned_document_without_package_effects(
     from scripts import install_native_root_worker as host
     monkeypatch.setattr(host, "_native_distro", lambda: "debian")
     monkeypatch.setattr(host, "require_native_host_preconditions", lambda: {})
-    monkeypatch.setattr(stage, "verify_installed_worker", lambda *a, **kw: {})
+    monkeypatch.setattr(stage, "verify_installed_worker", lambda *a, **kw: {
+        "status": "AUTHENTICATED_WORKER_FILES_MATCH",
+        "source_sha": "b" * 40, "archive_sha256": "c" * 64,
+        "authorizes_host_installation": False,
+        "authorizes_service_activation": False,
+    })
     def forbidden(*_args, **_kwargs):
         pytest.fail("native manager, journal or systemd reached without document trust")
     monkeypatch.setattr(host, "_execute_native_nginx_install_locked", forbidden)
@@ -614,4 +619,24 @@ def test_native_install_cli_refuses_missing_document_digest_before_host_actions(
     )
     assert result.returncode == 2
     assert b"--document-sha256" in result.stderr
+    assert not list(tmp_path.iterdir())
+
+
+def test_native_package_signature_receipt_must_match_pinned_candidate(
+    tmp_path, monkeypatch,
+):
+    from scripts import install_native_root_worker as host
+    monkeypatch.setattr(host, "_native_distro", lambda: "debian")
+    monkeypatch.setattr(host, "require_native_host_preconditions", lambda: {})
+    monkeypatch.setattr(stage, "verify_installed_worker", lambda *a, **kw: {
+        "status": "AUTHENTICATED_WORKER_FILES_MATCH",
+        "source_sha": "0" * 40, "archive_sha256": "c" * 64,
+        "authorizes_host_installation": False,
+        "authorizes_service_activation": False,
+    })
+    with pytest.raises(ValueError, match="NATIVE_SIGNED_WORKER_AUDIT_UNVERIFIED"):
+        host.install_authenticated_native_nginx(
+            tmp_path, tmp_path / "unread.json", "a" * 64,
+            commit="b" * 40, archive_sha256="c" * 64,
+        )
     assert not list(tmp_path.iterdir())

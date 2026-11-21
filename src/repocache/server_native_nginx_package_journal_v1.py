@@ -1,10 +1,11 @@
-"""Fixture-only durable native NGINX package-effects blocker (#27).
+"""Private durable native NGINX package-effects journal (#27/#31).
 
 Unlike #31's atomic state JSON journal, APT/DNF have non-atomic effects.
-Preparing a package transaction must first persist an unambiguous pending
-marker under the *same* #31 state lock. An interrupted or ambiguous marker
-is a hard stop requiring a separately designed audited recovery. There is
-no privileged host entrypoint, no automatic cleanup, and no package execution.
+Preparing a transaction persists a pending marker under the SAME #31 state
+lock. An interrupted/ambiguous marker remains a hard stop. The signed native
+installer can explicitly complete a verified uninterrupted manager operation
+under that retained lock; no observer, socket caller or fixture API is thereby
+granted host-installation or automatic retry/recovery authority.
 """
 from __future__ import annotations
 
@@ -269,7 +270,7 @@ def _retain_native_package_journal_lock_under_root(
     allow_native_package_parent_changes: bool = False,
     expose_audited_completion: bool = False,
 ) -> Iterator[dict[str, Any]]:
-    """Fixture-only same-lock scope spanning the future native transaction.
+    """Private same-lock scope for the authenticated installer and CI fixtures.
 
     The marker is durably recorded BEFORE yielding; exiting never silently
     cleans a possibly irreversible APT/DNF package effect. The caller is not
