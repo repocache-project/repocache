@@ -246,6 +246,7 @@ def _retain_native_package_journal_lock_under_root(
     root_fd: int, *, owner_uid: int, distribution: str,
     inject_fault: Callable[[str], None] | None = None,
     allow_native_package_parent_changes: bool = False,
+    expose_audited_completion: bool = False,
 ) -> Iterator[dict[str, Any]]:
     """Fixture-only same-lock scope spanning the future native transaction.
 
@@ -263,7 +264,8 @@ def _retain_native_package_journal_lock_under_root(
             or type(distribution) is not str
             or distribution not in _NATIVE_MANAGERS
             or (inject_fault is not None and not callable(inject_fault))
-            or type(allow_native_package_parent_changes) is not bool):
+            or type(allow_native_package_parent_changes) is not bool
+            or type(expose_audited_completion) is not bool):
         _deny("NATIVE_JOURNAL_ARGUMENT_INVALID")
     try:
         with _locked(
@@ -279,7 +281,29 @@ def _retain_native_package_journal_lock_under_root(
                 raise
             except (ProtectedStateStoreError, OSError, ValueError, TypeError):
                 _deny("NATIVE_JOURNAL_STATE_UNVERIFIED")
-            yield prepared
+            active = True
+            finished = False
+
+            def finish_same_locked_native_package_transaction() -> dict[str, Any]:
+                nonlocal finished
+                if not active or finished:
+                    _deny("NATIVE_COMPLETION_SCOPE_EXPIRED")
+                finished = True
+                return _complete_native_install_after_verified_manager_under_lock(
+                    directory, owner_uid=owner_uid, distribution=distribution,
+                )
+
+            if expose_audited_completion:
+                # Only a first-party, authenticated native installer may
+                # invoke this callback after the fixed package manager and
+                # signed-source checks have completed IN THIS SAME scope.
+                # It is not returned over CLI/socket/protocol and cannot
+                # be replayed after the exclusive lock is released.
+                prepared["_complete_under_lock"] = finish_same_locked_native_package_transaction
+            try:
+                yield prepared
+            finally:
+                active = False
     except NativePackageJournalError:
         raise
     except (ProtectedStateStoreError, OSError, TypeError):

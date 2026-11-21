@@ -404,3 +404,50 @@ def test_native_completion_refuses_untrusted_facts_with_pending_intact(
     assert not (folder / NATIVE_COMPLETE_NAME).exists()
 
 
+
+def test_native_completion_scope_expires_and_never_auto_clears(protected_root):
+    from repocache.server_native_nginx_package_journal_v1 import (
+        _retain_native_package_journal_lock_under_root,
+        NATIVE_COMPLETE_NAME,
+    )
+    fd, folder, uid = protected_root
+    with _retain_native_package_journal_lock_under_root(
+        fd, owner_uid=uid, distribution="debian",
+        expose_audited_completion=True,
+    ) as report:
+        finish = report["_complete_under_lock"]
+        assert callable(finish)
+        assert (folder / NATIVE_PENDING_NAME).exists()
+        assert not (folder / NATIVE_COMPLETE_NAME).exists()
+        # No pre-existing install proof: no callback call is permitted merely
+        # because the journal is well-formed.
+    with pytest.raises(NativePackageJournalError, match="NATIVE_COMPLETION_SCOPE_EXPIRED"):
+        finish()
+    assert (folder / NATIVE_PENDING_NAME).exists()
+    assert not (folder / NATIVE_COMPLETE_NAME).exists()
+
+
+def test_completion_callback_is_single_use_even_after_failure(
+    protected_root, monkeypatch,
+):
+    from repocache import server_native_package_effects_observe_v1 as observe
+    from repocache.server_native_nginx_package_journal_v1 import (
+        _retain_native_package_journal_lock_under_root,
+    )
+    fd, folder, uid = protected_root
+    monkeypatch.setattr(
+        observe, "_collect_postpackage_facts_while_locked",
+        lambda *_a, **_kw: (_ for _ in ()).throw(ValueError("unverified native")),
+    )
+    with _retain_native_package_journal_lock_under_root(
+        fd, owner_uid=uid, distribution="debian",
+        expose_audited_completion=True,
+    ) as report:
+        finish = report["_complete_under_lock"]
+        with pytest.raises(NativePackageJournalError, match="NATIVE_COMPLETION_AUDIT_UNVERIFIED"):
+            finish()
+        with pytest.raises(NativePackageJournalError, match="NATIVE_COMPLETION_SCOPE_EXPIRED"):
+            finish()
+    assert (folder / NATIVE_PENDING_NAME).exists()
+
+
