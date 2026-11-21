@@ -371,6 +371,21 @@ def run() -> dict[str, Any]:
                 distribution=distribution,
             )
         except (NativeEffectsReconciliationError, OSError, ValueError, TypeError):
+            # CI-only investigation of the distro's stock RPM verifier.
+            # This script has already refused all non-disposable hosts.
+            # Never execute this diagnostic from the installed root worker.
+            if distribution == "almalinux":
+                diagnostic = subprocess.run(
+                    ["/usr/bin/rpm", "-V", "nginx", "nginx-core"],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL, text=True, timeout=12,
+                    check=False,
+                )
+                print("DISPOSABLE_RPM_VERIFY_EXIT=" + str(diagnostic.returncode),
+                      file=sys.stderr)
+                for row in diagnostic.stdout.splitlines()[:30]:
+                    print("DISPOSABLE_RPM_VERIFY_ROW=" + row[:160],
+                          file=sys.stderr)
             _deny("NATIVE_POSTPACKAGE_CORRELATION_UNVERIFIED")
         if (correlation.get("status") !=
                 "NATIVE_POSTPACKAGE_CORRELATION_CANDIDATE_ONLY"
