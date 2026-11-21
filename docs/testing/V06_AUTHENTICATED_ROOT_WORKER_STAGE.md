@@ -242,3 +242,11 @@ before the protected state-v2 lifecycle can reuse the namespace. Receipt
 corruption, missing root ownership or any still-pending native effects
 refuse further writes. The completed record blocks a second fresh native
 package installation rather than authorizing an overwrite.
+
+The two-distro CI now exercises both sides of the native effects
+boundary on *fresh separate disposable containers*: the existing pending
+path proves an uncompleted operation never authorizes re-entry, and the
+additional genuine APT/DNF success path verifies the same retained lock,
+strict package-owner/file/vendor-unit observations, durable completion
+receipt and refusal of duplicate fresh installation. Neither case
+installs a root broker or claims booted native systemd/SELinux.
