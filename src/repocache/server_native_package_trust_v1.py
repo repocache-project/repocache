@@ -216,6 +216,45 @@ def _dnf_commands(work: Path) -> tuple[list[str], list[str]]:
             [*args, "repoquery", "--available", "--queryformat=%{name}", "nginx"])
 
 
+def _native_install_commands(distribution: str, work: Path) -> tuple[list[str], list[str]]:
+    """Build the fixed host-install command pair using signed OS profiles.
+
+    Debian uses the same freshly authenticated APT lists and trusted sources
+    as the download-only stage, but must use the *container* dpkg status file
+    rather than the deliberately empty download rehearsal status database.
+
+    AlmaLinux uses the identical signed DNF4 official repo configuration and
+    disables all other repositories/plugins, but intentionally drops only
+    --installroot: this disposable Docker image itself is the install target.
+    """
+    if distribution == "debian":
+        update, _ = _apt_commands(work)
+        actual_status = "-o"
+        opts = list(update[:-1])
+        # Reject future unreviewed command layout changes instead of silently
+        # installing against unknown package-manager state.
+        expected = "Dir::State::status=" + str(work / "absent-dpkg-status")
+        positions = [i for i, x in enumerate(opts) if x == expected]
+        if (len(positions) != 1 or positions[0] == 0
+                or opts[positions[0] - 1] != actual_status):
+            raise ValueError("NATIVE_INSTALL_APT_PROFILE_CHANGED")
+        opts[positions[0]] = "Dir::State::status=/var/lib/dpkg/status"
+        return [*opts, "update"], [
+            *opts, "--assume-yes", "--no-install-recommends", "install", "nginx"
+        ]
+    if distribution == "almalinux":
+        update, _ = _dnf_commands(work)
+        if update[-2:] != ["makecache", "--refresh"]:
+            raise ValueError("NATIVE_INSTALL_DNF_PROFILE_CHANGED")
+        prefix = update[:-2]
+        roots = [x for x in prefix if x.startswith("--installroot=")]
+        if len(roots) != 1 or roots[0] != "--installroot=" + str(work / "root"):
+            raise ValueError("NATIVE_INSTALL_DNF_PROFILE_CHANGED")
+        opts = [x for x in prefix if x != roots[0]]
+        return [*opts, "makecache", "--refresh"], [*opts, "install", "nginx"]
+    raise ValueError("NATIVE_INSTALL_DISTRIBUTION_UNSUPPORTED")
+
+
 def _run(command: list[str], *, work: Path,
          runner: Callable[..., Any]) -> tuple[str, str]:
     """Execute with sanitized environment. Never expose raw subprocess output."""

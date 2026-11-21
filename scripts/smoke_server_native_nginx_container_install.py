@@ -23,7 +23,7 @@ from repocache.server_native_nginx_effective_unit_v1 import (
     EffectiveNginxUnitError, inspect_effective_native_nginx_unit,
 )
 from repocache.server_native_package_trust_v1 import (
-    _NATIVE, _apt_commands, _dnf_commands, _run, _trusted_key,
+    _NATIVE, _native_install_commands, _run, _trusted_key,
 )
 
 
@@ -36,42 +36,11 @@ def _deny(code: str) -> None:
 
 
 def _commands(distribution: str, work: Path) -> tuple[list[str], list[str]]:
-    """Generate a tightly bounded command pair from signed source profiles.
-
-    Debian uses the same freshly authenticated APT lists and trusted sources
-    as the download-only stage, but must use the *container* dpkg status file
-    rather than the deliberately empty download rehearsal status database.
-
-    AlmaLinux uses the identical signed DNF4 official repo configuration and
-    disables all other repositories/plugins, but intentionally drops only
-    --installroot: this disposable Docker image itself is the install target.
-    """
-    if distribution == "debian":
-        update, _ = _apt_commands(work)
-        actual_status = "-o"
-        opts = list(update[:-1])
-        # Reject future unreviewed command layout changes instead of silently
-        # installing against unknown package-manager state.
-        expected = "Dir::State::status=" + str(work / "absent-dpkg-status")
-        positions = [i for i, x in enumerate(opts) if x == expected]
-        if (len(positions) != 1 or positions[0] == 0
-                or opts[positions[0] - 1] != actual_status):
-            _deny("CONTAINER_APT_PROFILE_CHANGED")
-        opts[positions[0]] = "Dir::State::status=/var/lib/dpkg/status"
-        return [*opts, "update"], [
-            *opts, "--assume-yes", "--no-install-recommends", "install", "nginx"
-        ]
-    if distribution == "almalinux":
-        update, _ = _dnf_commands(work)
-        if update[-2:] != ["makecache", "--refresh"]:
-            _deny("CONTAINER_DNF_PROFILE_CHANGED")
-        prefix = update[:-2]
-        roots = [x for x in prefix if x.startswith("--installroot=")]
-        if len(roots) != 1 or roots[0] != "--installroot=" + str(work / "root"):
-            _deny("CONTAINER_DNF_PROFILE_CHANGED")
-        opts = [x for x in prefix if x != roots[0]]
-        return [*opts, "makecache", "--refresh"], [*opts, "install", "nginx"]
-    _deny("CONTAINER_DISTRIBUTION_UNSUPPORTED")
+    """CI-only compatibility wrapper for the same production-bound commands."""
+    try:
+        return _native_install_commands(distribution, work)
+    except ValueError:
+        _deny("CONTAINER_DISTRIBUTION_OR_NATIVE_PROFILE_UNVERIFIED")
 
 
 def _native_unit_package_owner(distribution: str, work: Path, runner) -> bool:
