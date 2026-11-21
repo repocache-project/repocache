@@ -31,8 +31,9 @@ together existing, independently implemented components:
 5. Commit state, managed include, catalog and owner manifest with the
    existing same-directory, fsynced, multi-resource WAL. The WAL reopens the
    state under a **new exclusive lock** and performs generation/transition
-   checks before any write. A concurrent transition cannot use the older
-   planning snapshot to overwrite a later generation.
+   **and exact predecessor SHA-256** checks before any write. A concurrent
+   change cannot substitute another state with the same generation or use
+   the older planning snapshot to overwrite a later generation.
 6. Require a disposable fixture prepublication callback. While it runs,
    the state/include are durable and the old catalog remains intact; a
    failure leaves the WAL for explicit, fail-closed recovery. Callback
