@@ -139,6 +139,34 @@ def main() -> None:
         unit.write_bytes(original)
     assert stage_native_root_worker.verify_installed_worker(assets, **pins)["status"] == "AUTHENTICATED_WORKER_FILES_MATCH"
 
+    # Test actual installed executable path substitution, not only drift in
+    # bytes. Preserve and restore the original inode inside this QEMU guest.
+    backup = worker.with_name("server-control-worker.pr237-symlink-test-original")
+    assert not os.path.lexists(backup) and not worker.is_symlink()
+    worker_original = worker.lstat()
+    os.rename(worker, backup)
+    try:
+        os.symlink(str(backup), str(worker))
+        try:
+            stage_native_root_worker.verify_installed_worker(assets, **pins)
+        except stage_native_root_worker.WorkerStageError:
+            pass
+        else:
+            raise AssertionError("Symlinked native root worker path was accepted")
+    finally:
+        if worker.is_symlink() and os.readlink(worker) == str(backup):
+            worker.unlink()
+        elif os.path.lexists(worker):
+            raise AssertionError("Unexpected replacement at installed worker path")
+        os.rename(backup, worker)
+    worker_restored = worker.lstat()
+    assert (worker_restored.st_dev, worker_restored.st_ino,
+            worker_restored.st_mtime_ns) == (
+                worker_original.st_dev, worker_original.st_ino,
+                worker_original.st_mtime_ns)
+    assert stage_native_root_worker.verify_installed_worker(assets, **pins)["status"] == "AUTHENTICATED_WORKER_FILES_MATCH"
+    print("PASS: real installed root worker symlink substitution refused; original inode safely restored")
+
     subprocess.run(["/usr/bin/systemctl", "daemon-reload"], check=True, timeout=30)
     for name in ("repocache-control.service", "repocache-control.socket"):
         active = subprocess.run(["/usr/bin/systemctl", "is-active", "--quiet", name],
