@@ -72,14 +72,28 @@ def main(distribution: str) -> None:
     print("ghost_log_variations=" + str(integrity["native_package_ghost_log_variations"]))
 
     shadow_dir = Path("/etc/systemd/system/nginx.service.d")
-    if shadow_dir.exists() or shadow_dir.is_symlink():
-        raise AssertionError("Unexpected NGINX unit drop-in; cannot safely inject")
-    shadow_dir.mkdir(mode=0o755)
+    if shadow_dir.is_symlink():
+        raise AssertionError("Symlinked NGINX drop-in directory; refusing injection")
+    created_dir = not shadow_dir.exists()
+    if created_dir:
+        shadow_dir.mkdir(mode=0o755)
+    if not shadow_dir.is_dir() or any(shadow_dir.iterdir()):
+        raise AssertionError("Foreign NGINX drop-ins present; refusing injection")
+    # A safe *empty* drop-in directory is intentionally accepted by the
+    # genuine verifier. A new, nonempty override MUST be refused.
+    injected = shadow_dir / "pr237-disposable-foreign.conf"
+    fd = os.open(injected, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
     try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(b"[Service]\\nEnvironment=PR237_FOREIGN_DROPIN=1\\n")
+            stream.flush()
+            os.fsync(stream.fileno())
         assert inspect_native_nginx_unit(distribution).code == "VENDOR_NGINX_SHADOW_REFUSED"
-        print("PASS: actual foreign systemd drop-in detected and refused")
+        print("PASS: actual nonempty foreign systemd drop-in detected and refused")
     finally:
-        shadow_dir.rmdir()
+        injected.unlink()
+        if created_dir:
+            shadow_dir.rmdir()
     assert inspect_native_nginx_unit(distribution).code == "VENDOR_NGINX_UNIT_OBSERVED"
 
     command("/usr/bin/systemctl", "start", "nginx.service")
