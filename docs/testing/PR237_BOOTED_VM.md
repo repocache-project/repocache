@@ -206,3 +206,37 @@ any candidate activation; no apply/reload itself is invoked.
 This deliberately tests the real file validator and protected lock, **not**
 the full installed-worker `APPLY_V2` execution or failover after an interrupted
 APT/DNF transaction. It creates no new activation or recovery authority.
+
+
+## Experimental installed native socket APPLY/RELOAD/RECOVER lifecycle
+
+The \`native-installer\` VM scenario now attempts a **separate, real
+socket-activated systemd transaction** after the native APT/DNF installation,
+reboot, proposal staging and audited receipt tamper/restoration exercise.
+This is not a fixture call to \`_apply_locked\`: the test connects through
+\`request_native_fixed_v2\` over the real root-owned AF_UNIX SOCK_SEQPACKET
+socket to the **installed signed-fixture zipapp**. The kernel supplies
+SO_PEERCRED/SO_PEERGROUPS, and the actual worker enforces fixed operation
+selection. Both \`repocache\` and \`repocache-admin\` test identities are
+provisioned only within the disposable guest; the socket remains disabled
+for boot and is explicitly started for this test.
+
+The guest creates an ephemeral CA and hostname-valid TLS leaf/key,
+adds the synthetic CA to its *own* OS trust store, and uses the fixed
+\`cache.example.invalid\` test document. Signing keys never leave the VM,
+and no production trust store is touched. The expected live acceptance is:
+\`RECOVER_V2/CLEAN\` before activation, \`APPLY_V2/APPLIED\` generating
+the NGINX include/state/catalog, real systemd reload, independently verified
+local TLS generation and catalog, \`RELOAD_V2/RELOADED\`, idempotent
+\`APPLY_V2/UNCHANGED\` and \`RECOVER_V2/CLEAN\`; verify stable inode,
+mtime and SHA-256 of all managed resources and TLS assets, no pending WAL,
+and disabled/stopped units afterward. AlmaLinux must retain SELinux Enforcing.
+
+The PR237 CI experiment **must actually run and pass both VM jobs at the
+new exact HEAD** before any of the new native-transaction criteria can
+be marked PASS. Failure is a blocker requiring diagnosis, not a skipped
+validation or permission to disable SELinux. Even a PASS demonstrates only
+**synthetically signed guest installation**; interrupted power-loss
+recovery, same-version repair, foreign file preservation, SELinux negative
+policy tests, release publisher signing and production acceptance remain
+separate NOT VERIFIED criteria.
