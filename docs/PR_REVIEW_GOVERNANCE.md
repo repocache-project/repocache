@@ -10,7 +10,7 @@ Before any merge, verify live target/head SHA, branch ancestry and conflicts, co
 
 **No global independent-review requirement:** An external human review, separately commissioned AI-assisted review, original review-session URL, reviewer identity/provenance authentication, or independent review report is **not a prerequisite** for an ordinary PR merge under this policy. These reviews remain welcome as technical input, particularly for high-risk changes, but their absence alone is not a blocking acceptance criterion. Source findings, verified test failures or material security defects discovered by any reviewer **remain blocking**, regardless of reviewer type. Never misrepresent an AI-assisted review as an eligible human GitHub `APPROVED` event, or a review performed by the author/integrator as independently commissioned.
 
-A separately agreed **issue-specific human/security review or operational test** is still mandatory where its original acceptance criteria explicitly require it, until the maintainer approves a valid, separately recorded change to that specific scope. This governance amendment does **not** waive those criteria, or signed publisher-key verification, native booted Debian 13/AlmaLinux 10 testing, SELinux enforcing, deployment or production gates where applicable.
+**Maintainer decision (2026-11-21; proposed repository-wide clarification):** A commissioned independent human reviewer, separate human security assessment, external review identity, or formal independent human-review report must not be a mandatory acceptance or merge criterion for **any issue or milestone**, including historically issue-specific wording. Interpret those reviewer-only requirements as optional technical input, not as a FAIL or NOT VERIFIED gate merely because no human review was commissioned. This change does **not** remove source/security assessment, actionable defect remediation, documented exact-SHA test evidence, eligible GitHub approvals if required by effective rulesets, issue-specific **maintainer operational/merge decisions**, signed publisher-key verification, booted native Debian 13/AlmaLinux 10 and SELinux evidence, or release/production authorization. Existing substantive technical acceptance criteria remain mandatory. This amendment is effective only after it is merged to protected `main`; this proposed PR does not authorize its own merge.
 
 ## Milestone-independent, staged acceptance (not a gate waiver)
 
@@ -21,7 +21,7 @@ Stage-C outcomes. A focused Stage-A PR may merge only after *its own
 approved, original applicable criteria* PASS with real scoped evidence.
 Its merge must not close the wider issue, claim real host support, or
 make an unimplemented privileged/activation path available. Keep the parent
-issue's native, signing, compatibility, rollback and reviewer criteria OPEN
+issue's native, signing, compatibility, rollback and substantive security criteria OPEN
 until validated in the appropriate environment.
 
 A mere label of "CI-only" is **not** a maintainer scope decision. Where the
@@ -29,8 +29,7 @@ original issue expressly requires full native acceptance **before any PR
 merge**, obtain an authenticated, explicit issue-specific scope amendment
 before integrating a safe non-activating Stage-A increment; preserve all
 original feature/production obligations and record their future acceptance
-owner. Do not bypass issue-specific mandatory independent security review
-or maintainer merger approval. Follow the existing conditional standing
+owner. Do not bypass issue-specific maintainer merge approval or mandatory technical security acceptance. Independent human review itself is optional under the approved repository-wide policy. Follow the existing conditional standing
 versioned-integration delegation **only after** all applicable scoped
 criteria, current CI, security and merge/queue requirements pass.
 

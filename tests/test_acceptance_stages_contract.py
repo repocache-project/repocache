@@ -24,7 +24,9 @@ def test_every_milestone_uses_one_shared_acceptance_policy():
     assert "vMAJOR.MINOR.PATCH" in doc
     assert "Stage A — implementation acceptance in CI" in doc
     assert "Stage B — system-level/native acceptance" in doc
-    assert "Stage C — independent security and publisher acceptance" in doc
+    assert "Stage C — security and publisher acceptance" in doc
+    assert "commissioned human review is optional for all issues" in doc
+    assert "pinned-image VM harness is a reusable starting point" in doc
     assert "NOT VERIFIED" in doc
     assert "An original issue may remain NOT VERIFIED" in doc
 
