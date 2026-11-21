@@ -24,6 +24,9 @@ from repocache.server_fixture_repository_transaction_v1 import (
     commit_fixture_repository_change_under_root as change,
 )
 from repocache.server_install_v1 import validate_install_document
+from repocache.server_repository_v2_transition_v1 import (
+    RepositoryV2TransitionError, plan_repository_v2_transition,
+)
 from repocache.server_repository_plan_v1 import _canonical_identity
 from repocache.server_protected_state_store_v1 import LOCK_NAME
 from repocache.server_proposed_state_v2_store import V2_STATE
@@ -352,3 +355,53 @@ def test_stale_identity_rebinding_and_pin_errors_have_no_mutation(
     assert recover_multi(protected_fixture[0], owner_uid=protected_fixture[2])[
         "status"
     ] == "CLEAN_INERT_FIXTURE"
+
+
+def test_reusable_v2_builder_requires_exact_canonical_predecessor(
+    protected_fixture,
+):
+    _, directory, _ = protected_fixture
+    bootstrap(protected_fixture)
+    before = read_state(directory)
+    raw = (directory / V2_STATE).read_bytes()
+    expected = hashlib.sha256(raw).hexdigest()
+    result = plan_repository_v2_transition(
+        before,
+        expected_generation=1,
+        expected_previous_state_sha256=expected,
+        operation="enable",
+        repository_id="debian-trixie-main",
+        decision_sha256=DECISION,
+    )
+    assert result["status"] == "V2_REPOSITORY_LIFECYCLE_CANDIDATE_ONLY"
+    assert result["proposed_snapshot"]["state_generation"] == 2
+    assert result["authorizes_state_write"] is False
+    assert result["authorizes_nginx_activation"] is False
+    assert result["authorizes_catalog_publication"] is False
+    # The pure plan did not commit an inode or change the canonical bytes.
+    assert (directory / V2_STATE).read_bytes() == raw
+
+    with pytest.raises(RepositoryV2TransitionError, match="PREDECESSOR_MISMATCH"):
+        plan_repository_v2_transition(
+            before,
+            expected_generation=1,
+            expected_previous_state_sha256="0" * 64,
+            operation="enable",
+            repository_id="debian-trixie-main",
+            decision_sha256=DECISION,
+        )
+    with pytest.raises(RepositoryV2TransitionError, match="CANDIDATE_INVALID"):
+        forged = copy.deepcopy(before)
+        forged["id_reservations"][0]["id"] = "forged-identity"
+        plan_repository_v2_transition(
+            forged,
+            expected_generation=1,
+            expected_previous_state_sha256=hashlib.sha256(
+                json.dumps(forged, sort_keys=True, ensure_ascii=True,
+                           separators=(",", ":")).encode("utf-8")
+            ).hexdigest(),
+            operation="enable",
+            repository_id="debian-trixie-main",
+            decision_sha256=DECISION,
+        )
+    assert (directory / V2_STATE).read_bytes() == raw
