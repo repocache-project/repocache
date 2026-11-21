@@ -91,6 +91,11 @@ identity remains historically reserved under the approved v2 schema:
 safe same-identity re-add/cache reuse needs a separate explicit approved
 policy, not silent weakening of the ledger.
 
+The administrator-visible repository states, existing NGINX ownership
+boundaries, clean-install migration/refusal and recovery semantics are
+documented in [v0.6.0 repository lifecycle migration](
+../SERVER_REPOSITORY_LIFECYCLE_MIGRATION_V06.md).
+
 ## CI verification
 
 ```sh
