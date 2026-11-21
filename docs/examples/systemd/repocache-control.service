@@ -1,6 +1,6 @@
 # NON-INSTALLED REFERENCE ONLY (#64). NOT a deployable service.
 # The referenced fixed executable MUST be installed by an authenticated,
-# separately reviewed release. The source-only entrypoint now exists in #31,
+# signed, security-assessed release. The source-only entrypoint exists in #31,
 # but this example MUST NOT be enabled without signed install acceptance.
 # An installed worker must be signed, root-owned and independently verified.
 [Unit]

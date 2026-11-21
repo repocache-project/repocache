@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Place the authenticated fixed worker and units before native activation.
 
-Run from the independently reviewed checkout on an authorized host. This
+Run from a trusted, security-assessed checkout on an authorized host. This
 operation prepares the fixed server namespace and places the authenticated
 worker. It never reloads or enables a service.
 """

@@ -1,8 +1,8 @@
 # Authenticated v0.6 worker staging (#64)
 
-Use the independently reviewed checkout for the verifier below. Supply a
+Use a trusted, security-assessed checkout for the verifier below. Supply a
 private operator-owned staging parent, the exact source commit and the
-independently reviewed archive SHA-256. The asset directory contains
+operator-verified archive SHA-256. The asset directory contains
 the v0.6.0 source archive, its signed manifest and detached signature.
 
 ~~~sh
@@ -12,6 +12,10 @@ the v0.6.0 source archive, its signed manifest and detached signature.
   --commit "$REVIEWED_SOURCE_SHA" \
   --archive-sha256 "$REVIEWED_ARCHIVE_SHA256"
 ~~~
+
+An independently commissioned human security review is optional under the
+issue #64 maintainer amendment (2026-11-21); the trusted signed source,
+exact-SHA security evidence and native deployment gates remain mandatory.
 
 The verifier uses the existing independently provisioned host trust store.
 It checks the detached signature, canonical v0.6 release identity, two
