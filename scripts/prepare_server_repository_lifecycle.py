@@ -24,6 +24,7 @@ if __name__ == "__main__":
     checkout = Path(__file__).resolve().parents[1]
     sys.path[:0] = [str(checkout / "src"), str(checkout)]
 
+from repocache.server_install_v1 import ID
 from repocache.server_repository_reconcile_v1 import (
     render_fixed_native_repository_batch_envelope,
 )
@@ -182,16 +183,44 @@ def _atomic_create(path: Path, payload: bytes) -> None:
             _deny()
 
 
+def _review_outcomes(candidate: dict[str, Any]) -> list[dict[str, str]]:
+    """Expose only validated identifiers and planner results, never secrets."""
+    entries = candidate.get("per_repository")
+    if type(entries) is not list or len(entries) > 500:
+        _deny()
+    reviewed = []
+    for item in entries:
+        if type(item) is not dict:
+            _deny()
+        rid, result = item.get("repository_id"), item.get("result")
+        if (type(rid) is not str or ID.fullmatch(rid) is None
+                or type(result) is not str or not 1 <= len(result) <= 64
+                or any(ch not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ_" for ch in result)):
+            _deny()
+        row = {"repository_id": rid, "result": result}
+        assignment = item.get("id_assignment")
+        if assignment is not None:
+            if assignment not in ("AUTO_SUGGESTED", "EXPLICIT"):
+                _deny()
+            row["id_assignment"] = assignment
+        reviewed.append(row)
+    return reviewed
+
+
 def prepare_offline_lifecycle(
-    previous: Path, request: Path, output: Path, *,
+    previous: Path, request: Path, output: Path | None, *,
     expected_generation: int,
     expected_state_sha256: str,
     decision_sha256: str,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     """Write a canonical exact next snapshot for separately approved staging."""
     if (type(expected_generation) is not int or expected_generation < 1
             or not _sha(expected_state_sha256)
-            or not _sha(decision_sha256)):
+            or not _sha(decision_sha256)
+            or type(dry_run) is not bool
+            or (dry_run and output is not None)
+            or (not dry_run and not isinstance(output, Path))):
         _deny()
     old = _read_owned(previous, _MAX_PREVIOUS)
     if hashlib.sha256(old).hexdigest() != expected_state_sha256:
@@ -212,6 +241,7 @@ def prepare_offline_lifecycle(
             or candidate["authorizes_catalog_publication"] is not False
             or candidate["authorizes_cache_cleanup"] is not False):
         _deny()
+    reviewed = _review_outcomes(candidate)
     if candidate["changed"] is False:
         if candidate["envelope_bytes"] is not None:
             _deny()
@@ -221,6 +251,8 @@ def prepare_offline_lifecycle(
             "expected_generation": expected_generation,
             "requires_operator_review": True,
             "authorizes_service_activation": False,
+            "per_repository": reviewed,
+            "proposal_written": False,
         }
     if type(candidate["envelope_bytes"]) is not bytes:
         _deny()
@@ -231,15 +263,19 @@ def prepare_offline_lifecycle(
             or hashlib.sha256(next_state).hexdigest()
                != envelope["next_state_sha256"]):
         _deny()
-    _atomic_create(output, next_state)
+    if not dry_run:
+        _atomic_create(output, next_state)
     return {
-        "status": "OFFLINE_LIFECYCLE_PROPOSAL_PREPARED",
+        "status": ("OFFLINE_LIFECYCLE_PREVIEW" if dry_run
+                   else "OFFLINE_LIFECYCLE_PROPOSAL_PREPARED"),
         "changed": True,
         "state_generation": expected_generation + 1,
         "proposed_state_sha256": hashlib.sha256(next_state).hexdigest(),
         "expected_state_sha256": expected_state_sha256,
         "requires_operator_review": True,
         "authorizes_service_activation": False,
+        "per_repository": reviewed,
+        "proposal_written": not dry_run,
     }
 
 
@@ -247,7 +283,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--previous-v2-state", required=True, type=Path)
     parser.add_argument("--request", required=True, type=Path)
-    parser.add_argument("--proposal-output", required=True, type=Path)
+    parser.add_argument("--proposal-output", type=Path)
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Review candidate IDs and digest without writing a proposal")
     parser.add_argument("--expected-generation", required=True, type=int)
     parser.add_argument("--expected-state-sha256", required=True)
     parser.add_argument("--decision-sha256", required=True)
@@ -258,6 +296,7 @@ def main() -> int:
             expected_generation=args.expected_generation,
             expected_state_sha256=args.expected_state_sha256,
             decision_sha256=args.decision_sha256,
+            dry_run=args.dry_run,
         )
     except (OfflineLifecycleError, OSError, ValueError, TypeError,
             OverflowError, RecursionError, UnicodeError):

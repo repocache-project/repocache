@@ -225,3 +225,31 @@ fixed-native builder. It also checks read-only predecessor retention,
 tombstones, auto-ID, no-op, destination collision, malicious requests,
 symlinks, hardlinks and file ownership/mode. This Stage-A execution does
 not replace any Debian 13 / AlmaLinux 10 booted native VM acceptance.
+
+
+### Non-mutating offline change review
+
+Before creating a private proposal file, run the same reviewed request with
+`--dry-run` **instead of** `--proposal-output`. This is a checkout-only
+preview, not the installed `repocache` CLI:
+
+```sh
+python scripts/prepare_server_repository_lifecycle.py \\
+  --previous-v2-state /secure/predecessor-v2.json \\
+  --expected-generation 1 \\
+  --expected-state-sha256 "$PREDECESSOR_SHA256" \\
+  --decision-sha256 "$OPERATOR_DECISION_REFERENCE_SHA256" \\
+  --request /secure/lifecycle-request.json \\
+  --dry-run
+```
+
+The preview validates the exact proposed native state bytes and reports its
+SHA-256, proposed generation and per-repository IDs/results (including
+suggested automatic IDs), but **does not create the candidate file**. Repeat
+without `--dry-run` and with a new private `--proposal-output` path only after
+review. The two reports must agree on predecessor, proposed SHA and IDs; a
+changed protected predecessor requires a fresh proposal. No stdout field
+contains upstream URLs, signing/trust references, credentials or cache paths.
+A preview neither reserves an ID nor authenticates approval, proves deployed
+NGINX exposure or authorizes the #237 signed native stager. The original
+native lock/CAS, trust, systemd/SELinux and publication gates remain mandatory.
