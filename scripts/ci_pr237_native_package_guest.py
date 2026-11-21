@@ -23,6 +23,55 @@ def run(*argv: str) -> subprocess.CompletedProcess[str]:
         stdin=subprocess.DEVNULL, env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"},
     )
 
+def procfs_scan_diagnostic() -> str:
+    """Mirror read-only kernel comm scan, output fixed failure classes only.
+
+    Never log guest PIDs, names, command lines, credentials or /proc data.
+    This function neither modifies production preflight nor supplies authority.
+    """
+    observed = 0
+    try:
+        with os.scandir("/proc") as entries:
+            for entry in entries:
+                name = entry.name
+                if (not name.isascii() or not name.isdecimal()
+                        or name.startswith("0") or len(name) > 10):
+                    continue
+                observed += 1
+                if observed > 65536:
+                    return "TOO_MANY_PIDS"
+                try:
+                    fd = os.open("/proc/" + name + "/comm",
+                                 os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                                 | getattr(os, "O_CLOEXEC", 0))
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:
+                    return "COMM_OPEN_ERRNO_" + str(exc.errno)
+                try:
+                    try:
+                        raw = os.read(fd, 64)
+                        overflow = os.read(fd, 1)
+                    except FileNotFoundError:
+                        continue
+                    except OSError as exc:
+                        return "COMM_READ_ERRNO_" + str(exc.errno)
+                    if not raw:
+                        return "COMM_EMPTY"
+                    if overflow:
+                        return "COMM_SECOND_READ_NONEMPTY"
+                    if len(raw) > 32:
+                        return "COMM_TOO_LONG"
+                    value = raw.removesuffix(b"\\n")
+                    if value == b"nginx" or value.startswith(b"nginx:"):
+                        return "NGINX_PROCESS_PRESENT"
+                finally:
+                    os.close(fd)
+        return "VALID_PROCESS_SCAN"
+    except OSError as exc:
+        return "PROC_SCAN_ERRNO_" + str(exc.errno)
+
+
 def report(distribution: str) -> None:
     assert os.getresuid() == (0, 0, 0)
     assert Path("/proc/1/comm").read_text().strip() == "systemd"
@@ -102,6 +151,12 @@ def report(distribution: str) -> None:
         )
         print("native_prepackage_code=" + boundary.code, flush=True)
         print("native_prepackage_footprint=" + boundary.footprint_code, flush=True)
+        if boundary.footprint_code == "NGINX_PROCESS_SCAN_UNVERIFIED":
+            from repocache.server_native_nginx_ownership_v1 import _scan_nginx_process_footprint
+            for diagnostic_index in range(3):
+                print("native_real_proc_probe_" + str(diagnostic_index) + "="
+                      + _scan_nginx_process_footprint(), flush=True)
+            print("native_first_proc_failure=" + procfs_scan_diagnostic(), flush=True)
         print("native_distro_signing_anchor_trusted=" + str(_trusted_key(_NATIVE[distribution][2])), flush=True)
         try:
             observed = inspect_current_namespace_prepackage_state()
