@@ -335,6 +335,27 @@ def main(distribution: str) -> None:
     assert os.waitstatus_to_exitcode(denial_status) == 0
     print("PASS: kernel denied unprivileged REPOCACHE service identity at fixed admin socket", flush=True)
 
+    # Refuse ordinary service-UID reads of the actual root-owned native TLS
+    # private key. Real kernel permission check, not stat-only or mock ACL.
+    key_reader = os.fork()
+    if key_reader == 0:
+        try:
+            os.setgroups([])
+            os.setgid(service.pw_gid)
+            os.setuid(service.pw_uid)
+            fd = os.open(private_key, os.O_RDONLY | os.O_NOFOLLOW)
+        except PermissionError:
+            os._exit(0)
+        except OSError:
+            os._exit(2)
+        else:
+            os.close(fd)
+            os._exit(3)
+    _, key_status = os.waitpid(key_reader, 0)
+    assert os.waitstatus_to_exitcode(key_status) == 0
+    assert (stat.S_IMODE(private_key.stat().st_mode), private_key.stat().st_uid) == (0o600, 0)
+    print("PASS: native kernel denied unprivileged REPOCACHE service UID access to root-owned TLS private key", flush=True)
+
     clean = authenticated_native_operation("RECOVER_V2")
     assert clean["status"] == "CLEAN" and clean["transaction_completed"] is True
     assert not (STATE / "state-v2.json").exists()
