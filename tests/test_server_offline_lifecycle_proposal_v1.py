@@ -290,10 +290,10 @@ def test_offline_dry_run_reviews_exact_proposal_without_writing(
     committed_report = json.loads(prepare.stdout)
     assert committed_report["proposal_written"] is True
     assert committed_report["per_repository"] == report["per_repository"]
-    assert committed_report["proposed_state_sha256"] == (
-        report["proposed_state_sha256"]
-        == hashlib.sha256(output.read_bytes()).hexdigest()
-    )
+    assert committed_report["proposed_state_sha256"] == report["proposed_state_sha256"]
+    assert committed_report["proposed_state_sha256"] == hashlib.sha256(
+        output.read_bytes()
+    ).hexdigest()
 
 
 def test_offline_dry_run_auto_id_is_stable_and_does_not_write(tmp_path):
