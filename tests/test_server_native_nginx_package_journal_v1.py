@@ -449,5 +449,3 @@ def test_completion_callback_is_single_use_even_after_failure(
         with pytest.raises(NativePackageJournalError, match="NATIVE_COMPLETION_SCOPE_EXPIRED"):
             finish()
     assert (folder / NATIVE_PENDING_NAME).exists()
-
-
