@@ -37,6 +37,8 @@ def test_omitted_and_false_firewall_never_open_ports(distro):
         assert report["https_port"] == 8443
         assert report["exposure_scope"] == "unspecified"
         assert report["firewall_change_review_required"] is False
+        assert report["network_exposure_review_required"] is True
+        assert report["network_exposure_verified"] is False
         assert report["explicit_modify_requested"] is False
         assert not report["authorizes_firewall_change"]
 
@@ -144,3 +146,61 @@ def test_valid_explicit_specific_unicast_remains_no_host_authority(distribution)
     assert report["https_port"] == 8443
     assert report["firewall_change_review_required"] is True
     assert report["authorizes_firewall_change"] is False
+
+@pytest.mark.parametrize("distribution", ["debian13", "almalinux10"])
+@pytest.mark.parametrize("address,external", [
+    ("127.0.0.1", False),
+    ("::1", False),
+    ("0.0.0.0", True),
+    ("::", True),
+    ("192.0.2.15", True),
+    ("2001:db8::15", True),
+])
+@pytest.mark.parametrize("firewall_opt_in", [None, False, True])
+def test_network_exposure_review_is_independent_of_firewall_toggle(
+    distribution, address, external, firewall_opt_in,
+):
+    """An inert firewall preview must never certify a non-loopback socket."""
+    from repocache.server_nginx_tls_listener_candidate_v1 import (
+        render_native_tls_listener_candidate,
+    )
+
+    data = document(modify=firewall_opt_in, address=address, port=18443)
+    snapshot = deepcopy(data)
+    preview = preview_native_firewall_intent(data, distribution=distribution)
+    listener = render_native_tls_listener_candidate(data)
+    assert data == snapshot, "read-only preview mutated the trusted input"
+    assert preview["network_exposure_review_required"] is external
+    assert preview["network_exposure_verified"] is False
+    assert preview["explicit_modify_requested"] is (firewall_opt_in is True)
+    assert preview["firewall_change_review_required"] is (
+        firewall_opt_in is True and external
+    )
+    if firewall_opt_in is not True:
+        assert preview["status"] == "NO_FIREWALL_CHANGE_PROPOSED"
+    # The rendering and firewall previews must agree on the exact IP/port.
+    # No test-only separate rule can authorize NGINX activation.
+    addr = f"[{address}]" if ":" in address else address
+    assert f"listen {addr}:18443 ssl" in listener["server_context_fragment"]
+    assert preview["listen_address"] == address
+    assert preview["https_port"] == 18443
+    assert listener["authorizes_nginx_activation"] is False
+    assert preview["authorizes_nginx_activation"] is False
+    assert preview["authorizes_firewall_change"] is False
+
+
+def test_opt_out_is_not_a_deny_policy_proof_or_listener_permission():
+    plan = preview_native_firewall_intent(
+        document(modify=False, address="0.0.0.0", port=8443),
+        distribution="debian13",
+    )
+    assert plan["status"] == "NO_FIREWALL_CHANGE_PROPOSED"
+    assert plan["firewall_change_review_required"] is False
+    assert plan["network_exposure_review_required"] is True
+    assert plan["network_exposure_verified"] is False
+    assert not any(plan.get(name, False) for name in (
+        "native_firewall_backend_verified", "current_firewall_rules_verified",
+        "existing_firewall_ownership_verified", "effective_listener_verified",
+        "admin_identity_verified", "authorizes_nginx_activation",
+        "authorizes_firewall_change",
+    ))
