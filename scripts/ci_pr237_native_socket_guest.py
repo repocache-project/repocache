@@ -7,6 +7,7 @@ Use the real installed zipapp worker via kernel-credentialed systemd socket.
 """
 from __future__ import annotations
 
+import base64
 import grp
 import hashlib
 import json
@@ -245,6 +246,98 @@ def main(distribution: str) -> None:
         assert command("/usr/sbin/getenforce") == "Enforcing"
     print("PASS: real native RELOAD_V2, idempotent APPLY_V2 and RECOVER_V2/CLEAN preserve managed bytes and TLS", flush=True)
 
+    # Prepare a genuine generation-two partial repair on the already live
+    # v0.6 deployment. The operator proposal is synthetic but staged via
+    # the signed-fixture authenticated installer, not a direct state writer.
+    from scripts import install_native_root_worker
+    pins = json.loads((FIXTURE / "pins.json").read_bytes())
+    assert set(pins) == {"commit", "archive_sha256"}
+    assets = FIXTURE / "assets"
+    prior_state = (STATE / "state-v2.json").read_bytes()
+    prior_digest = hashlib.sha256(prior_state).hexdigest()
+    prior = json.loads(prior_state)
+    assert prior["state_generation"] == 1
+    repair_document = json.loads(
+        base64.b64decode(prior["configuration_base64"], validate=True)
+    )
+    assert repair_document["expected_state_generation"] == 1
+    assert repair_document["deployment"]["logging"]["retention_days"] == 7
+    repair_document["deployment"]["logging"]["retention_days"] = 8
+    previous_file = FIXTURE / "pr237-previous-state-v2.json"
+    repair_file = FIXTURE / "pr237-reviewed-repair.json"
+    proposal_file = FIXTURE / "pr237-repair-proposal-v2.json"
+    assert not any(x.exists() for x in (previous_file, repair_file, proposal_file))
+    for path, raw in (
+        (previous_file, prior_state),
+        (repair_file, (json.dumps(repair_document, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")),
+    ):
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "wb") as output:
+            output.write(raw)
+            output.flush()
+            os.fsync(output.fileno())
+
+    # Nonempty synthetic test assets in real cache/log/metrics directories:
+    # a directory existing alone is not preservation evidence.
+    preserved = {}
+    for name, path in (
+        ("cache", Path("/var/cache/nginx/repocache-managed/pr237-cache-record")),
+        ("logs", Path("/var/log/nginx/repocache-managed/pr237-log-record")),
+        ("metrics", Path("/var/lib/repocache/metrics/pr237-metrics-record")),
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        raw = ("PR237 private synthetic preservation marker: " + name + "\n").encode("ascii")
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "wb") as output:
+            output.write(raw)
+            output.flush()
+            os.fsync(output.fileno())
+        st = path.stat()
+        preserved[name] = (path, hashlib.sha256(raw).hexdigest(), st.st_ino, st.st_mtime_ns)
+    prepared = install_native_root_worker.prepare_authenticated_proposal(
+        assets, repair_file, proposal_file,
+        previous=previous_file, previous_sha256=prior_digest,
+        decision_sha256="e" * 64, **pins,
+    )
+    assert prepared["status"] == "AUTHENTICATED_V2_PROPOSAL_PREPARED"
+    assert prepared["state_generation"] == 2
+    assert prepared["requires_operator_review"] is True
+    assert prepared["authorizes_service_activation"] is False
+    repair_proposal_digest = hashlib.sha256(proposal_file.read_bytes()).hexdigest()
+    staged = install_native_root_worker.stage_authenticated_proposal(
+        assets, proposal_file, proposal_sha256=repair_proposal_digest,
+        expected_state_sha256=prior_digest, **pins,
+    )
+    assert staged["status"] == "AUTHENTICATED_V2_PROPOSAL_STAGED"
+    assert staged["expected_generation"] == 1
+    assert snapshot() == before
+    print("PASS: authenticated generation-two repair staged without premature service changes", flush=True)
+
+    repaired = request_native_fixed_v2("APPLY_V2")
+    assert (repaired["status"], repaired["state_generation"]) == ("APPLIED", 2)
+    after_repair = snapshot()
+    assert after_repair != before
+    assert json.loads((STATE / "state-v2.json").read_bytes())["state_generation"] == 2
+    assert b"x-repocache-generation: 2" in https_response("/__repocache/healthz").lower()
+    assert https_response("/.well-known/repocache/catalog.json").endswith(
+        Path("/var/lib/repocache/public/catalog.json").read_bytes()
+    )
+    for name, (path, digest, inode, mtime) in preserved.items():
+        info = path.stat()
+        assert (hashlib.sha256(path.read_bytes()).hexdigest(), info.st_ino, info.st_mtime_ns) == (
+            digest, inode, mtime
+        ), name
+    for path in (certificate, private_key):
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == saved_tls[str(path)]
+    unchanged_repair = request_native_fixed_v2("APPLY_V2")
+    assert (unchanged_repair["status"], unchanged_repair["state_generation"]) == ("UNCHANGED", 2)
+    reloaded_repair = request_native_fixed_v2("RELOAD_V2")
+    assert (reloaded_repair["status"], reloaded_repair["state_generation"]) == ("RELOADED", 2)
+    assert snapshot() == after_repair
+    assert request_native_fixed_v2("RECOVER_V2")["status"] == "CLEAN"
+    assert snapshot() == after_repair
+    print("PASS: native worker applied partial same-version v0.6 generation-two repair, preserving nonempty TLS/cache/log/metrics data", flush=True)
+
     # Real syntax refusal on the running, installed worker: NGINX must keep
     # serving the prior accepted generation, without changing durable v2.
     from repocache.server_native_root_control_client_v1 import NativeRootControlClientError
@@ -262,8 +355,8 @@ def main(distribution: str) -> None:
             assert str(error) == "NATIVE_ROOT_CLIENT_OPERATION_REFUSED"
         else:
             raise AssertionError("Invalid live NGINX syntax was reloaded by installed worker")
-        assert snapshot() == before
-        assert b"x-repocache-generation: 1" in https_response("/__repocache/healthz").lower()
+        assert snapshot() == after_repair
+        assert b"x-repocache-generation: 2" in https_response("/__repocache/healthz").lower()
     finally:
         invalid.unlink()
     print("PASS: native installed worker refused live invalid nginx syntax without changing known-good v2 and HTTPS exposure", flush=True)
