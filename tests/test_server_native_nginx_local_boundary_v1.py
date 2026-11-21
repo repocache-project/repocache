@@ -8,10 +8,21 @@ from types import SimpleNamespace
 import pytest
 
 from repocache import server_native_nginx_local_boundary_v1 as boundary
+from repocache import server_native_nginx_ownership_v1 as ownership
 from repocache.server_native_nginx_prepackage_state_v1 import (
     PrepackageStateInspectionError,
 )
 from repocache.server_install_v1 import InstallInputError
+
+
+
+@pytest.fixture(autouse=True)
+def _synthetic_process_snapshot_is_isolated_from_runner(monkeypatch):
+    """These filesystem/manager fixtures must not read the CI runner /proc."""
+    monkeypatch.setattr(
+        ownership, "_scan_nginx_process_footprint",
+        lambda: "PROCESS_NGINX_NOT_OBSERVED",
+    )
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "docs/examples/server-install-v1.json"
 DEBIAN = "ID=debian\nVERSION_ID=13\n"
@@ -248,3 +259,27 @@ def test_preprovisioned_state_root_needs_locked_reader_even_when_other_paths_abs
     assert report["code"] == "LOCAL_READ_ONLY_SNAPSHOT_OBSERVED"
     assert not report["authorizes_package_transaction"]
     assert not report["native_package_journal_prepared"]
+
+
+@pytest.mark.parametrize("process_result,expected_code,expected_status", [
+    ("PROCESS_NGINX_FOUND", "NGINX_RUNNING_PROCESS_REFUSED", "FAIL"),
+    ("PROCESS_SCAN_UNVERIFIED", "NGINX_PROCESS_SCAN_UNVERIFIED", "NOT VERIFIED"),
+])
+def test_live_or_uncertain_process_refused_before_root_and_state(
+    monkeypatch, process_result, expected_code, expected_status,
+):
+    # Override this module's synthetic default: the real production
+    # footprint must always refuse a running or uninspectable NGINX process.
+    monkeypatch.setattr(
+        ownership, "_scan_nginx_process_footprint",
+        lambda: process_result,
+    )
+    report = boundary.inspect_native_nginx_local_boundary(
+        os_release=DEBIAN, python_version=(3, 13), document=document(),
+        lstat=absent, geteuid=forbid, locked_inspector=forbid,
+    ).to_dict()
+    assert report["code"] == "NGINX_FOOTPRINT_REFUSED"
+    assert report["footprint_code"] == expected_code
+    assert report["status"] == expected_status
+    assert report["authorizes_package_transaction"] is False
+    assert report["authorizes_nginx_activation"] is False

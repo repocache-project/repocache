@@ -39,6 +39,20 @@ jobs:
               dnf -y -q install python3
               ;;
           esac
+      - name: Observe distribution package ownership of native Python
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          # Separate CI evidence, never a command executed by the read-only preflight.
+          case '${{ matrix.platform }}' in
+            debian13)
+              test "$(dpkg-query -S /usr/bin/python3.13)" = 'python3.13-minimal: /usr/bin/python3.13'
+              ;;
+            almalinux10)
+              test "$(rpm -qf --qf '%{NAME}' /usr/bin/python3.12)" = 'python3'
+              ;;
+          esac
+          echo 'PASS: native Python executable has expected distribution package owner'
       - name: Validate supported host without modifying its configuration
         shell: bash
         run: |
@@ -64,6 +78,14 @@ jobs:
                      for c in report["checks"])
           assert any(c["check"] == "supported_os_and_python" and c["status"] == "PASS"
                      for c in report["checks"]), report
+          assert any(c["check"] == "architecture_supported" and c["status"] == "PASS"
+                     and c["code"] == "SUPPORTED_NATIVE_ARCHITECTURE"
+                     for c in report["checks"]), report
+          assert any(c["check"] == "native_python_identity" and c["status"] == "PASS"
+                     and c["code"] == "NATIVE_PYTHON_INODE_OBSERVED_ONLY"
+                     for c in report["checks"]), report
+          assert any(c["check"] == "python_package_origin" and c["status"] == "NOT VERIFIED"
+                     for c in report["checks"]), report
           print("PASS: native OS identity observed; installation not authorized")
           PY
       - name: Verify invalid deployment refused before host inspection
@@ -86,3 +108,155 @@ jobs:
           assert report["error"]["code"] == "INVALID_INPUT_OR_HOST_OBSERVATION"
           print("PASS: invalid deployment refused without host mutation")
           PY
+      - name: Refuse a same-version foreign Python executable before host probes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          scratch=$(mktemp -d)
+          # A genuine separate inode, same distro Python version and libraries.
+          # Work only in this disposable job container's scratch directory.
+          cp -L /usr/bin/python3 "$scratch/python3"
+          set +e
+          "$scratch/python3" -I -B scripts/server_v06_preflight.py \
+            --document "$GITHUB_WORKSPACE/docs/examples/server-install-v1.json" \
+            --intent install > "$scratch/result.json"
+          rc=$?
+          set -e
+          test "$rc" -eq 1
+          /usr/bin/python3 -I -B - "$scratch/result.json" <<'PY'
+          import json, sys
+          from pathlib import Path
+          report = json.loads(Path(sys.argv[1]).read_text())
+          checks = {c["check"]: c for c in report["checks"]}
+          assert checks["supported_os_and_python"]["status"] == "PASS"
+          assert checks["native_python_identity"]["code"] == "INSTALL_REQUIRES_NATIVE_PYTHON"
+          assert checks["native_python_identity"]["status"] == "FAIL"
+          assert "nginx_native_binary" not in checks and "storage_free_space" not in checks
+          assert report["authorizes_installation"] is False
+          print("PASS: same-version foreign interpreter refused before host probes")
+          PY
+      - name: Check real TLS reference ownership and ancestor ownership refusals
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          /usr/bin/python3 -I -B - <<'PY'
+          import json, os, subprocess, tempfile
+          from pathlib import Path
+          root = Path.cwd()
+          with tempfile.TemporaryDirectory(prefix="repocache-preflight-", dir="/srv") as scratch:
+              work = Path(scratch)
+              doc = json.loads((root / "docs/examples/server-install-v1.json").read_text())
+              cert, key = work / "cert.pem", work / "key.pem"
+              cert.write_text("public test fixture")
+              key.write_text("non-secret test fixture")
+              cert.chmod(0o644)
+              key.chmod(0o600)
+              doc["deployment"]["tls"].update(certificate_file=str(cert), private_key_file=str(key))
+              candidate = work / "install.json"
+              candidate.write_text(json.dumps(doc))
+              def identity(path):
+                  info = path.lstat()
+                  return (info.st_ino, info.st_uid, info.st_gid, info.st_mode, info.st_nlink,
+                          info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+              def check_tls(code):
+                  before = [identity(path) for path in (work, cert, key, candidate)]
+                  proc = subprocess.run(["/usr/bin/python3", "-I", "-B",
+                      str(root / "scripts/server_v06_preflight.py"), "--document", str(candidate),
+                      "--intent", "install"], capture_output=True, timeout=30)
+                  assert proc.returncode in (1, 3) and not proc.stderr
+                  report = json.loads(proc.stdout)
+                  row = next(c for c in report["checks"] if c["check"] == "tls_reference_files")
+                  assert row["code"] == code, row
+                  assert report["authorizes_installation"] is False
+                  assert [identity(path) for path in (work, cert, key, candidate)] == before
+              check_tls("TLS_REFERENCE_MODES_OBSERVED_ONLY")
+              os.chown(key, 65534, 65534)
+              check_tls("TLS_REFERENCE_OWNER_OR_LINK_UNSAFE")
+              os.chown(key, 0, 0)
+              alias = work / "key-link"
+              os.link(key, alias)
+              check_tls("TLS_REFERENCE_OWNER_OR_LINK_UNSAFE")
+              alias.unlink()
+              os.chown(work, 65534, 65534)
+              check_tls("TLS_REFERENCE_PARENT_UNSAFE")
+              os.chown(work, 0, 0)
+          print("PASS: real ownership and hardlink refusals preserve local TLS references")
+          PY
+      - name: Verify protected state ownership and privacy without adopting storage
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          /usr/bin/python3 -I -B - <<'PY'
+          import json, os, subprocess, tempfile
+          from pathlib import Path
+          root = Path.cwd()
+          with tempfile.TemporaryDirectory(prefix="repocache-state-preflight-", dir="/srv") as scratch:
+              work = Path(scratch)
+              state, cache, logs = (work / name for name in ("state", "cache", "logs"))
+              for path in (state, cache, logs):
+                  path.mkdir(mode=0o700)
+              os.chown(cache, 65534, 65534)
+              os.chown(logs, 65534, 65534)
+              document = json.loads((root / "docs/examples/server-install-v1.json").read_text())
+              document["deployment"]["paths"].update(
+                  state_root=str(state), cache_root=str(cache), log_root=str(logs))
+              candidate = work / "install.json"
+              candidate.write_text(json.dumps(document))
+              def shape(path):
+                  value = path.lstat()
+                  return (value.st_ino, value.st_uid, value.st_gid, value.st_mode,
+                          value.st_size, value.st_ctime_ns, value.st_mtime_ns)
+              def check(code, status):
+                  before = [shape(path) for path in (state, cache, logs, candidate)]
+                  result = subprocess.run(["/usr/bin/python3", "-I", "-B",
+                      str(root / "scripts/server_v06_preflight.py"), "--document", str(candidate),
+                      "--intent", "install"], capture_output=True, timeout=30)
+                  assert result.returncode in (1, 3) and not result.stderr
+                  report = json.loads(result.stdout)
+                  checks = {row["check"]: row for row in report["checks"]}
+                  assert checks["storage_path_safety"]["code"] == code
+                  assert checks["storage_path_safety"]["status"] == status
+                  assert report["authorizes_installation"] is False
+                  assert [shape(path) for path in (state, cache, logs, candidate)] == before
+                  assert all(not list(path.iterdir()) for path in (state, cache, logs))
+              check("STORAGE_OWNERSHIP_MANIFEST_UNVERIFIED", "NOT VERIFIED")
+              state.chmod(0o755)
+              check("PROTECTED_STATE_DIRECTORY_UNSAFE", "FAIL")
+              state.chmod(0o700)
+              os.chown(state, 65534, 65534)
+              check("STORAGE_PATH_UNSAFE_OR_CONFLICTING", "FAIL")
+              os.chown(state, 0, 0)
+          print("PASS: protected root state privacy/owner verified; service-owned storage not adopted")
+          PY
+
+  unsupported-native-preflight:
+    name: Unsupported server target refusal (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: debian12
+            image: debian:12-slim
+          - platform: almalinux9
+            image: almalinux:9
+          - platform: ubuntu2404
+            image: ubuntu:24.04
+    container: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test unsupported real distro using native interpreter
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          # Bootstrap the test interpreter only in the disposable image.
+          if command -v apt-get >/dev/null 2>&1; then
+            apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends python3
+          else
+            dnf -q -y install python3
+          fi
+          /usr/bin/python3 -I -B scripts/ci_v06_preflight_unsupported_target.py

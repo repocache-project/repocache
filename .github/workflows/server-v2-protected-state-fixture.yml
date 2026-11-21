@@ -7,6 +7,11 @@ on:
       - 'src/repocache/server_proposed_state_v2_store.py'
       - 'src/repocache/server_fixture_activation_flow_v1.py'
       - 'src/repocache/server_fixture_multi_resource_wal_v1.py'
+      - 'src/repocache/server_fixture_repository_transaction_v1.py'
+      - 'src/repocache/server_repository_reconcile_v1.py'
+      - 'src/repocache/server_repository_v2_transition_v1.py'
+      - 'scripts/prepare_server_repository_lifecycle.py'
+      - 'tests/test_server_fixture_repository_transaction_v1.py'
       - 'src/repocache/server_proposed_v2_locked_digest_v1.py'
       - 'src/repocache/server_proposed_v2_locked_catalog_binding_v1.py'
       - 'src/repocache/server_locked_manifest_reconcile_v1.py'
@@ -20,6 +25,8 @@ on:
       - '.github/workflows/server-v2-protected-state-fixture.yml'
       - 'src/repocache/server_proposed_state_v2_store.py'
       - 'src/repocache/server_fixture_multi_resource_wal_v1.py'
+      - 'src/repocache/server_fixture_repository_transaction_v1.py'
+      - 'tests/test_server_fixture_repository_transaction_v1.py'
       - 'src/repocache/server_locked_manifest_reconcile_v1.py'
       - 'src/repocache/server_protected_state_store_v1.py'
   merge_group:
@@ -89,5 +96,6 @@ jobs:
           python3 -B -m pytest -q -rs \
             tests/test_server_proposed_state_v2_store.py \
             tests/test_server_locked_manifest_reconcile_v1.py \
-            tests/test_server_protected_state_store_v1.py
+            tests/test_server_protected_state_store_v1.py \
+            tests/test_server_fixture_repository_transaction_v1.py
           echo "NOT VERIFIED: installed root worker, host systemd/SELinux, release"

@@ -1,5 +1,57 @@
 # v0.6.0 combined native package installation rehearsal (issue #27)
 
+## Local read-only preflight acceptance (#26)
+
+The same disposable image now runs the normal preflight command before
+NGINX installation and again after the authenticated native transaction.
+Both runs verify the supported OS/Python identity, x86_64 policy and actual
+native interpreter inode. Before installation,
+missing NGINX produces its actionable diagnostic. After installation, the
+native executable observation changes to present.
+The image includes the distribution's systemd client as a prerequisite.
+Unexpected failed local checks reject the positive case both before and after
+package effects. Only the intended absent-NGINX diagnostics and the missing
+container systemd PID 1 are permitted before the fresh package transaction. The container's
+missing systemd PID 1 retains its explicit native-environment classification.
+
+The command is repeated with identical input and must produce identical
+diagnostics. The image also exercises a genuinely dropped UID/GID with no
+supplementary groups, a real loopback listener on the requested HTTPS port,
+and a configured capacity requirement above the observed filesystem space.
+These cases must respectively report missing root privilege, an occupied
+port and insufficient cache space.
+
+Each command invocation compares inode identities, ownership, modes,
+timestamps and file hashes across the existing NGINX configuration and
+protected state tree. A changed file, unexpected authority flag, invalid
+report or missing English guidance fails the job. The retained package
+effects marker remains present throughout post-package preflight.
+
+This is acceptance evidence for local non-mutating diagnostics and their
+composition with #27's separate package checks. Full installed-server
+acceptance remains tracked by #19 and the functional feature owners.
+The preflight report retains its non-authorizing JSON contract and
+explicitly unresolved broader readiness checks.
+
+The independent normal-CLI workflow also verifies the native Python inode
+and observes expected DEB/RPM package ownership outside preflight. A same-version
+copy of the interpreter is refused on install intent before local host probes.
+Real Debian 12, AlmaLinux 9 and Ubuntu 24.04 images exercise the unsupported
+target refusal and preserve protected NGINX/state/package-source metadata.
+In supported images, root-owned TLS references are observed without reading
+key contents; a foreign-owned leaf, hardlink or foreign-owned parent gives
+an actionable failure and leaves the reference files unchanged. Local owner,
+mode and inode observations do not prove signed package origin, valid TLS
+material, a managed ownership manifest or eventual host-install authority.
+
+The configured protected state root, if it exists, must be a root-owned
+private mode-0700 directory. A service-owned state root or a broader mode
+is an actionable preflight failure. An absent state root still reports
+only the closest parent; cache and log leaves may belong to the native
+service and are never treated as adopted solely from ownership. The
+normal CLI container tests exercise all three cases on actual filesystems
+and check that no file is created or changed by the observations.
+
 ## Objective
 
 Before any real-host installation, verify that three independently developed

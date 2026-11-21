@@ -70,3 +70,26 @@ signed metadata* is refused through the **generated NGINX route** with a
 validated cache-off generation and genuinely fresh manager metadata. Do not infer that production catalog/NGINX
 atomic activation or full issue #95 AC1–AC7 has passed before #31/#64
 and the final booted Debian 13 / AlmaLinux 10 campaign in #19.
+
+## Native signed package-manager rejection during active-route withdrawal
+
+The same disposable Debian 13/AlmaLinux 10 test now goes beyond
+verified APT/DNF signed package manager cache MISS/HIT. After a
+successful signed metadata and download, it disables the desired
+repository in a newly validated candidate, removes all generated NGINX
+routes and zones for that ID, validates stock `nginx -t`, reloads
+only the private process and waits for old NGINX workers to exit.
+The real package manager uses an entirely fresh metadata cache and
+**must fail** to update against the now-404 route. Direct HTTPS
+request to the withdrawn path must also return 404, and the
+independent signed upstream must receive **zero** follow-up hits.
+Recorded NGINX cache objects retain their SHA-256 and inode across
+withdrawal. A separate test-only restoration of the original candidate
+then verifies fresh native APT/DNF metadata signature acceptance and
+second HTTPS request **HIT** with signed bytes identical to the fixture.
+
+This is a real data-plane and package-manager Stage-A regression, but
+**not** the installed authenticated lifecycle, catalog publication,
+protected tombstone reallocation, actual root-mounted filesystem
+ownership, power-loss recovery, systemd or enforcing SELinux acceptance.
+The CI-only signing keys are independent ephemeral fixture keys.

@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import os
+import platform
 import stat
 import sys
 from typing import Any
 
-from repocache.server_install_v1 import validate_os_identity
+from repocache.server_install_v1 import validate_os_identity, validate_server_architecture
 from repocache.server_native_nginx_effective_unit_v1 import (
     EffectiveNginxUnitError, inspect_effective_native_nginx_unit,
 )
@@ -155,6 +156,10 @@ def inspect_booted_vm_nginx_readonly() -> dict[str, Any]:
         return _report(None, "SUPPORTED_OS_NOT_OBSERVED")
     if distro not in ("debian", "almalinux"):
         return _report(None, "SUPPORTED_OS_NOT_OBSERVED")
+    try:
+        validate_server_architecture(platform.machine())
+    except ValueError:
+        return _report(distro, "UNSUPPORTED_NATIVE_ARCHITECTURE")
     if os.geteuid() != 0:
         return _report(distro, "ROOT_READ_ONLY_PROBE_REQUIRED")
     try:

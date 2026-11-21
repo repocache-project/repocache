@@ -12,6 +12,7 @@ Only an explicitly disposable Docker container is accepted.
 from __future__ import annotations
 
 import collections
+import copy
 import hashlib
 import json
 import os
@@ -123,13 +124,15 @@ def nginx_config(base: Path, rid: str, pins: dict, doc: dict, *,
         or "    proxy_cache off;" not in rendered["server_location_fragment"]
     ):
         raise RuntimeError("TEST_ONLY_CACHE_BYPASS_UNVERIFIED")
-    if (rendered["proposed_repository_ids"] != [rid]
-            or rendered["authorizes_nginx_activation"] is not False
+    if (rendered["authorizes_nginx_activation"] is not False
             or rendered["authorizes_catalog_publication"] is not False):
         raise RuntimeError("DYNAMIC_ROUTE_RENDERING_UNVERIFIED")
     raw = rendered["http_upstream_fragment"]
     marker = "server 8.8.8.8:443;"
-    if raw.count(marker) != 1:
+    # Zero active repositories have no public-pin server directive.
+    # Refusing a disabled candidate merely because it has no pins would
+    # hide the actual native route withdrawal regression.
+    if raw.count(marker) != len(rendered["proposed_repository_ids"]):
         raise RuntimeError("PUBLIC_PIN_RENDERING_UNVERIFIED")
     test_upstream = raw.replace(marker, f"server 127.0.0.1:{origin_port};")
     if marker in test_upstream:
@@ -139,9 +142,12 @@ def nginx_config(base: Path, rid: str, pins: dict, doc: dict, *,
         "    proxy_cache_valid 200 60s;\n"
         "    add_header X-RepoCache-Smoke $upstream_cache_status always;",
     )
-    if (locations.count(f"location ^~ /__repocache/repos/{rid}/") != 1
-            or "    add_header X-RepoCache-Smoke " not in locations):
-        raise RuntimeError("DYNAMIC_LOCATION_RENDERING_UNVERIFIED")
+    route_count = locations.count(f"location ^~ /__repocache/repos/{rid}/")
+    expected_active = (doc["repositories"][0]["desired_state"] == "active")
+    if (rendered["proposed_repository_ids"] != ([rid] if expected_active else [])
+            or route_count != (1 if expected_active else 0)
+            or ("    add_header X-RepoCache-Smoke " in locations) != expected_active):
+        raise RuntimeError("DYNAMIC_ACTIVE_ONLY_ROUTE_INVALID")
     conf = base / "nginx.conf"
     conf.write_text(
         f"user {worker};\n"
@@ -408,6 +414,105 @@ def exercise(kind: str) -> None:
                     raise AssertionError("NATIVE_TAMPERED_METADATA_NOT_REFUSED")
             finally:
                 tampered_path.write_bytes(recorded)
+
+            # Actual native package-manager refusal after an administrator
+            # removes an otherwise valid repository from the desired route
+            # set. Fresh APT/DNF metadata caches rule out stale manager
+            # success. All changes affect this private NGINX process only.
+            native_cache = base / "cache" / rid
+            def retained_cache_objects() -> dict[str, tuple[int, str]]:
+                return {
+                    str(path.relative_to(native_cache)): (
+                        path.stat().st_ino,
+                        hashlib.sha256(path.read_bytes()).hexdigest(),
+                    )
+                    for path in native_cache.rglob("*") if path.is_file()
+                }
+
+            native_before = retained_cache_objects()
+            if not native_before:
+                raise AssertionError("SIGNED_DYNAMIC_CACHE_OBJECTS_NOT_OBSERVED")
+            disabled = copy.deepcopy(doc)
+            disabled["repositories"][0]["desired_state"] = "disabled"
+            prior = nginx_master_children(process.pid)
+            nginx_config(
+                base, rid, {}, disabled, nginx_port=frontend_port,
+                origin_port=origin_port, origin_cert=origin_cert,
+                front_cert=front_cert, front_key=front_key,
+                worker=worker,
+            )
+            if not subprocess_status([nginx, "-t", "-p", str(base), "-c", str(conf)]):
+                raise AssertionError("DYNAMIC_DISABLED_NGINX_SYNTAX_REFUSED")
+            process.send_signal(signal.SIGHUP)
+            await_worker_generation_drained(process, prior)
+            before_refused_hits = len(backend.hits)
+            absent = request(route_url + metadata, context)
+            if absent[0] != 404:
+                raise AssertionError("DISABLED_SIGNED_ROUTE_STILL_ACCESSIBLE")
+            if kind == "apt":
+                fresh_lists = base / "apt-disabled-lists"
+                (fresh_lists / "partial").mkdir(parents=True)
+                args = [
+                    f"Dir::State::lists={fresh_lists}"
+                    if item.startswith("Dir::State::lists=") else item
+                    for item in original_native_args
+                ]
+                erroneously_accepted = subprocess_status([*args, "update"])
+            else:
+                target = SimpleNamespace(origin=route_url)
+                args = native.dnf_command(
+                    base, target, target, "dynamic-disabled-route",
+                    ca_certificate=front_cert, metadata_key=signed_key,
+                )
+                erroneously_accepted = subprocess_status(args)
+            if (erroneously_accepted
+                    or backend.hits[before_refused_hits:]
+                    or retained_cache_objects() != native_before):
+                raise AssertionError("DISABLED_SIGNED_REPOSITORY_NOT_WITHDRAWN")
+
+            # Test-only restoration of the exact original definition.
+            # This is NOT reuse of a retired installed ID or a durable state
+            # ledger resurrection: it is a synthetic private reload.
+            prior = nginx_master_children(process.pid)
+            nginx_config(
+                base, rid, pins, doc, nginx_port=frontend_port,
+                origin_port=origin_port, origin_cert=origin_cert,
+                front_cert=front_cert, front_key=front_key,
+                worker=worker,
+            )
+            if not subprocess_status([nginx, "-t", "-p", str(base), "-c", str(conf)]):
+                raise AssertionError("DYNAMIC_REENABLED_NGINX_SYNTAX_REFUSED")
+            process.send_signal(signal.SIGHUP)
+            await_worker_generation_drained(process, prior)
+            restored = request(route_url + metadata, context)
+            repeat = request(route_url + metadata, context)
+            if (restored[:2] != (200, signed_metadata_bytes)
+                    or repeat[:3] != (200, signed_metadata_bytes, "HIT")):
+                raise AssertionError("REENABLED_SIGNED_CACHE_NOT_USABLE")
+            if kind == "apt":
+                verified_lists = base / "apt-reenabled-lists"
+                (verified_lists / "partial").mkdir(parents=True)
+                args = [
+                    f"Dir::State::lists={verified_lists}"
+                    if item.startswith("Dir::State::lists=") else item
+                    for item in original_native_args
+                ]
+                accepted_again = subprocess_status([*args, "update"])
+            else:
+                target = SimpleNamespace(origin=route_url)
+                args = native.dnf_command(
+                    base, target, target, "dynamic-reenabled-route",
+                    ca_certificate=front_cert, metadata_key=signed_key,
+                )
+                accepted_again = subprocess_status(args)
+            if not accepted_again:
+                raise AssertionError("REENABLED_NATIVE_SIGNATURE_NOT_ACCEPTED")
+            # NGINX may reindex/reclaim an existing cache during a reload;
+            # avoid promising identical inode sets once serving resumes.
+            print("PASS: native " + kind.upper() +
+                  " fresh signed metadata REFUSED after live route withdrawal, "
+                  "no upstream escape or cache deletion, then signed metadata "
+                  "ACCEPTED and cache HIT after private route restoration")
 
             print("PASS: " + kind.upper() +
                   " configuration-only repository + stock NGINX HTTPS cache, "
