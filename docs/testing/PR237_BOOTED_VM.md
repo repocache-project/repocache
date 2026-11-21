@@ -343,3 +343,28 @@ is claimed for this correction until **exact current HEAD** source and
 booted-VM CI complete on both supported OS targets. Publisher signing,
 SELinux installed-worker deny tests and full issue #31 acceptance remain
 independent prerequisites.
+
+## Installed raw-packet unit-injection refusal (native #64 evidence)
+
+The `native-installer` scenario additionally sends one 30-byte raw
+AF_UNIX SOCK_SEQPACKET request directly to the installed root-owned systemd
+worker, bypassing the unprivileged client's local operation allowlist. Its
+first command is the otherwise valid `reload-v2` token, followed in the
+**same packet** by an attacker-selected `unit=sshd.service` field. The
+real installed broker must close the connection without returning a successful
+reply. No additional operation, arbitrary unit selection or fallback command
+is permitted.
+
+The test then independently compares the durable managed-state, NGINX
+include, published catalog, TLS generation response and absence of a pending
+WAL to their earlier values. A subsequent legitimate `RELOAD_V2` request
+through the exact same installed socket must succeed without changing the
+managed snapshot. This is meaningful booted-OS evidence for *one specific*
+#64 malformed-input refusal, on both disposable Debian 13 and enforcing
+AlmaLinux 10 guests. It is **not** a complete #64 adversarial matrix, nor
+owner-signed/released worker acceptance.
+
+The relevant stage output is saved as `native-socket-v2.txt` inside each
+per-platform `native-installer` workflow artifact, with source HEAD and
+the pinned synthetic candidate in the adjacent provenance records. A green
+workflow on a *different* HEAD is not acceptance for this test.
