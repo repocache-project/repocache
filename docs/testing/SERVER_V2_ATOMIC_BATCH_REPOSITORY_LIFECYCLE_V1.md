@@ -50,6 +50,26 @@ security review and explicit owner approval remain mandatory. Do not
 re-export this planner as a privileged API, invoke NGINX, adopt a removed
 identity under another ID or modify existing public CLI commands.
 
+## Fixed native candidate handoff, still no native authority
+
+The companion `render_fixed_native_repository_batch_envelope` in the
+already-packaged `server_repository_reconcile_v1.py` joins this complete
+batch builder to the exact five-field fixed native candidate intake
+serializer introduced by merged PR #411. For one changed batch it
+returns **one canonical ASCII/base64 envelope**, with the expected
+predecessor generation/hash and the SHA-256 of the exact full next v2
+state. A no-op returns `envelope_bytes=None`, so it cannot
+accidentally request an extra state generation or service reload.
+The envelope contains no user-selected file path, executable, callback
+or arbitrary privileged operation.
+
+This is only a byte-serialization bridge. It does not write the fixed
+admin candidate file or attest who approved a change. The independently
+reviewed native #31/#64 worker must authenticate the operator and
+installed host, reload/read the actual protected state under its own
+lock, revalidate the complete batch, and verify live NGINX exposure
+before publishing its active discovery catalog.
+
 ## Executable tests / evidence limits
 
 ```sh
@@ -60,7 +80,10 @@ The tests exercise auto-ID additions with all-time reservations,
 multi-update without identity changes, enabling/disabling and removal of
 two APT/DNF repositories in one generation, missing/repeated selectors,
 conflicts, stale generation/whole-state digest, no-op handling, historical
-retention and strict false authorization flags. A genuine detached Linux
+retention and strict false authorization flags. Additional tests pass
+the whole two-repository batch into the fixed native candidate byte
+envelope, validate one five-field canonical wire, digest/CAS binding,
+idempotent no-op, tamper refusal and permanent tombstones. A genuine detached Linux
 fixture runs **the merged four-resource state/include/catalog/owner-manifest
 WAL** with two enabled repository entries in one committed generation,
 then retires both in a second committed generation, demonstrating correct
