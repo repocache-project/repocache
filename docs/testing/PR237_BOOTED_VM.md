@@ -198,6 +198,11 @@ the existing proposal, state/WAL absence and NGINX service state are preserved.
 The original receipt is restored and rechecked byte-for-byte with the durable
 pre-fault SHA-256; the VM is discarded afterwards.
 
+The same guest also calls the **actual non-fixture APPLY/RELOAD package-audit
+gate** with a real protected state FD, before corruption, during corruption and
+after restoration. It requires the gate to refuse the altered receipt before
+any candidate activation; no apply/reload itself is invoked.
+
 This deliberately tests the real file validator and protected lock, **not**
 the full installed-worker `APPLY_V2` execution or failover after an interrupted
 APT/DNF transaction. It creates no new activation or recovery authority.

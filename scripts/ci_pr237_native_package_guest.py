@@ -259,6 +259,9 @@ def report(distribution: str) -> None:
         from repocache.server_native_nginx_package_journal_v1 import (
             _read_completed_native_install_under_lock, NativePackageJournalError,
         )
+        from repocache.server_native_v2_transaction_v1 import (
+            _require_audited_native_package_for_activation, NativeV2TransactionError,
+        )
         rootfd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
         try:
             with _locked(rootfd, 0) as directory:
@@ -269,6 +272,9 @@ def report(distribution: str) -> None:
                 assert validated["native_package_file_integrity_verified"] is True
                 assert validated["booted_native_service_verified"] is False
                 assert validated["publisher_artifact_verified"] is False
+                _require_audited_native_package_for_activation(
+                    directory, distribution=distribution,
+                )
         finally:
             os.close(rootfd)
         original_receipt = complete.read_bytes()
@@ -294,6 +300,14 @@ def report(distribution: str) -> None:
                         assert str(error) == "NATIVE_COMPLETION_RECEIPT_INVALID"
                     else:
                         raise AssertionError("Corrupted real native completion receipt accepted")
+                    try:
+                        _require_audited_native_package_for_activation(
+                            directory, distribution=distribution,
+                        )
+                    except NativeV2TransactionError as error:
+                        assert str(error) == "NATIVE_V2_NATIVE_PACKAGE_PROVENANCE_UNVERIFIED"
+                    else:
+                        raise AssertionError("Real native APPLY/RELOAD audit gate accepted a corrupted package receipt")
             finally:
                 os.close(rootfd)
             assert pending_proposal.read_bytes() == original_proposal
@@ -315,6 +329,9 @@ def report(distribution: str) -> None:
                 assert _read_completed_native_install_under_lock(
                     directory, owner_uid=0, distribution=distribution,
                 ) is not None
+                _require_audited_native_package_for_activation(
+                    directory, distribution=distribution,
+                )
         finally:
             os.close(rootfd)
         native_observation()
