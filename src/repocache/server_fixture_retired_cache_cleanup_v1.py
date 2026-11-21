@@ -110,17 +110,23 @@ def _inventory(
 
 def _erase_verified_entry(
     repo_fd: int, path: tuple[str, ...], is_dir: bool,
-    fingerprint: tuple[int, ...], *, uid: int, gid: int, dev: int,
+    fingerprint: tuple[int, ...], frozen_by_path: dict[tuple[str, ...], tuple[int, ...]],
+    *, uid: int, gid: int, dev: int,
 ) -> None:
     """Recheck every ancestor and final inode immediately before unlink."""
     with ExitStack() as stack:
         parent = repo_fd
+        parent_path: tuple[str, ...] = ()
         for component in path[:-1]:
+            parent_path = (*parent_path, component)
             parent_next = os.open(component, _DIRECTORY_FLAGS, dir_fd=parent)
             stack.callback(os.close, parent_next)
             _metadata(os.fstat(parent_next), uid=uid, gid=gid,
                       dev=dev, directory=True)
             _no_unverified_xattrs(parent_next)
+            if (_structural(os.fstat(parent_next))[:5]
+                    != frozen_by_path[parent_path][:5]):
+                _deny("ANCESTOR_CHANGED")
             parent = parent_next
         name = path[-1]
         before = os.stat(name, dir_fd=parent, follow_symlinks=False)
@@ -137,8 +143,8 @@ def _erase_verified_entry(
         # are removed; final entries must retain the exact initial inode.
         if (not is_dir and _fingerprint(before) != fingerprint
                 or not is_dir and _fingerprint(actual) != fingerprint
-                or is_dir and _structural(before) != fingerprint[:6]
-                or is_dir and _structural(actual) != fingerprint[:6]
+                or is_dir and _structural(before)[:5] != fingerprint[:5]
+                or is_dir and _structural(actual)[:5] != fingerprint[:5]
                 or _identity(before) != _identity(actual)):
             _deny("ENTRY_CHANGED")
         if is_dir:
@@ -271,11 +277,14 @@ def purge_fixture_retired_repository_cache_objects_under_root(
                         != _structural(repo_info)):
                     _deny("REPOSITORY_ROOT_CHANGED")
 
+                frozen_by_path = {parts: fingerprint
+                                  for parts, _, fingerprint in first}
                 files_removed = 0
                 for parts, directory, fingerprint in first:
                     _erase_verified_entry(
                         repo_fd, parts, directory, fingerprint,
-                        uid=cache_uid, gid=cache_gid, dev=cache.st_dev,
+                        frozen_by_path, uid=cache_uid, gid=cache_gid,
+                        dev=cache.st_dev,
                     )
                     if not directory:
                         files_removed += 1
