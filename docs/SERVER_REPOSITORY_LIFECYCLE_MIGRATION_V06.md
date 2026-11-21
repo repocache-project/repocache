@@ -159,3 +159,69 @@ sanitized, copy/paste-friendly command output, exact source/release SHA,
 installed package/unit identity and per-criterion PASS/FAIL/NOT VERIFIED.
 Do not request VM execution before the remaining non-VM integration and
 security gates are resolved.
+
+
+## Prepared repository operations before signed native activation (Stage A)
+
+The trusted **checkout-only** operator utility
+scripts/prepare_server_repository_lifecycle.py now connects the actual #95
+single-generation v2 add/update/enable/disable/remove batch planner to the
+exact fixed native #31/#64 proposal format. This is an offline candidate
+builder, **not an installed REPOCACHE command or an NGINX operation**. The
+five-field native envelope is checked, then only its exact canonical next
+state bytes are durably created as a 0600 file for the separately reviewed
+#237 native proposal stager. This avoids manually editing base64 v2
+snapshots and accidentally losing all-time IDs or tombstones.
+
+With a separately obtained, reviewed *private* canonical predecessor state
+and known SHA-256 and generation, prepare an owner-only 0600 JSON request,
+for example:
+
+```json
+{"operation":"enable","repository_ids":["debian-trixie-main"]}
+```
+
+From a trusted checkout with a source Python environment:
+
+```sh
+python scripts/prepare_server_repository_lifecycle.py \
+  --previous-v2-state /secure/predecessor-v2.json \
+  --expected-generation 1 \
+  --expected-state-sha256 "$PREDECESSOR_SHA256" \
+  --decision-sha256 "$OPERATOR_DECISION_REFERENCE_SHA256" \
+  --request /secure/lifecycle-request.json \
+  --proposal-output /secure/next-v2.json
+```
+
+Supported closed request shapes: add/update accept 1-64 complete repository
+objects in proposed_repositories; enable/disable accept 1-500 unique IDs
+in repository_ids; remove accepts repository_ids or all_repositories=true.
+The existing strict v2 builder verifies all-time ID reservations and
+canonical upstream/cache identity; it refuses stale generations, invalid
+selectors and conflicting identity reuse. A no-op produces **no file**.
+A changed operation creates one new 0600 file without overwriting any
+existing path, and reports only expected/new digests, generation and
+non-authorizing status. Previous and request files must be regular,
+single-linked, locally owned and mode 0600 inside a locally owned,
+non-group/world-writable directory; symlinks and malformed requests refuse
+without mutation.
+
+**Critical trust boundary:** a previous-state file and a user-supplied
+decision SHA-256 are untrusted data, not proof of authenticated installed
+state, private owner approval or code signature. Neither this utility nor
+its output stages or activates the native worker. The pending #237/#254
+signed, authenticated fixed stager **must** verify the output snapshot
+digest, the installed predecessor again under the real protected lock,
+operator authority, native host, NGINX routing and recoverable catalog
+publication. Do not copy a candidate straight into protected NGINX/state
+locations. There is no safe operational path until those drafts' mandatory
+review/approval and installed native gates pass. The utility is not a
+signed v0.6 release asset and is intended only in the reviewed source
+checkout.
+
+The source CI runs the real CLI as an independent Python subprocess and
+compares its emitted canonical bytes with the pre-existing exact five-field
+fixed-native builder. It also checks read-only predecessor retention,
+tombstones, auto-ID, no-op, destination collision, malicious requests,
+symlinks, hardlinks and file ownership/mode. This Stage-A execution does
+not replace any Debian 13 / AlmaLinux 10 booted native VM acceptance.
