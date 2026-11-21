@@ -81,7 +81,7 @@ def _preview_locked_v2_catalog_binding_under_root(
     try:
         with _locked(root_fd, owner_uid) as directory:
             _legacy_refusal(directory, owner_uid)
-            if _pending(directory, owner_uid):
+            if _pending(directory, owner_uid, include_multi=False):
                 _deny("RECOVERY_REQUIRED")
             _check_no_auxiliary_pending(directory, owner_uid)
             state, state_raw = _read_v2(directory, owner_uid)
@@ -126,7 +126,6 @@ def _preview_locked_v2_catalog_binding_under_root(
                        != render["proposed_repository_ids"]
                     or derived["exact_https_server_context_candidate_matched"]
                        is not True):
-
                 _deny("DOMAIN_BINDING_INVALID")
             # Canonical, bounded potential client-schema bytes. These are
             # deliberately NOT written, nor treated as observed exposure.
@@ -138,7 +137,7 @@ def _preview_locked_v2_catalog_binding_under_root(
             # Independent root writers can ignore an advisory flock:
             # recheck state, inode/ctime, legacy and WAL before returning.
             _legacy_refusal(directory, owner_uid)
-            if _pending(directory, owner_uid):
+            if _pending(directory, owner_uid, include_multi=False):
                 _deny("RECOVERY_REQUIRED")
             _check_no_auxiliary_pending(directory, owner_uid)
             later, later_raw = _read_v2(directory, owner_uid)
