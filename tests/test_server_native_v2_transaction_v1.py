@@ -1345,3 +1345,41 @@ def test_apply_route_dump_refuses_unverified_derived_catalog(monkeypatch):
             {}, include, _canon({"schema": 1, "repositories": []}),
             "debian", 2, {},
         )
+
+
+@pytest.mark.parametrize("resource", ["state", "include", "catalog", "manifest"])
+@pytest.mark.parametrize("tamper", ["mode", "hardlink", "bytes"])
+def test_completed_same_version_noop_rejects_protected_inode_and_metadata_drift(
+    filesystem, resource, tamper,
+):
+    """A repeated install must neither adopt changed bytes nor repair foreign inodes."""
+    stage(filesystem, snapshot(count=1))
+    assert apply(filesystem)["state_generation"] == 1
+    _fd, state, include, catalog, events = filesystem
+    paths = {
+        "state": state / V2_STATE,
+        "include": include,
+        "catalog": catalog,
+        "manifest": state / native._MANIFEST,
+    }
+    original = {name: path.read_bytes() for name, path in paths.items()}
+    target = paths[resource]
+    extra = target.parent / (target.name + ".foreign-link")
+    if tamper == "mode":
+        target.chmod(0o666)
+    elif tamper == "hardlink":
+        os.link(target, extra)
+    else:
+        target.write_bytes(original[resource] + b"\nforeign drift")
+    after_tamper = {name: path.read_bytes() for name, path in paths.items()}
+    events.clear()
+    with pytest.raises(ValueError):
+        apply(filesystem)
+    assert {name: path.read_bytes() for name, path in paths.items()} == after_tamper
+    assert ("reload", "debian") not in events
+    assert "syntax" not in events
+    assert not (state / native._WAL).exists()
+    if tamper == "hardlink":
+        assert extra.is_file() and extra.stat().st_ino == target.stat().st_ino
+    if tamper == "mode":
+        assert target.stat().st_mode & 0o777 == 0o666
