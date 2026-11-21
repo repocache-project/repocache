@@ -707,9 +707,10 @@ def test_synthetic_signed_candidate_enters_exact_native_journal_once(
     )
     install, effects = _synthetic_host_native_package(monkeypatch, distribution)
 
-    with os.fdopen(os.open(sysroot, os.O_RDONLY | os.O_DIRECTORY), "rb") as fake_root:
+    fake_root = os.open(sysroot, os.O_RDONLY | os.O_DIRECTORY)
+    try:
         def isolated_native_effects(_real_host_root, **kwargs):
-            return old_execute(fake_root.fileno(), **kwargs)
+            return old_execute(fake_root, **kwargs)
         monkeypatch.setattr(
             install, "_execute_native_nginx_install_locked", isolated_native_effects,
         )
@@ -748,3 +749,5 @@ def test_synthetic_signed_candidate_enters_exact_native_journal_once(
                 commit=commit, archive_sha256=digest,
             )
         assert (state / NATIVE_COMPLETE_NAME).read_bytes() == receipt
+    finally:
+        os.close(fake_root)
