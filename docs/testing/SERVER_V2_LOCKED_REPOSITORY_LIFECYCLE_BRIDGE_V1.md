@@ -64,15 +64,20 @@ booted systemd/SELinux, installed NGINX reload or real publisher signatures.
 
 ## Remaining operational integration and issue gates
 
-The next production increment is a separately audited, **fixed-purpose**
-root-owned installed service/control boundary, rather than permitting this
-fixture function to write real files. That worker must authenticate the
-operator and installed release, verify the real root namespace, cache
-ownership, OS/package unit and NGINX include, retain its own crash-consistent
+The native root-worker and real NGINX/state/catalog WAL are under
+development in the separate **draft PR #237** (dependency #31/#64), and
+must not be reimplemented in a competing privileged service. This bridge
+cannot be substituted for that code. When its original criteria and review
+gates pass and it is integrated, the next #95 increment must bind
+operator-authorized lifecycle intentions to the **fixed installed candidate
+staging contract** and invoke that native worker without caller-selected
+paths, callbacks, environment, service units or executables. The worker must
+authenticate the operator and installed release, verify the root namespace,
+cache ownership, OS/package unit and NGINX include, retain a crash-consistent
 journal across service reloads, run actual `nginx -t` and reload, observe
-the new live worker/routes, and publish the signed/derived client catalog
-only after that exposure is verified. Restart/recovery must reconcile both
-service and catalog, not merely roll back shadow bytes.
+the new live worker/routes, and publish derived discovery only after verified
+exposure. Restart/recovery must reconcile the service and public catalog,
+not merely roll back shadow bytes.
 
 The accepted state-v2 schema retains historical ID **and identity** digests,
 so a removed publisher identity cannot be silently rebound to a different
