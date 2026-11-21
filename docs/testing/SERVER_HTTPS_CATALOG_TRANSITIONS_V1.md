@@ -32,3 +32,32 @@ handshake, atomic catalog publication and protected state-v2
 transaction/recovery. The test does not start a real service or access
 any external repository; native signed APT/DNF and cache HIT are
 covered independently. The original issue #95 is not closed.
+
+## Protected v2 catalog binding now requires the full HTTPS context
+
+The private read-only `server_proposed_v2_locked_catalog_binding_v1.py`
+previously accepted an untrusted route/upstream-only `nginx -T`-shaped
+string. It now requires the entire exact generated HTTPS server context,
+including the selected listener, TLS certificate/key references, SNI and
+active-only locations, before deriving client-schema candidate bytes.
+The same exclusive fixture state lock covers validated state-v2 bytes,
+the generation/SHA and an optional complete four-resource owner manifest.
+If the fixture state/include/catalog ownership domain is present, the
+manifest and derived active set must match. Pending journals, changed
+state/inode, malformed or missing owner resources, forged TLS listener,
+extra routes and route-only dump strings are refused without writes.
+
+The check deliberately does not run NGINX or authenticate the claimed
+`nginx -T` text. It does not verify the actual TLS certificate, handshake,
+running NGINX master, installed root or administrator. The **privileged
+native worker** must independently authenticate those facts under its
+real host transaction before a catalog can be published.
+
+```sh
+python -m pytest -q tests/test_server_proposed_state_v2_store.py
+```
+
+CI scenarios verify deterministic exact-HTTPS client catalog mapping,
+single-state and complete multi-resource ownership, unchanged protected
+bytes, stale SHA/generation, forged/missing owner manifest, pending WAL,
+listener/SNI/TLS drift and previously accepted route-only claims.
