@@ -33,8 +33,9 @@ redundant VM gate; if a VM is inherently needed, mark it NOT VERIFIED until
 run. A booted VM may itself be orchestrated by suitably equipped CI; what
 matters is the faithful native environment, not who hosts it.
 
-**Stage C — independent security and publisher acceptance.** Preserve every
-original issue-specific mandatory reviewer/owner decision, real private-key
+**Stage C — security and publisher acceptance.** Preserve issue-specific
+maintainer operational/merge decisions and substantive security gates; independently
+commissioned human review is optional for all issues. Preserve real private-key
 Ed25519 signing outside CI, exact signed candidate verification, authorized
 staging/tag/publishing and immutable public readback/postpublication smoke.
 Neither Stage A nor Stage B automatically authorizes Stage C. These steps
@@ -46,7 +47,7 @@ occur only when their genuine inputs and separately required permissions exist.
    actual code, selected release and its current dependency graph. Do not
    invent milestone scope or an already approved production writer.
 2. For each requirement, record its **evidence owner**: A (executable in CI),
-   B (booted/native system acceptance), C (owner/review/signing/publication),
+   B (booted/native system acceptance), C (owner/security/signing/publication),
    or A+B/C where applicable. Record exact observable PASS conditions.
 3. Track CI-only independently accepted increments in their existing focused
    PRs; keep a wider parent issue OPEN until its own full criteria PASS.
@@ -58,7 +59,7 @@ occur only when their genuine inputs and separately required permissions exist.
    install/apply and native fallback mechanisms, integrate them and execute
    available security, package manager, failure-injection and end-to-end CI.
    Deferral of VM testing is **not** deferral of this implementation work.
-5. Before asking for VM work, freeze an installable candidate and runbook:
+5. Prefer reproducible, isolated booted QEMU/KVM guests in GitHub Actions where they faithfully exercise native systemd, AlmaLinux SELinux enforcing, real installed services and negative cases. The PR #237 experimental pinned-image VM harness is a reusable starting point, not blanket evidence for other issues or a substitute for the final signed artifact. Keep images digest-pinned, ephemeral and independently verified, with exact SHA/guest/test logs and fail-closed bootstrap. Do not label synthetic signing or incomplete installed-product flows as release acceptance. Where hosted VMs cannot faithfully reproduce the target or necessary permissions, retain the final maintainer VM campaign. Before asking for VM work, freeze an installable candidate and runbook:
    exact source SHA/asset digests, fixture provenance, install/repair/rollback,
    OS/kernel/systemd/SELinux commands, expected outcomes, negative cases and
    redacted machine-readable logs. Consolidate overlapping native tests into
@@ -70,7 +71,7 @@ occur only when their genuine inputs and separately required permissions exist.
 
 **Evidence states:** PASS = executed at the required environment and exact
 revision; FAIL = verified defect; NOT VERIFIED = missing/stale/wrong-environment
-test, missing review or absent approval; NOT APPLICABLE = a requirement
+test, missing mandatory technical security evidence or absent approval; NOT APPLICABLE = a requirement
 explicitly superseded by an authenticated maintainer decision, with provenance.
 A VM-only requirement is not a PR Stage-A criterion *only where the
 maintainer-approved scope of that PR genuinely excludes native activation*.
@@ -88,8 +89,9 @@ dependencies, required checks and no blocking risks or review threads.
 The current [PR governance](PR_REVIEW_GOVERNANCE.md) controls conditional
 `integration/vMAJOR.MINOR.PATCH` merge delegation and queue admission.
 An active native queue or green checks are not self-authorization.
-Issue-specific independent security review and maintainer merge approval
-remain mandatory where agreed. Main/release merges, unusual scope/security
+Issue-specific maintainer merge approval and technical security acceptance
+remain mandatory where agreed; separately commissioned human review is
+optional for every issue. This does not waive GitHub ruleset approvals. Main/release merges, unusual scope/security
 changes, native queue pilots/rulesets, tags, signing, staging, publication,
 production or destructive operations retain their separate authorizations.
 
