@@ -93,3 +93,40 @@ publisher metadata, actual cache purge or booted systemd/SELinux testing.
 
 Original #95 acceptance criteria remain open for the full signed and
 installed implementation; source-only stage-A CI cannot close them.
+
+## Locked full-batch four-resource fixture transaction
+
+`commit_fixture_repository_batch_under_root` in the existing
+`server_fixture_repository_transaction_v1.py` exercises the same
+**complete v2 batch** against an actual protected, owner-pinned detached
+Linux fixture directory. It reads the canonical ledger and its all-time
+ID reservations under the first exclusive lock, constructs a single batch
+candidate, derives the managed NGINX include and shadow discovery catalog from
+the same active IDs, and passes the whole generation to the existing
+state/include/catalog/owner-manifest persistent WAL. The WAL takes its own
+lock, verifies the exact prior generation and SHA-256 again, keeps the
+previous catalog during the fixture prepublication barrier, and atomically
+commits or records recoverable rollback evidence. No-op batches do not write
+new WAL bytes or advance the generation. One invalid member or bad pin
+rejects the whole batch before mutation. All-repository removal retires
+historical IDs but never deletes cached objects.
+
+The private fixture callback is not a real NGINX readiness attestation.
+No administrator authentication, installed privileged writer, native
+service reload, real catalog publication or cache purge is authorized.
+The actual `/` root is always refused. Never import this fixture entrypoint
+in privileged production code.
+
+Additional test coverage:
+
+```sh
+python -m pytest -q tests/test_server_fixture_repository_transaction_v1.py
+```
+
+The batch scenarios assert one durable generation for two-repository
+enablement, coherent shadow routes/catalog, entire-repository removal with
+retained bytes, two-source auto-ID allocation from persisted history, stale
+or malicious selector rejection with no filesystem mutation, repeat no-op,
+prepublication callback refusal and a simulated crash followed by exact
+four-resource WAL rollback. These are **Stage-A fixture tests**, not
+booted Debian/AlmaLinux acceptance or independent security review.
