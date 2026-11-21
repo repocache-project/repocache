@@ -33,7 +33,7 @@ from repocache.server_locked_manifest_reconcile_v1 import (
 )
 from repocache.server_proposed_state_v2_store import MAX_V2_STATE_BYTES
 from repocache.server_repository_v2_transition_v1 import (
-    plan_repository_v2_transition,
+    plan_repository_v2_transition, plan_repository_v2_batch_transition,
 )
 from repocache.server_protected_state_store_v1 import _json as _canonical_v2_json
 
@@ -953,4 +953,87 @@ def render_fixed_native_repository_lifecycle_envelope(
         "operation": operation,
         "repository_id": plan["repository_id"],
         "changed": True,
+    }
+
+
+def render_fixed_native_repository_batch_envelope(
+    previous_canonical_state_bytes: bytes,
+    *,
+    expected_generation: int,
+    expected_previous_state_sha256: str,
+    operation: str,
+    decision_sha256: str,
+    proposed_repositories: tuple[dict[str, Any], ...] = (),
+    repository_ids: tuple[str, ...] = (),
+    all_repositories: bool = False,
+) -> dict[str, Any]:
+    """Prepare ONE fixed native v2 intake for an all-or-nothing #95 batch.
+
+    This is the existing exact-byte #31/#64 *data* envelope, not a native
+    file stager, approved administrator signature, root broker or durable
+    transaction. A future installed worker must revalidate the complete
+    batch against its OWN locked protected predecessor before activation.
+    """
+    if (type(previous_canonical_state_bytes) is not bytes
+            or not 1 <= len(previous_canonical_state_bytes)
+                   <= MAX_V2_STATE_BYTES):
+        raise ReconciliationPlanError("fixed batch: predecessor invalid")
+    try:
+        previous = _canonical_v2_json(
+            previous_canonical_state_bytes, limit=MAX_V2_STATE_BYTES,
+        )
+        plan = plan_repository_v2_batch_transition(
+            previous, expected_generation=expected_generation,
+            expected_previous_state_sha256=expected_previous_state_sha256,
+            operation=operation, decision_sha256=decision_sha256,
+            proposed_repositories=proposed_repositories,
+            repository_ids=repository_ids,
+            all_repositories=all_repositories,
+        )
+        if (plan["authorizes_state_write"] is not False
+                or plan["authorizes_nginx_activation"] is not False
+                or plan["authorizes_catalog_publication"] is not False):
+            raise ReconciliationPlanError("fixed batch: unsafe plan")
+        if not plan["changed"]:
+            return {
+                "schema_version": 1,
+                "status": "NO_CHANGE_FIXED_V2_BATCH_CANDIDATE_ONLY",
+                "operation": operation,
+                "changed": False,
+                "per_repository": plan["per_repository"],
+                "expected_generation": expected_generation,
+                "envelope_bytes": None,
+                "operator_approval_verified": False,
+                "persisted_predecessor_provenance_verified": False,
+                "native_state_lock_held": False,
+                "authorizes_state_write": False,
+                "authorizes_nginx_reload": False,
+                "authorizes_catalog_publication": False,
+                "authorizes_cache_cleanup": False,
+                "requires_native_locked_recheck": True,
+            }
+        next_bytes = json.dumps(
+            plan["proposed_snapshot"], sort_keys=True,
+            separators=(",", ":"), ensure_ascii=True,
+            allow_nan=False,
+        ).encode("ascii")
+        native = render_fixed_native_v2_candidate_envelope(
+            previous_canonical_state_bytes, next_bytes,
+            expected_generation=expected_generation,
+            expected_previous_state_sha256=expected_previous_state_sha256,
+        )
+    except ReconciliationPlanError:
+        raise
+    except (ValueError, TypeError, OverflowError, UnicodeError,
+            RecursionError, KeyError):
+        raise ReconciliationPlanError(
+            "fixed batch: candidate rejected"
+        ) from None
+    return {
+        **native,
+        "status": "FIXED_V2_ATOMIC_BATCH_ENVELOPE_ONLY",
+        "operation": operation,
+        "changed": True,
+        "per_repository": plan["per_repository"],
+        "retired_ids_proposed": plan["retired_ids_proposed"],
     }
