@@ -51,6 +51,19 @@ def assert_disabled(unit: str) -> None:
     )
 
 
+def assert_static_socket() -> None:
+    # The signed socket reference has deliberately no [Install] section.
+    # systemd reports "static", NOT "disabled", for a valid non-enableable
+    # socket. Preserve the precise state rather than loosening this check.
+    result = subprocess.run(
+        ["/usr/bin/systemctl", "is-enabled", "repocache-control.socket"],
+        capture_output=True, text=True, check=False, timeout=15,
+    )
+    assert result.returncode == 0 and result.stdout.strip() == "static", (
+        "Unexpected boot activation state for fixed root socket"
+    )
+
+
 def accounts() -> None:
     if "repocache-admin" not in [g.gr_name for g in grp.getgrall()]:
         command("/usr/sbin/groupadd", "--system", "repocache-admin")
@@ -196,8 +209,8 @@ def main(distribution: str) -> None:
         0, grp.getgrnam("repocache-admin").gr_gid, 0o660,
     )
     assert command("/usr/bin/systemctl", "is-active", "repocache-control.socket") == "active"
-    assert_disabled("repocache-control.socket")
-    print("PASS: native installed systemd AF_UNIX seqpacket socket with root/admin ownership and disabled boot", flush=True)
+    assert_static_socket()
+    print("PASS: native installed systemd AF_UNIX seqpacket socket with root/admin ownership and static non-enableable boot state", flush=True)
 
     # The same protected socket must refuse its own unprivileged service UID
     # at the kernel permission boundary (not through a mocked peer id).
@@ -441,9 +454,9 @@ def main(distribution: str) -> None:
     print("PASS: real installed RECOVER_V2 restored prior live generation and preserved TLS/cache/log/metrics; repeat recovery clean", flush=True)
     command("/usr/bin/systemctl", "stop", "repocache-control.socket")
     command("/usr/bin/systemctl", "stop", "nginx.service")
-    assert_disabled("repocache-control.socket")
+    assert_static_socket()
     assert_disabled("nginx.service")
-    print("PASS: guest native services stopped; no autostart enabled; synthetic trust only", flush=True)
+    print("PASS: guest native services stopped; no socket/nginx autostart enabled; synthetic trust only", flush=True)
 
 
 if __name__ == "__main__":
