@@ -309,3 +309,37 @@ is **refusal pending operator reconciliation**, not unsafe automatic retry.
 The native interruption acceptance is NOT VERIFIED until both extra jobs
 are completed and their evidence inspected at the same exact source SHA.
 The matrix remains PR237-only, non-required, secret-free and disposable.
+
+
+## Fixed native NGINX cache directory required by the systemd sandbox
+
+Actual AlmaLinux 10 native VM execution exposed a missing provisioning step:
+the independently authenticated native package installer could complete with
+no \`/var/cache/nginx\` directory, while the unchanged signed control service
+requires it as one of its exact \`ReadWritePaths\`. On socket activation,
+systemd correctly refused the worker *before execution* with
+\`ExecMainStatus=226/NAMESPACE\`; the client returned
+\`NATIVE_ROOT_CLIENT_OUTCOME_UNCONFIRMED\` rather than inventing transaction
+success. The same source path is tested on Debian 13.
+
+Under the existing durable native package lock, and only after an audited
+APT/DNF NGINX install plus verified vendor unit, the native installer now
+ensures the **single fixed cache parent** exists with root:root ownership
+and mode 0755 **before writing the completed package receipt**. It opens
+\`/\`, \`/var\`, \`/var/cache\` and \`nginx\` with no-follow descriptor-relative
+operations, refuses foreign symlinks/files, unsafe owner/mode or mount drift,
+and fsyncs an exclusively created directory and parent. An existing safe
+directory and its cache contents are never replaced or altered. The original
+systemd \`ReadWritePaths\`, isolation and fail-closed service definition
+remain byte-for-byte unchanged; no privileged socket or service is enabled
+by this installer. If this step fails, the pending native journal remains
+for operator reconciliation rather than marking the installation complete.
+
+New source tests cover clean creation, repeated idempotency, preservation of
+existing nonempty files, and refusal of unsafe parent paths and foreign
+cache inode types/modes. The booted native installer scenarios verify the
+actual root-owned cache directory both before and after reboot. No PASS
+is claimed for this correction until **exact current HEAD** source and
+booted-VM CI complete on both supported OS targets. Publisher signing,
+SELinux installed-worker deny tests and full issue #31 acceptance remain
+independent prerequisites.
