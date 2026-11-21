@@ -943,3 +943,100 @@ def test_foreign_completed_public_stage_not_deleted_even_with_valid_wal(
         recover(filesystem)
     assert (state / native._WAL).exists()
     assert (include.parent / native._STAGE).read_bytes() == b"foreign complete stage"
+
+
+# #31/#64 strict live dump binding: catalog publication may never be
+# authorized by a substring in a foreign file, duplicate include or comment.
+_MANAGED_HEADER = b"# configuration file /etc/nginx/conf.d/repocache-managed.conf:\n"
+
+
+def test_apply_route_dump_reuses_single_exact_managed_section(monkeypatch):
+    include = b"# exact managed v2\nserver { listen 127.0.0.1:8443; }\n"
+    expected_catalog = _canon({"schema": 1, "repositories": []})
+    current = (
+        b"nginx: configuration test is successful\n"
+        b"# configuration file /etc/nginx/nginx.conf:\n"
+        b"events {}\nhttp { include /etc/nginx/conf.d/*.conf; }\n"
+        + _MANAGED_HEADER + include + b"\n"
+    )
+    observations = []
+    monkeypatch.setattr(native, "_capture_default_nginx_dump_private",
+                        lambda: current)
+
+    def parsed(_document, *, nginx_dump_text, **_kwargs):
+        observations.append(nginx_dump_text.encode("utf-8"))
+        return {"candidate_catalog": {"schema": 1, "repositories": []}}
+
+    monkeypatch.setattr(native, "preview_derived_catalog_from_nginx_dump", parsed)
+    native._route_dump_check({}, include, expected_catalog,
+                             "debian", 2, {})
+    assert observations == [current]
+
+
+@pytest.mark.parametrize("substitution", [
+    "missing",
+    "wrong-filename",
+    "fake-comment",
+    "duplicate",
+    "modified",
+    "prefix-only",
+])
+def test_apply_route_dump_requires_unique_exact_owned_file(
+    monkeypatch, substitution,
+):
+    include = b"# exact managed v2\nserver { listen 127.0.0.1:8443; }\n"
+    managed = _MANAGED_HEADER + include
+    foreign = b"# configuration file /etc/nginx/nginx.conf:\n"
+    dumps = {
+        "missing": foreign + b"events {}\n",
+        "wrong-filename": (
+            foreign + b"events {}\n"
+            + b"# configuration file /etc/nginx/conf.d/foreign.conf:\n"
+            + include
+        ),
+        "fake-comment": foreign + b"# " + include,
+        "duplicate": foreign + b"events {}\n" + managed
+                     + b"# configuration file /etc/nginx/conf.d/repocache-managed.conf:\n"
+                     + include,
+        "modified": foreign + b"events {}\n" + managed
+                    + b"# foreign appended text in managed include\n",
+        "prefix-only": foreign + b"events {}\n" + _MANAGED_HEADER
+                       + include[:-1],
+    }
+    captured = dumps[substitution]
+    monkeypatch.setattr(native, "_capture_default_nginx_dump_private",
+                        lambda: captured)
+
+    def should_not_derive(*_args, **_kwargs):
+        pytest.fail("untrusted NGINX dump reached catalog derivation")
+
+    monkeypatch.setattr(native, "preview_derived_catalog_from_nginx_dump",
+                        should_not_derive)
+    with pytest.raises(native.NativeV2TransactionError,
+                       match="NGINX_DUMP_MISMATCH"):
+        native._route_dump_check(
+            {}, include, _canon({"schema": 1, "repositories": []}),
+            "debian", 2, {},
+        )
+
+
+def test_apply_route_dump_refuses_unverified_derived_catalog(monkeypatch):
+    include = b"# exact managed\n"
+    monkeypatch.setattr(
+        native, "_capture_default_nginx_dump_private",
+        lambda: _MANAGED_HEADER + include,
+    )
+    monkeypatch.setattr(
+        native, "preview_derived_catalog_from_nginx_dump",
+        lambda *_args, **_kwargs: {
+            "candidate_catalog": {"schema": 1, "repositories": [
+                {"id": "forged"}
+            ]}
+        },
+    )
+    with pytest.raises(native.NativeV2TransactionError,
+                       match="CATALOG_MISMATCH"):
+        native._route_dump_check(
+            {}, include, _canon({"schema": 1, "repositories": []}),
+            "debian", 2, {},
+        )
