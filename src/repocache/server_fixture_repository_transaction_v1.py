@@ -320,3 +320,105 @@ def commit_fixture_repository_batch_under_root(
         "authorizes_catalog_publication": False,
         "authorizes_cache_cleanup": False,
     }
+
+
+def prepare_locked_fixture_native_batch_envelope_under_root(
+    root_fd: int, *,
+    owner_uid: int,
+    expected_generation: int,
+    expected_previous_state_sha256: str,
+    operation: str,
+    fixture_decision_sha256: str,
+    proposed_repositories: tuple[dict[str, Any], ...] = (),
+    repository_ids: tuple[str, ...] = (),
+    all_repositories: bool = False,
+) -> dict[str, Any]:
+    """Read owned fixture v2 state and bind an exact #31/#64 candidate to it.
+
+    The complete state/include/catalog/manifest is checked in one descriptor
+    lock, including an all-time ID ledger and pending WAL checks. This does
+    NOT stage a native candidate, attest an operator or activate any service.
+    The installed worker must revalidate everything under its own lock.
+    """
+    from repocache.server_proposed_v2_locked_digest_v1 import _state_inode
+    from repocache.server_proposed_state_v2_store import MAX_V2_STATE_BYTES
+    from repocache.server_repository_reconcile_v1 import (
+        render_fixed_native_repository_batch_envelope,
+    )
+
+    _refuse_actual_root_fixture_write(root_fd)
+    if (type(owner_uid) is not int or owner_uid < 0
+            or type(expected_generation) is not int
+            or not 1 <= expected_generation < MAX_INT
+            or type(expected_previous_state_sha256) is not str
+            or len(expected_previous_state_sha256) != 64
+            or any(ch not in "0123456789abcdef"
+                   for ch in expected_previous_state_sha256)
+            or type(fixture_decision_sha256) is not str
+            or len(fixture_decision_sha256) != 64
+            or any(ch not in "0123456789abcdef"
+                   for ch in fixture_decision_sha256)
+            or type(proposed_repositories) is not tuple
+            or type(repository_ids) is not tuple
+            or type(all_repositories) is not bool):
+        _deny("LOCKED_CANDIDATE_ARGUMENT_INVALID")
+    try:
+        with _locked(root_fd, owner_uid) as directory:
+            _legacy_refusal(directory, owner_uid)
+            _check_no_auxiliary_pending(directory, owner_uid)
+            previous, raw = _read_v2(directory, owner_uid)
+            if previous is None or raw is None:
+                _deny("LOCKED_CANDIDATE_STATE_ABSENT")
+            owned = _read_all(directory, owner_uid)
+            _validate_old(owned)
+            if owned[V2_STATE] != raw:
+                _deny("LOCKED_CANDIDATE_READ_DRIFT")
+            inode = _state_inode(directory)
+            if raw != _canonical(previous, limit=MAX_V2_STATE_BYTES):
+                _deny("LOCKED_CANDIDATE_NONCANONICAL")
+            if previous["state_generation"] != expected_generation:
+                _deny("LOCKED_CANDIDATE_STALE_GENERATION")
+            if (hashlib.sha256(raw).hexdigest()
+                    != expected_previous_state_sha256):
+                _deny("LOCKED_CANDIDATE_PREDECESSOR_MISMATCH")
+
+            candidate = render_fixed_native_repository_batch_envelope(
+                raw, expected_generation=expected_generation,
+                expected_previous_state_sha256=expected_previous_state_sha256,
+                operation=operation, decision_sha256=fixture_decision_sha256,
+                proposed_repositories=proposed_repositories,
+                repository_ids=repository_ids,
+                all_repositories=all_repositories,
+            )
+            if (candidate["authorizes_state_write"] is not False
+                    or candidate["authorizes_nginx_reload"] is not False
+                    or candidate["authorizes_catalog_publication"] is not False
+                    or candidate["authorizes_cache_cleanup"] is not False
+                    or candidate["operator_approval_verified"] is not False
+                    or candidate["requires_native_locked_recheck"] is not True
+                    or ((candidate["changed"] is False)
+                        != (candidate["envelope_bytes"] is None))):
+                _deny("LOCKED_CANDIDATE_UNSAFE")
+
+            # A foreign writer may ignore flock; re-read all owned resources
+            # and original inode/ctime metadata before releasing the lock.
+            _legacy_refusal(directory, owner_uid)
+            _check_no_auxiliary_pending(directory, owner_uid)
+            if (_read_all(directory, owner_uid) != owned
+                    or _state_inode(directory) != inode):
+                _deny("LOCKED_CANDIDATE_CHANGED_DURING_PREPARE")
+            return {
+                **candidate,
+                "status": "LOCKED_FIXTURE_" + candidate["status"],
+                "fixture_only": True,
+                "fixture_owner_manifest_verified_during_prepare": True,
+                "fixture_exclusive_lock_held_during_prepare": True,
+                "installed_root_provenance_verified": False,
+                "native_nginx_exposure_verified": False,
+                "public_catalog_published": False,
+            }
+    except FixtureRepositoryTransactionError:
+        raise
+    except (ValueError, TypeError, OverflowError, OSError,
+            RecursionError, UnicodeError):
+        _deny("LOCKED_CANDIDATE_REFUSED")

@@ -130,3 +130,28 @@ or malicious selector rejection with no filesystem mutation, repeat no-op,
 prepublication callback refusal and a simulated crash followed by exact
 four-resource WAL rollback. These are **Stage-A fixture tests**, not
 booted Debian/AlmaLinux acceptance or independent security review.
+
+
+## Owner-locked fixture v2-to-native candidate handoff (#95)
+
+The internal prepare_locked_fixture_native_batch_envelope_under_root entrypoint
+extends the exact-byte fixed #31/#64 candidate serialization with the actual
+persisted, owner-pinned fixture v2 state and immutable historical ID ledger.
+One exclusive descriptor lock verifies the canonical predecessor, its SHA-256
+and generation, the complete state/include/catalog/owner manifest, recovery
+markers and state inode metadata. It constructs a complete one-generation
+batch through the existing lifecycle builder, then rechecks all four resources
+before releasing the lock. No-op batches return no envelope and do not stage
+new work. A separately executed four-resource WAL regression demonstrates
+that the resulting native intake proposes the exact bytes committed by the
+protected fixture transaction, not just an abstract candidate plan.
+
+This is a nonprivileged, detached-fixture-only read/prepare bridge: real '/'
+is refused, and no native candidate is written to an installed intake path.
+An envelope is not an approval, lock lease, actual NGINX syntax/reload result
+or published active client catalog. The future separately reviewed #237/#254
+fixed-identity native worker must independently authenticate its operator,
+verify the installed protected predecessor under its own lock, apply/rollback
+the real NGINX transaction and prove active exposure before publication.
+The original #95 native service, force-cleanup, real signed publisher and
+booted Debian 13 / AlmaLinux 10 gates remain NOT VERIFIED.
