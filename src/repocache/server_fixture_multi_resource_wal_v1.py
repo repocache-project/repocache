@@ -285,6 +285,8 @@ def _commit_fixture_multi_resource_under_root(
         existing, old_state = _read_v2(directory, owner_uid)
         old = _read_all(directory, owner_uid)
         _validate_old(old)
+        if old_state != old[V2_STATE]:
+            _refuse("PREDECESSOR_READ_DRIFT")
         # Exact prior bytes, not only the generation, bind callers that plan
         # before entering the WAL lock. Same-generation substitutions must
         # not allow a stale candidate to overwrite a different predecessor.
