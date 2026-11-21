@@ -183,3 +183,21 @@ This is **not** live `APPLY_V2` or `RECOVER_V2`. The proposal is a
 synthetic-key-authorized test candidate, not an owner-published release or
 external operator approval. The original operational repair, TLS/cache/log
 preservation, SELinux worker enforcement and real publisher gates remain open.
+
+## Native post-reboot completion receipt integrity refusal
+
+The separate `native-installer` VM case now invokes the **actual protected
+lock and native package completion receipt reader** against the real
+root-owned `/var/lib/repocache/server` directory, after native APT/DNF
+install, guest kernel reboot, and signed-fixture proposal staging. It proves
+that the stored audit explicitly does **not** claim publisher signing or a
+booted production service. The disposable guest then changes exactly the
+`native_package_file_integrity_verified` field from true to false, requires
+the real closed-schema reader to refuse the forged receipt, and proves that
+the existing proposal, state/WAL absence and NGINX service state are preserved.
+The original receipt is restored and rechecked byte-for-byte with the durable
+pre-fault SHA-256; the VM is discarded afterwards.
+
+This deliberately tests the real file validator and protected lock, **not**
+the full installed-worker `APPLY_V2` execution or failover after an interrupted
+APT/DNF transaction. It creates no new activation or recovery authority.

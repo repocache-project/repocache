@@ -252,6 +252,73 @@ def report(distribution: str) -> None:
         assert hashlib.sha256(complete.read_bytes()).hexdigest() == original
         for name in ("nginx.service", "repocache-control.service", "repocache-control.socket"):
             assert run("/usr/bin/systemctl", "is-active", name).returncode != 0
+        # Exercise the REAL root-owned completed-receipt parser against the
+        # fixed installed namespace after reboot, not a mocked JSON fixture.
+        # A corrupted package audit must never be promoted to trust.
+        from repocache.server_protected_state_store_v1 import _locked
+        from repocache.server_native_nginx_package_journal_v1 import (
+            _read_completed_native_install_under_lock, NativePackageJournalError,
+        )
+        rootfd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            with _locked(rootfd, 0) as directory:
+                validated = _read_completed_native_install_under_lock(
+                    directory, owner_uid=0, distribution=distribution,
+                )
+                assert validated is not None
+                assert validated["native_package_file_integrity_verified"] is True
+                assert validated["booted_native_service_verified"] is False
+                assert validated["publisher_artifact_verified"] is False
+        finally:
+            os.close(rootfd)
+        original_receipt = complete.read_bytes()
+        initial_receipt_stat = complete.stat()
+        original_proposal = pending_proposal.read_bytes()
+        original_proposal_stat = pending_proposal.stat()
+        try:
+            # Keep ownership/mode/inode unchanged, alter only semantic bytes.
+            altered = original_receipt.replace(
+                b'"native_package_file_integrity_verified":true',
+                b'"native_package_file_integrity_verified":false', 1,
+            )
+            assert altered != original_receipt
+            complete.write_bytes(altered)
+            rootfd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            try:
+                with _locked(rootfd, 0) as directory:
+                    try:
+                        _read_completed_native_install_under_lock(
+                            directory, owner_uid=0, distribution=distribution,
+                        )
+                    except NativePackageJournalError as error:
+                        assert str(error) == "NATIVE_COMPLETION_RECEIPT_INVALID"
+                    else:
+                        raise AssertionError("Corrupted real native completion receipt accepted")
+            finally:
+                os.close(rootfd)
+            assert pending_proposal.read_bytes() == original_proposal
+            assert not (STATE / "state-v2.json").exists()
+            assert not (STATE / ".state-v2-native.pending").exists()
+        finally:
+            complete.write_bytes(original_receipt)
+        restored_receipt_stat = complete.stat()
+        assert (restored_receipt_stat.st_ino, restored_receipt_stat.st_uid,
+                restored_receipt_stat.st_gid, stat.S_IMODE(restored_receipt_stat.st_mode)) == (
+                    initial_receipt_stat.st_ino, 0, 0, 0o600
+                )
+        assert pending_proposal.read_bytes() == original_proposal
+        assert pending_proposal.stat().st_ino == original_proposal_stat.st_ino
+        assert hashlib.sha256(complete.read_bytes()).hexdigest() == original
+        rootfd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            with _locked(rootfd, 0) as directory:
+                assert _read_completed_native_install_under_lock(
+                    directory, owner_uid=0, distribution=distribution,
+                ) is not None
+        finally:
+            os.close(rootfd)
+        native_observation()
+        print("PASS: real post-reboot completed-package receipt corruption rejected under protected lock; existing staged proposal and service preserved")
         print("PASS: actual signed-fixture reviewed v2 proposal staged idempotently on booted host, without state commit or service activation")
         print("NOT VERIFIED: actual package-manager interruption recovery, publisher release signing, v2 activation")
     else:
