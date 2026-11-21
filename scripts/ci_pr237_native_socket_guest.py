@@ -191,6 +191,27 @@ def main(distribution: str) -> None:
     assert_disabled("repocache-control.socket")
     print("PASS: native installed systemd AF_UNIX seqpacket socket with root/admin ownership and disabled boot", flush=True)
 
+    # The same protected socket must refuse its own unprivileged service UID
+    # at the kernel permission boundary (not through a mocked peer id).
+    service = pwd.getpwnam("repocache")
+    child = os.fork()
+    if child == 0:
+        try:
+            os.setgroups([])
+            os.setgid(service.pw_gid)
+            os.setuid(service.pw_uid)
+            with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as untrusted:
+                untrusted.settimeout(3)
+                untrusted.connect(str(SOCKET))
+        except PermissionError:
+            os._exit(0)
+        except OSError:
+            os._exit(2)
+        os._exit(3)
+    _, denial_status = os.waitpid(child, 0)
+    assert os.waitstatus_to_exitcode(denial_status) == 0
+    print("PASS: kernel denied unprivileged REPOCACHE service identity at fixed admin socket", flush=True)
+
     clean = request_native_fixed_v2("RECOVER_V2")
     assert clean["status"] == "CLEAN" and clean["transaction_completed"] is True
     assert not (STATE / "state-v2.json").exists()
@@ -223,6 +244,29 @@ def main(distribution: str) -> None:
     if distribution == "almalinux":
         assert command("/usr/sbin/getenforce") == "Enforcing"
     print("PASS: real native RELOAD_V2, idempotent APPLY_V2 and RECOVER_V2/CLEAN preserve managed bytes and TLS", flush=True)
+
+    # Real syntax refusal on the running, installed worker: NGINX must keep
+    # serving the prior accepted generation, without changing durable v2.
+    from repocache.server_native_root_control_client_v1 import NativeRootControlClientError
+    invalid = Path("/etc/nginx/conf.d/pr237-disposable-invalid.conf")
+    assert not invalid.exists()
+    fd = os.open(invalid, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+    try:
+        with os.fdopen(fd, "wb") as output:
+            output.write(b"unknown_pr237_nginx_directive on;\n")
+            output.flush()
+            os.fsync(output.fileno())
+        try:
+            request_native_fixed_v2("RELOAD_V2")
+        except NativeRootControlClientError as error:
+            assert str(error) == "NATIVE_ROOT_CLIENT_OPERATION_REFUSED"
+        else:
+            raise AssertionError("Invalid live NGINX syntax was reloaded by installed worker")
+        assert snapshot() == before
+        assert b"x-repocache-generation: 1" in https_response("/__repocache/healthz").lower()
+    finally:
+        invalid.unlink()
+    print("PASS: native installed worker refused live invalid nginx syntax without changing known-good v2 and HTTPS exposure", flush=True)
     command("/usr/bin/systemctl", "stop", "repocache-control.socket")
     command("/usr/bin/systemctl", "stop", "nginx.service")
     assert_disabled("repocache-control.socket")
