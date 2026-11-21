@@ -87,6 +87,28 @@ def report(distribution: str) -> None:
         assert not pending.exists() and not complete.exists()
         print("PASS: genuine installed-worker package entry refused tampered document pin before APT/DNF")
 
+        # Print only fixed, redacted preflight codes from the REAL observers.
+        # This does not bypass any native guard or modify host/package state.
+        from repocache.server_install_v1 import parse_install_bytes
+        from repocache.server_native_nginx_local_boundary_v1 import inspect_native_nginx_local_boundary
+        from repocache.server_native_nginx_prepackage_state_v1 import (
+            inspect_current_namespace_prepackage_state, PrepackageStateInspectionError,
+        )
+        from repocache.server_native_package_trust_v1 import _NATIVE, _trusted_key
+        import sys as native_python
+        boundary = inspect_native_nginx_local_boundary(
+            os_release=Path("/usr/lib/os-release").read_text(encoding="ascii"),
+            python_version=native_python.version_info[:2], document=parse_install_bytes(raw),
+        )
+        print("native_prepackage_code=" + boundary.code, flush=True)
+        print("native_prepackage_footprint=" + boundary.footprint_code, flush=True)
+        print("native_distro_signing_anchor_trusted=" + str(_trusted_key(_NATIVE[distribution][2])), flush=True)
+        try:
+            observed = inspect_current_namespace_prepackage_state()
+            print("native_protected_state_code=" + observed["status"], flush=True)
+        except PrepackageStateInspectionError as exc:
+            print("native_protected_state_code=" + str(exc), flush=True)
+
         outcome = install_native_root_worker.install_authenticated_native_nginx(
             assets, doc, digest, **pins,
         )
