@@ -62,6 +62,13 @@ the actual canonical persisted v2 snapshot and requires:
   successfully pass the earlier bounded filesystem preview.
 - The protected ledger remains byte-identical with no newly pending
   journal after the scan, while the same state lock is held throughout.
+- Both the earlier state-only fixture and the **committed, four-resource
+  state/include/catalog/manifest domain** from merged #410 are supported
+  in read-only mode. A completed #410 owner manifest is validated against
+  exact state/include/catalog bytes, not confused with an interrupted
+  multi-resource journal. Unknown, mismatched or partial owner resources
+  fail closed; outstanding multi-resource and v2 state journals block
+  the scan independently of retired-ID status.
 
 An allocated/active/unknown ID fails **before any cache scan**. A
 changed generation or state digest, foreign/symlinked cached object,
@@ -88,7 +95,9 @@ python -m pytest -q tests/test_server_repository_cache_cleanup_preview_v1.py
 
 The protected-v2 tests use **actual durable fixture filesystem commits**
 for a present APT repository, then retire it through the merged #95
-v2 operation planner. They inspect its retained package cache while
+v2 operation planner. A second scenario uses the exact committed #410
+multi-resource WAL with a derived catalog and checks that tampered owner
+manifests and pending WAL markers never become cleanup authority. They inspect its retained package cache while
 the state lock is held, reject still-allocated state and unsafe objects,
 and verify journal refusal and byte-for-byte cache preservation. This
 is useful Stage-A evidence, not installed native systemd/SELinux proof.
