@@ -105,6 +105,7 @@ V06_EXTRA_FILES = (
     "src/repocache/server_repository_cache_usage_v1.py",
     "src/repocache/server_repository_plan_v1.py",
     "src/repocache/server_repository_reconcile_v1.py",
+    "src/repocache/server_repository_v2_transition_v1.py",
     "src/repocache/server_stock_nginx_package_owner_v1.py",
     "src/repocache/server_upstream_address_preflight_v1.py",
     "src/repocache/server_upstream_rotation_v1.py",
