@@ -23,6 +23,7 @@ from repocache.server_repository_reconcile_v1 import (
     preview_repository_lifecycle_nginx_from_untrusted_document,
     preview_repository_auto_add_nginx_from_untrusted_document,
     render_fixed_native_v2_candidate_envelope,
+    render_fixed_native_repository_lifecycle_envelope,
 )
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "docs/examples/server-install-v1.json"
@@ -2133,3 +2134,173 @@ def test_native_v2_envelope_never_touches_host_or_changes_input(monkeypatch):
     )
     assert report["envelope_bytes"]
     assert old == current and new == next_state
+
+
+def _next_native_state_from_envelope(report: dict) -> bytes:
+    envelope = json.loads(report["envelope_bytes"])
+    return base64.b64decode(envelope["next_state_base64"], validate=True)
+
+
+def _render_lifecycle_operation(
+    previous: bytes, *, operation: str, generation: int,
+    repository_id: str | None = None, proposal: dict | None = None,
+) -> dict:
+    return render_fixed_native_repository_lifecycle_envelope(
+        previous,
+        expected_generation=generation,
+        expected_previous_state_sha256=hashlib.sha256(previous).hexdigest(),
+        operation=operation, repository_id=repository_id,
+        proposed_repository=proposal,
+        decision_sha256="b" * 64,
+    )
+
+
+def test_complete_lifecycle_operation_to_fixed_native_wire():
+    """Real #95 v2 builder -> #31/#64 exact deterministic intake contract."""
+    source = _native_state_bytes(
+        _v2_native_envelope_fixture_state(document(), generation=1)
+    )
+    enabled = _render_lifecycle_operation(
+        source, operation="enable", generation=1,
+        repository_id="debian-trixie-main",
+    )
+    assert enabled["status"] == "FIXED_V2_REPOSITORY_LIFECYCLE_ENVELOPE_ONLY"
+    assert enabled["repository_id"] == "debian-trixie-main"
+    assert enabled["changed"] is True
+    enabled_raw = _next_native_state_from_envelope(enabled)
+    enabled_state = json.loads(enabled_raw)
+    assert enabled_state["state_generation"] == 2
+    assert next(row for row in enabled_state["repository_records"]
+                if row["id"] == "debian-trixie-main")["desired_state"] == "active"
+    assert json.loads(enabled["envelope_bytes"])["expected_state_sha256"] == (
+        hashlib.sha256(source).hexdigest()
+    )
+
+    noop = _render_lifecycle_operation(
+        enabled_raw, operation="enable", generation=2,
+        repository_id="debian-trixie-main",
+    )
+    assert noop["status"] == "NO_CHANGE_FIXED_V2_LIFECYCLE_CANDIDATE_ONLY"
+    assert noop["changed"] is False
+    assert noop["envelope_bytes"] is None
+    assert noop["authorizes_state_write"] is False
+
+    disabled = _render_lifecycle_operation(
+        enabled_raw, operation="disable", generation=2,
+        repository_id="debian-trixie-main",
+    )
+    disabled_raw = _next_native_state_from_envelope(disabled)
+    assert json.loads(disabled_raw)["state_generation"] == 3
+    assert next(row for row in json.loads(disabled_raw)["repository_records"]
+                if row["id"] == "debian-trixie-main")["desired_state"] == "disabled"
+
+    removed = _render_lifecycle_operation(
+        disabled_raw, operation="remove", generation=3,
+        repository_id="debian-trixie-main",
+    )
+    state = json.loads(_next_native_state_from_envelope(removed))
+    assert state["state_generation"] == 4
+    assert {row["id"] for row in state["repository_records"]} == {
+        "almalinux-baseos",
+    }
+    assert next(row for row in state["id_reservations"]
+                if row["id"] == "debian-trixie-main")["status"] == "retired"
+    for report in (enabled, disabled, removed):
+        for key in (
+            "operator_approval_verified", "persisted_predecessor_provenance_verified",
+            "native_state_lock_held", "authorizes_state_write",
+            "authorizes_nginx_reload", "authorizes_catalog_publication",
+            "authorizes_cache_cleanup",
+        ):
+            assert report[key] is False
+
+
+def test_fixed_native_lifecycle_auto_add_uses_complete_v2_id_history():
+    src = _native_state_bytes(
+        _v2_native_envelope_fixture_state(document(), generation=1)
+    )
+    proposal = copy.deepcopy(document()["repositories"][0])
+    proposal.pop("id")
+    proposal["upstream"]["base_url"] = (
+        "https://newsource.example.invalid/debian/"
+    )
+    proposal["upstream"]["allowed_hosts"] = ["newsource.example.invalid"]
+    first = _render_lifecycle_operation(
+        src, operation="add", generation=1, proposal=proposal,
+    )
+    assert first["status"] == "FIXED_V2_REPOSITORY_LIFECYCLE_ENVELOPE_ONLY"
+    allocated = first["repository_id"]
+    assert allocated.startswith("repo-")
+    next_bytes = _next_native_state_from_envelope(first)
+    state = json.loads(next_bytes)
+    assert allocated in {x["id"] for x in state["repository_records"]}
+    assert allocated in {x["id"] for x in state["id_reservations"]}
+    second = _render_lifecycle_operation(
+        next_bytes, operation="add", generation=2, proposal=proposal,
+    )
+    assert second["status"] == "NO_CHANGE_FIXED_V2_LIFECYCLE_CANDIDATE_ONLY"
+    assert second["repository_id"] == allocated
+    assert second["envelope_bytes"] is None
+    removed = _render_lifecycle_operation(
+        next_bytes, operation="remove", generation=2,
+        repository_id=allocated,
+    )
+    old = json.loads(_next_native_state_from_envelope(removed))
+    assert next(x for x in old["id_reservations"]
+                if x["id"] == allocated)["status"] == "retired"
+    with pytest.raises(ReconciliationPlanError, match="invalid protected transition"):
+        _render_lifecycle_operation(
+            _next_native_state_from_envelope(removed),
+            operation="add", generation=3,
+            repository_id=allocated,
+            proposal={**proposal, "id": allocated},
+        )
+    assert "id" not in proposal
+
+
+def test_fixed_native_lifecycle_update_preserves_repository_identity():
+    src = _native_state_bytes(
+        _v2_native_envelope_fixture_state(document(), generation=1)
+    )
+    replacement = copy.deepcopy(document()["repositories"][0])
+    replacement["layout"]["release_key_refs"] = [
+        "file:/etc/repocache/keys/rotated-example.gpg",
+    ]
+    update = _render_lifecycle_operation(
+        src, operation="update", generation=1,
+        repository_id="debian-trixie-main",
+        proposal=replacement,
+    )
+    old_state = json.loads(src)
+    new_state = json.loads(_next_native_state_from_envelope(update))
+    old_record = next(x for x in old_state["repository_records"]
+                      if x["id"] == "debian-trixie-main")
+    new_record = next(x for x in new_state["repository_records"]
+                      if x["id"] == "debian-trixie-main")
+    assert new_record["canonical_identity_sha256"] == old_record[
+        "canonical_identity_sha256"
+    ]
+    new_config = json.loads(base64.b64decode(
+        new_state["configuration_base64"], validate=True,
+    ))
+    assert new_config["repositories"][0]["layout"]["release_key_refs"] == (
+        replacement["layout"]["release_key_refs"]
+    )
+
+
+def test_fixed_native_lifecycle_never_accepts_stale_predecessor_or_bad_plan():
+    src = _native_state_bytes(
+        _v2_native_envelope_fixture_state(document(), generation=1)
+    )
+    with pytest.raises(ReconciliationPlanError, match="invalid protected transition"):
+        render_fixed_native_repository_lifecycle_envelope(
+            src, expected_generation=1,
+            expected_previous_state_sha256="0" * 64,
+            operation="disable", repository_id="debian-trixie-main",
+            decision_sha256="b" * 64,
+        )
+    with pytest.raises(ReconciliationPlanError, match="invalid protected transition"):
+        _render_lifecycle_operation(
+            src, operation="remove", generation=1,
+            repository_id="../../escape",
+        )
