@@ -29,6 +29,7 @@ MODULES = (
     "server_managed_include_v1",
     "server_native_nginx_effective_unit_v1",
     "server_native_nginx_package_journal_v1",
+    "server_native_package_effects_observe_v1",
     "server_native_nginx_service_unit_v1",
     "server_native_root_control_entrypoint_v1",
     "server_native_v2_transaction_v1",
@@ -47,6 +48,7 @@ MODULES = (
     "server_root_control_pinned_tls_pair_v1",
     "server_root_control_protocol_v1",
     "server_root_control_worker_v1",
+    "server_stock_nginx_package_owner_v1",
     "server_upstream_address_preflight_v1",
     "server_upstream_rotation_v1",
 )
