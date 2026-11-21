@@ -181,7 +181,7 @@ def assert_native_socket_refuses_arbitrary_unit() -> None:
     A valid fixed-command prefix plus a caller-selected unit must be rejected
     as one whole SOCK_SEQPACKET message, without performing a reload.
     """
-    packet = b"reload-v2\\nunit=sshd.service\\n"
+    packet = b"reload-v2\nunit=sshd.service\n"
     assert len(packet) <= 32
     with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as conn:
         conn.settimeout(8)
