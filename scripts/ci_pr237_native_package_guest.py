@@ -59,9 +59,9 @@ def procfs_scan_diagnostic() -> str:
                     if not raw:
                         return "COMM_EMPTY"
                     if overflow:
-                        return "COMM_SECOND_READ_NONEMPTY"
+                        return "COMM_SECOND_READ_NONEMPTY_FIRSTLEN_" + str(len(raw))
                     if len(raw) > 32:
-                        return "COMM_TOO_LONG"
+                        return "COMM_TOO_LONG_LEN_" + str(len(raw))
                     value = raw.removesuffix(b"\\n")
                     if value == b"nginx" or value.startswith(b"nginx:"):
                         return "NGINX_PROCESS_PRESENT"
