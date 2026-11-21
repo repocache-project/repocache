@@ -130,8 +130,8 @@ jobs:
               export REPOCACHE_NATIVE_COMPLETION_TEST=1
               python3 -B scripts/ci_v06_journaled_native_server_install.py > /tmp/audited-native-completion.json
               grep -Fq DISPOSABLE_AUDITED_NATIVE_COMPLETION_PASS /tmp/audited-native-completion.json
-              grep -Fq "\\"durable_completed_receipt_verified\\": true" /tmp/audited-native-completion.json
-              grep -Fq "\\"authorizes_host_installation\\": false" /tmp/audited-native-completion.json
+              grep -Fq "\"durable_completed_receipt_verified\": true" /tmp/audited-native-completion.json
+              grep -Fq "\"authorizes_host_installation\": false" /tmp/audited-native-completion.json
               cat /tmp/audited-native-completion.json
               echo "PASS: real APT/DNF completed with same-lock durable audit; native host/release NOT VERIFIED"
             '
