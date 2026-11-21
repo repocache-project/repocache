@@ -8,8 +8,10 @@ transaction lock, verify provenance/ownership and repeat validation.
 """
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
+import json
 from typing import Any
 
 from repocache.server_install_v1 import (
@@ -26,6 +28,11 @@ from repocache.server_protected_state_store_v1 import (
 from repocache.server_nginx_repository_bundle_v1 import (
     NginxRepositoryBundleError, render_repository_nginx_bundle_candidate,
 )
+from repocache.server_locked_manifest_reconcile_v1 import (
+    preview_proposed_v2_state_transition,
+)
+from repocache.server_proposed_state_v2_store import MAX_V2_STATE_BYTES
+from repocache.server_protected_state_store_v1 import _json as _canonical_v2_json
 
 
 class ReconciliationPlanError(ValueError):
@@ -745,4 +752,122 @@ def plan_batch_repository_states(
         "authorizes_catalog_publication": False,
         "authorizes_state_write": False,
         "authorizes_cache_cleanup": False,
+    }
+
+
+# Matches the frozen, exact-byte fixed-candidate envelope in the unmerged
+# #31/#64 native root-control worker. This renderer does not authenticate
+# either source or stage the output at its fixed, protected intake path.
+_MAX_FIXED_V2_CANDIDATE_ENVELOPE_BYTES = 6 * 1024 * 1024
+
+
+def render_fixed_native_v2_candidate_envelope(
+    previous_canonical_state_bytes: bytes | None,
+    next_canonical_state_bytes: bytes,
+    *,
+    expected_generation: int,
+    expected_previous_state_sha256: str | None,
+) -> dict[str, Any]:
+    """Produce the exact fixed-v2 administrator candidate *bytes* for #31/#64.
+
+    A trusted operator stager may later supply these bytes to the separately
+    reviewed fixed-path root-worker intake. This pure function neither reads
+    the protected ledger nor stages a private file; its previous-state bytes
+    and digest are *caller supplied*, not trusted owner/root provenance.
+
+    A real native worker MUST re-read the protected previous state, verify
+    its SHA-256 under its own exclusive lock, authenticate the administrator,
+    validate the complete transition, render NGINX, reload and observe
+    exposure before publishing the active catalog. Never treat the envelope
+    or its embedded approval_reference as an authorization token.
+    """
+    if (type(expected_generation) is not int
+            or not 0 <= expected_generation < MAX_INT
+            or type(next_canonical_state_bytes) is not bytes
+            or not 1 <= len(next_canonical_state_bytes) <= MAX_V2_STATE_BYTES):
+        raise ReconciliationPlanError("fixed v2 candidate: arguments invalid")
+
+    if previous_canonical_state_bytes is None:
+        if expected_generation != 0 or expected_previous_state_sha256 is not None:
+            raise ReconciliationPlanError("fixed v2 candidate: predecessor invalid")
+        previous = None
+        previous_digest = None
+    else:
+        if (type(previous_canonical_state_bytes) is not bytes
+                or not 1 <= len(previous_canonical_state_bytes)
+                       <= MAX_V2_STATE_BYTES
+                or type(expected_previous_state_sha256) is not str
+                or len(expected_previous_state_sha256) != 64
+                or any(ch not in "0123456789abcdef"
+                       for ch in expected_previous_state_sha256)):
+            raise ReconciliationPlanError("fixed v2 candidate: predecessor invalid")
+        previous_digest = hashlib.sha256(
+            previous_canonical_state_bytes,
+        ).hexdigest()
+        if previous_digest != expected_previous_state_sha256:
+            raise ReconciliationPlanError("fixed v2 candidate: predecessor changed")
+
+    try:
+        if previous_canonical_state_bytes is not None:
+            previous = _canonical_v2_json(
+                previous_canonical_state_bytes, limit=MAX_V2_STATE_BYTES,
+            )
+            if type(previous) is not dict:
+                raise ReconciliationPlanError(
+                    "fixed v2 candidate: predecessor invalid"
+                )
+        proposed = _canonical_v2_json(
+            next_canonical_state_bytes, limit=MAX_V2_STATE_BYTES,
+        )
+        if type(proposed) is not dict:
+            raise ReconciliationPlanError("fixed v2 candidate: next state invalid")
+        transition = preview_proposed_v2_state_transition(
+            proposed, expected_generation=expected_generation,
+            previous_snapshot=previous,
+        )
+        if (transition["proposed_generation"] != expected_generation + 1
+                or transition["authorizes_write"] is not False
+                or transition["authorizes_nginx_reload"] is not False
+                or transition["authorizes_catalog_publication"] is not False):
+            raise ReconciliationPlanError("fixed v2 candidate: transition invalid")
+        envelope = {
+            "request_schema_version": 1,
+            "expected_generation": expected_generation,
+            "expected_state_sha256": previous_digest,
+            "next_state_base64": base64.b64encode(
+                next_canonical_state_bytes,
+            ).decode("ascii"),
+            "next_state_sha256": hashlib.sha256(
+                next_canonical_state_bytes,
+            ).hexdigest(),
+        }
+        output = json.dumps(
+            envelope, sort_keys=True, ensure_ascii=True,
+            separators=(",", ":"), allow_nan=False,
+        ).encode("ascii")
+        if not 1 <= len(output) <= _MAX_FIXED_V2_CANDIDATE_ENVELOPE_BYTES:
+            raise ReconciliationPlanError("fixed v2 candidate: envelope too large")
+    except ReconciliationPlanError:
+        raise
+    except (ValueError, TypeError, OverflowError, RecursionError, UnicodeError):
+        raise ReconciliationPlanError(
+            "fixed v2 candidate: canonical transition rejected"
+        ) from None
+
+    return {
+        "schema_version": 1,
+        "status": "FIXED_NATIVE_V2_CANDIDATE_ENVELOPE_ONLY",
+        "expected_generation": expected_generation,
+        "next_state_sha256": envelope["next_state_sha256"],
+        "envelope_sha256": hashlib.sha256(output).hexdigest(),
+        "envelope_bytes": output,
+        "operator_approval_verified": False,
+        "persisted_predecessor_provenance_verified": False,
+        "native_state_lock_held": False,
+        "native_nginx_exposure_verified": False,
+        "authorizes_state_write": False,
+        "authorizes_nginx_reload": False,
+        "authorizes_catalog_publication": False,
+        "authorizes_cache_cleanup": False,
+        "requires_native_locked_recheck": True,
     }
