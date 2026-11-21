@@ -70,10 +70,18 @@ def filesystem(tmp_path, monkeypatch):
                             ("exposure", generation)))
     monkeypatch.setattr(native, "_route_dump_check",
                         lambda *_args: events.append("dump"))
-    # Native nginx -T cannot inspect the detached fixture root. Individual
-    # strict dump-validator tests below use explicit captured bytes instead.
-    monkeypatch.setattr(native, "_verify_owned_include_in_dump",
-                        lambda *_args, **_kwargs: None)
+    # The real strict dump validator is also exercised during WAL recovery.
+    # Derive the private fixture NGINX -T view from the actual restored
+    # include, not from a no-op validator that could hide foreign drift.
+    def fixture_nginx_dump():
+        result = b"# configuration file /etc/nginx/nginx.conf:\\nhttp {}\\n"
+        if include.exists():
+            result += (b"# configuration file /etc/nginx/conf.d/"
+                       b"repocache-managed.conf:\\n" + include.read_bytes() + b"\\n")
+        return result
+
+    monkeypatch.setattr(native, "_capture_default_nginx_dump_private",
+                        fixture_nginx_dump)
     monkeypatch.setattr(native, "_local_https_catalog",
                         lambda _doc, raw: events.append(("catalog-exposure", len(raw))))
     try:
