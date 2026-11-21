@@ -1,7 +1,8 @@
 """Fixture-only #95 lifecycle transaction joining the protected v2 ledger to NGINX.
 
-The existing v2 state, generated NGINX include and derived catalog are
-committed together by the durable multi-resource WAL. This is an executable
+The reusable pure v2 lifecycle builder, persisted protected state,
+generated NGINX include and derived catalog are bound through a durable
+multi-resource WAL. This is an executable
 integration seam for a future fixed-identity native worker, NOT that worker:
 the root FD and approval digest are test inputs, a callback cannot prove
 installed NGINX exposure, and the real '/' is categorically refused.
@@ -11,7 +12,6 @@ Do not call from CLI, server socket handlers or privileged installers.
 from __future__ import annotations
 
 import base64
-import copy
 import hashlib
 import os
 from typing import Any, Callable
@@ -23,11 +23,7 @@ from repocache.server_fixture_multi_resource_wal_v1 import (
     _validate_old,
 )
 from repocache.server_install_v1 import (
-    MAX_DOCUMENT_BYTES, MAX_INT, parse_install_bytes,
-    validate_install_document,
-)
-from repocache.server_locked_manifest_reconcile_v1 import (
-    preview_proposed_v2_state_transition,
+    MAX_INT, parse_install_bytes,
 )
 from repocache.server_nginx_repository_bundle_v1 import (
     render_repository_nginx_bundle_candidate,
@@ -38,9 +34,8 @@ from repocache.server_proposed_state_v2_store import (
 from repocache.server_protected_state_store_v1 import (
     _canonical, _locked,
 )
-from repocache.server_repository_plan_v1 import (
-    _canonical_identity, plan_repository_change,
-    propose_automatic_repository_id,
+from repocache.server_repository_v2_transition_v1 import (
+    plan_repository_v2_transition,
 )
 
 
@@ -50,62 +45,6 @@ class FixtureRepositoryTransactionError(ValueError):
 
 def _deny(code: str) -> None:
     raise FixtureRepositoryTransactionError("FIXTURE_REPOSITORY_TRANSACTION_" + code)
-
-
-def _snapshot_for_change(
-    previous: dict[str, Any], document: dict[str, Any], *,
-    decision_sha256: str,
-) -> dict[str, Any]:
-    """Build a complete v2 ledger from the frozen protected predecessor.
-
-    Historical reservations survive every transition, including removals;
-    the v2 transition validator independently rejects identity reassignment.
-    Caller-provided approval digests are merely fixture data, never authority.
-    """
-    generation = previous["state_generation"] + 1
-    next_document = copy.deepcopy(document)
-    next_document["expected_state_generation"] = generation
-    next_document = validate_install_document(next_document, for_apply=True)
-    raw = _canonical(next_document, limit=MAX_DOCUMENT_BYTES)
-    digest = hashlib.sha256(raw).hexdigest()
-    records = [{
-        "id": row["id"],
-        "canonical_identity_sha256": hashlib.sha256(
-            _canonical_identity(row).encode("utf-8")
-        ).hexdigest(),
-        "desired_state": row["desired_state"],
-        "observed_state": "not-activated",
-    } for row in next_document["repositories"]]
-    reserved = {
-        item["id"]: copy.deepcopy(item)
-        for item in previous["id_reservations"]
-    }
-    present = {row["id"] for row in records}
-    for rid in reserved:
-        if rid not in present:
-            reserved[rid]["status"] = "retired"
-    for record in records:
-        rid = record["id"]
-        if rid not in reserved:
-            reserved[rid] = {
-                "id": rid,
-                "canonical_identity_sha256": record["canonical_identity_sha256"],
-                "status": "allocated",
-            }
-    return {
-        "state_schema_version": 2,
-        "state_generation": generation,
-        "configuration_base64": base64.b64encode(raw).decode("ascii"),
-        "configuration_sha256": digest,
-        "repository_records": records,
-        "id_reservations": [reserved[rid] for rid in sorted(reserved)],
-        "approval_reference": {
-            "source": "operator",
-            "decision_sha256": decision_sha256,
-            "configuration_sha256": digest,
-            "expected_generation": generation - 1,
-        },
-    }
 
 
 def commit_fixture_repository_change_under_root(
@@ -153,30 +92,19 @@ def commit_fixture_repository_change_under_root(
             _validate_old(_read_all(directory, owner_uid))
             if old["state_generation"] != expected_generation:
                 _deny("STALE_GENERATION")
-            document = parse_install_bytes(
-                base64.b64decode(old["configuration_base64"], validate=True),
-                for_apply=True,
-            )
-            reservations = frozenset(
-                item["id"] for item in old["id_reservations"]
-            )
-            # Explicit IDs are checked against the full protected ledger.
-            # Automatic IDs are generated from the exact same locked view.
-            proposed = proposed_repository
-            if operation == "add" and type(proposed) is dict and "id" not in proposed:
-                suggestion = propose_automatic_repository_id(
-                    document, proposed,
-                    current_generation=expected_generation,
-                    reserved_ids=reservations,
-                )
-                proposed = {**proposed, "id": suggestion["repository_id"]}
-            plan = plan_repository_change(
-                document,
-                current_generation=expected_generation,
+            # This general builder is reusable by the eventual installed
+            # native candidate-staging workflow. It has no filesystem power.
+            # Our source predecessor is read under the actual protected
+            # fixture lock; the WAL rechecks the CAS on a second lock.
+            plan = plan_repository_v2_transition(
+                old, expected_generation=expected_generation,
+                expected_previous_state_sha256=hashlib.sha256(
+                    raw,
+                ).hexdigest(),
                 operation=operation,
                 repository_id=repository_id,
-                proposed_repository=proposed,
-                reserved_ids=reservations if operation == "add" else None,
+                proposed_repository=proposed_repository,
+                decision_sha256=fixture_decision_sha256,
             )
             if not plan["changed"]:
                 return {
@@ -190,14 +118,7 @@ def commit_fixture_repository_change_under_root(
                     "authorizes_catalog_publication": False,
                     "authorizes_cache_cleanup": False,
                 }
-            next_snapshot = _snapshot_for_change(
-                old, plan["candidate_document"],
-                decision_sha256=fixture_decision_sha256,
-            )
-            preview_proposed_v2_state_transition(
-                next_snapshot, expected_generation=expected_generation,
-                previous_snapshot=old,
-            )
+            next_snapshot = plan["proposed_snapshot"]
             next_document = parse_install_bytes(
                 base64.b64decode(
                     next_snapshot["configuration_base64"], validate=True,
