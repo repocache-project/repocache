@@ -18,11 +18,13 @@ demonstrating that route withdrawal never requires deletion.
 
 The test drops to UID/GID 65534 inside disposable distro containers.
 Every configuration, scratch cache and temporary file remains private;
-no NGINX service is started or reloaded, and no upstream is contacted.
+the original parser-only candidate phase remains read-only. A separate
+nonroot, loopback-only NGINX master is started and reloaded exclusively
+inside this disposable container; no public upstream is contacted.
 A positive nginx -T result is not proof of the actual installed route
 configuration, trusted request approval or published client discovery.
 
-Still NOT VERIFIED: live NGINX route withdrawal/activation, installed
+Still NOT VERIFIED: installed privileged NGINX route activation, installed
 root worker and atomic WAL, true NGINX cache-loader reuse, native
 systemd/SELinux on booted Debian 13 and AlmaLinux 10, and signed
 APT/DNF client fallback. Original #95 and native acceptance #19 remain
