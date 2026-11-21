@@ -18,7 +18,7 @@ from repocache.server_native_storage_bootstrap_v1 import (
     bootstrap_native_nginx_storage_under_root,
 )
 from repocache.server_proposed_state_v2_store import (
-    V2_JOURNAL, V2_STATE,
+    V2_JOURNAL, V2_JOURNAL_TMP, V2_STATE,
     _commit_proposed_v2_under_root as commit_v2,
 )
 from repocache.server_repository_plan_v1 import _canonical_identity
@@ -472,7 +472,9 @@ def test_locked_retired_cleanup_refuses_pending_state_wal_without_scanning(
     _retire_owned_repo(owned_with_locked_state)
     layout, _, state_file = owned_with_locked_state
     digest = hashlib.sha256(state_file.read_bytes()).hexdigest()
-    pending = state_file.with_name(V2_JOURNAL)
+    # An unpublished temporary WAL marker is a genuine pending-recovery
+    # interlock without any parsed published journal body.
+    pending = state_file.with_name(V2_JOURNAL_TMP)
     pending.write_bytes(b'not-a-clean-recovery-journal')
     pending.chmod(0o600)
     with pytest.raises(preview.RepositoryCacheCleanupPreviewError,
@@ -481,6 +483,19 @@ def test_locked_retired_cleanup_refuses_pending_state_wal_without_scanning(
             owned_with_locked_state, generation=2, digest=digest,
         )
     assert pending.read_bytes() == b'not-a-clean-recovery-journal'
+    pending.unlink()
+    # A malformed *published* WAL cannot be trusted enough to classify its
+    # contents as an ordinary pending transaction, but still fails closed
+    # without touching the cached data.
+    corrupted = state_file.with_name(V2_JOURNAL)
+    corrupted.write_bytes(b'not-a-canonical-journal')
+    corrupted.chmod(0o600)
+    with pytest.raises(preview.RepositoryCacheCleanupPreviewError,
+                       match="LOCKED_PROTECTED_UNVERIFIED"):
+        _locked_cleanup_preview(
+            owned_with_locked_state, generation=2, digest=digest,
+        )
+    assert corrupted.read_bytes() == b'not-a-canonical-journal'
 
 
 def test_locked_retired_cleanup_unsafe_cache_objects_and_lock_contention(
