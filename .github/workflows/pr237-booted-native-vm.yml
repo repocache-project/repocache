@@ -11,6 +11,7 @@ on:
       - 'scripts/ci_pr237_native_journal_reboot.py'
       - 'scripts/ci_pr237_synthetic_worker_guest.py'
       - 'scripts/ci_pr237_native_package_guest.py'
+      - 'scripts/ci_pr237_native_socket_guest.py'
       - 'docs/testing/PR237_BOOTED_VM.md'
   workflow_dispatch:
 
