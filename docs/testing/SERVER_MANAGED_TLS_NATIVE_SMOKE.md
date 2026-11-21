@@ -52,6 +52,14 @@ python3, python3-pytest, nginx, openssl and ca-certificates:
 The ordinary Python CI can SKIP tests when native NGINX or OpenSSL is
 missing; the two OS-specific jobs must PASS at the exact reviewed SHA.
 
+## Operator certificate preparation
+
+For a clean booted-host trial, follow the
+[operator-managed certificate trust and rotation procedure](SERVER_NATIVE_TLS_CERTIFICATE_PROVISIONING_V06.md).
+It explicitly separates public CA/chain identity, root-only key custody,
+NGINX configuration ownership, opt-in firewall review and recoverable
+renewal; no fixture certificate here constitutes a production trust anchor.
+
 ## Production contract and remaining gates
 
 The approved v1 declarative deployment contract uses
