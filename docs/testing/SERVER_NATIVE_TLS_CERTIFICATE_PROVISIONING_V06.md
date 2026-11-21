@@ -45,13 +45,16 @@ into public PRs or this conversation.
 
 ```sh
 # Set these only in a trusted operator shell; do not print them in logs.
+# Use a shell with pipefail so a failed upstream OpenSSL command cannot pass.
+set -o pipefail
 CERT=/etc/repocache/tls/server-chain.pem
 KEY=/etc/repocache/tls/server-key.pem
 CA=/absolute/path/to/independently/trusted/public-ca.pem
 DNS=cache.example.invalid
 
 # Inspect leaf identity, validity and intended server authentication.
-openssl x509 -in "$CERT" -noout -dates -ext subjectAltName -ext extendedKeyUsage
+openssl x509 -in "$CERT" -noout -dates -ext subjectAltName
+openssl x509 -in "$CERT" -noout -ext extendedKeyUsage
 openssl x509 -in "$CERT" -noout -checkend 0
 
 # Use the *independently verified* CA; a successful command does not
@@ -68,9 +71,13 @@ openssl pkey -in "$KEY" -pubout -outform DER | openssl sha256
 ```
 
 The two digest lines must match **exactly**, and every OpenSSL command
-must succeed. The shell commands are review aids: do not assume a
-pipeline's final command status proves all prior commands succeeded
-unless running with a shell that supports `pipefail`. Do not automate
+must succeed. Inspect the DNS SAN separately from the extended-key-usage
+output: repeated `-ext` switches on some OpenSSL builds can suppress the
+earlier extension instead of displaying both. If an extension is absent,
+review the certificate purpose under the approved PKI policy, do not
+infer it was displayed. The commands require a shell supporting
+`pipefail`; never interpret only the final pipeline process exit status
+as proof of earlier OpenSSL successes. Do not automate
 a passphrase prompt or store it in command arguments. Failures, missing
 intermediates, inaccessible files, symlinks, mutable/hardlinked keys,
 unreviewed ACL/xattr/SELinux state and untrusted parent directories are
