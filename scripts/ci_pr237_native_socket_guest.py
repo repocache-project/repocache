@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import pwd
+import re
 import socket
 import ssl
 import stat
@@ -185,13 +186,63 @@ def main(distribution: str) -> None:
     assert not (STATE / "state-v2.json").exists()
     assert not (STATE / ".state-v2-native.pending").exists()
     sys.path[:0] = [str(SOURCE / "src"), str(SOURCE)]
-    from repocache.server_native_root_control_client_v1 import request_native_fixed_v2
+    from repocache.server_native_root_control_client_v1 import (
+        NativeRootControlClientError, request_native_fixed_v2,
+    )
 
     def authenticated_native_operation(operation: str) -> dict:
         # Each request starts the one-shot installed worker. Preserve its
         # vendor systemd StartLimitBurst rather than weakening rate limits.
         time.sleep(3)
-        return request_native_fixed_v2(operation)
+        try:
+            return request_native_fixed_v2(operation)
+        except NativeRootControlClientError:
+            # The client intentionally reports UNKNOWN after send. Inspect
+            # only bounded, fixed systemd properties and redacted error
+            # classes from this disposed guest. Never dump key material,
+            # NGINX -T, arbitrary journal text, or private state.
+            status = subprocess.run(
+                [
+                    "/usr/bin/systemctl", "show", "repocache-control.service",
+                    "-p", "LoadState", "-p", "ActiveState", "-p", "SubState",
+                    "-p", "Result", "-p", "ExecMainStatus",
+                    "-p", "ExecMainCode", "-p", "UnitFileState",
+                ],
+                capture_output=True, text=True, timeout=12, check=False,
+            )
+            if status.returncode == 0:
+                for line in status.stdout.splitlines():
+                    if re.fullmatch(
+                        r"(?:LoadState|ActiveState|SubState|Result|ExecMainStatus|ExecMainCode|UnitFileState)=[A-Za-z0-9_.-]{1,50}",
+                        line,
+                    ):
+                        print("NATIVE_SOCKET_DIAGNOSTIC: " + line, flush=True)
+            logs = subprocess.run(
+                [
+                    "/usr/bin/journalctl", "-u", "repocache-control.service",
+                    "--no-pager", "--quiet", "-n", "50", "-o", "cat",
+                ],
+                capture_output=True, text=True, timeout=12, check=False,
+            )
+            for line in logs.stdout.splitlines()[-50:]:
+                for code in re.findall(
+                    r"(?:NATIVE_ROOT_CONTROL|ROOT_CONTROL|NATIVE_HOST|FIXED_REQUEST)_[A-Z0-9_]{2,100}",
+                    line,
+                ):
+                    print("NATIVE_SOCKET_DIAGNOSTIC: " + code, flush=True)
+                for error_class in (
+                    "ModuleNotFoundError", "ImportError", "PermissionError",
+                    "FileNotFoundError", "OSError", "AttributeError",
+                    "SyntaxError", "ValueError", "TypeError",
+                ):
+                    if error_class + ":" in line:
+                        print(
+                            "NATIVE_SOCKET_DIAGNOSTIC: exception="
+                            + error_class, flush=True,
+                        )
+                if "Failed at step EXEC" in line:
+                    print("NATIVE_SOCKET_DIAGNOSTIC: SYSTEMD_EXEC_FAILED", flush=True)
+            raise
 
     accounts()
     certificate, private_key = synthetic_local_tls(distribution)
