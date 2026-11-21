@@ -156,27 +156,27 @@ def test_valid_explicit_specific_unicast_remains_no_host_authority(distribution)
     ("192.0.2.15", True),
     ("2001:db8::15", True),
 ])
-@pytest.mark.parametrize("request", [None, False, True])
+@pytest.mark.parametrize("firewall_opt_in", [None, False, True])
 def test_network_exposure_review_is_independent_of_firewall_toggle(
-    distribution, address, external, request,
+    distribution, address, external, firewall_opt_in,
 ):
     """An inert firewall preview must never certify a non-loopback socket."""
     from repocache.server_nginx_tls_listener_candidate_v1 import (
         render_native_tls_listener_candidate,
     )
 
-    data = document(modify=request, address=address, port=18443)
+    data = document(modify=firewall_opt_in, address=address, port=18443)
     snapshot = deepcopy(data)
     preview = preview_native_firewall_intent(data, distribution=distribution)
     listener = render_native_tls_listener_candidate(data)
     assert data == snapshot, "read-only preview mutated the trusted input"
     assert preview["network_exposure_review_required"] is external
     assert preview["network_exposure_verified"] is False
-    assert preview["explicit_modify_requested"] is (request is True)
+    assert preview["explicit_modify_requested"] is (firewall_opt_in is True)
     assert preview["firewall_change_review_required"] is (
-        request is True and external
+        firewall_opt_in is True and external
     )
-    if request is not True:
+    if firewall_opt_in is not True:
         assert preview["status"] == "NO_FIREWALL_CHANGE_PROPOSED"
     # The rendering and firewall previews must agree on the exact IP/port.
     # No test-only separate rule can authorize NGINX activation.
