@@ -272,6 +272,14 @@ def preview_locked_retired_repository_cache_cleanup_under_root(
                    for ch in expected_state_sha256)):
         _deny("LOCKED_ARGUMENT_INVALID")
     try:
+        # This is a disposable-fixture read API, not the authorized native
+        # root broker. Reject the real '/' BEFORE taking its state lock or
+        # opening any protected host file (matching the cache-only preview).
+        live_root = os.stat("/", follow_symlinks=False)
+        supplied_root = os.fstat(root_fd)
+        if ((supplied_root.st_dev, supplied_root.st_ino)
+                == (live_root.st_dev, live_root.st_ino)):
+            _deny("LIVE_ROOT_FORBIDDEN")
         with _locked(root_fd, root_uid) as state_fd:
             _legacy_refusal(state_fd, root_uid)
             if _pending(state_fd, root_uid, include_multi=False):
