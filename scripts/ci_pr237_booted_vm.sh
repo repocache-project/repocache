@@ -12,7 +12,7 @@ mkdir -p "$out"
 tmp="$(mktemp -d)"
 stage=initial
 scenario="${PR237_SCENARIO:-smoke}"
-case "$scenario" in smoke|native-installer) ;; *) echo 'Invalid VM scenario' >&2; exit 2;; esac
+case "$scenario" in smoke|native-installer|native-package-interruption) ;; *) echo 'Invalid VM scenario' >&2; exit 2;; esac
 accel=unknown
 sha="$(git rev-parse HEAD)"
 finish() {
@@ -143,12 +143,27 @@ scp -i "$tmp/id_ed25519" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-n
   -o "UserKnownHostsFile=$tmp/known_hosts" -o LogLevel=ERROR \
   -P 2222 "$tmp/source.tar.gz" pr237ci@127.0.0.1:source.tar.gz
 sshguest 'mkdir -p ~/source && tar -xf ~/source.tar.gz -C ~/source'
-if test "$scenario" = native-installer; then
+if test "$scenario" = native-installer || test "$scenario" = native-package-interruption; then
   stage=prepare-fresh-native-installer-guest
   sshguest "sudo bash /home/pr237ci/source/scripts/ci_pr237_guest.sh '$PR237_PLATFORM' prepare-installer" > "$out/installer-prerequisites.txt" 2>&1 || { cat "$out/installer-prerequisites.txt"; exit 1; }
   prepare_pinned_synthetic_source
   stage=synthetic-worker-native-placement
   sshguest "sudo /usr/bin/python3 -B /home/pr237ci/source/scripts/ci_pr237_synthetic_worker_guest.py /home/pr237ci/combined '$combined_sha'" > "$out/synthetic-installed-worker.txt" 2>&1 || { cat "$out/synthetic-installed-worker.txt"; exit 1; }
+  if test "$scenario" = native-package-interruption; then
+    stage=real-native-manager-SIGKILL
+    sshguest "sudo /usr/bin/python3 -B /home/pr237ci/source/scripts/ci_pr237_native_package_interrupt_guest.py '$PR237_PLATFORM_ID' interrupt" > "$out/native-package-manager-interruption.txt" 2>&1 || { cat "$out/native-package-manager-interruption.txt"; exit 1; }
+    stage=interrupted-manager-kernel-reboot
+    sshguest 'sudo systemctl reboot' >/dev/null 2>&1 || true
+    sleep 8
+    waitssh
+    boot_after="$(sshguest 'cat /proc/sys/kernel/random/boot_id')"
+    test "$boot_after" != "$boot_before"
+    printf 'before=%s\nafter=%s\n' "$boot_before" "$boot_after" > "$out/interrupted-manager-reboot-ids.txt"
+    stage=interrupted-manager-after-reboot
+    sshguest "sudo /usr/bin/python3 -B /home/pr237ci/source/scripts/ci_pr237_native_package_interrupt_guest.py '$PR237_PLATFORM_ID' after" > "$out/native-package-manager-after-reboot.txt" 2>&1 || { cat "$out/native-package-manager-after-reboot.txt"; exit 1; }
+    stage=complete
+    exit 0
+  fi
   stage=real-native-package-install-through-signed-worker
   sshguest "sudo /usr/bin/python3 -B /home/pr237ci/source/scripts/ci_pr237_native_package_guest.py '$PR237_PLATFORM_ID' install" > "$out/native-install.txt" 2>&1 || { cat "$out/native-install.txt"; exit 1; }
   stage=native-installer-kernel-reboot
