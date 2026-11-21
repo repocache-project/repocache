@@ -165,3 +165,21 @@ ignore inaccessible process records or a running NGINX task. Focused tests
 cover benign 43/64-byte names, refusal beyond 64 bytes and positive
 detection of long nginx-prefixed names. This source change needs exact-HEAD
 CI and native Debian acceptance before being counted as PASS.
+
+## Post-install native v2 proposal staging (synthetic trust, no activation)
+
+After the **real** signed-fixture root installer completes native APT/DNF,
+issues a protected completion receipt, and survives an actual kernel reboot,
+the guest prepares an initial generation-one proposal from the exact reviewed
+install-v1 example through the authenticated source verifier. A wrong proposed
+SHA must be refused **before** any root-owned proposal is written. The
+correct reviewed SHA is staged using the real installed worker verifier and
+the existing protected v2 state lock. A second identical call must preserve
+the exact staged envelope inode, timestamp and bytes. The package receipt
+must remain unchanged, no committed state-v2 or pending native WAL may exist,
+and NGINX/REPOCACHE service/socket units must remain inactive.
+
+This is **not** live `APPLY_V2` or `RECOVER_V2`. The proposal is a
+synthetic-key-authorized test candidate, not an owner-published release or
+external operator approval. The original operational repair, TLS/cache/log
+preservation, SELinux worker enforcement and real publisher gates remain open.

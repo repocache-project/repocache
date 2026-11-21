@@ -197,6 +197,62 @@ def report(distribution: str) -> None:
         for name in ("repocache-control.socket", "repocache-control.service"):
             assert run("/usr/bin/systemctl", "is-active", name).returncode != 0
         print("PASS: actual native APT/DNF completion persisted across kernel reboot; no NGINX or REPOCACHE autostart")
+
+        # Move one step closer to a genuine installed v2 lifecycle without
+        # applying any candidate, starting the fixed control socket, or
+        # granting production operator authorization.
+        proposal = ROOT / "reviewed-initial-v2.json"
+        prepared = install_native_root_worker.prepare_authenticated_proposal(
+            assets, ROOT / "reviewed-install.json", proposal,
+            decision_sha256="d" * 64, **pins,
+        )
+        assert prepared["status"] == "AUTHENTICATED_V2_PROPOSAL_PREPARED"
+        assert prepared["state_generation"] == 1
+        assert prepared["requires_operator_review"] is True
+        assert prepared["authorizes_service_activation"] is False
+        proposal_raw = proposal.read_bytes()
+        proposed_sha = hashlib.sha256(proposal_raw).hexdigest()
+        assert prepared["proposed_state_sha256"] == proposed_sha
+        pending_proposal = STATE / ".admin-candidate-v2.json"
+        assert not pending_proposal.exists()
+        assert not (STATE / "state-v2.json").exists()
+        try:
+            install_native_root_worker.stage_authenticated_proposal(
+                assets, proposal, proposal_sha256="0" * 64, **pins,
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Unreviewed/mismatching proposed v2 SHA was accepted")
+        assert not pending_proposal.exists() and not (STATE / "state-v2.json").exists()
+        print("PASS: actual native signed-fixture proposal staging refuses an incorrect reviewed digest")
+
+        staged = install_native_root_worker.stage_authenticated_proposal(
+            assets, proposal, proposal_sha256=proposed_sha, **pins,
+        )
+        assert staged == {
+            "status": "AUTHENTICATED_V2_PROPOSAL_STAGED",
+            "proposed_state_sha256": proposed_sha,
+            "expected_generation": 0,
+            "authorizes_service_activation": False,
+        }
+        envelope_before = pending_proposal.read_bytes()
+        info_before = pending_proposal.stat()
+        repeated = install_native_root_worker.stage_authenticated_proposal(
+            assets, proposal, proposal_sha256=proposed_sha, **pins,
+        )
+        assert repeated == staged
+        info_after = pending_proposal.stat()
+        assert pending_proposal.read_bytes() == envelope_before
+        assert (info_before.st_ino, info_before.st_mtime_ns) == (
+            info_after.st_ino, info_after.st_mtime_ns
+        )
+        assert not (STATE / "state-v2.json").exists()
+        assert not (STATE / ".state-v2-native.pending").exists()
+        assert hashlib.sha256(complete.read_bytes()).hexdigest() == original
+        for name in ("nginx.service", "repocache-control.service", "repocache-control.socket"):
+            assert run("/usr/bin/systemctl", "is-active", name).returncode != 0
+        print("PASS: actual signed-fixture reviewed v2 proposal staged idempotently on booted host, without state commit or service activation")
         print("NOT VERIFIED: actual package-manager interruption recovery, publisher release signing, v2 activation")
     else:
         raise ValueError("Invalid phase")
