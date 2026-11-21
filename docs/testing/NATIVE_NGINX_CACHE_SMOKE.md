@@ -284,3 +284,23 @@ or atomic publication. The original #28/#95/#19 native/transactional
 acceptance remains NOT VERIFIED. No privileged reload, network packet
 transfer, active catalog or host NGINX configuration is performed here.
 
+
+## Already accepted DNF transfer survives live route withdrawal (#95)
+
+The disposable stock NGINX data-plane test now holds an **actual
+in-flight DNF HTTPS request** behind a bounded threading event at its
+private TLS origin before removing the repository route. It validates
+the reduced NGINX configuration, starts a real accepted client request
+under the old worker and only then reloads the private NGINX master.
+It requires the old request to remain active during the reload, releases
+the origin response, verifies the original client receives exact HTTP
+200 bytes and waits until the old worker generation drains. Only then
+does it assert that new DNF requests get HTTP 404 while APT remains HIT.
+The special response uses `Cache-Control: private, no-store`, keeping
+its own bytes out of the retained cache identity/hash snapshot. This
+is a faithful Stage-A route-ownership/concurrency test in unprivileged
+Debian13 and AlmaLinux10 Docker containers with network disabled.
+
+It does **not** prove the full installed transaction is safe under
+concurrent privileged state-v2 writes, real deletion of old cache
+objects, host outages, systemd/SELinux or power-loss rollback.
