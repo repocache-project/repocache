@@ -412,8 +412,12 @@ def test_apply_foreign_managed_context_refused_before_candidate_reload(
     assert observed_reload_includes == [before[1][0]]
     assert events.count(("reload", "debian")) == 1
     assert ("exposure", 2) not in events
-    assert [(path.read_bytes(), path.stat().st_ino)
-            for path in (state / V2_STATE, include, catalog, state / native._MANIFEST)] == before
+    # Atomic WAL compensation may replace inodes, but must restore exactly
+    # the previous published state, NGINX include, catalog and manifest bytes.
+    assert [path.read_bytes()
+            for path in (state / V2_STATE, include, catalog, state / native._MANIFEST)] == [
+                content for content, _inode in before
+            ]
     assert_no_pending(filesystem)
 
 
