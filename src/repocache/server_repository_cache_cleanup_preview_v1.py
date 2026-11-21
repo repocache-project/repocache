@@ -22,6 +22,14 @@ from repocache.server_native_storage_bootstrap_v1 import (
 from repocache.server_protected_state_inspect_v1 import (
     _DIRECTORY_FLAGS, _identity, _recheck, _safe_directory, _walk,
 )
+from repocache.server_fixture_multi_resource_wal_v1 import (
+    CATALOG as _MULTI_CATALOG,
+    INCLUDE as _MULTI_INCLUDE,
+    MANIFEST as _MULTI_MANIFEST,
+    _check_no_auxiliary_pending,
+    _read_all as _read_multi_resources,
+    _validate_old as _validate_multi_owner,
+)
 from repocache.server_proposed_state_v2_store import (
     _legacy_refusal, _pending, _read_v2,
 )
@@ -266,11 +274,23 @@ def preview_locked_retired_repository_cache_cleanup_under_root(
     try:
         with _locked(root_fd, root_uid) as state_fd:
             _legacy_refusal(state_fd, root_uid)
-            if _pending(state_fd, root_uid):
+            if _pending(state_fd, root_uid, include_multi=False):
                 _deny("LOCKED_RECOVERY_REQUIRED")
+            # Distinguish a completed multi-resource ownership domain from
+            # an *interrupted* WAL: the ordinary v2 single-resource writer
+            # treats both as conflicts, but a read-only cache preflight must
+            # support correctly committed #410 include/catalog/manifest bytes.
+            _check_no_auxiliary_pending(state_fd, root_uid)
             state, raw = _read_v2(state_fd, root_uid)
             if state is None or raw is None:
                 _deny("LOCKED_STATE_REQUIRED")
+            resources = _read_multi_resources(state_fd, root_uid)
+            if resources["state-v2.json"] != raw:
+                _deny("LOCKED_STATE_CHANGED")
+            if any(resources[name] is not None for name in (
+                _MULTI_INCLUDE, _MULTI_CATALOG, _MULTI_MANIFEST,
+            )):
+                _validate_multi_owner(resources)
             digest = hashlib.sha256(raw).hexdigest()
             if (state["state_generation"] != expected_state_generation
                     or digest != expected_state_sha256):
@@ -293,8 +313,11 @@ def preview_locked_retired_repository_cache_cleanup_under_root(
             )
             again, current = _read_v2(state_fd, root_uid)
             _legacy_refusal(state_fd, root_uid)
-            if (_pending(state_fd, root_uid) or again != state
-                    or current != raw):
+            if _pending(state_fd, root_uid, include_multi=False):
+                _deny("LOCKED_RECOVERY_REQUIRED")
+            _check_no_auxiliary_pending(state_fd, root_uid)
+            if (again != state or current != raw
+                    or _read_multi_resources(state_fd, root_uid) != resources):
                 _deny("LOCKED_STATE_CHANGED")
             return {
                 **observed,
