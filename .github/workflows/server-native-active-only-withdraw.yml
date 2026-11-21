@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   withdrawal:
-    name: Native nginx -T route and catalog withdrawal (${{ matrix.platform }})
+    name: Native nginx -T and live route withdrawal (${{ matrix.platform }})
     runs-on: ubuntu-latest
     timeout-minutes: 25
     strategy:
@@ -41,7 +41,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Run real syntax and derived read-only catalog across state changes
+      - name: Run syntax, catalog and private live NGINX withdrawal across states
         shell: bash
         run: |
           set -Eeuo pipefail
