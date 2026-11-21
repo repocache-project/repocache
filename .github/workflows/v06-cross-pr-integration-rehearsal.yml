@@ -53,7 +53,7 @@ jobs:
       BASE_SHA: ${{ github.event.pull_request.base.sha }}
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       FORK_SHA: 675e7b49b3573b1e5ede2ca023ed55e270397d4f
-      PR64_SHA: 1e6f01bfac1267df656b788fefb74ff5dcd3eb52
+      PR64_INTEGRATION_SHA: fb67b5e459690cb96affb7238bdca16b0d8be410
       PR76_SHA: fba69bc8baad0dc6b5d6be7d59812572928f5efa
     steps:
       # Install git before checkout: the stock distro container images
@@ -95,29 +95,25 @@ jobs:
           git merge-base --is-ancestor "$FORK_SHA" "$BASE_SHA"
           git merge-base --is-ancestor "$FORK_SHA" "$HEAD_SHA"
 
-          # Combine only still-unmerged #64 and #76 at exact revisions.
-          git fetch --no-tags origin \
-            +refs/heads/feat/64-fixed-credentialed-native-control-v1:refs/remotes/origin/pr64
-          observed="$(git rev-parse refs/remotes/origin/pr64)"
-          test "$observed" = "$PR64_SHA" || {
-            echo "Dependency PR #254 moved; update exact SHA before rehearsal"
+          # #254 is already integrated on the protected base and its source
+          # branch was deleted. Verify the exact accepted integration commit,
+          # not a vanished branch ref or an unrelated source-only SHA.
+          git merge-base --is-ancestor "$PR64_INTEGRATION_SHA" "$BASE_SHA" || {
+            echo "Integrated #254 is absent from the exact PR event base"
             exit 1
           }
-          git merge-base --is-ancestor d53782ed01e1f85686f10279fd3c7eea6d7f6720 "$observed"
-          git merge-base --is-ancestor "$FORK_SHA" "$observed"
           git config user.email "read-only-rehearsal@repocache.invalid"
           git config user.name "REPOCACHE disposable CI"
           git switch -c local-v06-rehearsal
           git merge --no-ff --no-edit "$BASE_SHA"
-          git merge --no-ff --no-edit refs/remotes/origin/pr64
           git fetch --no-tags origin \
             +refs/heads/fix/76-repository-transfer-v06-candidate-20261107:refs/remotes/origin/pr76
           test "$(git rev-parse refs/remotes/origin/pr76)" = "$PR76_SHA" || {
             echo "Dependency #249 moved; exact-SHA source rehearsal refused"
             exit 1
           }
-          # #254 and #249 are still independent unmerged PRs with exact
-          # pinned revisions. Their ephemeral merge grants no host authority.
+          # #254 is in the protected base. Only #249 remains an unmerged
+          # exact-SHA prerequisite; ephemeral merging grants no host authority.
           git merge-base --is-ancestor "$FORK_SHA" refs/remotes/origin/pr76
           git merge --no-ff --no-edit refs/remotes/origin/pr76
           # Enforce whitespace only on this PR's owned server integration
@@ -130,8 +126,8 @@ jobs:
             'tests/test_server_*' \
             'scripts/ci_v06_cross_pr_*'
           test -z "$(git status --porcelain)"
-          printf 'Rehearsal source: base=%s head=%s pr254=%s pr249=%s combined=%s\n' \
-            "$BASE_SHA" "$HEAD_SHA" "$PR64_SHA" "$PR76_SHA" "$(git rev-parse HEAD)"
+          printf 'Rehearsal source: base=%s head=%s pr254-integrated=%s pr249=%s combined=%s\n' \
+            "$BASE_SHA" "$HEAD_SHA" "$PR64_INTEGRATION_SHA" "$PR76_SHA" "$(git rev-parse HEAD)"
           echo "NOT VERIFIED: protected integration merge, host-root, systemd, SELinux, release"
       - name: Run combined state, NGINX, catalog, systemd and lifecycle tests
         shell: bash
