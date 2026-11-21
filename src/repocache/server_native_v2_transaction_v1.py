@@ -39,6 +39,12 @@ from repocache.server_locked_manifest_reconcile_v1 import (
 from repocache.server_native_nginx_effective_unit_v1 import (
     inspect_effective_native_nginx_unit,
 )
+from repocache.server_native_nginx_package_journal_v1 import (
+    _read_completed_native_install_under_lock, NativePackageJournalError,
+)
+from repocache.server_stock_nginx_package_owner_v1 import (
+    inspect_stock_nginx_package_file_integrity, StockNginxPackageOwnerError,
+)
 from repocache.server_nginx_repository_bundle_v1 import (
     render_repository_nginx_bundle_candidate,
 )
@@ -1002,6 +1008,40 @@ def _recover_locked(state_fd: int, include_fd: int,
     return {"status": "NATIVE_V2_ROLLED_BACK", "recovery_required": False}
 
 
+def _require_audited_native_package_for_activation(
+    state_fd: int, *, distribution: str,
+) -> None:
+    """Gate host APPLY/RELOAD on durable package audit and current file integrity.
+
+    The completion receipt is root-owned install-local evidence, NOT a signed
+    REPOCACHE publisher assertion, OS authorization or permission to reload.
+    Only the authenticated fixed host worker may invoke this production path.
+    Recovery of an already-pending WAL remains possible without this gate.
+    """
+    _legacy_refusal(state_fd, 0)
+    try:
+        receipt = _read_completed_native_install_under_lock(
+            state_fd, owner_uid=0, distribution=distribution,
+        )
+        if receipt is None:
+            _deny("NATIVE_PACKAGE_COMPLETION_REQUIRED")
+        integrity = inspect_stock_nginx_package_file_integrity()
+        if (integrity.get("status") !=
+                "READ_ONLY_STOCK_NGINX_PACKAGE_FILE_INTEGRITY_OBSERVED"
+                or integrity.get("platform") !=
+                    ("debian13" if distribution == "debian" else "almalinux10")
+                or integrity.get("native_package_file_integrity_verified") is not True
+                or integrity.get("native_package_signature_verified") is not False
+                or integrity.get("authorizes_native_marker_removal") is not False
+                or integrity.get("authorizes_nginx_activation") is not False):
+            _deny("NATIVE_PACKAGE_INTEGRITY_CHANGED")
+    except NativeV2TransactionError:
+        raise
+    except (NativePackageJournalError, StockNginxPackageOwnerError,
+            OSError, TypeError, ValueError):
+        _deny("NATIVE_PACKAGE_PROVENANCE_UNVERIFIED")
+
+
 def _operation_under_root(root_fd: int, *, distribution: str,
                           operation: str, fixture: bool = False) -> dict:
     """Internal entry. Only trusted root code selects the fixed operation."""
@@ -1020,9 +1060,17 @@ def _operation_under_root(root_fd: int, *, distribution: str,
             if stat.S_IMODE(os.fstat(public_fd).st_mode) != 0o755:
                 _deny("PUBLIC_DIRECTORY_MODE_UNSAFE")
             if operation == "APPLY_V2":
+                if not fixture:
+                    _require_audited_native_package_for_activation(
+                        state_fd, distribution=distribution,
+                    )
                 result = _apply_locked(root_fd, state_fd, include_fd,
                                        public_fd, distribution, fixture=fixture)
             elif operation == "RELOAD_V2":
+                if not fixture:
+                    _require_audited_native_package_for_activation(
+                        state_fd, distribution=distribution,
+                    )
                 result = _reload_owned_locked(root_fd, state_fd, include_fd,
                                               public_fd, distribution)
             else:

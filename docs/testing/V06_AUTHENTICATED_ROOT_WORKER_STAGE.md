@@ -250,3 +250,16 @@ additional genuine APT/DNF success path verifies the same retained lock,
 strict package-owner/file/vendor-unit observations, durable completion
 receipt and refusal of duplicate fresh installation. Neither case
 installs a root broker or claims booted native systemd/SELinux.
+
+### Privileged activation now requires audited package completion
+
+The fixed native root-worker `APPLY_V2` and `RELOAD_V2` paths
+fail closed *before* NGINX/state/catalog mutations without the canonical
+root-owned native package completion receipt. They also repeat the
+distro's current NGINX installed-file integrity check. Any pending
+APT/DNF effects, missing/corrupt/mismatching receipt, foreign package
+state or changed operational bytes refuses activation. `RECOVER_V2`
+retains its independent WAL compensation path so a missing audit receipt
+does not by itself disable emergency rollback. Fixture-only tests may
+exercise the underlying transaction without a production host receipt;
+this exception is never available to the installed worker protocol.

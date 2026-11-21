@@ -139,6 +139,73 @@ def assert_no_pending(fs):
     (65534, [49999], "SERVICE_IDENTITY_DENIED"),
     (65533, [], "ADMIN_GROUP_REQUIRED"),
 ])
+@pytest.mark.parametrize("operation", ["APPLY_V2", "RELOAD_V2"])
+def test_native_host_operation_requires_audited_package_completion(
+    filesystem, monkeypatch, operation,
+):
+    from repocache.server_native_nginx_package_journal_v1 import NATIVE_COMPLETE_NAME
+    _fd, state, include, catalog, events = filesystem
+
+    def forbidden(*_a, **_kw):
+        pytest.fail("unverified native package reached privileged service operation")
+
+    monkeypatch.setattr(native, "_apply_locked", forbidden)
+    monkeypatch.setattr(native, "_reload_owned_locked", forbidden)
+    monkeypatch.setattr(native, "inspect_stock_nginx_package_file_integrity", forbidden)
+    with pytest.raises(native.NativeV2TransactionError,
+                       match="NATIVE_PACKAGE_COMPLETION_REQUIRED"):
+        native._operation_under_root(
+            filesystem[0], distribution="debian",
+            operation=operation, fixture=False,
+        )
+    assert not (state / NATIVE_COMPLETE_NAME).exists()
+    assert not include.exists() and not catalog.exists() and not events
+
+
+@pytest.mark.parametrize("operation", ["APPLY_V2", "RELOAD_V2"])
+def test_native_host_operation_refuses_stale_package_integrity_before_effects(
+    filesystem, monkeypatch, operation,
+):
+    from repocache.server_native_nginx_package_journal_v1 import NATIVE_COMPLETE_NAME
+    _fd, state, include, catalog, events = filesystem
+    receipt = {
+        "schema_version": 1,
+        "status": "NATIVE_PACKAGE_EFFECTS_COMPLETED_AFTER_LOCKED_INSTALL",
+        "distribution": "debian", "manager": "apt",
+        "pending_sha256": "a" * 64, "vendor_unit_sha256": "b" * 64,
+        "native_package_file_integrity_verified": True,
+        "publisher_artifact_verified": False, "booted_native_service_verified": False,
+    }
+    candidate = state / NATIVE_COMPLETE_NAME
+    candidate.write_bytes(_canon(receipt))
+    candidate.chmod(0o600)
+
+    def forbidden(*_a, **_kw):
+        pytest.fail("stale package metadata reached privileged service operation")
+
+    monkeypatch.setattr(native, "_apply_locked", forbidden)
+    monkeypatch.setattr(native, "_reload_owned_locked", forbidden)
+    monkeypatch.setattr(
+        native, "inspect_stock_nginx_package_file_integrity",
+        lambda: {
+            "status": "READ_ONLY_STOCK_NGINX_PACKAGE_FILE_INTEGRITY_OBSERVED",
+            "platform": "debian13",
+            "native_package_file_integrity_verified": False,
+            "native_package_signature_verified": False,
+            "authorizes_native_marker_removal": False,
+            "authorizes_nginx_activation": False,
+        },
+    )
+    with pytest.raises(native.NativeV2TransactionError,
+                       match="NATIVE_PACKAGE_INTEGRITY_CHANGED"):
+        native._operation_under_root(
+            filesystem[0], distribution="debian",
+            operation=operation, fixture=False,
+        )
+    assert candidate.read_bytes() == _canon(receipt)
+    assert not include.exists() and not catalog.exists() and not events
+
+
 def test_kernel_credentialed_dispatch_reaches_real_wal_only_for_admin(
     filesystem, monkeypatch, uid, groups, denial,
 ):
