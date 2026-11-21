@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from repocache.server_repository_batch_add_v1 import (
+from repocache.server_repository_plan_v1 import (
     BatchRepositoryAddError, plan_batch_repository_additions,
 )
 
