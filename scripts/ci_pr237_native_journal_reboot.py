@@ -60,7 +60,7 @@ def prepare(distribution: str) -> None:
     assert Path("/var/lib/repocache/server").exists()
     root = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        bootstrap = bootstrap_protected_namespace_under_root(root, owner_uid=0)
+        bootstrap = bootstrap_protected_namespace_under_root(root, owner_uid=0, public_catalog=True)
         assert bootstrap["status"] == "EXISTING_PROTECTED_LOCK_VALIDATED"
         result = _prepare_native_journal_under_root(
             root, owner_uid=0, distribution=distribution,
