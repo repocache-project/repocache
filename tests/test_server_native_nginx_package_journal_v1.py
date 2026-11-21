@@ -564,3 +564,33 @@ def test_signed_native_host_scope_rejects_partial_effects_and_retains_durable_ma
         install._execute_native_nginx_install_locked(
             root_fd, distribution=distribution, document={}, os_release="", owner_uid=uid,
         )
+
+
+@pytest.mark.parametrize("name", [
+    "state-v2.json", ".state-v2.pending", ".state-v2-native.pending",
+    ".admin-candidate-v2", ".native-worker-placement.pending-bad",
+    ".foreign", ".native-worker-placement.complete-" + "g" * 64,
+])
+def test_fresh_native_package_never_adopts_v2_or_unknown_protected_state(
+    protected_root, name,
+):
+    root, state, owner = protected_root
+    unexpected = state / name
+    unexpected.write_bytes(b"")
+    unexpected.chmod(0o600)
+    with pytest.raises(NativePackageJournalError, match="NATIVE_FOREIGN_PROTECTED_STATE"):
+        _prepare_native_journal_under_root(root, owner_uid=owner, distribution="debian")
+    assert unexpected.is_file()
+    assert not (state / NATIVE_PENDING_NAME).exists()
+
+
+def test_fresh_native_package_can_follow_exact_authenticated_worker_placement_receipt(
+    protected_root,
+):
+    root, state, owner = protected_root
+    marker = state / (".native-worker-placement.complete-" + "a" * 64)
+    marker.write_bytes(b"")
+    marker.chmod(0o600)
+    result = _prepare_native_journal_under_root(root, owner_uid=owner, distribution="debian")
+    assert result["status"] == "NATIVE_PACKAGE_EFFECTS_JOURNAL_DURABLE"
+    assert marker.exists() and (state / NATIVE_PENDING_NAME).is_file()

@@ -12,9 +12,11 @@ from typing import Any, Callable, Iterator
 from contextlib import contextmanager
 import hashlib
 import os
+import re
+import stat
 
 from repocache.server_protected_state_store_v1 import (
-    JOURNAL_NAME, JOURNAL_TMP_NAME, ROLLBACK_NAME, STAGE_NAME,
+    JOURNAL_NAME, JOURNAL_TMP_NAME, ROLLBACK_NAME, STAGE_NAME, LOCK_NAME,
     MAX_JOURNAL_BYTES, MAX_STATE_BYTES,
     ProtectedStateStoreError,
     _canonical, _json, _locked, _read_file, _read_journal, _read_state,
@@ -109,6 +111,24 @@ def _prepare_native_journal_under_lock(
     if state is not None or raw is not None:
         _deny("NATIVE_EXISTING_STATE_REFUSED")
     _no_pending_native_effects(directory, owner_uid)
+    # No prior v2 state, WAL, staged administrator intent or arbitrary file
+    # can be adopted as an initial NGINX package install. The one permitted
+    # installed worker-placement receipt is immutable, empty, single-linked
+    # and root-owned; its contents and release signing are checked by the
+    # authenticated caller separately.
+    worker_marker = re.compile(
+        r"\.native-worker-placement\.complete-[0-9a-f]{64}\Z", re.ASCII,
+    )
+    for entry in os.listdir(directory):
+        if entry == LOCK_NAME:
+            continue
+        if worker_marker.fullmatch(entry) is not None:
+            info = os.stat(entry, dir_fd=directory, follow_symlinks=False)
+            if (stat.S_ISREG(info.st_mode) and info.st_uid == owner_uid
+                    and info.st_gid == 0 and info.st_nlink == 1
+                    and stat.S_IMODE(info.st_mode) == 0o600 and info.st_size == 0):
+                continue
+        _deny("NATIVE_FOREIGN_PROTECTED_STATE")
     content = _canonical({
         "journal_schema_version": 1,
         "operation": "fresh-native-nginx-package-install",
