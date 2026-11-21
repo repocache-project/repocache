@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import signal
 import stat
@@ -134,7 +135,28 @@ def interrupt(distribution: str) -> None:
             install_native_root_worker.install_authenticated_native_nginx(
                 assets, doc, digest, **pins,
             )
-        except Exception:
+        except Exception as exc:
+            # Keep native exception details PRIVATE; only a fixed class
+            # and an uppercase redacted code may leave the child.
+            code = str(exc)
+            if re.fullmatch(r"[A-Z][A-Z0-9_]{3,120}", code) is None:
+                code = "REDACTED"
+            classification = (
+                "CHILD_EXCEPTION_CLASS=" + type(exc).__name__ + "\n"
+                + "CHILD_EXCEPTION_CODE=" + code + "\n"
+            )
+            diagnostic = FIXTURE / "native-interrupt-child-status.txt"
+            try:
+                fd = os.open(
+                    diagnostic, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o600,
+                )
+                with os.fdopen(fd, "w", encoding="ascii") as record:
+                    record.write(classification)
+                    record.flush()
+                    os.fsync(record.fileno())
+            except OSError:
+                pass
             os._exit(44)
         os._exit(0)
 
@@ -144,6 +166,19 @@ def interrupt(distribution: str) -> None:
         while time.monotonic() < deadline:
             ended, status = os.waitpid(installer_pid, os.WNOHANG)
             if ended:
+                # A fast finish must not be misclassified as having killed
+                # the actual manager. Expose only fixed diagnostic codes.
+                reason = FIXTURE / "native-interrupt-child-status.txt"
+                if reason.exists():
+                    lines = reason.read_text(encoding="ascii").splitlines()
+                    for line in lines:
+                        if re.fullmatch(r"CHILD_EXCEPTION_(?:CLASS|CODE)=[A-Za-z0-9_]+", line):
+                            print("DIAGNOSTIC: " + line, flush=True)
+                print(
+                    "DIAGNOSTIC: native installer exited with "
+                    + str(os.waitstatus_to_exitcode(status)),
+                    flush=True,
+                )
                 raise AssertionError("Native installer ended before manager interruption")
             manager_pid = direct_manager(installer_pid, distribution)
             if manager_pid is not None:
