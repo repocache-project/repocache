@@ -163,6 +163,26 @@ def main() -> int:
 if __name__ == "__main__":
     raise SystemExit(main())
 
+def _ignored_minimal_image_documentation(raw: str) -> int:
+    """Count only missing distro-stripped docs; reject any runtime drift."""
+    if type(raw) is not str or len(raw) > _MAX_RESULT:
+        _deny("PACKAGE_FILE_INTEGRITY_UNVERIFIED")
+    if not raw:
+        return 0
+    omitted = 0
+    for line in raw.splitlines():
+        match = re.fullmatch(
+            r"missing[ \t]+(/usr/share/(?:doc/(?:nginx|nginx-common|nginx-core)/"
+            r"[A-Za-z0-9._+-]+|man/man8/nginx\.8\.gz|"
+            r"licenses/(?:nginx|nginx-core)/[A-Za-z0-9._+-]+))",
+            line, re.ASCII,
+        )
+        if match is None or any(part in (".", "..") for part in match.group(1).split("/")):
+            _deny("PACKAGE_FILE_INTEGRITY_UNVERIFIED")
+        omitted += 1
+    return omitted
+
+
 def inspect_stock_nginx_package_file_integrity() -> dict[str, Any]:
     """Verify installed stock NGINX file bytes against native package metadata.
 
@@ -180,10 +200,11 @@ def inspect_stock_nginx_package_file_integrity() -> dict[str, Any]:
             check=False, timeout=20, env=_ENV, cwd="/",
         )
         if (type(result.returncode) is not int or result.returncode != 0
-                or type(result.stdout) is not str or result.stdout != ""
-                or type(result.stderr) is not str
-                or len(result.stderr) > _MAX_RESULT):
+                or type(result.stderr) is not str or result.stderr != ""):
             _deny("PACKAGE_FILE_INTEGRITY_UNVERIFIED")
+        # Distro base images intentionally omit man pages and changelogs.
+        # Do not confuse those safe omissions with verified completeness.
+        missing_docs = _ignored_minimal_image_documentation(result.stdout)
         if _safe_binary() != before:
             _deny("BINARY_CHANGED")
     except StockNginxPackageOwnerError:
@@ -196,6 +217,8 @@ def inspect_stock_nginx_package_file_integrity() -> dict[str, Any]:
         "status": "READ_ONLY_STOCK_NGINX_PACKAGE_FILE_INTEGRITY_OBSERVED",
         "platform": platform,
         "native_package_file_integrity_verified": True,
+        "native_package_documentation_omissions": missing_docs,
+        "all_native_package_bytes_verified": missing_docs == 0,
         "native_package_signature_verified": False,
         "installed_host_root_authenticated": False,
         "authorizes_native_marker_removal": False,

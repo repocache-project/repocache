@@ -166,3 +166,38 @@ def test_installed_file_integrity_failure_cannot_be_reconciled(failure):
          mock.patch.object(p.subprocess, "run", return_value=result):
         with pytest.raises(p.StockNginxPackageOwnerError):
             p.inspect_stock_nginx_package_file_integrity()
+
+@pytest.mark.parametrize("line,ok", [
+    ("missing     /usr/share/doc/nginx/changelog.gz", True),
+    ("missing     /usr/share/doc/nginx-common/changelog.Debian.gz", True),
+    ("missing     /usr/share/man/man8/nginx.8.gz", True),
+    ("missing     /usr/share/licenses/nginx/COPYING", True),
+    ("missing     /usr/sbin/nginx", False),
+    ("S.5....T /etc/nginx/nginx.conf", False),
+    ("missing     /usr/share/doc/nginx/..", False),
+    ("missing     /usr/share/doc/nginx/../../../etc/shadow", False),
+])
+def test_minimal_image_documentation_omission_is_bounded_not_host_proof(line, ok):
+    if ok:
+        assert p._ignored_minimal_image_documentation(line + "\n") == 1
+    else:
+        with pytest.raises(p.StockNginxPackageOwnerError):
+            p._ignored_minimal_image_documentation(line + "\n")
+
+
+def test_native_file_audit_never_claims_stripped_documentation_is_intact():
+    info = SimpleNamespace(st_dev=2, st_ino=19, st_mode=stat.S_IFREG | 0o755,
+        st_uid=0, st_gid=0, st_nlink=1, st_size=345678,
+        st_mtime_ns=5, st_ctime_ns=5)
+    missing = ("missing     /usr/share/doc/nginx/changelog.gz\n"
+               "missing     /usr/share/man/man8/nginx.8.gz\n")
+    with mock.patch.object(Path, "read_text", return_value="ID=debian\nVERSION_ID=13\n"), \
+         mock.patch.object(p.os, "lstat", return_value=info), \
+         mock.patch.object(p.subprocess, "run",
+             return_value=subprocess.CompletedProcess([], 0, missing, "")):
+        report = p.inspect_stock_nginx_package_file_integrity()
+    assert report["native_package_file_integrity_verified"] is True
+    assert report["native_package_documentation_omissions"] == 2
+    assert report["all_native_package_bytes_verified"] is False
+    assert report["native_package_signature_verified"] is False
+    assert report["authorizes_native_marker_removal"] is False

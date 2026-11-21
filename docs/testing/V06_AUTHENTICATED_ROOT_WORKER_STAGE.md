@@ -201,3 +201,9 @@ local package-database consistency, a vendor unit and a signed release
 worker do not alone justify removal after an ambiguous APT/DNF crash.
 No new package, privileged operation, marker clearing or service
 activation authority is introduced here.
+
+Minimal distribution images may omit only explicitly bounded NGINX
+changelog, manual and license files. Those exact missing-doc entries
+are recorded as omissions and **never** imply verification of all package
+bytes. Any binary, systemd-unit, runtime configuration, package-manager
+failure or unknown discrepancy is still a hard refusal.
