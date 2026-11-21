@@ -129,7 +129,10 @@ def nginx_config(base: Path, rid: str, pins: dict, doc: dict, *,
         raise RuntimeError("DYNAMIC_ROUTE_RENDERING_UNVERIFIED")
     raw = rendered["http_upstream_fragment"]
     marker = "server 8.8.8.8:443;"
-    if raw.count(marker) != 1:
+    # Zero active repositories have no public-pin server directive.
+    # Refusing a disabled candidate merely because it has no pins would
+    # hide the actual native route withdrawal regression.
+    if raw.count(marker) != len(rendered["proposed_repository_ids"]):
         raise RuntimeError("PUBLIC_PIN_RENDERING_UNVERIFIED")
     test_upstream = raw.replace(marker, f"server 127.0.0.1:{origin_port};")
     if marker in test_upstream:
