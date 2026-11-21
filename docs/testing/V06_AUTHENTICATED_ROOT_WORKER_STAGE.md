@@ -236,3 +236,9 @@ authenticated native installer that actually executed the fixed
 distro-signed package transaction inside that same lock may invoke it.
 The receipt explicitly does not attest owner-signed REPOCACHE artifacts,
 booted systemd, enforcing SELinux, service exposure or production activation.
+
+The completion receipt has a closed canonical schema and is validated
+before the protected state-v2 lifecycle can reuse the namespace. Receipt
+corruption, missing root ownership or any still-pending native effects
+refuse further writes. The completed record blocks a second fresh native
+package installation rather than authorizing an overwrite.

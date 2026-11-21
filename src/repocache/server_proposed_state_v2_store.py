@@ -29,6 +29,8 @@ from repocache.server_protected_state_store_v1 import (
 )
 from repocache.server_native_nginx_package_journal_v1 import (
     NATIVE_PENDING_NAME, NATIVE_TMP_NAME, MAX_NATIVE_JOURNAL_BYTES,
+    NATIVE_COMPLETE_NAME, MAX_NATIVE_COMPLETE_BYTES,
+    _read_completed_native_install_under_lock,
 )
 from repocache.server_install_v1 import MAX_INT, parse_install_bytes
 from repocache.server_nginx_repository_bundle_v1 import (
@@ -115,6 +117,10 @@ def _legacy_refusal(directory: int, uid: int) -> None:
     for name in (NATIVE_PENDING_NAME, NATIVE_TMP_NAME):
         if _read_file(directory, name, uid, MAX_NATIVE_JOURNAL_BYTES) is not None:
             _refuse("NATIVE_PACKAGE_EFFECTS_RECONCILIATION_REQUIRED")
+    # A completed native journal is a durable local audit receipt, not a
+    # publisher signature or host authorization. Refuse any corrupted
+    # root-owned receipt rather than silently treating it as clean state.
+    _read_completed_native_install_under_lock(directory, owner_uid=uid)
     # Both generations must never silently cohabit. A real v1 migration needs
     # separate authorization, conflict resolution and crash-tested journal.
     for name, bound in (

@@ -17,7 +17,7 @@ from repocache.server_protected_state_store_v1 import (
     JOURNAL_NAME, JOURNAL_TMP_NAME, ROLLBACK_NAME, STAGE_NAME,
     MAX_JOURNAL_BYTES, MAX_STATE_BYTES,
     ProtectedStateStoreError,
-    _canonical, _locked, _read_file, _read_journal, _read_state,
+    _canonical, _json, _locked, _read_file, _read_journal, _read_state,
     _write_exclusive, _unlink_known,
 )
 
@@ -37,9 +37,48 @@ def _deny(code: str) -> None:
     raise NativePackageJournalError(code)
 
 
+def _read_completed_native_install_under_lock(
+    directory: int, *, owner_uid: int, distribution: str | None = None,
+) -> dict[str, Any] | None:
+    """Validate a root-owned completion receipt, never a host trust token."""
+    raw = _read_file(directory, NATIVE_COMPLETE_NAME,
+                     owner_uid, MAX_NATIVE_COMPLETE_BYTES)
+    if raw is None:
+        return None
+    try:
+        value = _json(raw, limit=MAX_NATIVE_COMPLETE_BYTES)
+        if (type(value) is not dict or set(value) != {
+            "schema_version", "status", "distribution", "manager",
+            "pending_sha256", "vendor_unit_sha256",
+            "native_package_file_integrity_verified",
+            "publisher_artifact_verified", "booted_native_service_verified",
+        } or type(value["schema_version"]) is not int
+                or value["schema_version"] != 1
+                or value["status"] !=
+                   "NATIVE_PACKAGE_EFFECTS_COMPLETED_AFTER_LOCKED_INSTALL"
+                or type(value["distribution"]) is not str
+                or value["distribution"] not in _NATIVE_MANAGERS
+                or (distribution is not None
+                    and value["distribution"] != distribution)
+                or value["manager"] != _NATIVE_MANAGERS[value["distribution"]]
+                or any(type(value[k]) is not str or len(value[k]) != 64
+                       or any(ch not in "0123456789abcdef" for ch in value[k])
+                       for k in ("pending_sha256", "vendor_unit_sha256"))
+                or value["native_package_file_integrity_verified"] is not True
+                or value["publisher_artifact_verified"] is not False
+                or value["booted_native_service_verified"] is not False
+                or _canonical(value, limit=MAX_NATIVE_COMPLETE_BYTES) != raw):
+            _deny("NATIVE_COMPLETION_RECEIPT_INVALID")
+        return value
+    except NativePackageJournalError:
+        raise
+    except (ProtectedStateStoreError, TypeError, ValueError, KeyError):
+        _deny("NATIVE_COMPLETION_RECEIPT_INVALID")
+
+
 def _no_pending_native_effects(directory: int, owner_uid: int) -> None:
     """Hard-block both published and orphaned native package effects markers."""
-    for name in (NATIVE_PENDING_NAME, NATIVE_TMP_NAME):
+    for name in (NATIVE_PENDING_NAME, NATIVE_TMP_NAME, NATIVE_COMPLETE_NAME):
         if _read_file(
             directory, name, owner_uid, MAX_NATIVE_JOURNAL_BYTES
         ) is not None:

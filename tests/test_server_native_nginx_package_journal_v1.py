@@ -270,3 +270,137 @@ def test_fault_before_lock_scope_yields_never_run_package_effects(
             or (folder / NATIVE_TMP_NAME).exists())
     with pytest.raises(NativePackageJournalError):
         _prepare_native_journal_under_root(fd, owner_uid=uid, distribution=dist)
+
+@pytest.mark.parametrize("distribution", ["debian", "almalinux"])
+def test_native_package_completion_is_durable_and_requires_exact_locked_facts(
+    protected_root, monkeypatch, distribution,
+):
+    from repocache import server_native_package_effects_observe_v1 as observe
+    from repocache.server_native_nginx_package_journal_v1 import (
+        NATIVE_COMPLETE_NAME, _complete_native_install_after_verified_manager_under_lock,
+        _read_completed_native_install_under_lock,
+    )
+    fd, folder, uid = protected_root
+    _prepare_native_journal_under_root(fd, owner_uid=uid, distribution=distribution)
+    pending = (folder / NATIVE_PENDING_NAME).read_bytes()
+    before = {
+        "status": "NATIVE_PACKAGE_EFFECTS_PENDING_RECONCILIATION",
+        "distribution": distribution,
+        "journal_identity_verified": True,
+        "pending_native_effects_block_reentry": True,
+        "authorizes_native_marker_removal": False,
+    }
+    package = {
+        "platform": "debian13" if distribution == "debian" else "almalinux10",
+        "package_name": "nginx" if distribution == "debian" else "nginx-core",
+        "binary_path": "/usr/sbin/nginx",
+        "status": "READ_ONLY_STOCK_NGINX_PACKAGE_OWNER_OBSERVED",
+        "native_package_db_owner_observed": True,
+        "native_package_signature_verified": False,
+        "authorizes_nginx_adoption": False,
+    }
+    integrity = {
+        "status": "READ_ONLY_STOCK_NGINX_PACKAGE_FILE_INTEGRITY_OBSERVED",
+        "platform": package["platform"],
+        "native_package_file_integrity_verified": True,
+        "native_package_signature_verified": False,
+        "authorizes_native_marker_removal": False,
+        "authorizes_nginx_activation": False,
+    }
+    unit = {
+        "unit_name": "nginx.service",
+        "code": "VENDOR_NGINX_UNIT_OBSERVED",
+        "vendor_unit_sha256": "a" * 64,
+        "vendor_unit_bounded_and_owned": True,
+        "native_package_file_ownership_verified": False,
+        "authorizes_systemctl": False,
+        "authorizes_nginx_reload": False,
+    }
+    monkeypatch.setattr(
+        observe, "_collect_postpackage_facts_while_locked",
+        lambda state, *, owner_uid, distribution:
+            (before, package, integrity, unit, dict(before)),
+    )
+    with _locked(fd, uid) as state:
+        result = _complete_native_install_after_verified_manager_under_lock(
+            state, owner_uid=uid, distribution=distribution,
+        )
+        assert result["native_package_effects_reconciled"] is True
+        receipt = _read_completed_native_install_under_lock(
+            state, owner_uid=uid, distribution=distribution,
+        )
+        assert receipt["pending_sha256"] == __import__("hashlib").sha256(pending).hexdigest()
+        assert receipt["vendor_unit_sha256"] == "a" * 64
+        assert receipt["publisher_artifact_verified"] is False
+    assert not (folder / NATIVE_PENDING_NAME).exists()
+    assert (folder / NATIVE_COMPLETE_NAME).exists()
+    with pytest.raises(NativePackageJournalError):
+        _prepare_native_journal_under_root(
+            fd, owner_uid=uid, distribution=distribution,
+        )
+    assert (folder / NATIVE_COMPLETE_NAME).exists()
+
+
+@pytest.mark.parametrize("unsafe", [
+    "foreign-package", "invalid-unit", "missing-integrity",
+])
+def test_native_completion_refuses_untrusted_facts_with_pending_intact(
+    protected_root, monkeypatch, unsafe,
+):
+    from repocache import server_native_package_effects_observe_v1 as observe
+    from repocache.server_native_nginx_package_journal_v1 import (
+        NATIVE_COMPLETE_NAME, _complete_native_install_after_verified_manager_under_lock,
+    )
+    fd, folder, uid = protected_root
+    _prepare_native_journal_under_root(fd, owner_uid=uid, distribution="debian")
+    raw = (folder / NATIVE_PENDING_NAME).read_bytes()
+    before = {
+        "status": "NATIVE_PACKAGE_EFFECTS_PENDING_RECONCILIATION",
+        "distribution": "debian",
+        "journal_identity_verified": True,
+        "pending_native_effects_block_reentry": True,
+        "authorizes_native_marker_removal": False,
+    }
+    package = {
+        "platform": "debian13", "package_name": "nginx",
+        "binary_path": "/usr/sbin/nginx",
+        "status": "READ_ONLY_STOCK_NGINX_PACKAGE_OWNER_OBSERVED",
+        "native_package_db_owner_observed": True,
+        "native_package_signature_verified": False,
+        "authorizes_nginx_adoption": False,
+    }
+    integrity = {
+        "status": "READ_ONLY_STOCK_NGINX_PACKAGE_FILE_INTEGRITY_OBSERVED",
+        "platform": "debian13",
+        "native_package_file_integrity_verified": True,
+        "native_package_signature_verified": False,
+        "authorizes_native_marker_removal": False,
+        "authorizes_nginx_activation": False,
+    }
+    unit = {
+        "unit_name": "nginx.service", "code": "VENDOR_NGINX_UNIT_OBSERVED",
+        "vendor_unit_sha256": "a" * 64,
+        "vendor_unit_bounded_and_owned": True,
+        "native_package_file_ownership_verified": False,
+        "authorizes_systemctl": False, "authorizes_nginx_reload": False,
+    }
+    if unsafe == "foreign-package":
+        package["package_name"] = "foreign"
+    elif unsafe == "invalid-unit":
+        unit["code"] = "VENDOR_NGINX_SHADOW_REFUSED"
+    else:
+        integrity["native_package_file_integrity_verified"] = False
+    monkeypatch.setattr(
+        observe, "_collect_postpackage_facts_while_locked",
+        lambda *_a, **_kw:
+            (before, package, integrity, unit, dict(before)),
+    )
+    with _locked(fd, uid) as state:
+        with pytest.raises(NativePackageJournalError, match="NATIVE_COMPLETION_AUDIT_UNVERIFIED"):
+            _complete_native_install_after_verified_manager_under_lock(
+                state, owner_uid=uid, distribution="debian",
+            )
+    assert (folder / NATIVE_PENDING_NAME).read_bytes() == raw
+    assert not (folder / NATIVE_COMPLETE_NAME).exists()
+
+
