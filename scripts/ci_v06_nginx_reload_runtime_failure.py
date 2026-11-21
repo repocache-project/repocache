@@ -80,8 +80,9 @@ def fetch_managed_route(port: int, repo_id: str) -> int:
         connection.request("GET", f"/__repocache/repos/{repo_id}/probe")
         reply = connection.getresponse()
         status, body = reply.status, reply.read()
-        require(body == (b"repocache-active" if status == 200 else body),
-                "MANAGED_ROUTE_RESPONSE_INVALID")
+        if status == 200:
+            require(body == b"repocache-active",
+                    "MANAGED_ROUTE_RESPONSE_INVALID")
         return status
     finally:
         connection.close()
