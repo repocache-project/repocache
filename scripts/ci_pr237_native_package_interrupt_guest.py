@@ -84,10 +84,17 @@ def direct_manager(installer_pid: int, distribution: str) -> int | None:
                 path = Path("/proc") / entry.name / "cmdline"
                 fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
                 try:
-                    command = os.read(fd, 1024).split(b"\0", 1)[0]
+                    arguments = os.read(fd, 1024).split(b"\0")
                 finally:
                     os.close(fd)
-                if command in names:
+                if arguments and arguments[0] in names:
+                    return pid
+                # DNF4 on AlmaLinux may use a Python script shebang;
+                # require the exact signed-OS manager path as argv[1].
+                if (len(arguments) >= 2
+                        and arguments[0] in (b"/usr/bin/python3", b"/usr/bin/python3.12",
+                                             b"/usr/libexec/platform-python")
+                        and arguments[1] in names):
                     return pid
             except (FileNotFoundError, ProcessLookupError, PermissionError):
                 continue
