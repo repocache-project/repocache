@@ -32,3 +32,29 @@ no host service is changed and no third-party action is used.
 Failure at boot/image/cloud-init/SELinux/package-test stage is reported as
 FAIL or NOT VERIFIED with stage-specific logs, not silently skipped. Keep
 this an experiment until the maintainer decides whether to extend it.
+
+## Expanded native host security and failure injection
+
+After the guest boots and reboots with a masked, inactive service, a
+separate real-host exercise performs the **actual REPOCACHE read-only native
+root/PID1/user-namespace/mount preflight** (not a mocked function), the
+distro package-owner and installed-file-integrity checks, and the exact
+vendor systemd NGINX unit inventory. It injects a temporary foreign unit
+drop-in and requires the actual vendor inspector to **refuse**, then removes
+the drop-in without loading it into PID1.
+
+With the stock NGINX service running, it creates one exclusively named
+invalid configuration include under /etc/nginx/conf.d in the disposable
+VM, requires genuine nginx -t AND systemctl reload to fail, and asserts the
+previous NGINX master PID and local HTTP response are unchanged. After
+removing only that include, successful syntax/reload and repeated package
+and unit integrity are mandatory. These are **live stock-NGINX failure
+tests**, not the complete signed REPOCACHE v2 APPLY/RECOVER transaction or a
+claim that service drop-in drift was actually loaded by systemd.
+
+Safety: the test fails without writing if a foreign drop-in or test include
+already exists, verifies a QEMU/KVM booted guest, PID1 systemd and the
+pr237-ci image context, and runs privileged mutations exclusively in that
+discarded guest. It never installs or starts the REPOCACHE worker. If the
+negative scenario fails, the workflow must fail rather than silently
+falling back to fixture-only acceptance.

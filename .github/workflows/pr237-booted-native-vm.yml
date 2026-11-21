@@ -7,6 +7,7 @@ on:
       - '.github/workflows/pr237-booted-native-vm.yml'
       - 'scripts/ci_pr237_booted_vm.sh'
       - 'scripts/ci_pr237_guest.sh'
+      - 'scripts/ci_pr237_native_host_integration.py'
       - 'docs/testing/PR237_BOOTED_VM.md'
   workflow_dispatch:
 

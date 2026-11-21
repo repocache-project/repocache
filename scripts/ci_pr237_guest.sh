@@ -57,6 +57,7 @@ case "$phase" in
     systemctl is-active --quiet nginx.service
     curl -fsS --max-time 10 http://127.0.0.1/ >/dev/null
     echo 'PASS: real NGINX service activation and local HTTP'
+    python3 -B /home/pr237ci/source/scripts/ci_pr237_native_host_integration.py "$(test "$platform" = debian13 && echo debian || echo almalinux)"
     systemctl stop nginx.service
     systemctl disable nginx.service || true
     ! systemctl is-active --quiet nginx.service
