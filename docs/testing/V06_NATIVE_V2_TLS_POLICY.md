@@ -29,3 +29,24 @@ certificate trust and the separately commissioned #64 security review
 plus explicit issue-specific merger approval. PR #237 remains Draft and
 not eligible for the native integration queue until all its blocking gates
 are resolved.
+
+
+## Exact managed NGINX context before catalog publication
+
+The native v2 APPLY operation now validates the **unique complete**
+\`# configuration file /etc/nginx/conf.d/repocache-managed.conf:\`
+section within the same fixed \`nginx -T\` output used for deriving the
+active-only client catalog. A substring match anywhere in an unrelated
+configuration file or comment is insufficient. An absent, duplicate,
+renamed, truncated, unexpectedly extended or otherwise nonidentical managed
+section refuses with a fixed non-disclosing error **before** catalog
+publication; the existing WAL/rollback path remains responsible for
+restoring the previously exposed resources after refusal. Explicit RELOAD
+uses the same exact managed-section validator.
+
+Source/fixture regressions exercise a valid exact section and six
+foreign/duplicate/drift cases, and confirm that catalog derivation is not
+reached on a mismatch. These do not constitute native booted systemd,
+SELinux, independently signed worker or publisher acceptance. The #64
+separately commissioned security review and explicit owner integration
+approval remain mandatory.
