@@ -630,3 +630,23 @@ def test_locked_retired_preview_refuses_multi_resource_pending_marker(owned):
             ).hexdigest(),
         )
     assert pending.read_bytes() == b"interrupted-unpublished-multi-resource"
+
+
+def test_locked_retired_cache_preview_rejects_actual_root_before_state_lock(
+    monkeypatch,
+):
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("cannot acquire lock on the installed host")
+    monkeypatch.setattr(preview, "_locked", forbidden)
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        with pytest.raises(preview.RepositoryCacheCleanupPreviewError,
+                           match="LIVE_ROOT_FORBIDDEN"):
+            preview.preview_locked_retired_repository_cache_cleanup_under_root(
+                fd, root_uid=os.geteuid(), cache_uid=os.geteuid(),
+                cache_gid=os.getegid(), repository_id=RID,
+                expected_state_generation=1,
+                expected_state_sha256="0" * 64,
+            )
+    finally:
+        os.close(fd)
