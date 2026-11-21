@@ -18,6 +18,7 @@ import re
 import stat
 import subprocess
 import sys
+import tempfile
 
 if __name__ == "__main__":
     checkout = Path(__file__).resolve().parents[1]
@@ -25,6 +26,13 @@ if __name__ == "__main__":
 
 from repocache import signatures, upgrade
 from repocache.server_install_v1 import MAX_DOCUMENT_BYTES, parse_install_bytes
+from repocache.server_native_nginx_local_boundary_v1 import inspect_native_nginx_local_boundary
+from repocache.server_native_nginx_ownership_v1 import inspect_fresh_nginx_footprint
+from repocache.server_native_nginx_package_journal_v1 import _retain_native_package_journal_lock_under_root
+from repocache.server_native_package_trust_v1 import _NATIVE, _native_install_commands, _run as _native_run, _trusted_key
+from repocache.server_native_nginx_service_unit_v1 import inspect_native_nginx_unit
+from repocache.server_protected_state_inspect_v1 import _FIXED_STATE_ROOT
+from repocache.server_stock_nginx_package_owner_v1 import inspect_stock_nginx_package_owner, inspect_stock_nginx_package_file_integrity
 from repocache.server_protected_namespace_bootstrap_v1 import bootstrap_protected_namespace_under_root
 from repocache.server_locked_manifest_reconcile_v1 import (
     _validate_proposed_v2_snapshot, preview_proposed_v2_state_transition,
@@ -309,6 +317,181 @@ def install_authenticated_worker(
     return {**receipt, "status": "AUTHENTICATED_WORKER_FILES_PLACED"}
 
 
+# First-install native effects are an explicit operator action, not a
+# socket, generic subprocess or implicit side effect of worker placement.
+_NGINX_MASK = "/etc/systemd/system/nginx.service"
+_SYSTEMCTL = ("/usr/bin/systemctl", "--system", "--no-pager")
+
+
+def _nginx_systemctl(action: str) -> tuple[int, bytes]:
+    """Only the five fixed service-mask / non-activating audit operations."""
+    if action not in ("mask", "unmask", "disable", "is-enabled", "is-active"):
+        _reject("NATIVE_SYSTEMCTL_OPERATION_REFUSED")
+    result = subprocess.run(
+        [*_SYSTEMCTL, action, "nginx.service"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        env={"PATH": "/usr/bin:/bin", "LC_ALL": "C", "LANG": "C"},
+        cwd="/", timeout=20, check=False,
+    )
+    if type(result.stdout) is not bytes or len(result.stdout) > 256:
+        _reject("NATIVE_SYSTEMCTL_RESULT_UNVERIFIED")
+    return result.returncode, result.stdout
+
+
+def _owned_nginx_mask() -> bool:
+    try:
+        info = os.lstat(_NGINX_MASK)
+        return (stat.S_ISLNK(info.st_mode) and info.st_uid == 0
+                and info.st_gid == 0 and info.st_nlink == 1
+                and os.readlink(_NGINX_MASK) == "/dev/null")
+    except FileNotFoundError:
+        return False
+
+
+def _fresh_nginx_under_lock(distribution: str, document: dict, os_release: str) -> None:
+    def ignore_our_state(path: str) -> os.stat_result:
+        if path == _FIXED_STATE_ROOT:
+            raise FileNotFoundError(path)
+        return os.lstat(path)
+
+    observed = inspect_fresh_nginx_footprint(
+        os_release=os_release, python_version=sys.version_info[:2],
+        document=document, lstat=ignore_our_state,
+    )
+    if (observed.distribution != distribution
+            or observed.code != "FRESH_NGINX_FOOTPRINT_NOT_OBSERVED"):
+        _reject("NATIVE_NGINX_FOREIGN_FOOTPRINT")
+
+
+def _native_package_command(command: list[str], work: Path) -> str:
+    output, failure = _native_run(command, work=work, runner=subprocess.run)
+    if failure:
+        _reject("NATIVE_MANAGER_COMMAND_FAILED")
+    return output.strip()
+
+
+def _execute_native_nginx_install_locked(
+    root_fd: int, *, distribution: str, document: dict, os_release: str,
+) -> dict:
+    """Host APT/DNF; one durable marker and lock across signed-source install.
+
+    A failure retains the blocking journal. The persistent systemd mask
+    survives power loss while native package effects may be incomplete.
+    """
+    with _retain_native_package_journal_lock_under_root(
+        root_fd, owner_uid=0, distribution=distribution,
+        allow_native_package_parent_changes=True, expose_audited_completion=True,
+    ) as transaction:
+        if (transaction.get("status") != "NATIVE_PACKAGE_EFFECTS_JOURNAL_DURABLE"
+                or transaction.get("authorizes_package_installation") is not False
+                or "_complete_under_lock" not in transaction):
+            _reject("NATIVE_JOURNAL_UNVERIFIED")
+        _fresh_nginx_under_lock(distribution, document, os_release)
+        if not _trusted_key(_NATIVE[distribution][2]):
+            _reject("NATIVE_TRUST_ANCHOR_UNVERIFIED")
+        if os.path.lexists(_NGINX_MASK):
+            _reject("NATIVE_FOREIGN_SERVICE_MASK")
+        if _nginx_systemctl("mask")[0] != 0 or not _owned_nginx_mask():
+            _reject("NATIVE_SERVICE_MASK_FAILED")
+        try:
+            with tempfile.TemporaryDirectory(prefix="repocache-native-nginx-", dir="/var/tmp") as temp:
+                work = Path(temp)
+                if (work.stat().st_uid != 0
+                        or stat.S_IMODE(work.stat().st_mode) != 0o700):
+                    _reject("NATIVE_WORKSPACE_UNSAFE")
+                refresh, install = _native_install_commands(distribution, work)
+                _native_package_command(refresh, work)
+                _native_package_command(install, work)
+                if distribution == "debian":
+                    status = _native_package_command(
+                        ["/usr/bin/dpkg-query", "-W", "-f=${Status}", "nginx"], work,
+                    )
+                    if status != "install ok installed":
+                        _reject("NATIVE_PACKAGE_STATUS_UNVERIFIED")
+                else:
+                    status = _native_package_command(
+                        ["/usr/bin/rpm", "-q", "--queryformat=%{NAME}", "nginx"], work,
+                    )
+                    if status != "nginx":
+                        _reject("NATIVE_PACKAGE_STATUS_UNVERIFIED")
+                _native_package_command(["/usr/sbin/nginx", "-t", "-q"], work)
+            if (inspect_stock_nginx_package_owner().get("native_package_db_owner_observed") is not True
+                    or inspect_stock_nginx_package_file_integrity().get(
+                        "native_package_file_integrity_verified") is not True):
+                _reject("NATIVE_PACKAGE_INTEGRITY_UNVERIFIED")
+            # Package scripts may enable nginx automatically. Disable it
+            # while masked, BEFORE allowing any later service activation.
+            if _nginx_systemctl("disable")[0] != 0 or not _owned_nginx_mask():
+                _reject("NATIVE_SERVICE_DISABLE_FAILED")
+            if _nginx_systemctl("unmask")[0] != 0 or os.path.lexists(_NGINX_MASK):
+                _reject("NATIVE_SERVICE_UNMASK_FAILED")
+            if (_nginx_systemctl("is-enabled") != (1, b"disabled\n")
+                    or _nginx_systemctl("is-active") != (3, b"inactive\n")):
+                _reject("NATIVE_SERVICE_EXPOSURE_UNVERIFIED")
+            unit = inspect_native_nginx_unit(distribution).to_dict()
+            if unit.get("code") != "VENDOR_NGINX_UNIT_OBSERVED":
+                _reject("NATIVE_VENDOR_UNIT_UNVERIFIED")
+            # The atomic completion primitive independently repeats the
+            # protected-state, package, file and vendor-unit checks.
+            result = transaction["_complete_under_lock"]()
+            if (result.get("native_package_effects_reconciled") is not True
+                    or result.get("authorizes_service_activation") is not False):
+                _reject("NATIVE_COMPLETION_UNVERIFIED")
+            return {
+                "status": "AUTHENTICATED_NATIVE_NGINX_PACKAGE_INSTALLED",
+                "native_package_effects_reconciled": True,
+                "authorizes_service_activation": False,
+                "booted_service_verified": False,
+            }
+        except Exception:
+            # Retain/recreate a fixed fail-closed mask on ambiguous failure.
+            # Never clear the durable pending marker or retry native effects.
+            if not os.path.lexists(_NGINX_MASK):
+                try:
+                    _nginx_systemctl("mask")
+                except (OSError, ValueError, subprocess.SubprocessError):
+                    pass
+            raise
+
+
+def install_authenticated_native_nginx(
+    assets: Path, document: Path, document_sha256: str, *,
+    commit: str, archive_sha256: str,
+) -> dict:
+    """Opt-in first-install from owner-authenticated release; no NGINX start."""
+    distribution = _native_distro()
+    require_native_host_preconditions()
+    stage.verify_installed_worker(
+        assets, commit=commit, archive_sha256=archive_sha256,
+    )
+    if (type(document_sha256) is not str
+            or signatures.HEX64.fullmatch(document_sha256) is None):
+        _reject("NATIVE_DOCUMENT_PIN_INVALID")
+    with ExitStack() as stack:
+        source = os.open(document.parent, stage._DIRECTORY)
+        stack.callback(os.close, source)
+        raw = stage._asset_bytes(source, document.name, MAX_DOCUMENT_BYTES)
+        if hashlib.sha256(raw).hexdigest() != document_sha256:
+            _reject("NATIVE_DOCUMENT_PIN_MISMATCH")
+        parsed = parse_install_bytes(raw)
+        if parsed["expected_state_generation"] != 0:
+            _reject("NATIVE_INITIAL_GENERATION_REQUIRED")
+        os_release = Path("/usr/lib/os-release").read_text(encoding="ascii")
+        boundary = inspect_native_nginx_local_boundary(
+            os_release=os_release, python_version=sys.version_info[:2],
+            document=parsed,
+        )
+        if (boundary.distribution != distribution
+                or boundary.code != "LOCAL_READ_ONLY_SNAPSHOT_OBSERVED"
+                or not _trusted_key(_NATIVE[distribution][2])):
+            _reject("NATIVE_PREPACKAGE_BOUNDARY_UNVERIFIED")
+        root = os.open("/", stage._DIRECTORY)
+        stack.callback(os.close, root)
+        return _execute_native_nginx_install_locked(
+            root, distribution=distribution, document=parsed, os_release=os_release,
+        )
+
+
 _PROPOSAL_STAGE = ".admin-candidate-v2.stage"
 
 
@@ -539,15 +722,19 @@ def main() -> int:
     parser.add_argument("--archive-sha256", required=True)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--stage-v2-proposal", type=Path)
+    mode.add_argument("--install-native-nginx", type=Path)
     mode.add_argument("--prepare-initial-v2-proposal", type=Path)
     mode.add_argument("--prepare-v2-repair", type=Path)
     parser.add_argument("--proposal-sha256")
+    parser.add_argument("--document-sha256")
     parser.add_argument("--proposal-output", type=Path)
     parser.add_argument("--decision-sha256")
     parser.add_argument("--previous-v2-state", type=Path)
     parser.add_argument("--previous-state-sha256")
     parser.add_argument("--expected-state-sha256")
     args = parser.parse_args()
+    if (args.install_native_nginx is None) != (args.document_sha256 is None):
+        parser.error("--install-native-nginx requires --document-sha256")
     if (args.stage_v2_proposal is None) != (args.proposal_sha256 is None):
         parser.error("--stage-v2-proposal and --proposal-sha256 must be supplied together")
     repairing = args.prepare_v2_repair is not None
@@ -566,6 +753,10 @@ def main() -> int:
                 args.proposal_output, decision_sha256=args.decision_sha256,
                 previous=args.previous_v2_state, previous_sha256=args.previous_state_sha256, **pins,
             )
+        elif args.install_native_nginx is not None:
+            result = install_authenticated_native_nginx(
+                args.assets, args.install_native_nginx, args.document_sha256, **pins,
+            )
         elif args.stage_v2_proposal is None:
             result = install_authenticated_worker(args.assets, **pins)
         else:
@@ -578,6 +769,8 @@ def main() -> int:
         refused = "AUTHENTICATED_WORKER_PLACEMENT_REFUSED"
         if preparing or args.stage_v2_proposal is not None:
             refused = "AUTHENTICATED_V2_PROPOSAL_REFUSED"
+        elif args.install_native_nginx is not None:
+            refused = "AUTHENTICATED_NATIVE_NGINX_INSTALL_REFUSED"
         result = {"status": refused}
         status = 1
     else:
