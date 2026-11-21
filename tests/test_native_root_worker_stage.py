@@ -640,3 +640,111 @@ def test_native_package_signature_receipt_must_match_pinned_candidate(
             commit="b" * 40, archive_sha256="c" * 64,
         )
     assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="requires disposable root-owned fixture")
+@pytest.mark.parametrize("distribution", ["debian", "almalinux"])
+def test_synthetic_signed_candidate_enters_exact_native_journal_once(
+    candidate, tmp_path, monkeypatch, distribution,
+):
+    """Signed source -> pinned installed bytes -> parsed intent -> locked journal.
+
+    All host-specific service, package and preflight side effects are mocked;
+    this is NOT a native systemd, real signing-key or publisher acceptance test.
+    """
+    from types import SimpleNamespace
+    from test_server_native_nginx_package_journal_v1 import _synthetic_host_native_package
+    from repocache.server_native_nginx_package_journal_v1 import (
+        NATIVE_PENDING_NAME, NATIVE_COMPLETE_NAME,
+    )
+    archive, digest, commit, detached = candidate
+    system = None if _combined() else {"ID": "debian", "VERSION_ID": "13"}
+    sysroot = tmp_path / "isolated-host"
+    sysroot.mkdir(mode=0o700)
+    source_payloads, _ = stage._authenticated_payloads(
+        archive.parent, commit=commit, archive_sha256=digest, system=system,
+    )
+    for parent, names, mode in (
+        ("usr/libexec/repocache", [stage.WORKER], 0o755),
+        ("etc/systemd/system", stage.UNITS, 0o644),
+    ):
+        folder = sysroot / parent
+        folder.mkdir(parents=True, mode=0o700)
+        for name in names:
+            dest = folder / name
+            dest.write_bytes(source_payloads[name])
+            dest.chmod(mode)
+
+    state = sysroot / "var/lib/repocache/server"
+    state.mkdir(parents=True, mode=0o700)
+    (state / LOCK_NAME).write_bytes(b"")
+    (state / LOCK_NAME).chmod(0o600)
+    install_document = tmp_path / "reviewed-native-install.json"
+    install_document.write_bytes(
+        (json.dumps(document(count=1, generation=0), sort_keys=True, separators=(",", ":")) + "\n").encode()
+    )
+    pinned_document = hashlib.sha256(install_document.read_bytes()).hexdigest()
+    old_execute = install._execute_native_nginx_install_locked
+    real_payloads = stage._authenticated_payloads
+    authenticated = []
+
+    def verify_synthetic_installed_bytes(assets, *, commit, archive_sha256):
+        payloads, receipt = real_payloads(
+            assets, commit=commit, archive_sha256=archive_sha256, system=system,
+        )
+        stage._audit_worker_files(sysroot, payloads)
+        authenticated.append(receipt["manifest_sha256"])
+        return {**receipt, "status": "AUTHENTICATED_WORKER_FILES_MATCH"}
+
+    monkeypatch.setattr(stage, "verify_installed_worker", verify_synthetic_installed_bytes)
+    monkeypatch.setattr(install, "_native_distro", lambda: distribution)
+    monkeypatch.setattr(install, "require_native_host_preconditions", lambda: {})
+    monkeypatch.setattr(
+        install, "inspect_native_nginx_local_boundary",
+        lambda **_kw: SimpleNamespace(
+            distribution=distribution, code="LOCAL_READ_ONLY_SNAPSHOT_OBSERVED",
+        ),
+    )
+    install, effects = _synthetic_host_native_package(monkeypatch, distribution)
+
+    with os.fdopen(os.open(sysroot, os.O_RDONLY | os.O_DIRECTORY), "rb") as fake_root:
+        def isolated_native_effects(_real_host_root, **kwargs):
+            return old_execute(fake_root.fileno(), **kwargs)
+        monkeypatch.setattr(
+            install, "_execute_native_nginx_install_locked", isolated_native_effects,
+        )
+        first = install.install_authenticated_native_nginx(
+            archive.parent, install_document, pinned_document,
+            commit=commit, archive_sha256=digest,
+        )
+        assert first["status"] == "AUTHENTICATED_NATIVE_NGINX_PACKAGE_INSTALLED"
+        assert first["authorizes_service_activation"] is False
+        assert authenticated
+        assert ("INSTALL",) in effects["commands"]
+        assert not (state / NATIVE_PENDING_NAME).exists()
+        receipt = (state / NATIVE_COMPLETE_NAME).read_bytes()
+        actions_before_retry = list(effects["actions"])
+        with pytest.raises(ValueError):
+            install.install_authenticated_native_nginx(
+                archive.parent, install_document, pinned_document,
+                commit=commit, archive_sha256=digest,
+            )
+        assert effects["actions"] == actions_before_retry
+        assert (state / NATIVE_COMPLETE_NAME).read_bytes() == receipt
+
+        # The document, signature and installed root-owned bytes are each
+        # independently rechecked before any further native side effects.
+        install_document.write_bytes(b"tampered")
+        with pytest.raises(ValueError):
+            install.install_authenticated_native_nginx(
+                archive.parent, install_document, pinned_document,
+                commit=commit, archive_sha256=digest,
+            )
+        assert effects["actions"] == actions_before_retry
+        detached.write_bytes(b"invalid synthetic signature")
+        with pytest.raises((signatures.SignatureError, stage.WorkerStageError)):
+            install.install_authenticated_native_nginx(
+                archive.parent, install_document, pinned_document,
+                commit=commit, archive_sha256=digest,
+            )
+        assert (state / NATIVE_COMPLETE_NAME).read_bytes() == receipt
