@@ -437,3 +437,99 @@ def plan_batch_repository_additions(
         "authorizes_catalog_publication": False,
         "authorizes_cache_cleanup": False,
     }
+
+
+class BatchRepositoryUpdateError(ValueError):
+    """A multi-repository config-only update was refused without source data."""
+
+
+def plan_batch_repository_updates(
+    current_document: dict[str, Any], *, current_generation: int,
+    proposed_repositories: tuple[dict[str, Any], ...],
+) -> dict[str, Any]:
+    """Propose up to 64 atomic, identity-preserving repository updates.
+
+    Existing cache identifiers must NEVER be rebound to a different
+    canonical origin/layout in this bounded batch: old cache data and the
+    previous publisher trust context could otherwise be served from the
+    same namespace. A source/layout migration is a separate, authenticated
+    add/retire operation, never an implicit in-place cache adoption.
+
+    This function produces only a validated dry-run document. A real writer
+    must still authenticate current generation/owner under the #31 lock,
+    verify signing references, stage/pin NGINX and reconcile the catalog.
+    """
+    if (type(current_generation) is not int
+            or not 0 <= current_generation <= MAX_INT):
+        raise BatchRepositoryUpdateError("BATCH_UPDATE_GENERATION_INVALID")
+    if (type(proposed_repositories) is not tuple
+            or not 1 <= len(proposed_repositories) <= 64
+            or any(type(item) is not dict for item in proposed_repositories)):
+        raise BatchRepositoryUpdateError("BATCH_UPDATE_SELECTOR_INVALID")
+    try:
+        base = validate_install_document(current_document, for_apply=True)
+    except (ValueError, TypeError, OverflowError, RecursionError):
+        raise BatchRepositoryUpdateError("BATCH_UPDATE_DOCUMENT_INVALID") from None
+    if base["expected_state_generation"] != current_generation:
+        raise BatchRepositoryUpdateError("BATCH_UPDATE_STALE_GENERATION")
+    if any("id" not in row for row in base["repositories"]):
+        raise BatchRepositoryUpdateError("BATCH_UPDATE_UNALLOCATED_ID")
+
+    originals = {row["id"]: row for row in base["repositories"]}
+    selected: set[str] = set()
+    candidate = base
+    outcomes: list[dict[str, str]] = []
+    to_reconcile: set[str] = set()
+    for proposed in proposed_repositories:
+        try:
+            rid = _id(proposed.get("id"))
+            if rid not in originals or rid in selected:
+                raise ValueError("unknown or repeated repository")
+            # Validate one complete proposal in its actual deployment
+            # context *before* computing an identity or making any copy.
+            reviewed = _validated_candidate(base, proposed)
+            if _canonical_identity(reviewed) != _canonical_identity(originals[rid]):
+                raise ValueError("immutable cache source identity")
+            planned = plan_repository_change(
+                candidate, current_generation=current_generation,
+                operation="update", repository_id=rid,
+                proposed_repository=reviewed,
+            )
+            if planned["changed"] and (
+                originals[rid]["desired_state"] == "active"
+                or reviewed["desired_state"] == "active"
+            ):
+                to_reconcile.add(rid)
+            candidate = planned["candidate_document"]
+            selected.add(rid)
+            outcomes.append({
+                "repository_id": rid,
+                "result": "UPDATE_CANDIDATE" if planned["changed"]
+                          else "ALREADY_CURRENT",
+            })
+        except (RepositoryPlanError, ValueError, TypeError, OverflowError,
+                RecursionError):
+            # No partial candidate or per-target contents escape on failure.
+            raise BatchRepositoryUpdateError(
+                "BATCH_UPDATE_REPOSITORY_INVALID"
+            ) from None
+    return {
+        "schema_version": 1,
+        "status": "BATCH_UPDATE_PLAN_ONLY",
+        "expected_state_generation": current_generation,
+        "changed": candidate != base,
+        "per_repository": outcomes,
+        "candidate_document": candidate,
+        "identity_preserved_for_all_updated_repositories": True,
+        "active_route_reconciliation_candidate_ids": sorted(to_reconcile),
+        "authorizes_existing_cache_reuse": False,
+        "operator_authorization_verified": False,
+        "protected_state_generation_verified": False,
+        "upstream_signing_trust_verified": False,
+        "native_nginx_routes_reconciled": False,
+        "active_catalog_reconciled": False,
+        "authorizes_nginx_activation": False,
+        "authorizes_catalog_publication": False,
+        "authorizes_state_write": False,
+        "authorizes_cache_cleanup": False,
+    }
