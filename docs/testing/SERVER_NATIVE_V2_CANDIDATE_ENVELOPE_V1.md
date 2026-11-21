@@ -16,6 +16,18 @@ the current unmerged #31/#64 read contract, rather than adding a second root
 service, a new administrator CLI, an arbitrary command endpoint, or a
 separate route/catalog allowlist.
 
+The companion
+`render_fixed_native_repository_lifecycle_envelope` is the **complete
+functional composition** of the merged protected-v2 repository operation
+builder (#410) and this exact fixed-native envelope serializer. Given
+caller-provided prior canonical v2 bytes, previous SHA-256, expected
+generation, a validated add/update/enable/disable/remove intent and an
+untrusted decision-reference digest, it constructs the full new state-v2
+ledger and encodes the fixed broker intake in a single pure operation.
+This includes automatic IDs from the complete all-time tombstone ledger,
+persistent existing identity checks and explicit no-op outcomes: a no-op
+returns `envelope_bytes=null`, never an unnecessary staging request.
+
 It takes the **caller-supplied** raw canonical previous state-v2 bytes (or
 `None` for clean bootstrap), the raw canonical proposed state-v2 bytes,
 the expected generation and the expected SHA-256 of the previous bytes.
@@ -50,11 +62,12 @@ prints candidate bytes itself.
 
 1. The separately reviewed operator-side lifecycle workflow first reads
    the *actual protected* predecessor under the authenticated lock and
-   computes its exact digest. The #95 reusable v2 builder in **PR #410**
-   may be used to construct the validated next state.
-2. Use this envelope renderer **only as a deterministic serialization
-   helper**, then hand its output to the approved fixed-path, owner-verified
-   staging mechanism. No caller-selected service, executable, environment,
+   computes its exact digest. The #95 reusable v2 builder from **merged
+   PR #410** and this serializer are now joined by
+   `render_fixed_native_repository_lifecycle_envelope`.
+2. Use the combined function **only as deterministic preparation**. A
+   reviewed fixed-path, owner-verified staging mechanism must separately
+   accept the output. No caller-selected service, executable, environment,
    filesystem path, callback or arbitrary native request is added here.
 3. The installed #31/#64 root worker, **independently** of these caller
    inputs, authenticates the operator and its installed code/host, reads
@@ -88,7 +101,11 @@ python -m pytest -q tests/test_server_proposed_state_v2_store.py
 Regression cases check exact ASCII/base64/JSON byte shape, SHA-256 and
 generation binding, clean bootstrap, tombstones across removal, strict
 identity continuity, stale and forged digests, noncanonical or duplicate
-JSON keys, bounded input types and zero OS/network/process effects. The
+JSON keys, bounded input types and zero OS/network/process effects. Additional
+CI cases execute the **real merged #410 builder** through the combined
+operation-to-native-wire pipeline: add with automatic ID, enable, disable,
+update without identity reassignment, remove with permanent tombstone,
+idempotent no-op and stale/malicious intent refusal. The
 source-state generation is not proof of actual installed host readiness.
 
 For the **full native wire compatibility** gate, the accepted and
