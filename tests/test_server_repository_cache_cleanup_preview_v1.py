@@ -17,6 +17,11 @@ from repocache.server_native_repository_cache_v1 import (
 from repocache.server_native_storage_bootstrap_v1 import (
     bootstrap_native_nginx_storage_under_root,
 )
+from repocache.server_fixture_multi_resource_wal_v1 import (
+    MANIFEST as MULTI_MANIFEST,
+    JOURNAL_TMP as MULTI_PENDING_TMP,
+    _commit_fixture_multi_resource_under_root as commit_multi,
+)
 from repocache.server_proposed_state_v2_store import (
     V2_JOURNAL, V2_JOURNAL_TMP, V2_STATE,
     _commit_proposed_v2_under_root as commit_v2,
@@ -523,3 +528,105 @@ def test_locked_retired_cleanup_unsafe_cache_objects_and_lock_contention(
                 owned_with_locked_state, generation=2, digest=digest,
             )
     assert state_file.is_file()
+
+
+def test_locked_retired_preview_accepts_completed_multi_resource_owner(owned):
+    """Join the already-integrated #410 WAL with the real owned cache."""
+    fd, uid, gid, directory, cache_root, root = owned
+    for segment in ("var/lib", "var/lib/repocache", "var/lib/repocache/server"):
+        (root / segment).mkdir(mode=0o700)
+    lock = root / "var/lib/repocache/server" / LOCK_NAME
+    lock.write_bytes(b"")
+    lock.chmod(0o600)
+    state_file = root / "var/lib/repocache/server" / V2_STATE
+    initial = _initial_cache_v2_state()
+    catalog = _canonical_state_bytes({
+        "schema_version": 1,
+        "status": "fixture-only-observed-candidate",
+        "active_ids": [],
+    })
+    first = commit_multi(
+        fd, initial, owner_uid=uid, expected_generation=0,
+        include_bytes=b"# fixed fixture include: generation 1\n",
+        catalog_bytes=catalog,
+    )
+    assert first["state_generation"] == 1
+
+    previous = state_file.read_bytes()
+    plan = plan_repository_v2_transition(
+        initial, expected_generation=1,
+        expected_previous_state_sha256=hashlib.sha256(previous).hexdigest(),
+        operation="remove", repository_id=RID,
+        decision_sha256="b" * 64,
+    )
+    committed = commit_multi(
+        fd, plan["proposed_snapshot"], owner_uid=uid,
+        expected_generation=1,
+        include_bytes=b"# fixed fixture include: generation 2\n",
+        catalog_bytes=catalog,
+    )
+    assert committed["state_generation"] == 2
+
+    cached = directory / "a" / "bc"
+    cached.mkdir(parents=True, mode=0o700)
+    package = cached / DIGEST1
+    package.write_bytes(b"intact-retired-cache")
+    observed = (package.stat().st_ino, package.read_bytes())
+    digest = hashlib.sha256(state_file.read_bytes()).hexdigest()
+    result = preview.preview_locked_retired_repository_cache_cleanup_under_root(
+        fd, root_uid=uid, cache_uid=uid, cache_gid=gid,
+        repository_id=RID, expected_state_generation=2,
+        expected_state_sha256=digest,
+    )
+    assert result["status"] == "LOCKED_RETIRED_CACHE_PREVIEW_ONLY"
+    assert result["cache_files_observed"] == 1
+    assert result["state_lock_held_during_inspection"] is True
+    assert result["authorizes_cache_cleanup"] is False
+    assert (package.stat().st_ino, package.read_bytes()) == observed
+
+    # A tampered committed multi-resource manifest must not be mistaken for
+    # a clean state-only fixture. The cache and report stay inert.
+    marker = state_file.with_name(MULTI_MANIFEST)
+    marker.write_bytes(b"tampered")
+    with pytest.raises(preview.RepositoryCacheCleanupPreviewError,
+                       match="LOCKED_PROTECTED_UNVERIFIED"):
+        preview.preview_locked_retired_repository_cache_cleanup_under_root(
+            fd, root_uid=uid, cache_uid=uid, cache_gid=gid,
+            repository_id=RID, expected_state_generation=2,
+            expected_state_sha256=digest,
+        )
+    assert (package.stat().st_ino, package.read_bytes()) == observed
+
+
+def test_locked_retired_preview_refuses_multi_resource_pending_marker(owned):
+    fd, uid, gid, directory, cache_root, root = owned
+    for segment in ("var/lib", "var/lib/repocache", "var/lib/repocache/server"):
+        (root / segment).mkdir(mode=0o700)
+    lock = root / "var/lib/repocache/server" / LOCK_NAME
+    lock.write_bytes(b"")
+    lock.chmod(0o600)
+    initial = _initial_cache_v2_state()
+    catalog = _canonical_state_bytes({
+        "schema_version": 1,
+        "status": "fixture-only-observed-candidate",
+        "active_ids": [],
+    })
+    commit_multi(
+        fd, initial, owner_uid=uid, expected_generation=0,
+        include_bytes=b"# fixed fixture include\n",
+        catalog_bytes=catalog,
+    )
+    state_file = root / "var/lib/repocache/server" / V2_STATE
+    pending = state_file.with_name(MULTI_PENDING_TMP)
+    pending.write_bytes(b"interrupted-unpublished-multi-resource")
+    pending.chmod(0o600)
+    with pytest.raises(preview.RepositoryCacheCleanupPreviewError,
+                       match="LOCKED_PROTECTED_UNVERIFIED"):
+        preview.preview_locked_retired_repository_cache_cleanup_under_root(
+            fd, root_uid=uid, cache_uid=uid, cache_gid=gid,
+            repository_id=RID, expected_state_generation=1,
+            expected_state_sha256=hashlib.sha256(
+                state_file.read_bytes()
+            ).hexdigest(),
+        )
+    assert pending.read_bytes() == b"interrupted-unpublished-multi-resource"
