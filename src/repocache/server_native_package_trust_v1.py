@@ -220,12 +220,12 @@ def _native_install_commands(distribution: str, work: Path) -> tuple[list[str], 
     """Build the fixed host-install command pair using signed OS profiles.
 
     Debian uses the same freshly authenticated APT lists and trusted sources
-    as the download-only stage, but must use the *container* dpkg status file
-    rather than the deliberately empty download rehearsal status database.
+    as the download-only stage, but must use the current host dpkg status file
+    rather than the deliberately empty metadata-probe status database.
 
     AlmaLinux uses the identical signed DNF4 official repo configuration and
     disables all other repositories/plugins, but intentionally drops only
-    --installroot: this disposable Docker image itself is the install target.
+    --installroot: the already-verified current root is the install target.
     """
     if distribution == "debian":
         update, _ = _apt_commands(work)

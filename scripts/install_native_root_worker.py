@@ -370,8 +370,17 @@ def _native_package_command(command: list[str], work: Path) -> str:
     return output.strip()
 
 
+def _native_workspace_is_root_owned(work: Path) -> bool:
+    """Reject shared or user-controlled APT/DNF override files on a real host."""
+    info = work.stat()
+    return (info.st_uid == 0 and info.st_gid == 0
+            and stat.S_IMODE(info.st_mode) == 0o700
+            and stat.S_ISDIR(info.st_mode))
+
+
 def _execute_native_nginx_install_locked(
     root_fd: int, *, distribution: str, document: dict, os_release: str,
+    owner_uid: int = 0,
 ) -> dict:
     """Host APT/DNF; one durable marker and lock across signed-source install.
 
@@ -379,7 +388,7 @@ def _execute_native_nginx_install_locked(
     survives power loss while native package effects may be incomplete.
     """
     with _retain_native_package_journal_lock_under_root(
-        root_fd, owner_uid=0, distribution=distribution,
+        root_fd, owner_uid=owner_uid, distribution=distribution,
         allow_native_package_parent_changes=True, expose_audited_completion=True,
     ) as transaction:
         if (transaction.get("status") != "NATIVE_PACKAGE_EFFECTS_JOURNAL_DURABLE"
@@ -396,8 +405,7 @@ def _execute_native_nginx_install_locked(
         try:
             with tempfile.TemporaryDirectory(prefix="repocache-native-nginx-", dir="/var/tmp") as temp:
                 work = Path(temp)
-                if (work.stat().st_uid != 0
-                        or stat.S_IMODE(work.stat().st_mode) != 0o700):
+                if not _native_workspace_is_root_owned(work):
                     _reject("NATIVE_WORKSPACE_UNSAFE")
                 refresh, install = _native_install_commands(distribution, work)
                 _native_package_command(refresh, work)
