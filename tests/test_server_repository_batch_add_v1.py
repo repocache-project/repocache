@@ -153,7 +153,9 @@ def test_missing_reservations_and_partial_allocated_snapshot_fail_closed():
         plan(source, (explicit(source),), reserved=set())
     raw = json.loads(EXAMPLE.read_text(encoding="utf-8"))
     with pytest.raises(BatchRepositoryAddError, match="UNALLOCATED_ID"):
-        plan(raw, (explicit(source),))
+        # Provide the reservation snapshot explicitly: the test helper
+        # cannot derive IDs from an intentionally unallocated raw document.
+        plan(raw, (explicit(source),), reserved={"debian-trixie-main"})
 
 
 def test_unknown_generation_is_not_an_id_allocation_authorization():
