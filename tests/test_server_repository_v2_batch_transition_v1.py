@@ -90,7 +90,9 @@ def proposals():
     apt["upstream"]["base_url"] = "https://auto-apt.example.invalid/debian/"
     apt["upstream"]["allowed_hosts"] = ["auto-apt.example.invalid"]
     dnf = copy.deepcopy(original["repositories"][1])
-    dnf.pop("id")
+    # The canonical install-v1 sample already leaves the DNF ID for
+    # automatic allocation; an absent optional field is expected.
+    dnf.pop("id", None)
     dnf["upstream"]["base_url"] = (
         "https://auto-dnf.example.invalid/almalinux/10/BaseOS/x86_64/os/"
     )
