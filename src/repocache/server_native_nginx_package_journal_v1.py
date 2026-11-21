@@ -119,13 +119,14 @@ def _prepare_native_journal_under_lock(
     worker_marker = re.compile(
         r"\.native-worker-placement\.complete-[0-9a-f]{64}\Z", re.ASCII,
     )
+    owner_gid = os.fstat(directory).st_gid
     for entry in os.listdir(directory):
         if entry == LOCK_NAME:
             continue
         if worker_marker.fullmatch(entry) is not None:
             info = os.stat(entry, dir_fd=directory, follow_symlinks=False)
             if (stat.S_ISREG(info.st_mode) and info.st_uid == owner_uid
-                    and info.st_gid == 0 and info.st_nlink == 1
+                    and info.st_gid == owner_gid and info.st_nlink == 1
                     and stat.S_IMODE(info.st_mode) == 0o600 and info.st_size == 0):
                 continue
         _deny("NATIVE_FOREIGN_PROTECTED_STATE")
