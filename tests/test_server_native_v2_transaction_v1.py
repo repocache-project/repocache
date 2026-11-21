@@ -74,10 +74,10 @@ def filesystem(tmp_path, monkeypatch):
     # Derive the private fixture NGINX -T view from the actual restored
     # include, not from a no-op validator that could hide foreign drift.
     def fixture_nginx_dump():
-        result = b"# configuration file /etc/nginx/nginx.conf:\\nhttp {}\\n"
+        result = b"# configuration file /etc/nginx/nginx.conf:\nhttp {}\n"
         if include.exists():
             result += (b"# configuration file /etc/nginx/conf.d/"
-                       b"repocache-managed.conf:\\n" + include.read_bytes() + b"\\n")
+                       b"repocache-managed.conf:\n" + include.read_bytes() + b"\n")
         return result
 
     monkeypatch.setattr(native, "_capture_default_nginx_dump_private",
