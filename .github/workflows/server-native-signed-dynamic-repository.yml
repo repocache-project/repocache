@@ -1,4 +1,4 @@
-name: Native signed metadata over configuration-only NGINX repositories
+name: Native signed metadata and route withdrawal over config-only repositories
 
 on:
   pull_request:
@@ -30,7 +30,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Verify native signed APT/DNF metadata and artifact over a new generated route
+      - name: Verify signed native APT/DNF cache and withdrawal/recovery on generated route
         shell: bash
         run: |
           set -Eeuo pipefail
