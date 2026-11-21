@@ -127,6 +127,125 @@ def main() -> None:
             raise AssertionError("FOREIGN_TLS_SNI_SERVER_CONTEXT_ACCEPTED")
         print("PASS: route-only text cannot bypass strict HTTPS/SNI binding",
               flush=True)
+        # Actual stock nginx -T, not only a hand-written parser string:
+        # one active route, then only APT after disabling DNF, then complete
+        # removal of the DNF definition, then recovery of the initial pair.
+        # Every prospective catalog remains inert until a separately trusted
+        # live generation / HTTPS exposure is authenticated under the lock.
+        original_upstreams = complete["http_context_fragment"]
+        original_server = complete["server_block_fragment"]
+        assert config.count(original_upstreams) == 1
+        assert config.count(original_server) == 1
+        for phase in ("disabled", "removed", "restored"):
+            proposed = copy.deepcopy(original)
+            if phase != "restored":
+                if phase == "disabled":
+                    for repo in proposed["repositories"]:
+                        if repo["id"] == "almalinux-baseos":
+                            repo["desired_state"] = "disabled"
+                else:
+                    proposed["repositories"] = [
+                        repo for repo in proposed["repositories"]
+                        if repo["id"] != "almalinux-baseos"
+                    ]
+            desired = {
+                row["id"]: {"mirror.example.invalid": ["8.8.8.8"]}
+                for row in proposed["repositories"]
+                if row["desired_state"] == "active"
+            }
+            candidate = render_repository_https_server_candidate(
+                proposed, expected_state_generation=0,
+                candidate_pins_by_repository=desired, ca_bundle_path=str(cert),
+            )
+            assert candidate["authorizes_nginx_activation"] is False
+            assert candidate["authorizes_catalog_publication"] is False
+            assert candidate["authorizes_firewall_change"] is False
+            generated = config.replace(
+                original_upstreams, candidate["http_context_fragment"], 1,
+            ).replace(
+                original_server, candidate["server_block_fragment"], 1,
+            )
+            assert generated != "" and "proxy_pass http://" not in generated
+            candidate_conf = prefix / ("catalog-" + phase + ".conf")
+            candidate_conf.write_text(generated, encoding="ascii")
+            observed = subprocess.run(
+                [nginx, "-T", "-p", str(prefix), "-c", str(candidate_conf)],
+                capture_output=True, text=True, check=False, timeout=20,
+            )
+            assert observed.returncode == 0, (
+                "STOCK_NGINX_" + phase.upper() + "_CONFIG_REFUSED"
+            )
+            projection = preview_derived_https_catalog_from_nginx_dump(
+                proposed, candidate_pins_by_repository=desired,
+                ca_bundle_path=str(cert), nginx_dump_text=observed.stdout,
+                nginx_t_exit_code=observed.returncode,
+            )
+            expected_ids = (
+                ["almalinux-baseos", "debian-trixie-main"]
+                if phase == "restored" else ["debian-trixie-main"]
+            )
+            assert projection["desired_active_repository_ids"] == expected_ids
+            assert len(projection["candidate_catalog"]["repositories"]) == len(expected_ids)
+            assert projection["authorizes_nginx_activation"] is False
+            assert projection["authorizes_catalog_publication"] is False
+            assert projection["real_tls_handshake_verified"] is False
+
+            if phase == "disabled":
+                # The previous two-route nginx -T output is not admissible
+                # for a new one-route desired state, even though it passed
+                # nginx -T under its own historical configuration.
+                try:
+                    preview_derived_https_catalog_from_nginx_dump(
+                        proposed, candidate_pins_by_repository=desired,
+                        ca_bundle_path=str(cert),
+                        nginx_dump_text=check.stdout, nginx_t_exit_code=0,
+                    )
+                except DerivedCatalogCandidateError:
+                    pass
+                else:
+                    raise AssertionError("STALE_ACTIVE_DNF_CATALOG_ACCEPTED")
+                # This is a REAL parsed NGINX config with a rogue retired
+                # route rather than an invented text dump. Even a complete
+                # exact TLS server candidate must refuse it as unapproved
+                # route exposure before the catalog is considered publishable.
+                final = candidate["server_block_fragment"]
+                assert final.endswith("}\n")
+                rogue = (
+                    final[:-2]
+                    + "location ^~ /__repocache/repos/almalinux-baseos/ {\n"
+                    + "    return 204;\n"
+                    + "}\n"
+                    + "}\n"
+                )
+                rogue_content = generated.replace(final, rogue, 1)
+                assert rogue_content != generated
+                rogue_conf = prefix / "catalog-foreign-route.conf"
+                rogue_conf.write_text(rogue_content, encoding="ascii")
+                foreign = subprocess.run(
+                    [nginx, "-T", "-p", str(prefix), "-c", str(rogue_conf)],
+                    capture_output=True, text=True, check=False, timeout=20,
+                )
+                assert foreign.returncode == 0, (
+                    "STOCK_NGINX_FOREIGN_ROUTE_SYNTAX_NOT_ACCEPTED"
+                )
+                try:
+                    preview_derived_https_catalog_from_nginx_dump(
+                        proposed, candidate_pins_by_repository=desired,
+                        ca_bundle_path=str(cert),
+                        nginx_dump_text=foreign.stdout,
+                        nginx_t_exit_code=foreign.returncode,
+                    )
+                except DerivedCatalogCandidateError:
+                    pass
+                else:
+                    raise AssertionError("PARSABLE_FOREIGN_DNF_ROUTE_CATALOG_ACCEPTED")
+        print(
+            "PASS: actual distro nginx -T accepts active, disabled, removed "
+            "and restored TLS route candidates, refuses stale and parsable "
+            "foreign DNF routes for active-only derived catalog",
+            flush=True,
+        )
+
         print("NOT VERIFIED: installed NGINX/TLS trust, authorized activation, "
               "current live exposure or catalog publication", flush=True)
 
