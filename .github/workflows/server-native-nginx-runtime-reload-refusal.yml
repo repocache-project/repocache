@@ -36,7 +36,7 @@ jobs:
             apt-get update -qq
             apt-get install -y -qq --no-install-recommends nginx python3 util-linux ca-certificates
           else
-            dnf -y -q --enablerepo=crb install nginx python3 util-linux
+            dnf -y -q --enablerepo=crb install nginx python3 util-linux ca-certificates
           fi
           test -x /usr/sbin/nginx
           test -x /usr/bin/setpriv
