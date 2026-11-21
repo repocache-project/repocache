@@ -256,7 +256,9 @@ installs a root broker or claims booted native systemd/SELinux.
 The fixed native root-worker `APPLY_V2` and `RELOAD_V2` paths
 fail closed *before* NGINX/state/catalog mutations without the canonical
 root-owned native package completion receipt. They also repeat the
-distro's current NGINX installed-file integrity check. Any pending
+distro's current NGINX installed-file integrity check and require the
+current fixed vendor `nginx.service` digest to match the durable audited
+package-install receipt. Any pending
 APT/DNF effects, missing/corrupt/mismatching receipt, foreign package
 state or changed operational bytes refuses activation. `RECOVER_V2`
 retains its independent WAL compensation path so a missing audit receipt

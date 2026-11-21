@@ -42,6 +42,9 @@ from repocache.server_native_nginx_effective_unit_v1 import (
 from repocache.server_native_nginx_package_journal_v1 import (
     _read_completed_native_install_under_lock, NativePackageJournalError,
 )
+from repocache.server_native_nginx_service_unit_v1 import (
+    inspect_native_nginx_unit, NginxServiceUnitInspectionError,
+)
 from repocache.server_stock_nginx_package_owner_v1 import (
     inspect_stock_nginx_package_file_integrity, StockNginxPackageOwnerError,
 )
@@ -1035,10 +1038,21 @@ def _require_audited_native_package_for_activation(
                 or integrity.get("authorizes_native_marker_removal") is not False
                 or integrity.get("authorizes_nginx_activation") is not False):
             _deny("NATIVE_PACKAGE_INTEGRITY_CHANGED")
+        # Compare the current fixed vendor unit with the exact audited
+        # package-install receipt. File integrity alone is insufficient:
+        # a foreign or replaced unit must not inherit old completion.
+        unit = inspect_native_nginx_unit(distribution).to_dict()
+        if (unit.get("code") != "VENDOR_NGINX_UNIT_OBSERVED"
+                or unit.get("unit_name") != "nginx.service"
+                or unit.get("vendor_unit_bounded_and_owned") is not True
+                or unit.get("vendor_unit_sha256") != receipt["vendor_unit_sha256"]
+                or unit.get("authorizes_systemctl") is not False
+                or unit.get("authorizes_nginx_reload") is not False):
+            _deny("NATIVE_PACKAGE_UNIT_CHANGED")
     except NativeV2TransactionError:
         raise
     except (NativePackageJournalError, StockNginxPackageOwnerError,
-            OSError, TypeError, ValueError):
+            NginxServiceUnitInspectionError, OSError, TypeError, ValueError):
         _deny("NATIVE_PACKAGE_PROVENANCE_UNVERIFIED")
 
 

@@ -201,6 +201,67 @@ def test_native_host_operation_refuses_stale_package_integrity_before_effects(
     assert not include.exists() and not catalog.exists() and not events
 
 
+@pytest.mark.parametrize("operation", ["APPLY_V2", "RELOAD_V2"])
+@pytest.mark.parametrize("unit_case", ["changed", "foreign", "matching"])
+def test_native_host_package_receipt_pins_current_vendor_unit(
+    filesystem, monkeypatch, operation, unit_case,
+):
+    from repocache.server_native_nginx_package_journal_v1 import NATIVE_COMPLETE_NAME
+    _fd, state, include, catalog, events = filesystem
+    receipt = {
+        "schema_version": 1,
+        "status": "NATIVE_PACKAGE_EFFECTS_COMPLETED_AFTER_LOCKED_INSTALL",
+        "distribution": "debian", "manager": "apt",
+        "pending_sha256": "a" * 64, "vendor_unit_sha256": "b" * 64,
+        "native_package_file_integrity_verified": True,
+        "publisher_artifact_verified": False, "booted_native_service_verified": False,
+    }
+    candidate = state / NATIVE_COMPLETE_NAME
+    candidate.write_bytes(_canon(receipt))
+    candidate.chmod(0o600)
+    monkeypatch.setattr(native, "inspect_stock_nginx_package_file_integrity",
+        lambda: {
+            "status": "READ_ONLY_STOCK_NGINX_PACKAGE_FILE_INTEGRITY_OBSERVED",
+            "platform": "debian13",
+            "native_package_file_integrity_verified": True,
+            "native_package_signature_verified": False,
+            "authorizes_native_marker_removal": False,
+            "authorizes_nginx_activation": False,
+        },
+    )
+    from types import SimpleNamespace
+    monkeypatch.setattr(native, "inspect_native_nginx_unit",
+        lambda distribution: SimpleNamespace(to_dict=lambda: {
+            "code": ("VENDOR_NGINX_SHADOW_REFUSED" if unit_case == "foreign"
+                     else "VENDOR_NGINX_UNIT_OBSERVED"),
+            "unit_name": "nginx.service",
+            "vendor_unit_sha256": "c" * 64 if unit_case == "changed" else "b" * 64,
+            "vendor_unit_bounded_and_owned": unit_case != "foreign",
+            "authorizes_systemctl": False, "authorizes_nginx_reload": False,
+        }),
+    )
+    called = []
+    def reached(*_args, **_kwargs):
+        called.append(operation)
+        return {"status": "REACHED_AFTER_AUDIT"}
+    monkeypatch.setattr(native, "_apply_locked", reached)
+    monkeypatch.setattr(native, "_reload_owned_locked", reached)
+    if unit_case == "matching":
+        assert native._operation_under_root(
+            filesystem[0], distribution="debian", operation=operation, fixture=False,
+        )["status"] == "REACHED_AFTER_AUDIT"
+        assert called == [operation]
+    else:
+        with pytest.raises(native.NativeV2TransactionError,
+                           match="NATIVE_PACKAGE_UNIT_CHANGED"):
+            native._operation_under_root(
+                filesystem[0], distribution="debian", operation=operation, fixture=False,
+            )
+        assert not called
+    assert candidate.read_bytes() == _canon(receipt)
+    assert not include.exists() and not catalog.exists() and not events
+
+
 @pytest.mark.parametrize("uid,groups,denial", [
     (65532, [49999], None),
     (65534, [49999], "SERVICE_IDENTITY_DENIED"),
