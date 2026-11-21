@@ -633,9 +633,11 @@ def _route_dump_check(document: dict, include: bytes, catalog: bytes,
     """Private fixed native -T must match exact staged bytes and catalog."""
     try:
         dump = _capture_default_nginx_dump_private()
+        # A matching byte substring in another file or comment does not
+        # prove the *fixed managed include* is actually loaded. Require the
+        # unique, exact -T section before deriving the public catalog.
+        _verify_owned_include_in_dump(include, captured_dump=dump)
         text = dump.decode("utf-8", "strict")
-        if include.decode("utf-8") not in text:
-            _deny("NGINX_DUMP_MISMATCH")
         preview = preview_derived_catalog_from_nginx_dump(
             document, candidate_pins_by_repository=pins,
             ca_bundle_path=_CA[distribution], nginx_dump_text=text,
@@ -656,9 +658,18 @@ def _native_syntax_check() -> None:
         _deny("SYNTAX_UNVERIFIED")
 
 
-def _verify_owned_include_in_dump(include: bytes) -> None:
+def _verify_owned_include_in_dump(
+    include: bytes, *, captured_dump: bytes | None = None,
+) -> None:
+    """Require exactly one full fixed managed-file section in the native -T.
+
+    Apply and explicit reload share this stricter identity check. Reuse the
+    *same* captured dump for apply so catalog parsing cannot depend on a
+    different NGINX configuration observation.
+    """
     header = b"/etc/nginx/conf.d/repocache-managed.conf:\n"
-    dump = _capture_default_nginx_dump_private()
+    dump = (_capture_default_nginx_dump_private()
+            if captured_dump is None else captured_dump)
     sections = re.split(rb"(?m)^# configuration file ", dump)[1:]
     managed = [section[len(header):] for section in sections if section.startswith(header)]
     if len(managed) != 1 or managed[0] not in (include, include + b"\n"):
