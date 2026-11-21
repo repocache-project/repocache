@@ -253,3 +253,26 @@ contains upstream URLs, signing/trust references, credentials or cache paths.
 A preview neither reserves an ID nor authenticates approval, proves deployed
 NGINX exposure or authorizes the #237 signed native stager. The original
 native lock/CAS, trust, systemd/SELinux and publication gates remain mandatory.
+
+
+## Exact prepared state → protected transaction fixture
+
+The Stage-A fixture function `commit_fixture_prepared_repository_proposal_under_root`
+now consumes **the unchanged canonical v2 bytes** emitted by the offline
+`prepare_server_repository_lifecycle.py` operator tool rather than
+recomputing the repository change from its request. It independently checks
+the pinned predecessor generation/SHA-256 against the actual descriptor-locked
+protected v2 ledger and owner manifest, matches the prepared SHA-256 and
+decision reference, refuses unrelated deployment policy edits and verifies
+the exact fixed native #31/#64 candidate envelope. It derives the matching
+NGINX fragment and active-only *fixture* catalog, then delegates to the
+existing durable four-resource WAL, which repeats predecessor CAS on a
+second lock and preserves the old catalog until the simulated exposure barrier.
+
+Executed subprocess tests cover exact offline output-byte persistence,
+remaining tombstones, default cache retention, stale/corrupt proposals,
+partial activation refusal and durable rollback. This is a **detached-root
+fixture only**, not an installed signed root/NGINX worker: the real `/` is
+forbidden; a callback cannot prove NGINX exposure, transfer drain or SELinux.
+The original #95 native service, real signed provenance and VM gates remain
+mandatory and NOT VERIFIED by fixture CI.
