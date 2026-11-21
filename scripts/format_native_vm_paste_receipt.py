@@ -21,12 +21,19 @@ _CODES = frozenset((
 ))
 _NATIVE_CODES = frozenset((
     "NATIVE_OBSERVATION_NOT_EXECUTED", "SUPPORTED_OS_NOT_OBSERVED",
+    "UNSUPPORTED_NATIVE_ARCHITECTURE",
     "ROOT_READ_ONLY_PROBE_REQUIRED", "CONTAINER_CONTEXT_REFUSED",
     "SYSTEMD_PID1_NOT_OBSERVED",
     "SYSTEMD_NAMESPACE_OR_RUNTIME_NOT_OBSERVED",
     "ALMALINUX_SELINUX_ENFORCING_NOT_OBSERVED",
     "EFFECTIVE_NGINX_NOT_OBSERVED", "OBSERVATION_ONLY_NO_HOST_AUTHORITY",
 ))
+_IDENTITY_INPUT_REFUSED = "CANDIDATE_IDENTITY_INPUT_REFUSED"
+_NO_AUTHORITY = {
+    "complete_server_acceptance_passed": False,
+    "authorizes_host_write": False,
+    "authorizes_publication": False,
+}
 
 
 def _unique(pairs: list[tuple[str, object]]) -> dict:
@@ -49,6 +56,18 @@ def _receipt(data: bytes) -> dict:
         raise ValueError("invalid receipt JSON") from exc
     if type(item) is not dict or type(item.get("schema_version")) is not int or item["schema_version"] != 1:
         raise ValueError("invalid receipt shape")
+    if item.get("code") == _IDENTITY_INPUT_REFUSED:
+        # The collector has no valid identity to include in this outcome.
+        if (set(item) != {"schema_version", "status", "code", *_NO_AUTHORITY}
+                or item["status"] != "FAIL"
+                or any(item[key] is not False for key in _NO_AUTHORITY)):
+            raise ValueError("invalid identity refusal")
+        return {
+            "kind": "repocache.native.candidate.paste.v1",
+            "status": "FAIL",
+            "code": _IDENTITY_INPUT_REFUSED,
+            **_NO_AUTHORITY,
+        }
     sha, expected, observed = (item.get("source_commit_sha"),
                                item.get("expected_artifact_sha256"),
                                item.get("observed_artifact_sha256"))
@@ -135,9 +154,7 @@ def _receipt(data: bytes) -> dict:
         "native_probe_code": native_code,
         "native_selinux_enforcing_reported": enforcing,
         "native_prerequisites_reported_only": native,
-        "complete_server_acceptance_passed": False,
-        "authorizes_host_write": False,
-        "authorizes_publication": False,
+        **_NO_AUTHORITY,
     }
 
 
@@ -150,9 +167,7 @@ def main() -> int:
             "kind": "repocache.native.candidate.paste.v1",
             "status": "NOT VERIFIED",
             "code": "INPUT_REFUSED",
-            "complete_server_acceptance_passed": False,
-            "authorizes_host_write": False,
-            "authorizes_publication": False,
+            **_NO_AUTHORITY,
         }
     print("REPOCACHE_VM_EVIDENCE_V1=" +
           json.dumps(result, sort_keys=True, separators=(",", ":")))

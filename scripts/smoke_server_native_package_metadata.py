@@ -12,6 +12,114 @@ import sys
 
 from repocache.server_native_nginx_ownership_v1 import prepare_fresh_native_nginx
 from repocache.server_native_package_payload_v1 import rehearse_native_nginx_downloads
+from repocache.server_native_package_trust_v1 import inspect_native_nginx_metadata
+
+
+class NegativeMetadataRunner:
+    """Inject a bounded scratch-only fault, retaining real native commands.
+
+    The absent-package case queries a fixed nonexistent test name after a real
+    authenticated refresh. The bad-key case replaces only the generated scratch
+    source's key reference, never the OS trust anchor or host configuration.
+    Neither case installs packages or starts services.
+    """
+
+    def __init__(self, distribution: str, fault: str):
+        if distribution not in ("debian", "almalinux") or fault not in (
+            "absent_package", "bad_metadata_key",
+        ):
+            raise ValueError("invalid native metadata fault")
+        self.distribution = distribution
+        self.fault = fault
+        self.stages: list[str] = []
+        self.signature_refused = False
+
+    def __call__(self, args, **kwargs):
+        command = list(args)
+        stage = redacted_native_stage(command)
+        update = ("apt_metadata" if self.distribution == "debian"
+                  else "dnf_metadata")
+        query = ("apt_candidate" if self.distribution == "debian"
+                 else "dnf_candidate")
+        if stage == update and not self.stages:
+            if self.fault == "bad_metadata_key":
+                work = Path(kwargs["cwd"])
+                source = (work / "sources.list" if self.distribution == "debian"
+                          else work / "repos/repocache.repo")
+                original = ("/usr/share/keyrings/debian-archive-keyring.pgp"
+                            if self.distribution == "debian"
+                            else "file:///etc/pki/rpm-gpg/RPM-GPG-KEY-AlmaLinux-10")
+                text = source.read_text(encoding="ascii")
+                expected = 3 if self.distribution == "debian" else 2
+                if text.count(original) != expected:
+                    raise ValueError("unexpected generated native source")
+                key = work / "invalid-test-signing-key"
+                key.write_text("Not an OpenPGP public key.\n", encoding="ascii")
+                replacement = (str(key) if self.distribution == "debian"
+                               else key.as_uri())
+                source.write_text(text.replace(original, replacement), encoding="ascii")
+        elif (stage == query and self.stages == [update]
+              and self.fault == "absent_package" and command[-1] == "nginx"):
+            command[-1] = "repocache-acceptance-absent-package-7e941a"
+        else:
+            raise ValueError("unexpected native metadata fault command")
+        self.stages.append(stage)
+        process = subprocess.run(command, **kwargs)
+        if self.fault == "bad_metadata_key":
+            combined = (process.stdout + process.stderr).casefold()
+            # A network/TLS/option failure is not signature-refusal evidence.
+            network_error = any(value in combined for value in (
+                "could not resolve", "could not connect", "ssl certificate",
+                "certificate verify failed", "ssl connection", "curl error",
+                "unknown option",
+                "unrecognized argument", "connection timed out",
+            ))
+            self.signature_refused = bool(process.returncode and not network_error
+                and any(value in combined for value in (
+                    "no_pubkey", "not signed", "gpg error", "gpgkey",
+                    "openpgp", "public key", "gpg signature", "gpg key",
+                    "gpg check failed",
+                    # librepo's GPGME and RPM key-import backends use these
+                    # fixed diagnostics when the test key cannot be parsed.
+                    "gpgme_op_import() error:", "compute cert len failed",
+                )))
+        return process
+
+
+def verify_negative_metadata(release: str, version: tuple[int, int],
+                             document: dict, distribution: str) -> None:
+    """Prove native missing-candidate and trust failures reach safe diagnostics."""
+    for fault, expected in (("absent_package", "NATIVE_PACKAGE_NOT_AVAILABLE"),
+                            ("bad_metadata_key", "NATIVE_MANAGER_FAILED")):
+        runner = NegativeMetadataRunner(distribution, fault)
+        report = inspect_native_nginx_metadata(
+            os_release=release, python_version=version,
+            document=document, runner=runner,
+        ).to_dict()
+        expected_stages = (["apt_metadata", "apt_candidate"]
+                           if distribution == "debian"
+                           else ["dnf_metadata", "dnf_candidate"])
+        if fault == "bad_metadata_key":
+            expected_stages = expected_stages[:1]
+        if (report["code"] != expected or not report["guidance"]
+                or report["candidate_available"]
+                or report["authorizes_installation"] or report["can_install"]
+                or report["payload_signature_verified"]
+                or report["metadata_signed"] != (fault == "absent_package")
+                or runner.stages != expected_stages
+                or (fault == "bad_metadata_key" and not runner.signature_refused)):
+            # Only fixed report fields and code-owned labels. Native output
+            # stays captured even when diagnosing a new distro response.
+            raise ValueError("native negative metadata acceptance failed: " + json.dumps({
+                "fault": fault, "code": report["code"],
+                "metadata_signed": report["metadata_signed"],
+                "candidate_available": report["candidate_available"],
+                "stages": runner.stages, "signature_refused": runner.signature_refused,
+            }, sort_keys=True))
+        print(json.dumps({"ci_native_negative_metadata": fault,
+                          "distribution": distribution,
+                          "code": expected, "passed": True,
+                          "authorizes_installation": False}, sort_keys=True))
 
 
 
@@ -130,8 +238,13 @@ def main() -> int:
     assert payload["can_install"] is False
     if payload["code"] != "NATIVE_PAYLOADS_VERIFIED_IN_SCRATCH":
         return 1
+    verify_negative_metadata(
+        release, (sys.version_info.major, sys.version_info.minor),
+        document, report["footprint"]["distribution"],
+    )
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

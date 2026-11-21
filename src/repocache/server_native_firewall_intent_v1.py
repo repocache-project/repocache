@@ -62,10 +62,13 @@ def preview_native_firewall_intent(
              "multicast" if address.is_multicast else
              "link_local" if address.is_link_local else
              "specific")
-    # A mere operator setting is only *request intent*. If port exposure is
-    # intentionally requested, an actual backend/host authorization stage
-    # remains mandatory, including for loopback listeners and IPv6.
-    change = requested and scope != "loopback"
+    # There are two independent decisions: requesting a firewall rule and
+    # approving NGINX listener exposure. Opting out of firewall changes must
+    # NEVER be interpreted as an authenticated deny-by-default policy: an
+    # already-open host firewall can expose a wildcard/specific listener.
+    # This report cannot authorize either operation or inspect host policy.
+    external_listener = scope != "loopback"
+    change = requested and external_listener
     return {
         "schema_version": 1,
         "status": ("FIREWALL_REVIEW_ONLY" if change else
@@ -77,6 +80,10 @@ def preview_native_firewall_intent(
         "address_family": "ipv4" if address.version == 4 else "ipv6",
         "exposure_scope": scope,
         "firewall_change_review_required": change,
+        # Independent of firewall.modify: a public/non-loopback bind needs an
+        # explicit host/listener authorization, even when no rule is proposed.
+        "network_exposure_review_required": external_listener,
+        "network_exposure_verified": False,
         "native_distribution_observed": False,
         "native_firewall_backend_verified": False,
         "current_firewall_rules_verified": False,

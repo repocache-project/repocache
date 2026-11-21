@@ -128,3 +128,42 @@ def test_pure_repeatable_no_host_access_or_caller_mutation(monkeypatch):
     two = preview(90, **settings)
     assert one == two
     assert settings == BASE
+
+@pytest.mark.parametrize("free,partial", [
+    (41, {"measurements_complete": False}),
+    (75, {"disk_writable": None}),
+    (100, {"measurements_complete": False, "disk_writable": None}),
+])
+def test_partial_measurement_cannot_downgrade_prior_critical(free, partial):
+    # Reported free bytes do not establish that inodes or write access are
+    # healthy, so a prior critical alarm must not appear recovered.
+    result = preview(free, previous_level="critical", **partial)
+    assert result["pressure_level"] == "critical"
+    assert result["reason_code"] == "CRITICAL_RECOVERY_OBSERVATION_INCOMPLETE"
+    for name in ("nginx_manager_behavior_verified", "cache_occupancy_verified",
+                 "authorizes_nginx_policy_apply", "authorizes_cache_cleanup"):
+        assert result[name] is False
+
+
+@pytest.mark.parametrize("free", [0, 15, 30])
+def test_partial_monitor_still_escalates_known_critical_free_space(free):
+    result = preview(free, previous_level="warning",
+                     measurements_complete=False, disk_writable=None)
+    assert result["pressure_level"] == "critical"
+    assert result["reason_code"] == "CRITICAL_FREE_SPACE"
+
+
+def test_full_measurements_still_downgrade_after_hysteresis():
+    result = preview(75, previous_level="critical")
+    assert result["pressure_level"] == "warning"
+    assert result["reason_code"] == "LOW_FREE_SPACE"
+    assert preview(111, previous_level="critical")["pressure_level"] == "normal"
+
+
+def test_unknown_free_bytes_remain_unknown_in_pure_preview():
+    # Preserve the established distinction between a pure unknown
+    # measurement and the independent alarm reducer's held prior state.
+    result = preview(None, previous_level="critical",
+                     measurements_complete=False, disk_writable=None)
+    assert result["pressure_level"] == "unknown"
+    assert result["reason_code"] == "FREE_SPACE_UNAVAILABLE"

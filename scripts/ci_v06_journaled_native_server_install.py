@@ -9,15 +9,20 @@ from __future__ import annotations
 
 import errno
 import fcntl
+import copy
+import hashlib
 import json
 import os
+import platform
 from pathlib import Path
 import stat
 import subprocess
+import socket
 import sys
+import tempfile
 from typing import Any
 
-from repocache.server_install_v1 import validate_os_identity
+from repocache.server_install_v1 import validate_os_identity, validate_server_architecture
 from repocache.server_native_nginx_local_boundary_v1 import (
     inspect_native_nginx_local_boundary,
 )
@@ -44,6 +49,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 _STATE = Path("/var/lib/repocache/server")
 _CI_MARKER = "CONFIRMED_DISPOSABLE_DOCKER_ONLY"
 _STAGE = "UNVERIFIED"  # Static CI-only phase for redacted failure triage.
+_PREFLIGHT_PATHS = (Path("/etc/nginx"), _STATE)
 
 
 class NativeIntegrationError(ValueError):
@@ -52,6 +58,123 @@ class NativeIntegrationError(ValueError):
 
 def _deny(code: str) -> None:
     raise NativeIntegrationError(code)
+
+
+def _preserved_paths() -> dict:
+    result = {}
+    for root in _PREFLIGHT_PATHS:
+        paths = [root]
+        if root.is_dir() and not root.is_symlink():
+            paths.extend(root.rglob("*"))
+        if len(paths) > 1024:
+            _deny("PREFLIGHT_PRESERVATION_INVENTORY_TOO_LARGE")
+        for path in paths:
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                result[str(path)] = None
+                continue
+            digest = None
+            if stat.S_ISREG(info.st_mode):
+                if info.st_size > 2 * 1024 * 1024:
+                    _deny("PREFLIGHT_PRESERVATION_FILE_TOO_LARGE")
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            result[str(path)] = (
+                info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+                info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns, digest,
+            )
+    return result
+
+
+def _drop_preflight_identity() -> None:
+    os.setgroups([])
+    os.setgid(65534)
+    os.setuid(65534)
+
+
+def _run_readonly_preflight(document: dict, *, unprivileged: bool = False) -> dict:
+    before = _preserved_paths()
+    with tempfile.TemporaryDirectory(prefix="repocache-preflight-acceptance-") as tmp:
+        parent = Path(tmp)
+        parent.chmod(0o755)
+        config = parent / "install.json"
+        config.write_text(json.dumps(document), encoding="ascii")
+        config.chmod(0o644)
+        result = subprocess.run(
+            ["/usr/bin/python3", "-I", "-B", str(_ROOT / "scripts/server_v06_preflight.py"),
+             "--document", str(config), "--intent", "install"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=30, check=False, cwd="/", env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+            preexec_fn=_drop_preflight_identity if unprivileged else None,
+        )
+    if result.returncode not in (1, 3) or result.stderr or len(result.stdout) > 65536:
+        _deny("PREFLIGHT_COMMAND_UNVERIFIED")
+    try:
+        report = json.loads(result.stdout)
+    except (ValueError, UnicodeError):
+        _deny("PREFLIGHT_REPORT_INVALID")
+    if (report.get("read_only") is not True
+            or report.get("authorizes_installation") is not False
+            or report.get("kind") != "repocache.server.vm-preflight.partial"
+            or report.get("schema_version") != 1
+            or report.get("status") != ("FAIL" if result.returncode == 1 else "NOT VERIFIED")
+            or not report.get("checks")
+            or any(set(row) != {"check", "status", "code", "guidance"}
+                   or not isinstance(row["guidance"], str) or not row["guidance"]
+                   for row in report["checks"])):
+        _deny("PREFLIGHT_BOUNDARY_INVALID")
+    if _preserved_paths() != before:
+        _deny("PREFLIGHT_CHANGED_NATIVE_OR_PROTECTED_FILES")
+    return {row["check"]: row for row in report["checks"]}
+
+
+def _verify_readonly_preflight(document: dict, *, installed: bool) -> None:
+    first = _run_readonly_preflight(document)
+    if _run_readonly_preflight(document) != first:
+        _deny("PREFLIGHT_REPEAT_CHANGED")
+    if first["supported_os_and_python"]["status"] != "PASS":
+        _deny("PREFLIGHT_SUPPORTED_TARGET_REJECTED")
+    if (first["architecture_supported"]["code"] != "SUPPORTED_NATIVE_ARCHITECTURE"
+            or first["native_python_identity"]["code"] != "NATIVE_PYTHON_INODE_OBSERVED_ONLY"):
+        _deny("PREFLIGHT_SUPPORTED_TARGET_REJECTED")
+    expected = "NGINX_EXECUTABLE_OBSERVED_ONLY" if installed else "NGINX_EXECUTABLE_MISSING"
+    if first["nginx_native_binary"]["code"] != expected:
+        _deny("PREFLIGHT_PACKAGE_DIAGNOSTIC_UNVERIFIED")
+    allowed_failures = {"SYSTEMD_NATIVE_PID1_NOT_OBSERVED"}
+    if not installed:
+        allowed_failures.update({"NGINX_EXECUTABLE_MISSING", "REQUIRED_NATIVE_EXECUTABLE_MISSING"})
+    if any(row["status"] == "FAIL"
+           and row["code"] not in allowed_failures
+           for row in first.values()):
+        _deny("PREFLIGHT_POSITIVE_LOCAL_CHECK_FAILED")
+    if not installed:
+        return
+    nonroot = _run_readonly_preflight(document, unprivileged=True)
+    if (nonroot["effective_uid"]["code"] != "PRIVILEGED_INSTALL_REQUIRES_ROOT"
+            or nonroot["effective_uid"]["status"] != "FAIL"):
+        _deny("PREFLIGHT_ROOT_DIAGNOSTIC_UNVERIFIED")
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        occupied = copy.deepcopy(document)
+        occupied["deployment"]["listen"]["https_port"] = listener.getsockname()[1]
+        report = _run_readonly_preflight(occupied)
+        if (report["listen_port_conflicts"]["code"] != "HTTPS_PORT_ALREADY_LISTENING"
+                or report["listen_port_conflicts"]["status"] != "FAIL"):
+            _deny("PREFLIGHT_PORT_DIAGNOSTIC_UNVERIFIED")
+    cache = Path(document["deployment"]["paths"]["cache_root"])
+    while not cache.exists():
+        cache = cache.parent
+    observed = os.statvfs(cache)
+    low = copy.deepcopy(document)
+    critical = observed.f_bavail * observed.f_frsize + 1024 * 1024 * 1024
+    low["deployment"]["cache_policy"]["disk_pressure"] = {
+        "critical_free_bytes": critical, "warning_free_bytes": critical + 1,
+    }
+    report = _run_readonly_preflight(low)
+    if (report["storage_free_space"]["code"] != "STORAGE_SPACE_BELOW_CRITICAL_THRESHOLD"
+            or report["storage_free_space"]["status"] != "FAIL"):
+        _deny("PREFLIGHT_CAPACITY_DIAGNOSTIC_UNVERIFIED")
 
 
 def _require_disposable_context() -> tuple[str, str]:
@@ -71,6 +194,10 @@ def _require_disposable_context() -> tuple[str, str]:
         _deny("UNSUPPORTED_NATIVE_USERSPACE")
     if distro not in ("debian", "almalinux"):
         _deny("UNSUPPORTED_NATIVE_USERSPACE")
+    try:
+        validate_server_architecture(platform.machine())
+    except ValueError:
+        _deny("UNSUPPORTED_NATIVE_ARCHITECTURE")
     # Never change a pre-existing state tree, NGINX instance or package DB
     # except the fresh disposable image explicitly bound by the CI runner.
     if (os.path.lexists("/var/lib/repocache")
@@ -136,6 +263,8 @@ def run() -> dict[str, Any]:
     doc = json.loads(
         (_ROOT / "docs/examples/server-install-v1.json").read_text(encoding="utf-8")
     )
+    _STAGE = "READONLY_PREFLIGHT_BEFORE_PACKAGE"
+    _verify_readonly_preflight(doc, installed=False)
     _STAGE = "ROOT_FD"
     root_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
@@ -247,6 +376,7 @@ def run() -> dict[str, Any]:
                 "NATIVE_POSTPACKAGE_CORRELATION_CANDIDATE_ONLY"
                 or correlation.get("distribution") != distribution
                 or correlation.get("pending_journal_stable_across_observations") is not True
+                or correlation.get("single_protected_lock_spanned_native_package_and_unit_reads") is not True
                 or correlation.get("native_package_db_owner_observed") is not True
                 or correlation.get("native_vendor_unit_shape_observed") is not True
                 or correlation.get("pending_native_effects_block_reentry") is not True
@@ -263,9 +393,13 @@ def run() -> dict[str, Any]:
                     "authorizes_host_mutation",
                 ))):
             _deny("NATIVE_POSTPACKAGE_CORRELATION_UNVERIFIED")
+        _STAGE = "READONLY_PREFLIGHT_AFTER_PACKAGE"
+        _verify_readonly_preflight(doc, installed=True)
         _STAGE = "COMPLETE"
         return {
             "schema_version": 1,
+            "readonly_preflight_before_after_native_packages": True,
+            "readonly_preflight_real_uid_port_capacity_and_preservation": True,
             "native_binary_and_vendor_unit_correlated_in_container": True,
             "native_postpackage_correlation_authorizes_no_reentry": True,
             "status": "DISPOSABLE_JOURNALED_NATIVE_INSTALL_PASS",

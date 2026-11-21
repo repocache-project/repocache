@@ -18,6 +18,7 @@ import tempfile
 from repocache.server_install_v1 import validate_os_identity
 from repocache.server_native_storage_bootstrap_v1 import (
     bootstrap_native_nginx_storage_under_root,
+    inspect_native_nginx_storage_under_root,
 )
 from repocache.server_cache_pressure_observe_v1 import (
     observe_cache_pressure_under_root,
@@ -59,6 +60,9 @@ def main() -> int:
                 "root_uid": 0, "cache_uid": worker.pw_uid,
                 "cache_gid": worker.pw_gid,
             }
+            absent = inspect_native_nginx_storage_under_root(fd, **kwargs)
+            assert not absent["cache_marker_and_directory_observed"]
+            assert not absent["log_marker_and_directory_observed"]
             first = bootstrap_native_nginx_storage_under_root(fd, **kwargs)
             assert first["cache_directory_created"]
             assert first["log_directory_created"]
@@ -90,6 +94,19 @@ def main() -> int:
             assert os.WEXITSTATUS(status) == 0
             existing = (cache / "worker-package-cache-fixture").read_bytes()
             assert existing == b"immutable-Debian-Alma-disposable-test"
+            history = logs / "retained-history.fixture"
+            history.write_bytes(b"retained historical metric bytes")
+            def snapshot():
+                return {str(p.relative_to(root)): (p.lstat().st_ino, p.lstat().st_mode,
+                        p.lstat().st_uid, p.lstat().st_gid, p.lstat().st_mtime_ns,
+                        p.lstat().st_ctime_ns, p.read_bytes() if p.is_file() else None)
+                        for p in root.rglob("*")}
+            before = snapshot()
+            owned = inspect_native_nginx_storage_under_root(fd, **kwargs)
+            assert owned["cache_marker_and_directory_observed"]
+            assert owned["log_marker_and_directory_observed"]
+            assert not owned["authorizes_host_installation"]
+            assert snapshot() == before
             report = observe_cache_pressure_under_root(
                 fd, root_uid=0, cache_uid=worker.pw_uid,
                 warning_free_bytes=1_000_000,
@@ -105,6 +122,7 @@ def main() -> int:
             assert not second["cache_directory_created"]
             assert not second["log_directory_created"]
             assert (cache / "worker-package-cache-fixture").read_bytes() == existing
+            assert history.read_bytes() == b"retained historical metric bytes"
             assert not (logs / "unexpected-worker-write").exists()
             print(json.dumps({
                 "status": "DISPOSABLE_NATIVE_STORAGE_PASS",
@@ -113,6 +131,7 @@ def main() -> int:
                 "actual_native_worker_cache_write_passed": True,
                 "root_only_log_dir_enforced": True,
                 "ownership_marker_and_repeat_preservation_passed": True,
+                "read_only_owner_marker_and_history_preservation_passed": True,
                 "read_only_free_space_observation_passed": True,
                 "booted_systemd_verified": False,
                 "selinux_enforcing_verified": False,

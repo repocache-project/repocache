@@ -63,6 +63,13 @@ accepts that repository with `repo_gpgcheck=0`; we do not silently lower the
 requirement. GitHub-hosted synthetic fixtures cannot establish whether the
 actual supported distribution repositories meet this policy.
 
+An empty successful query, or APT explicitly reporting `Candidate: (none)`
+for NGINX, yields `NATIVE_PACKAGE_NOT_AVAILABLE`. Check availability in the
+authenticated distribution repositories. An invalid or ambiguous query
+response yields `NATIVE_MANAGER_OUTPUT_INVALID`. In that case, inspect the
+native manager diagnostics before treating the package as absent. Both
+outcomes withhold installation authority and omit raw manager output.
+
 The probe's PASS means only that **at the time of the read-only probe**
 native authenticated metadata was refreshed and an NGINX candidate was
 observed from its fixed allowed repositories. It is **not** proof of the
@@ -388,6 +395,34 @@ rehearsal checks every package's declared architecture against the observed
 native machine architecture. DEB dependencies may use the matching native
 architecture or `all`; RPM dependencies may use the native architecture
 or `noarch`. Unknown machines and foreign headers fail closed as
-`NATIVE_PAYLOAD_SET_UNSAFE`. This is not an approved architecture support
-matrix, host installation authorization, publisher signature claim or
-booted-VM acceptance.
+`NATIVE_PAYLOAD_SET_UNSAFE`. The maintainer-approved v0.6.0 server host policy
+is x86_64 only (#26, 2026-11-19). Native preparation refuses other machines
+before repository access; the download stage accepts only amd64/all DEBs or
+x86_64/noarch RPMs. This is not host installation authorization, a publisher
+signature claim or booted-VM acceptance.
+
+### Native negative metadata diagnostics (Stage A, #26 AC3 / #27)
+
+The metadata smoke runs two controlled faults through the existing production
+metadata diagnostic function in each disposable distro image. Native commands
+execute and retain signature/TLS enforcement. No package is installed by these
+cases, and the no-network/no-write #26 preflight remains unchanged.
+
+- After authenticated metadata refresh, native APT/DNF queries a fixed absent
+  test package name. The actual empty candidate response must produce
+  `NATIVE_PACKAGE_NOT_AVAILABLE` with English guidance and no install authority.
+  This tests the missing-candidate diagnostic, not a claim that official NGINX
+  is currently unavailable.
+- In a separate fresh scratch workspace, the generated source references an
+  invalid test public key instead of the distribution key. The OS key itself
+  is untouched. APT/DNF must refuse metadata authentication before any candidate
+  query and return the redacted `NATIVE_MANAGER_FAILED` diagnostic. A network,
+  TLS or option error cannot qualify as signature-refusal evidence.
+
+The workflow requires both successful negative-case markers before the later
+container-install job. Unit tests reject accidental candidate success, native
+success with a bad key, a different failure cause and unexpected source files.
+These are scratch-only fault injections with real package-manager responses,
+not deployed-host trust, native-effects
+reconciliation, booted systemd/SELinux or full #26/#27 issue acceptance.
+

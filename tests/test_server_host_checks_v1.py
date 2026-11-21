@@ -125,12 +125,79 @@ def test_paths_refuse_symlink_and_foreign_ownership(tmp_path):
     link.symlink_to(target, target_is_directory=True)
     assert host._safe_existing_ancestor(str(link/"child"))[1].startswith("UNSAFE_")
     # Even ordinary missing/existing descendants never prove REPOCACHE ownership.
-    assert host._safe_existing_ancestor("/etc/repocache/absent-child")[1] in ("PATH_PARENT_OBSERVED_ONLY", "STORAGE_PATH_ACCESS_UNVERIFIED", "UNSAFE_STORAGE_PATH")
+    assert host._safe_existing_ancestor("/etc/repocache/absent-child")[1] in ("PATH_PARENT_OBSERVED_ONLY", "STORAGE_PATH_ACCESS_UNVERIFIED", "UNSAFE_STORAGE_PATH", "UNSAFE_PATH_OWNER")
+
+
+def test_foreign_owned_parent_refused_even_without_group_or_world_write(monkeypatch):
+    import stat
+    def observed(path):
+        if path == "/":
+            return SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0)
+        if path == "/srv":
+            return SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=1000)
+        pytest.fail("walk continued into a foreign-owned parent")
+    monkeypatch.setattr(host.os, "lstat", observed)
+    assert host._safe_existing_ancestor("/srv/cache") == (None, "UNSAFE_PATH_OWNER")
+    assert host._safe_existing_ancestor("/srv", require_root_leaf=True) == (None, "UNSAFE_PATH_OWNER")
+    # A service-owned storage leaf cannot be certified by this local check.
+    assert host._safe_existing_ancestor("/srv") == ("/srv", "EXISTING_PATH_OWNERSHIP_UNVERIFIED")
+
+
+@pytest.mark.parametrize("mode,owner,expected", [
+    (0o700, 0, "STORAGE_OWNERSHIP_MANIFEST_UNVERIFIED"),
+    (0o750, 0, "PROTECTED_STATE_DIRECTORY_UNSAFE"),
+    (0o755, 0, "PROTECTED_STATE_DIRECTORY_UNSAFE"),
+    (0o500, 0, "PROTECTED_STATE_DIRECTORY_UNSAFE"),
+    (0o700, 1000, "STORAGE_PATH_UNSAFE_OR_CONFLICTING"),
+])
+def test_protected_state_leaf_private_root_owned_and_cache_service_leaf_not_adopted(
+    monkeypatch, mode, owner, expected,
+):
+    import stat
+    cfg = spec(state_root="/srv/state", cache_root="/srv/cache", log_root="/srv/logs")
+    def observed(path):
+        if path == cfg.state_root:
+            return SimpleNamespace(st_mode=stat.S_IFDIR | mode, st_uid=owner)
+        return SimpleNamespace(st_mode=stat.S_IFDIR | 0o750,
+                               st_uid=1000 if path in (cfg.cache_root, cfg.log_root) else 0)
+    monkeypatch.setattr(host.os, "lstat", observed)
+    monkeypatch.setattr(host.os, "statvfs", lambda _: SimpleNamespace(
+        f_bavail=100000, f_frsize=4096, f_favail=100, f_fsid=1, f_flag=0,
+    ))
+    result, capacity = host._storage_checks(cfg)
+    assert result.code == expected
+    assert result.status is (PreflightStatus.NOT_VERIFIED if mode == 0o700 and owner == 0 else PreflightStatus.FAIL)
+    assert capacity.status is (PreflightStatus.NOT_VERIFIED if owner else PreflightStatus.PASS)
+    assert host._safe_existing_ancestor(cfg.cache_root)[1] == "EXISTING_PATH_OWNERSHIP_UNVERIFIED"
+
+
+def test_unsafe_protected_state_reported_even_when_other_storage_unobservable(monkeypatch):
+    import stat
+    cfg = spec(state_root="/srv/state", cache_root="/srv/cache", log_root="/srv/logs")
+    def observed(path):
+        if path == cfg.cache_root:
+            raise PermissionError("unobservable cache")
+        return SimpleNamespace(st_uid=0, st_mode=stat.S_IFDIR | 0o755)
+    monkeypatch.setattr(host.os, "lstat", observed)
+    result, capacity = host._storage_checks(cfg)
+    assert (result.status, result.code) == (PreflightStatus.FAIL, "PROTECTED_STATE_DIRECTORY_UNSAFE")
+    assert capacity.status is PreflightStatus.NOT_VERIFIED
+
+
+@pytest.mark.parametrize("owner,links", [(1000, 1), (0, 2)])
+def test_tls_reference_foreign_owner_or_hardlink_refused(monkeypatch, owner, links):
+    import stat
+    monkeypatch.setattr(host, "_safe_existing_ancestor", lambda p, **kw: (p, "EXISTING_PATH_OWNERSHIP_UNVERIFIED"))
+    monkeypatch.setattr(host.os, "lstat", lambda p: SimpleNamespace(
+        st_mode=stat.S_IFREG | 0o600, st_uid=owner, st_nlink=links,
+    ))
+    result = host._tls_reference_check(spec())
+    assert (result.status, result.code) == (PreflightStatus.FAIL, "TLS_REFERENCE_OWNER_OR_LINK_UNSAFE")
 
 
 def test_capacity_critical_warning_and_unknown(monkeypatch):
     monkeypatch.setattr(host, "_safe_existing_ancestor",
-                        lambda path: ("/", "EXISTING_PATH_OWNERSHIP_UNVERIFIED"))
+                        lambda path, **kw: ("/", "EXISTING_PATH_OWNERSHIP_UNVERIFIED"))
     state = [3000, 3000, 3000]
     inode = [20, 20, 20]
     ids = [1, 2, 3]
@@ -139,7 +206,7 @@ def test_capacity_critical_warning_and_unknown(monkeypatch):
         position = idx["a"]
         idx["a"] = (position + 1) % 3
         return SimpleNamespace(f_bavail=state[position], f_frsize=1024,
-                               f_favail=inode[position], f_fsid=ids[position])
+                               f_favail=inode[position], f_fsid=ids[position], f_flag=0)
     monkeypatch.setattr(host.os, "statvfs", fake_statvfs)
     assert byname(host._storage_checks(spec()), "storage_free_space").status is PreflightStatus.PASS
     state[1] = 0
@@ -158,18 +225,40 @@ def test_capacity_critical_warning_and_unknown(monkeypatch):
     assert byname(host._storage_checks(spec()), "storage_free_space").status is PreflightStatus.FAIL
     inode[0] = 20
     monkeypatch.setattr(host, "_safe_existing_ancestor",
-                        lambda path: ("/", "PATH_PARENT_OBSERVED_ONLY"))
+                        lambda path, **kw: ("/", "PATH_PARENT_OBSERVED_ONLY"))
     assert byname(host._storage_checks(spec()), "storage_free_space").status is PreflightStatus.NOT_VERIFIED
     monkeypatch.setattr(host, "_safe_existing_ancestor",
-                        lambda path: (None, "STORAGE_PATH_ACCESS_UNVERIFIED"))
+                        lambda path, **kw: (None, "STORAGE_PATH_ACCESS_UNVERIFIED"))
     assert byname(host._storage_checks(spec()), "storage_free_space").status is PreflightStatus.NOT_VERIFIED
+
+
+@pytest.mark.parametrize("root", ["state_root", "cache_root", "log_root"])
+@pytest.mark.parametrize("missing", [False, True])
+def test_capacity_rejects_read_only_storage_with_free_bytes(monkeypatch, root, missing):
+    settings = spec()
+    destination = getattr(settings, root)
+    mount = str(Path(destination).parent) if missing else destination
+
+    def observed_directory(path, **kw):
+        if missing and path == destination:
+            return mount, "PATH_PARENT_OBSERVED_ONLY"
+        return path, "EXISTING_PATH_OWNERSHIP_UNVERIFIED"
+
+    monkeypatch.setattr(host, "_safe_existing_ancestor", observed_directory)
+    monkeypatch.setattr(host.os, "statvfs", lambda path: SimpleNamespace(
+        f_bavail=100000, f_frsize=4096, f_favail=100, f_fsid=1,
+        f_flag=os.ST_NOSUID | (os.ST_RDONLY if path == mount else 0),
+    ))
+    _, result = host._storage_checks(settings)
+    assert result.status is PreflightStatus.FAIL
+    assert result.code == "STORAGE_FILESYSTEM_READ_ONLY"
 
 
 def test_include_collision_never_adopts_existing_file(tmp_path, monkeypatch):
     incl = tmp_path/"generated.conf"
     incl.write_text("# unrelated vhost; do not overwrite\n")
     monkeypatch.setattr(host, "_executable_at", lambda x: True)
-    monkeypatch.setattr(host, "_safe_existing_ancestor", lambda path: ("/", "PATH_PARENT_OBSERVED_ONLY"))
+    monkeypatch.setattr(host, "_safe_existing_ancestor", lambda path, **kw: ("/", "PATH_PARENT_OBSERVED_ONLY"))
     checks = host._nginx_checks(spec(generated_include=str(incl)))
     assert byname(checks,"nginx_managed_include_collision").status is PreflightStatus.FAIL
     assert incl.read_text() == "# unrelated vhost; do not overwrite\n"
@@ -241,8 +330,9 @@ def test_capture_skips_host_probes_on_unsupported_os_and_retains_false_auth(monk
     ("ID=debian\nVERSION_ID=13\n", (3, 13)),
     ("ID=almalinux\nVERSION_ID=10\n", (3, 12)),
 ])
+@pytest.mark.parametrize("machine", ["../unsupported", "aarch64", "s390x", "ppc64le", "i686"])
 def test_invalid_machine_identity_never_reaches_host_probes(
-    monkeypatch, release, python,
+    monkeypatch, release, python, machine,
 ):
     """Malformed architecture fails before any native host probe on both OSes."""
     from dataclasses import replace
@@ -251,7 +341,7 @@ def test_invalid_machine_identity_never_reaches_host_probes(
         (Path(__file__).parents[1] / "docs/examples/server-install-v1.json")
         .read_text(encoding="utf-8")
     )
-    invalid = replace(fact(release, python), machine="../unsupported")
+    invalid = replace(fact(release, python), machine=machine)
     monkeypatch.setattr(host, "capture_native_host_facts", lambda: invalid)
 
     def forbidden(*_args, **_kwargs):
@@ -260,7 +350,7 @@ def test_invalid_machine_identity_never_reaches_host_probes(
     monkeypatch.setattr(host, "_capture_host_probes", forbidden)
     report = host.inspect_deployment_host(doc)
     assert byname(report.checks, "supported_os_and_python").status is PreflightStatus.PASS
-    assert byname(report.checks, "architecture_identity").status is PreflightStatus.FAIL
+    assert byname(report.checks, "architecture_supported").status is PreflightStatus.FAIL
     # The baseline deliberately includes an unresolved listener readiness
     # marker. Only the probe-specific observation may never be appended.
     assert byname(report.checks, "listen_port_conflicts").code == "LISTENER_OWNERSHIP_UNVERIFIED"
@@ -269,7 +359,7 @@ def test_invalid_machine_identity_never_reaches_host_probes(
     )
     assert report.has_failures
     assert not report.all_verified and not report.authorizes_installation
-    assert "../unsupported" not in json.dumps(report.to_dict())
+    assert machine not in json.dumps(report.to_dict())
 
     # A caller cannot inject positive host observations after identity failure.
     injected = host.assess_deployment_host(invalid, complete_probes())
@@ -327,9 +417,9 @@ def test_nginx_untrusted_group_or_world_writable_ancestor(monkeypatch, mode, exp
     import stat
     def mocked_lstat(path):
         if path == "/srv":
-            return SimpleNamespace(st_mode=stat.S_IFDIR | mode)
+            return SimpleNamespace(st_mode=stat.S_IFDIR | mode, st_uid=0)
         if path == "/":
-            return SimpleNamespace(st_mode=stat.S_IFDIR | 0o755)
+            return SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0)
         raise FileNotFoundError()
     monkeypatch.setattr(host, "os", SimpleNamespace(lstat=mocked_lstat, path=os.path))
     directory, code = host._safe_existing_ancestor("/srv/nginx/repocache.conf")
@@ -366,13 +456,13 @@ def test_malformed_tcp_header_or_state_never_means_port_free(monkeypatch):
 
 def test_capacity_unknown_fsid_and_inodes_are_not_success(monkeypatch):
     monkeypatch.setattr(host, "_safe_existing_ancestor",
-                        lambda path: ("/", "EXISTING_PATH_OWNERSHIP_UNVERIFIED"))
+                        lambda path, **kw: ("/", "EXISTING_PATH_OWNERSHIP_UNVERIFIED"))
     def untrusted_statvfs(_path):
-        return SimpleNamespace(f_bavail=100000, f_frsize=4096, f_favail=100)
+        return SimpleNamespace(f_bavail=100000, f_frsize=4096, f_favail=100, f_flag=0)
     monkeypatch.setattr(host.os, "statvfs", untrusted_statvfs)
     assert byname(host._storage_checks(spec()), "storage_free_space").status is PreflightStatus.NOT_VERIFIED
     monkeypatch.setattr(host.os, "statvfs", lambda _: SimpleNamespace(
-        f_bavail=100000, f_frsize=4096, f_fsid=1
+        f_bavail=100000, f_frsize=4096, f_fsid=1, f_flag=0
     ))
     assert byname(host._storage_checks(spec()), "storage_free_space").status is PreflightStatus.NOT_VERIFIED
 
@@ -389,14 +479,14 @@ def test_full_readonly_probe_orchestration_with_isolated_os_paths(monkeypatch, t
         generated_include=str(include)
     )
     monkeypatch.setattr(host, "_safe_existing_ancestor",
-                        lambda path: (path, "EXISTING_PATH_OWNERSHIP_UNVERIFIED"))
+                        lambda path, **kw: (path, "EXISTING_PATH_OWNERSHIP_UNVERIFIED"))
     monkeypatch.setattr(host, "_executable_at", lambda path: True)
     monkeypatch.setattr(host, "_read_fixed",
                         lambda path, limit: proc6() if path.endswith("/tcp6")
                         else proc() if path == "/proc/net/tcp"
                         else b"systemd\n" if path == "/proc/1/comm" else b"1\n")
     monkeypatch.setattr(host.os, "statvfs", lambda path: SimpleNamespace(
-        f_bavail=100000, f_frsize=4096, f_favail=100, f_fsid=1
+        f_bavail=100000, f_frsize=4096, f_favail=100, f_fsid=1, f_flag=os.ST_NOSUID
     ))
     original_stat = host.os.stat
     monkeypatch.setattr(host.os, "stat",
@@ -446,7 +536,7 @@ def test_invalid_kernel_inventory_never_claims_listen_port_free(monkeypatch, tcp
 def test_space_and_inode_policy_boundaries(
         monkeypatch, root, index, capacity, inode_count, expected, code):
     monkeypatch.setattr(host, "_safe_existing_ancestor",
-                        lambda path: (path, "EXISTING_PATH_OWNERSHIP_UNVERIFIED"))
+                        lambda path, **kw: (path, "EXISTING_PATH_OWNERSHIP_UNVERIFIED"))
     free = [3*1024*1024, 3000, 3*1024*1024]
     free[index] = capacity
     inodes = [20, 20, 20]
@@ -456,10 +546,22 @@ def test_space_and_inode_policy_boundaries(
         i = counter["i"] % 3
         counter["i"] += 1
         return SimpleNamespace(f_bavail=free[i], f_frsize=1,
-                               f_favail=inodes[i], f_fsid=i+1)
+                               f_favail=inodes[i], f_fsid=i+1, f_flag=0)
     monkeypatch.setattr(host.os, "statvfs", statvfs)
     result = byname(host._storage_checks(spec()), "storage_free_space")
     assert (result.status, result.code) == (expected, code)
+
+
+def _root_owned_tls_fixture(monkeypatch, paths):
+    # Isolate ownership from actual file type, mode and link-count checks.
+    # Local pytest need not run as root to exercise these independent rules.
+    native_lstat = host.os.lstat
+    def observed(path, *args, **kwargs):
+        info = native_lstat(path, *args, **kwargs)
+        if str(path) in paths:
+            return SimpleNamespace(st_mode=info.st_mode, st_uid=0, st_nlink=info.st_nlink)
+        return info
+    monkeypatch.setattr(host.os, "lstat", observed)
 
 
 def test_tls_reference_modes_are_observations_never_authorization(tmp_path, monkeypatch):
@@ -471,11 +573,12 @@ def test_tls_reference_modes_are_observations_never_authorization(tmp_path, monk
     private_key.write_bytes(b"test-only private-key fixture")
     certificate.chmod(0o644)
     private_key.chmod(0o600)
+    _root_owned_tls_fixture(monkeypatch, {str(certificate), str(private_key)})
     settings = dataclasses.replace(spec(), tls_certificate_file=str(certificate),
                                    tls_private_key_file=str(private_key))
     monkeypatch.setattr(
         host, "_safe_existing_ancestor",
-        lambda directory: (directory, "EXISTING_PATH_OWNERSHIP_UNVERIFIED"),
+        lambda directory, **kw: (directory, "EXISTING_PATH_OWNERSHIP_UNVERIFIED"),
     )
     assert host._tls_reference_check(settings) == host._check(
         "tls_reference_files", PreflightStatus.NOT_VERIFIED,
@@ -497,11 +600,12 @@ def test_tls_reference_unsafe_modes_and_nonregular_files_fail_closed(tmp_path, m
     private_key.write_bytes(b"non-secret example")
     certificate.chmod(0o644)
     private_key.chmod(0o600)
+    _root_owned_tls_fixture(monkeypatch, {str(certificate), str(private_key)})
     settings = dataclasses.replace(spec(), tls_certificate_file=str(certificate),
                                    tls_private_key_file=str(private_key))
     monkeypatch.setattr(
         host, "_safe_existing_ancestor",
-        lambda directory: (directory, "EXISTING_PATH_OWNERSHIP_UNVERIFIED"),
+        lambda directory, **kw: (directory, "EXISTING_PATH_OWNERSHIP_UNVERIFIED"),
     )
     private_key.chmod(0o604)
     result = host._tls_reference_check(settings)
@@ -525,11 +629,12 @@ def test_tls_reference_unknown_risks_never_become_pass(tmp_path, monkeypatch):
     private_key.write_bytes(b"fixture")
     certificate.chmod(0o644)
     private_key.chmod(0o640)
+    _root_owned_tls_fixture(monkeypatch, {str(certificate), str(private_key)})
     settings = dataclasses.replace(spec(), tls_certificate_file=str(certificate),
                                    tls_private_key_file=str(private_key))
     monkeypatch.setattr(
         host, "_safe_existing_ancestor",
-        lambda directory: (directory, "EXISTING_PATH_OWNERSHIP_UNVERIFIED"),
+        lambda directory, **kw: (directory, "EXISTING_PATH_OWNERSHIP_UNVERIFIED"),
     )
     check = host._tls_reference_check(settings)
     assert (check.status, check.code) == (
@@ -546,7 +651,7 @@ def test_tls_reference_unknown_risks_never_become_pass(tmp_path, monkeypatch):
     assert host._tls_reference_check(settings).code == "TLS_PRIVATE_KEY_WORLD_READABLE"
     monkeypatch.setattr(
         host, "_safe_existing_ancestor",
-        lambda directory: (None, "UNSAFE_WRITABLE_PATH"),
+        lambda directory, **kw: (None, "UNSAFE_WRITABLE_PATH"),
     )
     assert host._tls_reference_check(settings).code == "TLS_REFERENCE_PARENT_UNSAFE"
 
@@ -675,8 +780,8 @@ def test_tls_intermediate_symlink_and_denied_parent_are_distinct(monkeypatch):
         if path == "/srv/link":
             return SimpleNamespace(st_mode=stat.S_IFLNK | 0o777)
         if path == "/srv/keys/private.pem":
-            return SimpleNamespace(st_mode=stat.S_IFREG | 0o600)
-        return SimpleNamespace(st_mode=stat.S_IFDIR | 0o755)
+            return SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=0, st_nlink=1)
+        return SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0)
     monkeypatch.setattr(host, "os", SimpleNamespace(path=os.path, lstat=pretend_lstat))
     result = host._tls_reference_check(settings)
     assert (result.status, result.code) == (
@@ -727,11 +832,11 @@ def test_root_only_tls_parent_is_observed_without_false_unsafe_failure(monkeypat
     def virtual_lstat(path):
         seen.append(path)
         if path == "/":
-            return SimpleNamespace(st_mode=stat.S_IFDIR | 0o755)
+            return SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0)
         if path == "/chain.pem":
-            return SimpleNamespace(st_mode=stat.S_IFREG | 0o644)
+            return SimpleNamespace(st_mode=stat.S_IFREG | 0o644, st_uid=0, st_nlink=1)
         if path == "/private.key":
-            return SimpleNamespace(st_mode=stat.S_IFREG | 0o600)
+            return SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=0, st_nlink=1)
         raise AssertionError("Unexpected path inspection")
 
     monkeypatch.setattr(

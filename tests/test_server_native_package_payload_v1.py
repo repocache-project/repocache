@@ -10,6 +10,17 @@ import pytest
 
 from repocache import server_native_package_trust_v1 as trust
 from repocache import server_native_package_payload_v1 as stage
+from repocache import server_native_nginx_ownership_v1 as ownership
+
+
+
+@pytest.fixture(autouse=True)
+def _synthetic_process_snapshot_is_isolated_from_runner(monkeypatch):
+    """These filesystem/manager fixtures must not read the CI runner /proc."""
+    monkeypatch.setattr(
+        ownership, "_scan_nginx_process_footprint",
+        lambda: "PROCESS_NGINX_NOT_OBSERVED",
+    )
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "docs/examples/server-install-v1.json"
 DEBIAN = "ID=debian\nVERSION_ID=13\n"
@@ -381,10 +392,11 @@ def test_accept_architecture_neutral_native_dependencies(
     ("debian", ".deb"),
     ("almalinux", ".rpm"),
 ])
+@pytest.mark.parametrize("machine", ["unreviewed-architecture", "aarch64", "s390x", "ppc64le"])
 def test_unknown_machine_architecture_refuses_before_payload_tools(
-    tmp_path, monkeypatch, distribution, extension,
+    tmp_path, monkeypatch, distribution, extension, machine,
 ):
-    monkeypatch.setattr(stage.platform, "machine", lambda: "unreviewed-architecture")
+    monkeypatch.setattr(stage.platform, "machine", lambda: machine)
     artifact = tmp_path / ("nginx" + extension)
     artifact.write_bytes(b"synthetic")
     def forbidden(*_args, **_kwargs):

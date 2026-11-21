@@ -138,6 +138,22 @@ def test_apply_still_refused_before_any_network_or_local_write(host, monkeypatch
     assert _snapshot(host) == before
 
 
+def test_catalog_decoder_limit_is_a_redacted_sync_refusal(host, monkeypatch, capsys):
+    def decoder_refuses(_url, *, max_bytes):
+        raise RecursionError("sensitive decoder details")
+
+    monkeypatch.setattr(client, "_fetch_json", decoder_refuses)
+    before = _snapshot(host)
+    assert client.run(["--server", SERVER, "repos", "sync", "--json"], root=host) == 2
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert json.loads(captured.out)["error"] == {
+        "code": "OPERATION_FAILED",
+        "message": "Catalog unavailable or invalid",
+    }
+    assert _snapshot(host) == before
+
+
 def test_explicitly_disabled_sources_precede_other_plan_checks(tmp_path):
     repo = client._repo("disabled", "dnf", [
         "https://user:secret@rpm.example.org/linux/"],

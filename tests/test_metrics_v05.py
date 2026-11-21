@@ -85,6 +85,32 @@ def test_invalid_records_do_not_imply_complete_sample(tmp_path):
     assert result["coverage"] == "partial"
 
 
+def test_optional_metrics_do_not_coerce_fractional_or_boolean_values(tmp_path):
+    result = metrics(_write(tmp_path, [
+        _record(status=500.7, body_bytes_sent=True, request_time=True),
+        _record(status="5_00", body_bytes_sent=12.5, request_time=False),
+    ]), now=NOW)
+    assert result["requests"] == 2
+    assert result["statuses_observed"] == 0
+    assert result["errors_5xx"] is None
+    assert result["bytes_observed"] == 0
+    assert result["bytes_sent"] is None
+    assert result["avg_request_ms"] is None
+
+
+def test_native_quoted_fields_and_integer_byte_counts_are_exact(tmp_path):
+    native_bytes = 2**53 + 1
+    result = metrics(_write(tmp_path, [
+        _record(status="503", body_bytes_sent=str(native_bytes), request_time="0.100"),
+        _record(status=200, body_bytes_sent=2, request_time=0.3),
+    ]), now=NOW)
+    assert result["statuses_observed"] == 2
+    assert result["errors_5xx"] == 1
+    assert result["bytes_observed"] == 2
+    assert result["bytes_sent"] == native_bytes + 2
+    assert result["avg_request_ms"] == 200.0
+
+
 def test_truncated_sample_is_explicit(tmp_path, monkeypatch):
     from repocache import core
     settings = _write(tmp_path, [_record("/debian/a")])

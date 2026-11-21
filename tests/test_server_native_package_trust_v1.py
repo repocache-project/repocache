@@ -105,15 +105,13 @@ def test_fixed_native_sandbox_and_successfully_queried_candidate(
         assert not any(arg.startswith("--repo=") for arg in update)
 
 
-@pytest.mark.parametrize("distro,release,python,output", [
-    ("debian", DEBIAN, (3, 13), "Candidate: (none)\n"),
-    ("debian", DEBIAN, (3, 13), "Installed: 1.1\n"),
-    ("debian", DEBIAN, (3, 13), "Candidate: 1.0\n Candidate: 2.0\n"),
-    ("almalinux", ALMA, (3, 12), ""),
-    ("almalinux", ALMA, (3, 12), "nginx\nuntrusted-package\n"),
+@pytest.mark.parametrize("release,python,output", [
+    (DEBIAN, (3, 13), ""),
+    (DEBIAN, (3, 13), "nginx:\n Installed: (none)\n Candidate: (none)\n"),
+    (ALMA, (3, 12), ""),
 ])
-def test_absent_or_ambiguous_candidate_never_claimed(
-    monkeypatch, distro, release, python, output,
+def test_absent_candidate_in_authenticated_metadata_has_actionable_guidance(
+    monkeypatch, release, python, output,
 ):
     monkeypatch.setattr(native, "_trusted_key", lambda path: True)
     _, runner = _run_success(output)
@@ -121,9 +119,28 @@ def test_absent_or_ambiguous_candidate_never_claimed(
         os_release=release, python_version=python,
         document=document(), runner=runner,
     )
-    assert result.to_dict()["code"] == "NATIVE_PACKAGE_NOT_AVAILABLE"
+    report = result.to_dict()
+    assert report["code"] == "NATIVE_PACKAGE_NOT_AVAILABLE"
+    assert report["metadata_signed"]
+    assert "package availability" in report["guidance"]
     assert not result.candidate_available
     assert not result.authorizes_installation
+
+
+@pytest.mark.parametrize("output", ["nginx\nuntrusted-package\n", "nginx\n" * 129])
+def test_dnf_query_rejects_unexpected_names_or_too_many_rows(monkeypatch, output):
+    monkeypatch.setattr(native, "_trusted_key", lambda path: True)
+    _, runner = _run_success(output)
+    evidence = native.inspect_native_nginx_metadata(
+        os_release=ALMA, python_version=(3, 12), document=document(), runner=runner,
+    )
+    report = evidence.to_dict()
+    assert report["code"] == "NATIVE_MANAGER_OUTPUT_INVALID"
+    assert "package manager diagnostics" in report["guidance"]
+    assert "untrusted-package" not in json.dumps(report)
+    assert not report["metadata_signed"]
+    assert not report["candidate_available"]
+    assert not report["authorizes_installation"]
 
 
 @pytest.mark.parametrize("mode", ["bad-exit", "exception", "timeout", "bad-stdout",
@@ -160,6 +177,18 @@ def test_native_manager_failure_is_redacted_and_fails_closed(monkeypatch, mode):
     assert "secret-operator" not in rendered
     assert "sensitive" not in rendered
     assert len(calls) == 1
+
+
+def test_unsupported_machine_never_calls_native_manager(monkeypatch):
+    import platform
+    monkeypatch.setattr(platform, "machine", lambda: "aarch64")
+    monkeypatch.setattr(native, "_trusted_key", lambda _: pytest.fail("trust probe reached"))
+    for release, version in ((DEBIAN, (3, 13)), (ALMA, (3, 12))):
+        with pytest.raises(InstallInputError, match="only x86_64"):
+            native.inspect_native_nginx_metadata(
+                os_release=release, python_version=version, document=document(),
+                runner=lambda *a, **kw: pytest.fail("native manager reached"),
+            )
 
 
 def test_invalid_os_or_policy_never_calls_native_manager(monkeypatch):
@@ -298,6 +327,8 @@ def test_normal_single_link_signed_distribution_anchor_still_eligible(monkeypatc
 
 @pytest.mark.parametrize("output", [
     "Candidate: 1.26.3-1\n",
+    "Candidate: (none)\n",
+    "nginx:\n Installed: 1.1\n",
     "foreign-package:\n Candidate: 1.26.3-1\n",
     "nginx:\n Candidate: /tmp/untrusted-package\n",
     "nginx:\n Candidate: not-a-version\n",
@@ -314,7 +345,8 @@ def test_apt_policy_candidate_requires_exact_nginx_and_version(
         os_release=DEBIAN, python_version=(3, 13),
         document=document(), runner=runner,
     )
-    assert evidence.to_dict()["code"] == "NATIVE_PACKAGE_NOT_AVAILABLE"
+    assert evidence.to_dict()["code"] == "NATIVE_MANAGER_OUTPUT_INVALID"
+    assert not evidence.metadata_signed
     assert not evidence.candidate_available
     assert not evidence.authorizes_installation
 

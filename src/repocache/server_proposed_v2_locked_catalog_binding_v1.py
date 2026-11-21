@@ -14,9 +14,13 @@ import os
 from typing import Any
 
 from repocache.server_derived_catalog_candidate_v1 import (
-    DerivedCatalogCandidateError, preview_derived_catalog_from_nginx_dump,
+    DerivedCatalogCandidateError, preview_derived_https_catalog_from_nginx_dump,
 )
 from repocache.server_install_v1 import MAX_INT, parse_install_bytes
+from repocache.server_fixture_multi_resource_wal_v1 import (
+    V2_STATE, INCLUDE, CATALOG, MANIFEST,
+    _check_no_auxiliary_pending, _read_all, _validate_old,
+)
 from repocache.server_nginx_repository_bundle_v1 import (
     NginxRepositoryBundleError, render_repository_nginx_bundle_candidate,
 )
@@ -77,11 +81,22 @@ def _preview_locked_v2_catalog_binding_under_root(
     try:
         with _locked(root_fd, owner_uid) as directory:
             _legacy_refusal(directory, owner_uid)
-            if _pending(directory, owner_uid):
+            if _pending(directory, owner_uid, include_multi=False):
                 _deny("RECOVERY_REQUIRED")
+            _check_no_auxiliary_pending(directory, owner_uid)
             state, state_raw = _read_v2(directory, owner_uid)
             if state is None or state_raw is None:
                 _deny("STATE_ABSENT")
+            committed = _read_all(directory, owner_uid)
+            if committed[V2_STATE] != state_raw:
+                _deny("STATE_READ_DRIFT")
+            if any(committed[n] is not None for n in (
+                INCLUDE, CATALOG, MANIFEST,
+            )):
+                # A fixture-owned multi-resource generation must never be
+                # accepted with a missing/forged owner manifest or a shadow
+                # catalog inconsistent with the protected active set.
+                _validate_old(committed)
             initial_inode = _state_inode(directory)
             if state["state_generation"] != expected_generation:
                 _deny("STALE_GENERATION")
@@ -96,19 +111,21 @@ def _preview_locked_v2_catalog_binding_under_root(
                 candidate_pins_by_repository=pinned,
                 ca_bundle_path=ca_bundle_path,
             )
-            derived = preview_derived_catalog_from_nginx_dump(
+            derived = preview_derived_https_catalog_from_nginx_dump(
                 document, candidate_pins_by_repository=pinned,
                 ca_bundle_path=ca_bundle_path,
                 nginx_dump_text=untrusted_nginx_dump,
                 nginx_t_exit_code=untrusted_nginx_t_exit_code,
             )
             if (render["status"] != "MULTI_REPOSITORY_RENDER_CANDIDATE_ONLY"
-                    or derived["status"] != "INERT_DERIVED_CATALOG_CANDIDATE_ONLY"
+                    or derived["status"] != "INERT_DERIVED_HTTPS_CATALOG_CANDIDATE_ONLY"
                     or render["authorizes_catalog_publication"] is not False
                     or derived["authorizes_catalog_publication"] is not False
                     or render["authorizes_nginx_activation"] is not False
                     or derived["desired_active_repository_ids"]
-                       != render["proposed_repository_ids"]):
+                       != render["proposed_repository_ids"]
+                    or derived["exact_https_server_context_candidate_matched"]
+                       is not True):
                 _deny("DOMAIN_BINDING_INVALID")
             # Canonical, bounded potential client-schema bytes. These are
             # deliberately NOT written, nor treated as observed exposure.
@@ -120,15 +137,17 @@ def _preview_locked_v2_catalog_binding_under_root(
             # Independent root writers can ignore an advisory flock:
             # recheck state, inode/ctime, legacy and WAL before returning.
             _legacy_refusal(directory, owner_uid)
-            if _pending(directory, owner_uid):
+            if _pending(directory, owner_uid, include_multi=False):
                 _deny("RECOVERY_REQUIRED")
+            _check_no_auxiliary_pending(directory, owner_uid)
             later, later_raw = _read_v2(directory, owner_uid)
             if (later != state or later_raw != state_raw
-                    or _state_inode(directory) != initial_inode):
+                    or _state_inode(directory) != initial_inode
+                    or _read_all(directory, owner_uid) != committed):
                 _deny("STATE_CHANGED_DURING_PREVIEW")
             return {
                 "schema_version": 1,
-                "status": "LOCKED_V2_INERT_CATALOG_BINDING_ONLY",
+                "status": "LOCKED_V2_INERT_HTTPS_CATALOG_BINDING_ONLY",
                 "state_generation": expected_generation,
                 "whole_state_bytes_sha256": expected_state_sha256,
                 "generated_upstream_sha256": hashlib.sha256(
@@ -144,11 +163,14 @@ def _preview_locked_v2_catalog_binding_under_root(
                 "candidate_catalog": derived["candidate_catalog"],
                 "canonical_state_and_render_consistent_under_one_lock": True,
                 "untrusted_dump_matches_inert_render_structure_only": True,
+                "untrusted_dump_matches_exact_https_server_context_only": True,
                 "catalog_candidate_generated_not_published": True,
                 "operator_authorization_verified": False,
                 "signed_installed_binary_verified": False,
                 "native_host_root_verified": False,
                 "native_nginx_execution_verified": False,
+                "installed_tls_identity_verified": False,
+                "real_tls_handshake_verified": False,
                 "actual_active_exposure_verified": False,
                 "preflight_remains_valid_after_lock_release": False,
                 "authorizes_state_write": False,

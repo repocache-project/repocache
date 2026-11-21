@@ -281,11 +281,21 @@ def _first(record: Dict[str, Any], *names: str) -> Any:
 
 
 def _number(raw: Any) -> Optional[float]:
+    if type(raw) is bool:
+        return None
     try:
         x = float(raw)
         return x if 0 <= x < 1e18 else None
     except (TypeError, ValueError, OverflowError):
         return None
+
+
+def _integer_measurement(raw: Any, max_digits: int) -> Optional[int]:
+    if type(raw) is str and re.fullmatch(r"[0-9]{1,%d}" % max_digits, raw):
+        return int(raw)
+    if type(raw) is int and 0 <= raw < 10 ** max_digits:
+        return raw
+    return None
 
 
 def _tail_bytes(path: Path, max_bytes: int = 8_000_000) -> Tuple[List[str], bool]:
@@ -461,22 +471,22 @@ def metrics(settings: Settings, hours: int = 24, repo: Optional[str] = None,
         hourly[hour] += 1
         day = stamp.replace(hour=0, minute=0, second=0, microsecond=0).date().isoformat()
         daily[day] += 1
-        code = _first(record, "status", "http_status", "response_status", "status_code")
-        try:
-            parsed_code = int(code)
-            if 100 <= parsed_code <= 599:
-                base["statuses_observed"] += 1
-            if 500 <= parsed_code <= 599:
+        code = _integer_measurement(
+            _first(record, "status", "http_status", "response_status", "status_code"), 3,
+        )
+        if code is not None and 100 <= code <= 599:
+            base["statuses_observed"] += 1
+            if code >= 500:
                 base["errors_5xx"] += 1
-        except (ValueError, TypeError):
-            pass
         cache = str(_first(record, "upstream_cache_status", "cache_status", "cache") or "").upper()
         if cache in {"HIT", "MISS", "BYPASS", "EXPIRED", "STALE", "UPDATING", "REVALIDATED"}:
             base["cache_observed"] += 1
             statuses[cache] += 1
-        size = _number(_first(record, "body_bytes_sent", "bytes_sent", "response_bytes"))
+        size = _integer_measurement(
+            _first(record, "body_bytes_sent", "bytes_sent", "response_bytes"), 18,
+        )
         if size is not None:
-            bytes_total += int(size)
+            bytes_total += size
             base["bytes_observed"] += 1
         duration = _number(_first(record, "request_time", "duration"))
         if duration is not None:
