@@ -134,11 +134,6 @@ def assert_no_pending(fs):
     assert not (catalog.parent / native._STAGE).exists()
 
 
-@pytest.mark.parametrize("uid,groups,denial", [
-    (65532, [49999], None),
-    (65534, [49999], "SERVICE_IDENTITY_DENIED"),
-    (65533, [], "ADMIN_GROUP_REQUIRED"),
-])
 @pytest.mark.parametrize("operation", ["APPLY_V2", "RELOAD_V2"])
 def test_native_host_operation_requires_audited_package_completion(
     filesystem, monkeypatch, operation,
@@ -206,6 +201,11 @@ def test_native_host_operation_refuses_stale_package_integrity_before_effects(
     assert not include.exists() and not catalog.exists() and not events
 
 
+@pytest.mark.parametrize("uid,groups,denial", [
+    (65532, [49999], None),
+    (65534, [49999], "SERVICE_IDENTITY_DENIED"),
+    (65533, [], "ADMIN_GROUP_REQUIRED"),
+])
 def test_kernel_credentialed_dispatch_reaches_real_wal_only_for_admin(
     filesystem, monkeypatch, uid, groups, denial,
 ):
