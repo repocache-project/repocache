@@ -41,6 +41,17 @@ def package(distribution):
     }
 
 
+def integrity(distribution):
+    return {
+        "status": "READ_ONLY_STOCK_NGINX_PACKAGE_FILE_INTEGRITY_OBSERVED",
+        "platform": "debian13" if distribution == "debian" else "almalinux10",
+        "native_package_file_integrity_verified": True,
+        "native_package_signature_verified": False,
+        "authorizes_native_marker_removal": False,
+        "authorizes_nginx_activation": False,
+    }
+
+
 def unit():
     return {
         "schema_version": 1,
@@ -55,10 +66,11 @@ def unit():
 
 
 def observed(monkeypatch, distribution, *, before=None, after=None,
-             pkg=None, vendor=None):
+             pkg=None, vendor=None, proof=None):
     events = []
     p = package(distribution) if pkg is None else pkg
     u = unit() if vendor is None else vendor
+    i = integrity(distribution) if proof is None else proof
     first = inputs(distribution) if before is None else before
     last = first if after is None else after
 
@@ -69,6 +81,10 @@ def observed(monkeypatch, distribution, *, before=None, after=None,
     def check_package():
         events.append("package")
         return p
+
+    def check_integrity():
+        events.append("integrity")
+        return i
 
     class FakeUnit:
         def to_dict(self):
@@ -82,9 +98,10 @@ def observed(monkeypatch, distribution, *, before=None, after=None,
     def collected(*, distribution):
         first_observation = pending(distribution=distribution)
         actual_package = check_package()
+        actual_proof = check_integrity()
         actual_unit = check_unit(distribution).to_dict()
         last_observation = pending(distribution=distribution)
-        return first_observation, actual_package, actual_unit, last_observation
+        return first_observation, actual_package, actual_proof, actual_unit, last_observation
 
     monkeypatch.setattr(mod, "_collect_current_namespace_postpackage_facts", collected)
     return events
@@ -101,7 +118,7 @@ def test_consistent_native_package_and_pending_journal_remain_non_authorizing(
         distribution=distribution
     )
     assert events == [
-        "pending", "package", "unit", "unit-fields", "pending",
+        "pending", "package", "integrity", "unit", "unit-fields", "pending",
     ]
     assert report["status"] == "NATIVE_POSTPACKAGE_CORRELATION_CANDIDATE_ONLY"
     assert report["package"] == expected
@@ -109,6 +126,7 @@ def test_consistent_native_package_and_pending_journal_remain_non_authorizing(
     assert report["pending_journal_stable_across_observations"] is True
     assert report["single_protected_lock_spanned_native_package_and_unit_reads"] is True
     assert report["native_package_db_owner_observed"] is True
+    assert report["native_package_file_integrity_verified"] is True
     assert report["native_vendor_unit_shape_observed"] is True
     assert report["pending_native_effects_block_reentry"] is True
     assert all(report[key] is False for key in (
@@ -142,12 +160,14 @@ def test_invalid_distribution_never_enters_any_observer(monkeypatch, bad):
     "changed-journal", "foreign-package", "foreign-platform",
     "unsigned-claim", "adoption-authority", "unit-foreign",
     "unit-shadow", "unit-authz", "invalid-unit-digest",
+    "file-integrity", "file-integrity-authz",
 ])
 def test_any_mismatched_observation_fails_closed(monkeypatch, variation):
     before = inputs("debian")
     after = copy.deepcopy(before)
     pkg = package("debian")
     vendor = unit()
+    proof = integrity("debian")
     if variation == "changed-journal":
         after["pending_native_effects_block_reentry"] = False
     elif variation == "foreign-package":
@@ -158,6 +178,10 @@ def test_any_mismatched_observation_fails_closed(monkeypatch, variation):
         pkg["native_package_signature_verified"] = True
     elif variation == "adoption-authority":
         pkg["authorizes_nginx_adoption"] = True
+    elif variation == "file-integrity":
+        proof["native_package_file_integrity_verified"] = False
+    elif variation == "file-integrity-authz":
+        proof["authorizes_native_marker_removal"] = True
     elif variation == "unit-foreign":
         vendor["unit_name"] = "foreign.service"
     elif variation == "unit-shadow":
@@ -167,7 +191,7 @@ def test_any_mismatched_observation_fails_closed(monkeypatch, variation):
     else:
         vendor["vendor_unit_sha256"] = "Z" * 64
     observed(monkeypatch, "debian", before=before, after=after,
-             pkg=pkg, vendor=vendor)
+             pkg=pkg, vendor=vendor, proof=proof)
     with pytest.raises(mod.NativeEffectsReconciliationError,
                        match="^NATIVE_EFFECTS_"):
         mod.inspect_current_namespace_native_postpackage_candidate(
@@ -261,6 +285,10 @@ def test_package_and_unit_are_observed_while_one_real_lock_is_held(
             check_pending_exclusive("package")
             return package(distribution)
 
+        def actual_integrity():
+            check_pending_exclusive("integrity")
+            return integrity(distribution)
+
         class FakeVendor:
             def to_dict(self):
                 check_pending_exclusive("unit-data")
@@ -272,9 +300,10 @@ def test_package_and_unit_are_observed_while_one_real_lock_is_held(
             return FakeVendor()
 
         monkeypatch.setattr(mod, "inspect_stock_nginx_package_owner", actual_package)
+        monkeypatch.setattr(mod, "inspect_stock_nginx_package_file_integrity", actual_integrity)
         monkeypatch.setattr(mod, "inspect_native_nginx_unit", actual_unit)
         with _locked(fd, os.geteuid()) as directory:
-            before, pkg, vendor, after = (
+            before, pkg, proof, vendor, after = (
                 mod._collect_postpackage_facts_while_locked(
                     directory, owner_uid=os.geteuid(),
                     distribution=distribution,
@@ -286,7 +315,8 @@ def test_package_and_unit_are_observed_while_one_real_lock_is_held(
             "nginx" if distribution == "debian" else "nginx-core"
         )
         assert vendor["vendor_unit_sha256"] == SHA
-        assert observed == ["package", "unit", "unit-data"]
+        assert proof["native_package_file_integrity_verified"] is True
+        assert observed == ["package", "integrity", "unit", "unit-data"]
         assert marker.read_bytes() == marker_before
         assert marker.stat().st_ino == identity
         assert (folder / NATIVE_PENDING_NAME).is_file()
