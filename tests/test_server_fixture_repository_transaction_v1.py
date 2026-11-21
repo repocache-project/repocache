@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from repocache.server_fixture_multi_resource_wal_v1 import (
-    CATALOG, INCLUDE, JOURNAL, MANIFEST,
+    CATALOG, INCLUDE, JOURNAL, MANIFEST, FixtureMultiResourceError,
     _commit_fixture_multi_resource_under_root as commit_multi,
     _recover_fixture_multi_resource_under_root as recover_multi,
 )
@@ -405,3 +405,37 @@ def test_reusable_v2_builder_requires_exact_canonical_predecessor(
             decision_sha256=DECISION,
         )
     assert (directory / V2_STATE).read_bytes() == raw
+
+
+def test_wal_rechecks_exact_predecessor_digest_even_with_same_generation(
+    protected_fixture,
+):
+    fd, directory, uid = protected_fixture
+    bootstrap(protected_fixture)
+    old = read_state(directory)
+    prior = (directory / V2_STATE).read_bytes()
+    proposed = plan_repository_v2_transition(
+        old, expected_generation=1,
+        expected_previous_state_sha256=hashlib.sha256(prior).hexdigest(),
+        operation="enable", repository_id="debian-trixie-main",
+        decision_sha256=DECISION,
+    )["proposed_snapshot"]
+    baseline = {
+        name: (directory / name).read_bytes()
+        for name in (V2_STATE, INCLUDE, CATALOG, MANIFEST)
+    }
+    catalog = json.dumps(
+        {"schema_version": 1, "status": "fixture-only-observed-candidate",
+         "active_ids": ["debian-trixie-main"]},
+        sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+    with pytest.raises(FixtureMultiResourceError, match="PREDECESSOR_CHANGED"):
+        commit_multi(
+            fd, proposed, owner_uid=uid, expected_generation=1,
+            include_bytes=b"# valid inert shadow bytes\n",
+            catalog_bytes=catalog,
+            expected_previous_state_sha256="0" * 64,
+        )
+    assert not (directory / JOURNAL).exists()
+    assert all((directory / name).read_bytes() == raw
+               for name, raw in baseline.items())
