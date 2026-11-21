@@ -162,6 +162,7 @@ def commit_fixture_repository_change_under_root(
             expected_generation=expected_generation,
             include_bytes=include_bytes,
             catalog_bytes=catalog_bytes,
+            expected_previous_state_sha256=hashlib.sha256(raw).hexdigest(),
             inject_fault=inject_fault,
             verify_fixture_exposure_before_publish=(
                 verify_fixture_exposure_before_publish
