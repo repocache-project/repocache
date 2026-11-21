@@ -34,7 +34,7 @@ permissions:
 
 jobs:
   ephemeral-combined:
-    name: Exact-sha ephemeral combined prerequisites (${{ matrix.platform }})
+    name: Exact-sha ephemeral combined prerequisites (${{ matrix.platform }}, ${{ matrix.variant }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -43,8 +43,16 @@ jobs:
         include:
           - platform: debian13
             image: debian:trixie-slim
+            variant: server-only
           - platform: almalinux10
             image: almalinux:10
+            variant: server-only
+          - platform: debian13
+            image: debian:trixie-slim
+            variant: with-pr249
+          - platform: almalinux10
+            image: almalinux:10
+            variant: with-pr249
     container:
       image: ${{ matrix.image }}
     env:
@@ -106,16 +114,20 @@ jobs:
           git config user.name "REPOCACHE disposable CI"
           git switch -c local-v06-rehearsal
           git merge --no-ff --no-edit "$BASE_SHA"
-          git fetch --no-tags origin \
-            +refs/heads/fix/76-repository-transfer-v06-candidate-20261107:refs/remotes/origin/pr76
-          test "$(git rev-parse refs/remotes/origin/pr76)" = "$PR76_SHA" || {
-            echo "Dependency #249 moved; exact-SHA source rehearsal refused"
-            exit 1
-          }
-          # #254 is in the protected base. Only #249 remains an unmerged
-          # exact-SHA prerequisite; ephemeral merging grants no host authority.
-          git merge-base --is-ancestor "$FORK_SHA" refs/remotes/origin/pr76
-          git merge --no-ff --no-edit refs/remotes/origin/pr76
+          # Prove the #31/#95 Stage-A implementation *independently* from
+          # owner-signing/release #249. Separately rehearse the pinned #249
+          # source when present, without making it a prerequisite for
+          # non-activating protected-state code acceptance.
+          if [ '${{ matrix.variant }}' = 'with-pr249' ]; then
+            git fetch --no-tags origin \
+              +refs/heads/fix/76-repository-transfer-v06-candidate-20261107:refs/remotes/origin/pr76
+            test "$(git rev-parse refs/remotes/origin/pr76)" = "$PR76_SHA" || {
+              echo "Dependency #249 moved; pinned combined release rehearsal refused"
+              exit 1
+            }
+            git merge-base --is-ancestor "$FORK_SHA" refs/remotes/origin/pr76
+            git merge --no-ff --no-edit refs/remotes/origin/pr76
+          fi
           # Enforce whitespace only on this PR's owned server integration
           # surface. Other exact-SHA sibling PRs run their independent CI;
           # intentional Markdown hard-break spaces must not be falsely
@@ -126,8 +138,8 @@ jobs:
             'tests/test_server_*' \
             'scripts/ci_v06_cross_pr_*'
           test -z "$(git status --porcelain)"
-          printf 'Rehearsal source: base=%s head=%s pr254-integrated=%s pr249=%s combined=%s\n' \
-            "$BASE_SHA" "$HEAD_SHA" "$PR64_INTEGRATION_SHA" "$PR76_SHA" "$(git rev-parse HEAD)"
+          printf 'Rehearsal source: variant=%s base=%s head=%s pr254-integrated=%s pr249-candidate=%s combined=%s\n' \
+            '${{ matrix.variant }}' "$BASE_SHA" "$HEAD_SHA" "$PR64_INTEGRATION_SHA" "$PR76_SHA" "$(git rev-parse HEAD)"
           echo "NOT VERIFIED: protected integration merge, host-root, systemd, SELinux, release"
       - name: Run combined state, NGINX, catalog, systemd and lifecycle tests
         shell: bash
