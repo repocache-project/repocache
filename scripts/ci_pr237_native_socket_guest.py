@@ -39,6 +39,16 @@ def command(*argv: str, timeout: int = 30) -> str:
     return result.stdout.strip()
 
 
+def assert_disabled(unit: str) -> None:
+    result = subprocess.run(
+        ["/usr/bin/systemctl", "is-enabled", unit], capture_output=True,
+        text=True, check=False, timeout=15,
+    )
+    assert result.returncode == 1 and result.stdout.strip() == "disabled", (
+        "Unexpected enabled state for " + unit
+    )
+
+
 def accounts() -> None:
     if "repocache-admin" not in [g.gr_name for g in grp.getgrall()]:
         command("/usr/sbin/groupadd", "--system", "repocache-admin")
@@ -178,7 +188,7 @@ def main(distribution: str) -> None:
         0, grp.getgrnam("repocache-admin").gr_gid, 0o660,
     )
     assert command("/usr/bin/systemctl", "is-active", "repocache-control.socket") == "active"
-    assert command("/usr/bin/systemctl", "is-enabled", "repocache-control.socket") == "disabled"
+    assert_disabled("repocache-control.socket")
     print("PASS: native installed systemd AF_UNIX seqpacket socket with root/admin ownership and disabled boot", flush=True)
 
     clean = request_native_fixed_v2("RECOVER_V2")
@@ -215,8 +225,8 @@ def main(distribution: str) -> None:
     print("PASS: real native RELOAD_V2, idempotent APPLY_V2 and RECOVER_V2/CLEAN preserve managed bytes and TLS", flush=True)
     command("/usr/bin/systemctl", "stop", "repocache-control.socket")
     command("/usr/bin/systemctl", "stop", "nginx.service")
-    assert command("/usr/bin/systemctl", "is-enabled", "repocache-control.socket") == "disabled"
-    assert command("/usr/bin/systemctl", "is-enabled", "nginx.service") == "disabled"
+    assert_disabled("repocache-control.socket")
+    assert_disabled("nginx.service")
     print("PASS: guest native services stopped; no autostart enabled; synthetic trust only", flush=True)
 
 
