@@ -174,6 +174,26 @@ def snapshot() -> dict[str, tuple[str, int, int]]:
     return result
 
 
+
+def assert_native_socket_refuses_arbitrary_unit() -> None:
+    """Exercise actual installed root dispatch, bypassing the safe client allowlist.
+
+    A valid fixed-command prefix plus a caller-selected unit must be rejected
+    as one whole SOCK_SEQPACKET message, without performing a reload.
+    """
+    packet = b"reload-v2\\nunit=sshd.service\\n"
+    assert len(packet) <= 32
+    with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as conn:
+        conn.settimeout(8)
+        conn.connect(str(SOCKET))
+        assert conn.send(packet) == len(packet)
+        try:
+            reply = conn.recv(1025)
+        except ConnectionResetError:
+            reply = b""
+        assert reply == b"", "Installed root broker accepted a caller-selected unit"
+
+
 def main(distribution: str) -> None:
     assert distribution in ("debian", "almalinux")
     assert os.getresuid() == (0, 0, 0)
@@ -342,6 +362,16 @@ def main(distribution: str) -> None:
     clean_again = authenticated_native_operation("RECOVER_V2")
     assert clean_again["status"] == "CLEAN"
     assert snapshot() == before
+    # Send a malicious raw packet to the ACTUAL installed systemd service.
+    # The public client already rejects unknown operations locally; this
+    # independently proves the privileged server's exact-message boundary.
+    assert_native_socket_refuses_arbitrary_unit()
+    assert snapshot() == before
+    assert not (STATE / ".state-v2-native.pending").exists()
+    assert b"x-repocache-generation: 1" in https_response("/__repocache/healthz").lower()
+    assert (authenticated_native_operation("RELOAD_V2")["status"] == "RELOADED")
+    assert snapshot() == before
+    print("PASS: installed root socket rejected injected unit selection, kept live generation and recovered normal reload", flush=True)
     for path in (certificate, private_key):
         assert hashlib.sha256(path.read_bytes()).hexdigest() == saved_tls[str(path)]
     if distribution == "almalinux":
