@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from contextlib import ExitStack
 import hashlib
+import json
 import os
 import re
 import stat
@@ -43,6 +44,22 @@ _HEX32 = re.compile(r"[0-9a-f]{32}\Z", re.ASCII)
 _MAX_ENTRIES = 20_000
 
 
+def _cache_tree_digest(
+    entries: list[tuple[tuple[str, ...], bool, tuple[int, ...]]],
+) -> str:
+    """Exact sorted relative names, inode metadata and allocated blocks.
+
+    A digest is a change detector for the reviewed fixture scope, NOT a
+    content signature, operator approval or proof that objects are unused.
+    """
+    canonical = json.dumps(
+        [[list(path), directory, list(fingerprint)]
+         for path, directory, fingerprint in entries],
+        separators=(",", ":"), ensure_ascii=True, allow_nan=False,
+    ).encode("ascii")
+    return hashlib.sha256(canonical).hexdigest()
+
+
 class RepositoryCacheCleanupPreviewError(ValueError):
     """Stable refusal code that never reveals cache path or contents."""
 
@@ -64,7 +81,9 @@ def _metadata(value: os.stat_result, *, uid: int, gid: int,
 
 
 def _scan(fd: int, *, level: int, uid: int, gid: int, dev: int,
-          count: list[int]) -> tuple[int, int, int, int]:
+          count: list[int], prefix: tuple[str, ...],
+          entries: list[tuple[tuple[str, ...], bool, tuple[int, ...]]],
+          ) -> tuple[int, int, int, int]:
     """Bounded fd-relative scan; never read cache payload or follow symlinks.
 
     Only native NGINX levels=1:2 hex hierarchy is currently supported.
@@ -75,62 +94,66 @@ def _scan(fd: int, *, level: int, uid: int, gid: int, dev: int,
     _metadata(original, uid=uid, gid=gid, dev=dev, directory=True)
     _no_unverified_xattrs(fd)
     files, dirs, logical, allocated = 0, 0, 0, 0
+    # Stable order is necessary for a reproducible reviewed-scope digest.
     with os.scandir(fd) as listing:
-        for entry in listing:
-            count[0] += 1
-            if count[0] > _MAX_ENTRIES:
-                _deny("ENTRY_LIMIT_EXCEEDED")
-            name = entry.name
-            pattern = (_HEX1 if level == 0 else
-                       _HEX2 if level == 1 else _HEX32)
-            if type(name) is not str or pattern.fullmatch(name) is None:
-                _deny("UNEXPECTED_CACHE_LAYOUT")
-            expected_directory = level < 2
-            first = os.stat(name, dir_fd=fd, follow_symlinks=False)
-            # Never *open* a special node merely to discover its type.
-            # O_NONBLOCK avoids one FIFO hang, but a device can still have
-            # observable open-side effects. Refuse foreign inode kind,
-            # ownership, links, mount and permissions before any open(2).
-            # The opened descriptor is rechecked against this preflight
-            # immediately below to detect substitution between the calls.
-            _metadata(first, uid=uid, gid=gid, dev=dev,
+        names = sorted(entry.name for entry in listing)
+    for name in names:
+        count[0] += 1
+        if count[0] > _MAX_ENTRIES:
+            _deny("ENTRY_LIMIT_EXCEEDED")
+        pattern = (_HEX1 if level == 0 else
+                   _HEX2 if level == 1 else _HEX32)
+        if type(name) is not str or pattern.fullmatch(name) is None:
+            _deny("UNEXPECTED_CACHE_LAYOUT")
+        expected_directory = level < 2
+        first = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        # Never *open* a special node merely to discover its type.
+        # O_NONBLOCK avoids one FIFO hang, but a device can still have
+        # observable open-side effects. Refuse foreign inode kind,
+        # ownership, links, mount and permissions before any open(2).
+        # The opened descriptor is rechecked against this preflight
+        # immediately below to detect substitution between the calls.
+        _metadata(first, uid=uid, gid=gid, dev=dev,
+                  directory=expected_directory)
+        opened = os.open(
+            name, _DIRECTORY_FLAGS if expected_directory else _FILE_FLAGS,
+            dir_fd=fd,
+        )
+        try:
+            seen = os.fstat(opened)
+            _metadata(seen, uid=uid, gid=gid, dev=dev,
                       directory=expected_directory)
-            opened = os.open(
-                name, _DIRECTORY_FLAGS if expected_directory else _FILE_FLAGS,
-                dir_fd=fd,
-            )
-            try:
-                seen = os.fstat(opened)
-                _metadata(seen, uid=uid, gid=gid, dev=dev,
-                          directory=expected_directory)
-                if _identity(first) != _identity(seen):
-                    _deny("CONTENT_CHANGED")
-                _no_unverified_xattrs(opened)
-                if expected_directory:
-                    subfiles, subdirs, sublogical, suballocated = _scan(
-                        opened, level=level + 1, uid=uid, gid=gid,
-                        dev=dev, count=count,
-                    )
-                    files += subfiles
-                    dirs += 1 + subdirs
-                    logical += sublogical
-                    allocated += suballocated
-                else:
-                    if (type(seen.st_size) is not int or seen.st_size < 0
-                            or type(seen.st_blocks) is not int
-                            or seen.st_blocks < 0):
-                        _deny("CONTENT_SIZE_UNVERIFIED")
-                    files += 1
-                    logical += seen.st_size
-                    allocated += seen.st_blocks * 512
-                if (logical > MAX_INT or allocated > MAX_INT
-                        or _identity(os.fstat(opened)) != _identity(seen)
-                        or _identity(os.stat(
-                            name, dir_fd=fd, follow_symlinks=False
-                        )) != _identity(seen)):
-                    _deny("CONTENT_CHANGED")
-            finally:
-                os.close(opened)
+            if _identity(first) != _identity(seen):
+                _deny("CONTENT_CHANGED")
+            _no_unverified_xattrs(opened)
+            if expected_directory:
+                subfiles, subdirs, sublogical, suballocated = _scan(
+                    opened, level=level + 1, uid=uid, gid=gid,
+                    dev=dev, count=count, prefix=(*prefix, name),
+                    entries=entries,
+                )
+                files += subfiles
+                dirs += 1 + subdirs
+                logical += sublogical
+                allocated += suballocated
+            else:
+                if (type(seen.st_size) is not int or seen.st_size < 0
+                        or type(seen.st_blocks) is not int
+                        or seen.st_blocks < 0):
+                    _deny("CONTENT_SIZE_UNVERIFIED")
+                files += 1
+                logical += seen.st_size
+                allocated += seen.st_blocks * 512
+            if (logical > MAX_INT or allocated > MAX_INT
+                    or _identity(os.fstat(opened)) != _identity(seen)
+                    or _identity(os.stat(
+                        name, dir_fd=fd, follow_symlinks=False
+                    )) != _identity(seen)):
+                _deny("CONTENT_CHANGED")
+            entries.append(((*prefix, name), expected_directory,
+                            _identity(seen) + (seen.st_blocks,)))
+        finally:
+            os.close(opened)
     if _identity(os.fstat(fd)) != _identity(original):
         _deny("DIRECTORY_CHANGED")
     return files, dirs, logical, allocated
@@ -192,10 +215,12 @@ def preview_repository_cache_cleanup_under_root(
                     or before.st_gid != cache_gid
                     or stat.S_IMODE(before.st_mode) != 0o700):
                 _deny("REPOSITORY_ROOT_UNTRUSTED")
+            records: list[tuple[tuple[str, ...], bool, tuple[int, ...]]] = []
             files, dirs, logical, allocated = _scan(
                 repo_fd, level=0, uid=cache_uid, gid=cache_gid,
-                dev=before.st_dev, count=[0],
+                dev=before.st_dev, count=[0], prefix=(), entries=records,
             )
+            tree_sha256 = _cache_tree_digest(records)
             # Detect a swap/relink or concurrent cache-manager mutation.
             if (_identity(os.fstat(repo_fd)) != _identity(before)
                     or _identity(os.stat(
@@ -222,6 +247,7 @@ def preview_repository_cache_cleanup_under_root(
             "cache_directories_observed": dirs,
             "apparent_file_bytes_observed": logical,
             "allocated_file_bytes_observed": allocated,
+            "cache_tree_sha256_observed": tree_sha256,
             "bounded_layout_and_marker_observed": True,
             "trusted_repository_deletion_approval_verified": False,
             "nginx_quiescence_verified": False,
