@@ -649,3 +649,260 @@ def test_locked_retired_cache_preview_rejects_actual_root_before_state_lock(
             )
     finally:
         os.close(fd)
+
+
+
+# The actual object-deletion rehearsal is intentionally in a DIFFERENT,
+# fixture-only module. The public preflight module above stays read-only.
+def _fixture_purge(layout, *, generation, digest, files, allocated,
+                   probe=None, fault=None, rid=RID):
+    from repocache.server_fixture_retired_cache_cleanup_v1 import (
+        purge_fixture_retired_repository_cache_objects_under_root,
+    )
+    fd, uid, gid, *_ = layout
+    return purge_fixture_retired_repository_cache_objects_under_root(
+        fd, root_uid=uid, cache_uid=uid, cache_gid=gid,
+        repository_id=rid, expected_state_generation=generation,
+        expected_state_sha256=digest,
+        expected_cache_files=files,
+        expected_allocated_file_bytes=allocated,
+        assert_fixture_quiescent=(lambda: None) if probe is None else probe,
+        inject_fixture_fault=fault,
+    )
+
+
+def test_explicit_fixture_purge_is_retired_only_and_preserves_other_cache(
+    owned_with_locked_state,
+):
+    layout, _, state_file = owned_with_locked_state
+    fd, uid, gid, retired_root, cache_root, root = layout
+    populate(layout)
+    from repocache.server_fixture_retired_cache_cleanup_v1 import (
+        FixtureRetiredCacheCleanupError,
+    )
+    # A syntactically valid request is not sufficient to purge an
+    # allocated/disabled repository before it is persistently retired.
+    initial = hashlib.sha256(state_file.read_bytes()).hexdigest()
+    original_payload = (retired_root / "a/bc" / DIGEST1).read_bytes()
+    with pytest.raises(FixtureRetiredCacheCleanupError,
+                       match="REPOSITORY_NOT_RETIRED"):
+        _fixture_purge(
+            layout, generation=1, digest=initial, files=2,
+            allocated=inspect(layout)["allocated_file_bytes_observed"],
+        )
+    assert (retired_root / "a/bc" / DIGEST1).read_bytes() == original_payload
+
+    bootstrap_repository_cache_under_root(
+        fd, root_uid=uid, cache_uid=uid, cache_gid=gid,
+        repository_id="almalinux-baseos",
+    )
+    other_root = cache_root / "almalinux-baseos"
+    other_file = other_root / "b" / "cd" / DIGEST1
+    other_file.parent.mkdir(parents=True, mode=0o700)
+    other_file.write_bytes(b"signed-dnf-cache-must-survive")
+    other_inode = other_file.stat().st_ino
+
+    digest = _retire_owned_repo(owned_with_locked_state)
+    sample = _locked_cleanup_preview(
+        owned_with_locked_state, generation=2, digest=digest,
+    )
+    before_state = state_file.read_bytes()
+    expected = [
+        (p.name, p.stat().st_ino)
+        for p in (retired_root / "a" / "bc").iterdir()
+    ]
+    assert len(expected) == 2
+    observed = []
+    result = _fixture_purge(
+        layout, generation=2, digest=digest,
+        files=sample["cache_files_observed"],
+        allocated=sample["allocated_file_bytes_observed"],
+        probe=lambda: observed.append("fixture-drained") or None,
+    )
+    assert observed == ["fixture-drained"]
+    assert result["status"] == "PURGED_DETACHED_FIXTURE_CACHE_OBJECTS_ONLY"
+    assert result["verified_cache_files_removed"] == 2
+    assert result["repository_cache_marker_preserved"] is True
+    assert result["retirement_ledger_preserved"] is True
+    assert result["fixture_only"] is True
+    assert result["actual_host_transfer_quiescence_verified"] is False
+    assert result["authorizes_installed_cache_cleanup"] is False
+    assert list(retired_root.iterdir()) == []
+    assert retired_root.is_dir()
+    assert (cache_root.parent / (
+        ".repocache-repository-" + RID + ".owner-v1"
+    )).is_file()
+    assert other_file.read_bytes() == b"signed-dnf-cache-must-survive"
+    assert other_file.stat().st_ino == other_inode
+    assert state_file.read_bytes() == before_state
+
+    # Explicit cleanup is idempotent: a second full preflight reports zero,
+    # then an accepted empty purge touches no selected cache objects.
+    after = _locked_cleanup_preview(
+        owned_with_locked_state, generation=2, digest=digest,
+    )
+    assert after["cache_files_observed"] == 0
+    again = _fixture_purge(
+        layout, generation=2, digest=digest,
+        files=0, allocated=0,
+    )
+    assert again["verified_cache_files_removed"] == 0
+    assert other_file.read_bytes() == b"signed-dnf-cache-must-survive"
+
+
+def test_fixture_purge_refuses_stale_or_unapproved_scope_without_deletion(
+    owned_with_locked_state,
+):
+    from repocache.server_fixture_retired_cache_cleanup_v1 import (
+        FixtureRetiredCacheCleanupError,
+    )
+    layout, _, state_file = owned_with_locked_state
+    files = populate(layout)
+    digest = _retire_owned_repo(owned_with_locked_state)
+    sample = _locked_cleanup_preview(
+        owned_with_locked_state, generation=2, digest=digest,
+    )
+    args = dict(
+        generation=2, digest=digest,
+        files=sample["cache_files_observed"],
+        allocated=sample["allocated_file_bytes_observed"],
+    )
+    bad = (
+        {"generation": 1},
+        {"digest": "0" * 64},
+        {"files": 1},
+        {"allocated": sample["allocated_file_bytes_observed"] + 4096},
+        {"rid": "almalinux-baseos"},
+        {"rid": "../not-safe"},
+        {"probe": lambda: False},
+        {"probe": lambda: (_ for _ in ()).throw(
+            RuntimeError("synthetic active transfer")
+        )},
+    )
+    before = sorted((p.name, p.read_bytes()) for p in files.iterdir())
+    for override in bad:
+        with pytest.raises(FixtureRetiredCacheCleanupError):
+            _fixture_purge(layout, **{**args, **override})
+        assert sorted((p.name, p.read_bytes())
+                      for p in files.iterdir()) == before
+        assert not (state_file.with_name(".state-v2-multi.pending")).exists()
+    assert hashlib.sha256(state_file.read_bytes()).hexdigest() == digest
+
+
+def test_fixture_purge_detects_payload_changing_during_quiescence_check(
+    owned_with_locked_state,
+):
+    from repocache.server_fixture_retired_cache_cleanup_v1 import (
+        FixtureRetiredCacheCleanupError,
+    )
+    layout, _, _ = owned_with_locked_state
+    directory = populate(layout)
+    digest = _retire_owned_repo(owned_with_locked_state)
+    report = _locked_cleanup_preview(
+        owned_with_locked_state, generation=2, digest=digest,
+    )
+    target = directory / DIGEST1
+    baseline = (directory / DIGEST2).read_bytes()
+
+    def tamper():
+        # Even when file count and allocated size are unchanged, the
+        # complete inode/mtime fingerprint must block deletion.
+        target.write_bytes(b"x" * target.stat().st_size)
+
+    with pytest.raises(FixtureRetiredCacheCleanupError,
+                       match="CONTENT_CHANGED"):
+        _fixture_purge(
+            layout, generation=2, digest=digest,
+            files=report["cache_files_observed"],
+            allocated=report["allocated_file_bytes_observed"],
+            probe=tamper,
+        )
+    assert (directory / DIGEST2).read_bytes() == baseline
+    assert target.is_file()
+
+
+@pytest.mark.parametrize("kind", ["symlink", "hardlink", "extra-file"])
+def test_fixture_purge_foreign_objects_fail_before_unlink(
+    owned_with_locked_state, tmp_path, kind,
+):
+    from repocache.server_fixture_retired_cache_cleanup_v1 import (
+        FixtureRetiredCacheCleanupError,
+    )
+    layout, _, _ = owned_with_locked_state
+    directory = populate(layout)
+    digest = _retire_owned_repo(owned_with_locked_state)
+    outside = tmp_path / "outside-package"
+    outside.write_bytes(b"critical-other-repo")
+    if kind == "symlink":
+        (directory / DIGEST1).unlink()
+        (directory / DIGEST1).symlink_to(outside)
+    elif kind == "hardlink":
+        os.link(directory / DIGEST1, outside, follow_symlinks=False)
+    else:
+        (directory / "not-a-digest").write_bytes(b"not-owned")
+    with pytest.raises(FixtureRetiredCacheCleanupError):
+        _fixture_purge(
+            layout, generation=2, digest=digest,
+            files=2, allocated=0,
+        )
+    assert outside.read_bytes() in (b"critical-other-repo",
+                                    b"immutable-cached-package" * 10)
+    assert (directory / DIGEST2).read_bytes() == b"some-more-payload"
+
+
+def test_fixture_purge_fault_after_unlink_has_explicit_resumable_partial_state(
+    owned_with_locked_state,
+):
+    layout, _, state_file = owned_with_locked_state
+    directory = populate(layout)
+    digest = _retire_owned_repo(owned_with_locked_state)
+    report = _locked_cleanup_preview(
+        owned_with_locked_state, generation=2, digest=digest,
+    )
+
+    def crash(phase):
+        assert phase == "entry_removed"
+        raise RuntimeError("fixture-only kill after first unlink")
+
+    with pytest.raises(RuntimeError, match="fixture-only kill"):
+        _fixture_purge(
+            layout, generation=2, digest=digest,
+            files=report["cache_files_observed"],
+            allocated=report["allocated_file_bytes_observed"],
+            fault=crash,
+        )
+    assert state_file.is_file()
+    # Non-atomic cache deletion must not be misreported as complete.
+    remaining = _locked_cleanup_preview(
+        owned_with_locked_state, generation=2, digest=digest,
+    )
+    assert remaining["cache_files_observed"] == 1
+    result = _fixture_purge(
+        layout, generation=2, digest=digest,
+        files=remaining["cache_files_observed"],
+        allocated=remaining["allocated_file_bytes_observed"],
+    )
+    assert result["verified_cache_files_removed"] == 1
+    assert list(layout[3].iterdir()) == []
+
+
+def test_fixture_purge_rejects_actual_root_before_lock(monkeypatch):
+    from repocache import server_fixture_retired_cache_cleanup_v1 as module
+    monkeypatch.setattr(
+        module, "_locked",
+        lambda *_args, **_kwargs: pytest.fail("real host lock must not be read"),
+    )
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        with pytest.raises(module.FixtureRetiredCacheCleanupError,
+                           match="LIVE_ROOT_FORBIDDEN"):
+            module.purge_fixture_retired_repository_cache_objects_under_root(
+                fd, root_uid=os.geteuid(), cache_uid=os.geteuid(),
+                cache_gid=os.getegid(), repository_id=RID,
+                expected_state_generation=2,
+                expected_state_sha256="0" * 64,
+                expected_cache_files=0, expected_allocated_file_bytes=0,
+                assert_fixture_quiescent=lambda: None,
+            )
+    finally:
+        os.close(fd)
