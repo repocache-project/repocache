@@ -14,6 +14,9 @@ on:
       - 'scripts/ci_pr237_native_socket_guest.py'
       - 'scripts/ci_pr237_native_package_interrupt_guest.py'
       - 'docs/testing/PR237_BOOTED_VM.md'
+      - 'docs/testing/V060_NATIVE_VM_COVERAGE_MATRIX.md'
+      - 'scripts/collect_v06_vm_campaign_coverage.py'
+      - 'tests/test_v06_vm_campaign_coverage.py'
   workflow_dispatch:
 
 permissions:
@@ -82,6 +85,19 @@ jobs:
           PR237_IMAGE_SHA256: ${{ matrix.image_sha256 }}
           PR237_SCENARIO: ${{ matrix.scenario }}
         run: bash scripts/ci_pr237_booted_vm.sh
+      - name: Index partial cross-issue campaign evidence (never original acceptance)
+        if: always()
+        shell: bash
+        env:
+          VM_PLATFORM: ${{ matrix.platform }}
+          VM_SCENARIO: ${{ matrix.scenario }}
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          python3 -B scripts/collect_v06_vm_campaign_coverage.py \\
+            --evidence-dir pr237-vm-evidence \\
+            --platform "$VM_PLATFORM" \\
+            --scenario "$VM_SCENARIO" \\
+            --expected-head "$EXPECTED_HEAD"
       - name: Publish summary even when experiment fails
         if: always()
         shell: bash
