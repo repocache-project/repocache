@@ -1,7 +1,7 @@
 # #95 — inert batch enable/disable repository intent (Stage A)
 
 The reviewed v0.6 server lifecycle treats a repository as the only
-administrator-facing managed object. This pure multi-target helper
+administrator-facing managed object. The pure multi-target helper
 `plan_batch_repository_states` represents independent enable/disable
 requests in **one strictly validated candidate document**. It validates
 the expected generation and every identifier before proposing any

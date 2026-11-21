@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from repocache.server_repository_batch_states_v1 import (
+from repocache.server_repository_reconcile_v1 import (
     BatchRepositoryStateError, plan_batch_repository_states,
 )
 
