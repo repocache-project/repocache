@@ -76,6 +76,16 @@ def preview_cache_pressure(
     else:
         level, cause = "normal", "THRESHOLDS_SATISFIED"
 
+    # Free bytes above the critical hysteresis boundary alone cannot
+    # downgrade an existing CRITICAL alarm when other measurements are
+    # missing. In particular an inode-exhausted or read-only filesystem
+    # could still refuse cache writes even though statvfs reports bytes.
+    # A known CRITICAL free-space/read-only observation already escalated
+    # above; do not weaken it.
+    if (previous_level == "critical" and level == "warning"
+            and (not measurements_complete or disk_writable is None)):
+        level, cause = "critical", "CRITICAL_RECOVERY_OBSERVATION_INCOMPLETE"
+
     return {
         "status": "POLICY_PREVIEW_ONLY",
         "pressure_level": level,

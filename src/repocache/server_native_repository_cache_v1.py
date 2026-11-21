@@ -13,6 +13,7 @@ SELinux contexts and native root privilege before any production use.
 from __future__ import annotations
 
 from contextlib import ExitStack
+import hashlib
 import json
 import os
 import stat
@@ -26,6 +27,14 @@ from repocache.server_native_storage_bootstrap_v1 import (
 from repocache.server_protected_state_inspect_v1 import (
     _DIRECTORY_FLAGS, _identity, _recheck, _safe_directory, _walk,
 )
+from repocache.server_fixture_multi_resource_wal_v1 import (
+    V2_STATE, _check_no_auxiliary_pending, _read_all, _validate_old,
+)
+from repocache.server_proposed_state_v2_store import (
+    _legacy_refusal, _read_v2, _refuse_actual_root_fixture_write,
+)
+from repocache.server_proposed_v2_locked_digest_v1 import _state_inode
+from repocache.server_protected_state_store_v1 import _locked
 
 _MAX_MARKER = 512
 _READ = (os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
@@ -255,3 +264,129 @@ def bootstrap_repository_cache_under_root(
         raise
     except (OSError, ValueError, TypeError, OverflowError, RecursionError):
         _deny("UNVERIFIED_STATE")
+
+
+def preview_locked_active_repository_cache_roots_under_root(
+    root_fd: int, *, root_uid: int, cache_uid: int, cache_gid: int,
+    expected_state_generation: int, expected_state_sha256: str,
+) -> dict[str, Any]:
+    """Bind every desired-active v2 fixture ID to its pinned native cache root.
+
+    A complete committed state/include/catalog/manifest is read and checked
+    under the existing exclusive state lock. The active set comes only from
+    those protected state bytes, not from caller-selected IDs or a second
+    allowlist. This is an *inert read-only* precondition, not NGINX activation,
+    source trust, a grant to create storage or a live worker-drain check.
+
+    Native NGINX can have in-flight cache temp objects, so this deliberately
+    verifies the exact externally marked repository *root*, not individual
+    active cache files or an ambiguous potentially shared working directory.
+    """
+    try:
+        _refuse_actual_root_fixture_write(root_fd)
+    except (ValueError, OSError):
+        _deny("ACTIVE_LIVE_ROOT_REFUSED")
+    if (any(type(v) is not int or not 0 <= v <= 2**32 - 2
+            for v in (root_uid, cache_uid, cache_gid))
+            or type(expected_state_generation) is not int
+            or not 1 <= expected_state_generation < 2**63
+            or type(expected_state_sha256) is not str
+            or len(expected_state_sha256) != 64
+            or any(ch not in "0123456789abcdef"
+                   for ch in expected_state_sha256)):
+        _deny("ACTIVE_ARGUMENT_INVALID")
+    try:
+        with _locked(root_fd, root_uid) as state_fd:
+            _legacy_refusal(state_fd, root_uid)
+            _check_no_auxiliary_pending(state_fd, root_uid)
+            state, previous = _read_v2(state_fd, root_uid)
+            if state is None or previous is None:
+                _deny("ACTIVE_STATE_REQUIRED")
+            initial_inode = _state_inode(state_fd)
+            owned = _read_all(state_fd, root_uid)
+            if owned[V2_STATE] != previous:
+                _deny("ACTIVE_STATE_READ_DRIFT")
+            _validate_old(owned)
+            actual = hashlib.sha256(previous).hexdigest()
+            if (state["state_generation"] != expected_state_generation
+                    or actual != expected_state_sha256):
+                _deny("ACTIVE_STATE_CHANGED")
+            active = sorted(
+                item["id"] for item in state["repository_records"]
+                if item["desired_state"] == "active"
+            )
+            # Check the complete owned storage root even for zero active IDs;
+            # an absent/foreign cache namespace is never a positive preflight.
+            with ExitStack() as stack:
+                _safe_directory(root_fd, root_uid)
+                parent_fd, ancestry = _walk(
+                    root_fd, _CACHE_PARENT, stack, root_uid,
+                )
+                _no_unverified_xattrs(parent_fd)
+                parent = _safe_directory(parent_fd, root_uid)
+                cache_fd = os.open(
+                    _LEAF, _DIRECTORY_FLAGS, dir_fd=parent_fd,
+                )
+                stack.callback(os.close, cache_fd)
+                _no_unverified_xattrs(cache_fd)
+                cache = os.fstat(cache_fd)
+                named = os.stat(
+                    _LEAF, dir_fd=parent_fd, follow_symlinks=False,
+                )
+                if (not stat.S_ISDIR(cache.st_mode)
+                        or cache.st_dev != parent.st_dev
+                        or cache.st_uid != cache_uid
+                        or cache.st_gid != cache_gid
+                        or stat.S_IMODE(cache.st_mode) != 0o700
+                        or _structural(cache) != _structural(named)
+                        or _read_marker(parent_fd, root_uid=root_uid) != {
+                            "schema": 1, "kind": "cache", **_proof(cache),
+                        }):
+                    _deny("ACTIVE_CACHE_ROOT_UNTRUSTED")
+                for repository_id in active:
+                    present, _ = _snapshot(
+                        parent_fd, cache_fd, repository_id,
+                        root_uid=root_uid, cache_uid=cache_uid,
+                        cache_gid=cache_gid,
+                    )
+                    if not present:
+                        _deny("ACTIVE_REPOSITORY_CACHE_UNOWNED")
+                if (_structural(os.fstat(cache_fd)) != _structural(cache)
+                        or _structural(os.fstat(parent_fd)) != _structural(parent)):
+                    _deny("ACTIVE_CACHE_ROOT_CHANGED")
+                _recheck(ancestry, root_uid)
+            _legacy_refusal(state_fd, root_uid)
+            _check_no_auxiliary_pending(state_fd, root_uid)
+            later, later_raw = _read_v2(state_fd, root_uid)
+            if (later != state or later_raw != previous
+                    or _state_inode(state_fd) != initial_inode
+                    or _read_all(state_fd, root_uid) != owned):
+                _deny("ACTIVE_STATE_CHANGED_DURING_SCAN")
+            return {
+                "schema_version": 1,
+                "status": "FIXTURE_ACTIVE_REPOSITORY_CACHE_ROOTS_ONLY",
+                "state_generation": expected_state_generation,
+                "whole_state_sha256": actual,
+                "desired_active_repository_ids": active,
+                "active_repository_count": len(active),
+                "all_active_cache_root_markers_verified": True,
+                "complete_fixture_state_and_catalog_owned": True,
+                "fixture_root_and_locked_state_checked": True,
+                "atomic_cache_manager_snapshot_verified": False,
+                "operator_authorization_verified": False,
+                "installed_nginx_cache_usage_verified": False,
+                "native_host_root_provenance_verified": False,
+                "real_nginx_exposure_verified": False,
+                "published_client_catalog_verified": False,
+                "selinux_enforcing_verified": False,
+                "preflight_remains_valid_after_return": False,
+                "authorizes_cache_bootstrap": False,
+                "authorizes_state_commit": False,
+                "authorizes_nginx_activation": False,
+                "authorizes_catalog_publication": False,
+                "authorizes_cache_cleanup": False,
+            }
+    except RepositoryCacheBootstrapError:
+        raise
+    except (OSError, ValueError, TypeError, OverflowError, RecursionError):
+        _deny("ACTIVE_OWNERSHIP_UNVERIFIED")
