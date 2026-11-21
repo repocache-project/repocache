@@ -30,10 +30,14 @@ from repocache.server_nginx_repository_bundle_v1 import (
     render_repository_nginx_bundle_candidate,
 )
 from repocache.server_proposed_state_v2_store import (
-    _legacy_refusal, _read_v2, _refuse_actual_root_fixture_write,
+    MAX_V2_STATE_BYTES, _legacy_refusal, _read_v2,
+    _refuse_actual_root_fixture_write,
 )
 from repocache.server_protected_state_store_v1 import (
-    _canonical, _locked,
+    _canonical, _json, _locked,
+)
+from repocache.server_repository_reconcile_v1 import (
+    render_fixed_native_v2_candidate_envelope,
 )
 from repocache.server_repository_v2_transition_v1 import (
     plan_repository_v2_transition, plan_repository_v2_batch_transition,
@@ -422,3 +426,154 @@ def prepare_locked_fixture_native_batch_envelope_under_root(
     except (ValueError, TypeError, OverflowError, OSError,
             RecursionError, UnicodeError):
         _deny("LOCKED_CANDIDATE_REFUSED")
+
+
+def commit_fixture_prepared_repository_proposal_under_root(
+    root_fd: int, *, owner_uid: int, expected_generation: int,
+    expected_previous_state_sha256: str, expected_prepared_state_sha256: str,
+    prepared_state_bytes: bytes, fixture_decision_sha256: str,
+    candidate_pins_by_repository: dict[str, dict[str, list[str]]],
+    ca_bundle_path: str,
+    verify_fixture_exposure_before_publish: Callable[[], None],
+    inject_fault: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    """Commit exact offline #95 bytes through the protected test-only v2 WAL.
+
+    A real installed #237 worker must authenticate its operator and independently
+    revalidate all host, NGINX, SELinux, owner and recovery preconditions.
+    Neither a caller-selected test FD nor its callback is privileged authority.
+    """
+    _refuse_actual_root_fixture_write(root_fd)
+    if (type(owner_uid) is not int or not 0 <= owner_uid <= 2**32 - 2
+            or type(expected_generation) is not int
+            or not 1 <= expected_generation < MAX_INT
+            or type(prepared_state_bytes) is not bytes
+            or not 1 <= len(prepared_state_bytes) <= MAX_V2_STATE_BYTES
+            or any(type(value) is not str or len(value) != 64
+                   or any(ch not in "0123456789abcdef" for ch in value)
+                   for value in (expected_previous_state_sha256,
+                                 expected_prepared_state_sha256,
+                                 fixture_decision_sha256))
+            or hashlib.sha256(prepared_state_bytes).hexdigest()
+               != expected_prepared_state_sha256
+            or not callable(verify_fixture_exposure_before_publish)
+            or (inject_fault is not None and not callable(inject_fault))):
+        _deny("PREPARED_ARGUMENT_INVALID")
+    try:
+        # Do not reserialize/silently repair the supplied exact candidate.
+        proposed = _json(prepared_state_bytes, limit=MAX_V2_STATE_BYTES)
+        pinned = _json(
+            _canonical(candidate_pins_by_repository, limit=1024 * 1024),
+            limit=1024 * 1024,
+        )
+        if (type(proposed) is not dict
+                or type(proposed.get("approval_reference")) is not dict
+                or proposed["approval_reference"].get("source") != "operator"
+                or proposed["approval_reference"].get("decision_sha256")
+                   != fixture_decision_sha256
+                or proposed["approval_reference"].get("expected_generation")
+                   != expected_generation):
+            _deny("PREPARED_DECISION_MISMATCH")
+        with _locked(root_fd, owner_uid) as directory:
+            _legacy_refusal(directory, owner_uid)
+            _check_no_auxiliary_pending(directory, owner_uid)
+            previous, raw = _read_v2(directory, owner_uid)
+            if previous is None or raw is None:
+                _deny("PREPARED_PREDECESSOR_ABSENT")
+            resources = _read_all(directory, owner_uid)
+            _validate_old(resources)
+            if (resources[V2_STATE] != raw
+                    or previous["state_generation"] != expected_generation
+                    or hashlib.sha256(raw).hexdigest()
+                       != expected_previous_state_sha256):
+                _deny("PREPARED_PREDECESSOR_CHANGED")
+            # Independently validate the fixed native candidate envelope
+            # against the actual protected, descriptor-locked predecessor.
+            exact = render_fixed_native_v2_candidate_envelope(
+                raw, prepared_state_bytes,
+                expected_generation=expected_generation,
+                expected_previous_state_sha256=expected_previous_state_sha256,
+            )
+            if (exact["authorizes_state_write"] is not False
+                    or exact["authorizes_nginx_reload"] is not False
+                    or exact["authorizes_catalog_publication"] is not False
+                    or exact["authorizes_cache_cleanup"] is not False
+                    or exact["next_state_sha256"]
+                       != expected_prepared_state_sha256):
+                _deny("PREPARED_ENVELOPE_UNSAFE")
+            previous_doc = parse_install_bytes(
+                base64.b64decode(previous["configuration_base64"], validate=True),
+                for_apply=True,
+            )
+            document = parse_install_bytes(
+                base64.b64decode(proposed["configuration_base64"], validate=True),
+                for_apply=True,
+            )
+            before_common = {key: value for key, value in previous_doc.items()
+                             if key not in ("expected_state_generation", "repositories")}
+            after_common = {key: value for key, value in document.items()
+                            if key not in ("expected_state_generation", "repositories")}
+            if (before_common != after_common
+                    or previous_doc["repositories"] == document["repositories"]):
+                _deny("PREPARED_NOT_REPOSITORY_CHANGE")
+            bundle = render_repository_nginx_bundle_candidate(
+                document, expected_state_generation=expected_generation + 1,
+                candidate_pins_by_repository=pinned,
+                ca_bundle_path=ca_bundle_path,
+            )
+            active_ids = sorted(
+                row["id"] for row in proposed["repository_records"]
+                if row["desired_state"] == "active"
+            )
+            if (bundle["status"] != "MULTI_REPOSITORY_RENDER_CANDIDATE_ONLY"
+                    or bundle["proposed_repository_ids"] != active_ids
+                    or bundle["authorizes_nginx_activation"] is not False
+                    or bundle["authorizes_catalog_publication"] is not False):
+                _deny("PREPARED_BUNDLE_UNSAFE")
+            include_bytes = (
+                bundle["http_upstream_fragment"] + "server {\n"
+                + bundle["server_location_fragment"] + "}\n"
+            ).encode("utf-8")
+            catalog_bytes = _canonical({
+                "schema_version": 1,
+                "status": "fixture-only-observed-candidate",
+                "active_ids": active_ids,
+            }, limit=512000)
+            if (_read_v2(directory, owner_uid) != (previous, raw)
+                    or _read_all(directory, owner_uid) != resources):
+                _deny("PREPARED_RESOURCE_DRIFT")
+    except FixtureRepositoryTransactionError:
+        raise
+    except (OSError, ValueError, TypeError, RecursionError, OverflowError,
+            UnicodeError, KeyError, AttributeError):
+        _deny("PREPARED_VALIDATION_REFUSED")
+
+    # A separate lock/CAS in the existing *detached fixture* WAL is the
+    # final arbiter. Its callback simulates exposure, not live NGINX.
+    try:
+        committed = _commit_fixture_multi_resource_under_root(
+            root_fd, proposed, owner_uid=owner_uid,
+            expected_generation=expected_generation,
+            expected_previous_state_sha256=expected_previous_state_sha256,
+            include_bytes=include_bytes, catalog_bytes=catalog_bytes,
+            verify_fixture_exposure_before_publish=(
+                verify_fixture_exposure_before_publish
+            ),
+            inject_fault=inject_fault,
+        )
+    except ValueError:
+        _deny("PREPARED_COMMIT_REFUSED")
+    return {
+        "status": committed["status"],
+        "state_generation": committed["state_generation"],
+        "prepared_state_sha256": expected_prepared_state_sha256,
+        "predecessor_state_sha256": expected_previous_state_sha256,
+        "fixture_only": True,
+        "durable_shadow_wal_exercised": committed["durable_shadow_wal_exercised"],
+        "host_activation_verified": False,
+        "operator_authorization_verified": False,
+        "authorizes_state_write": False,
+        "authorizes_nginx_reload": False,
+        "authorizes_catalog_publication": False,
+        "authorizes_cache_cleanup": False,
+    }
