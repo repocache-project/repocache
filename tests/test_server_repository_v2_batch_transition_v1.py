@@ -173,7 +173,9 @@ def test_batch_update_keeps_cache_identity_and_rejects_rebinding():
     changed = []
     for row in doc["repositories"]:
         item = copy.deepcopy(row)
-        item["layout"]["release_key_refs"] = [
+        trust_field = ("release_key_refs" if item["kind"] == "apt"
+                       else "gpg_key_refs")
+        item["layout"][trust_field] = [
             "file:/etc/repocache/keys/rotated-" + item["kind"] + ".gpg",
         ]
         changed.append(item)
