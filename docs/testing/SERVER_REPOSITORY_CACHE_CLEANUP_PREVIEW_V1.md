@@ -45,6 +45,54 @@ with the existing bootstrap and executes adversarial filesystem tests
 as UID/GID 65534. Both Debian 13 and AlmaLinux 10 runs are userspace
 containers, not booted native host/SELinux acceptance.
 
+## Joined protected-v2 retirement and cache ownership preflight
+
+`preview_locked_retired_repository_cache_cleanup_under_root` provides a
+**functional read-only integration** between two previously separate
+fixture boundaries. It acquires the existing owner-pinned exclusive
+protected state-v2 lock, refuses legacy/multi-resource recovery, reads
+the actual canonical persisted v2 snapshot and requires:
+
+- An exact caller-pinned generation and exact SHA-256 of those persisted
+  bytes; an untrusted caller-provided history is never accepted.
+- The selected repository ID is a permanent `retired` reservation in
+  `id_reservations`, absent from current `repository_records`.
+- The existing fixed cache-root and repository ownership markers,
+  inode identity and expected native NGINX levels=1:2 cache layout
+  successfully pass the earlier bounded filesystem preview.
+- The protected ledger remains byte-identical with no newly pending
+  journal after the scan, while the same state lock is held throughout.
+
+An allocated/active/unknown ID fails **before any cache scan**. A
+changed generation or state digest, foreign/symlinked cached object,
+pending recovery journal or lock contention fails closed. Only the
+selected repository's observed counts and allocated/apparent bytes
+are returned. The preflight does not open cached payload for writing,
+unlink anything, change state, stage a catalogue or reload NGINX.
+
+This is still a **detached test-root fixture API**, not an approved
+production broker. The state record `retired` does **not** prove that
+a live NGINX worker has drained, the origin is unshared, the operator
+authorized irreversible deletion, or that the installed signed root
+control service is the caller. A passing report cannot be used as an
+unlink or force-cleanup token. All authority flags are false; the
+root lock is released before return. The future native owner must
+re-derive and revalidate cache ownership, active transfer quiescence
+and selected identity at the actual destructive transaction boundary.
+
+CI regression command:
+
+```sh
+python -m pytest -q tests/test_server_repository_cache_cleanup_preview_v1.py
+```
+
+The protected-v2 tests use **actual durable fixture filesystem commits**
+for a present APT repository, then retire it through the merged #95
+v2 operation planner. They inspect its retained package cache while
+the state lock is held, reject still-allocated state and unsafe objects,
+and verify journal refusal and byte-for-byte cache preservation. This
+is useful Stage-A evidence, not installed native systemd/SELinux proof.
+
 ## Requirements before any real force-cleanup feature
 
 A future, separately reviewed installed root worker must prove the
