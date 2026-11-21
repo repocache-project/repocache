@@ -39,8 +39,15 @@ def _commands(distribution: str, work: Path) -> tuple[list[str], list[str]]:
     """CI-only compatibility wrapper for the same production-bound commands."""
     try:
         return _native_install_commands(distribution, work)
-    except ValueError:
-        _deny("CONTAINER_DISTRIBUTION_OR_NATIVE_PROFILE_UNVERIFIED")
+    except ValueError as exc:
+        # Preserve the CI helper's closed, stable refusal contract while
+        # deriving all APT/DNF commands from the shared native installer.
+        codes = {
+            "NATIVE_INSTALL_DISTRIBUTION_UNSUPPORTED": "CONTAINER_DISTRIBUTION_UNSUPPORTED",
+            "NATIVE_INSTALL_APT_PROFILE_CHANGED": "CONTAINER_APT_PROFILE_CHANGED",
+            "NATIVE_INSTALL_DNF_PROFILE_CHANGED": "CONTAINER_DNF_PROFILE_CHANGED",
+        }
+        _deny(codes.get(str(exc), "CONTAINER_NATIVE_PROFILE_UNVERIFIED"))
 
 
 def _native_unit_package_owner(distribution: str, work: Path, runner) -> bool:
