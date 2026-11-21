@@ -80,7 +80,7 @@ def private_file(path, data):
 
 
 def invoke(previous, request, output, *, generation=1, digest=None,
-           decision=DECISION, dry_run=False):
+           decision=DECISION, dry_run=False, proposed_sha=None):
     actual = previous.read_bytes()
     args = [sys.executable, str(SCRIPT),
             "--previous-v2-state", str(previous),
@@ -93,6 +93,8 @@ def invoke(previous, request, output, *, generation=1, digest=None,
         args.append("--dry-run")
     else:
         args.extend(["--proposal-output", str(output)])
+    if proposed_sha is not None:
+        args.extend(["--expected-proposed-state-sha256", proposed_sha])
     return subprocess.run(
         args, cwd=ROOT, text=True, capture_output=True,
         check=False, timeout=20,
@@ -343,3 +345,86 @@ def test_offline_refuses_ambiguous_preview_output_and_missing_output(tmp_path):
         assert run.returncode == 1
         assert json.loads(run.stdout)["status"] == "OFFLINE_LIFECYCLE_REFUSED"
         assert not output.exists()
+
+
+@pytest.mark.parametrize("reviewed_request", [
+    {"operation": "enable", "repository_ids": ["debian-trixie-main"]},
+    {"operation": "remove", "all_repositories": True},
+])
+def test_reviewed_sha_binds_preview_to_exact_created_state(
+    tmp_path, reviewed_request,
+):
+    previous, request, output = prepared(tmp_path)
+    private_file(request, reviewed_request)
+    preview = invoke(previous, request, output, dry_run=True)
+    assert preview.returncode == 0, preview.stderr
+    approved_digest = json.loads(preview.stdout)["proposed_state_sha256"]
+    assert not output.exists()
+
+    run = invoke(previous, request, output, proposed_sha=approved_digest)
+    assert run.returncode == 0, run.stderr
+    report = json.loads(run.stdout)
+    assert report["review_digest_precondition_checked"] is True
+    assert report["proposed_state_sha256"] == approved_digest
+    assert hashlib.sha256(output.read_bytes()).hexdigest() == approved_digest
+    assert stat.S_IMODE(output.stat().st_mode) == 0o600
+    assert report["authorizes_service_activation"] is False
+
+
+def test_changed_request_after_review_cannot_write_unreviewed_proposal(tmp_path):
+    previous, request, output = prepared(tmp_path)
+    private_file(request, {
+        "operation": "enable", "repository_ids": ["debian-trixie-main"],
+    })
+    preview = invoke(previous, request, output, dry_run=True)
+    assert preview.returncode == 0
+    pinned = json.loads(preview.stdout)["proposed_state_sha256"]
+    before = previous.read_bytes()
+
+    # Both operations are valid and would write a different next state if
+    # the caller silently omitted the reviewed-digest condition.
+    private_file(request, {"operation": "remove", "all_repositories": True})
+    run = invoke(previous, request, output, proposed_sha=pinned)
+    assert run.returncode == 1
+    assert json.loads(run.stdout) == {"status": "OFFLINE_LIFECYCLE_REFUSED"}
+    assert not output.exists()
+    assert previous.read_bytes() == before
+    assert not list(tmp_path.glob(".*.part-*"))
+
+    private_file(request, {
+        "operation": "enable", "repository_ids": ["debian-trixie-main"],
+    })
+    matching = invoke(previous, request, output, proposed_sha=pinned)
+    assert matching.returncode == 0
+    assert hashlib.sha256(output.read_bytes()).hexdigest() == pinned
+    # A prior exact file is never overwritten by a subsequent bad pin.
+    preserved = output.read_bytes()
+    mismatch = invoke(previous, request, output, proposed_sha="f" * 64)
+    assert mismatch.returncode == 1
+    assert output.read_bytes() == preserved
+
+
+@pytest.mark.parametrize("bad_sha", ["", "Z" * 64, "f" * 63, "0" * 65])
+def test_invalid_expected_proposal_sha_refused_before_write(tmp_path, bad_sha):
+    previous, request, output = prepared(tmp_path)
+    private_file(request, {"operation": "remove", "all_repositories": True})
+    run = invoke(previous, request, output, proposed_sha=bad_sha)
+    assert run.returncode == 1
+    assert json.loads(run.stdout) == {"status": "OFFLINE_LIFECYCLE_REFUSED"}
+    assert not output.exists()
+
+
+def test_review_sha_pin_refuses_noop_and_preview_combination(tmp_path):
+    previous, request, output = prepared(tmp_path)
+    private_file(request, {
+        "operation": "disable", "repository_ids": ["debian-trixie-main"],
+    })
+    noop = invoke(previous, request, output, proposed_sha="a" * 64)
+    assert noop.returncode == 1
+    assert not output.exists()
+    private_file(request, {"operation": "remove", "all_repositories": True})
+    ambiguous = invoke(
+        previous, request, output, proposed_sha="a" * 64, dry_run=True,
+    )
+    assert ambiguous.returncode == 1
+    assert not output.exists()
