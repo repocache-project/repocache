@@ -217,6 +217,30 @@ def main(distribution: str) -> None:
                         line,
                     ):
                         print("NATIVE_SOCKET_DIAGNOSTIC: " + line, flush=True)
+            # The installed signed reference lists precisely these five
+            # ReadWritePaths. A missing target yields systemd 226/NAMESPACE;
+            # observe by fixed labels without creating, remounting or
+            # broadening any protected directory.
+            for label, fixed in (
+                ("NGINX_CONF", "/etc/nginx/conf.d"),
+                ("PROTECTED_STATE", "/var/lib/repocache/server"),
+                ("PUBLIC_CATALOG", "/var/lib/repocache/public"),
+                ("NGINX_LOG", "/var/log/nginx"),
+                ("NGINX_CACHE", "/var/cache/nginx"),
+            ):
+                try:
+                    observed = os.lstat(fixed)
+                except FileNotFoundError:
+                    print("NATIVE_SOCKET_DIAGNOSTIC: MISSING_" + label, flush=True)
+                except OSError:
+                    print("NATIVE_SOCKET_DIAGNOSTIC: UNREADABLE_" + label, flush=True)
+                else:
+                    if not stat.S_ISDIR(observed.st_mode):
+                        print("NATIVE_SOCKET_DIAGNOSTIC: NOT_DIRECTORY_" + label, flush=True)
+                    elif observed.st_uid != 0 or observed.st_mode & 0o022:
+                        print("NATIVE_SOCKET_DIAGNOSTIC: UNSAFE_OWNER_MODE_" + label, flush=True)
+                    else:
+                        print("NATIVE_SOCKET_DIAGNOSTIC: PRESENT_" + label, flush=True)
             logs = subprocess.run(
                 [
                     "/usr/bin/journalctl", "-u", "repocache-control.service",
@@ -242,6 +266,13 @@ def main(distribution: str) -> None:
                         )
                 if "Failed at step EXEC" in line:
                     print("NATIVE_SOCKET_DIAGNOSTIC: SYSTEMD_EXEC_FAILED", flush=True)
+                if ("Failed to set up mount namespacing" in line
+                        or "Failed at step NAMESPACE" in line):
+                    print("NATIVE_SOCKET_DIAGNOSTIC: SYSTEMD_NAMESPACE_FAILED", flush=True)
+                if "No such file or directory" in line:
+                    print("NATIVE_SOCKET_DIAGNOSTIC: SYSTEMD_MISSING_PATH", flush=True)
+                if "Permission denied" in line:
+                    print("NATIVE_SOCKET_DIAGNOSTIC: SYSTEMD_PERMISSION_REFUSED", flush=True)
             raise
 
     accounts()
