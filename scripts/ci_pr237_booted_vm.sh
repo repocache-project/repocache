@@ -154,6 +154,8 @@ if test "$scenario" = native-installer; then
   printf 'before=%s\\nafter=%s\\n' "$boot_before" "$boot_after" > "$out/installer-reboot-ids.txt"
   stage=native-installer-after-reboot
   sshguest "sudo /usr/bin/python3 -B /home/pr237ci/source/scripts/ci_pr237_native_package_guest.py '$PR237_PLATFORM_ID' after" > "$out/native-install-after-reboot.txt" 2>&1 || { cat "$out/native-install-after-reboot.txt"; exit 1; }
+  stage=native-installed-v2-systemd-socket
+  sshguest "sudo /usr/bin/python3 -B /home/pr237ci/source/scripts/ci_pr237_native_socket_guest.py '$PR237_PLATFORM_ID'" > "$out/native-socket-v2.txt" 2>&1 || { cat "$out/native-socket-v2.txt"; exit 1; }
   stage=complete
   exit 0
 fi
