@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Iterator
 from contextlib import contextmanager
+import hashlib
 import os
 
 from repocache.server_protected_state_store_v1 import (
@@ -17,12 +18,14 @@ from repocache.server_protected_state_store_v1 import (
     MAX_JOURNAL_BYTES, MAX_STATE_BYTES,
     ProtectedStateStoreError,
     _canonical, _locked, _read_file, _read_journal, _read_state,
-    _write_exclusive,
+    _write_exclusive, _unlink_known,
 )
 
 NATIVE_PENDING_NAME = ".native-nginx-v1.pending"
 NATIVE_TMP_NAME = ".native-nginx-v1.pending-tmp"
 MAX_NATIVE_JOURNAL_BYTES = 2048
+NATIVE_COMPLETE_NAME = ".native-nginx-v1.completed"
+MAX_NATIVE_COMPLETE_BYTES = 2048
 _NATIVE_MANAGERS = {"debian": "apt", "almalinux": "dnf"}
 
 
@@ -125,6 +128,78 @@ def _prepare_native_journal_under_lock(
         "authorizes_package_installation": False,
         "authorizes_nginx_reload": False,
     }
+
+
+def _complete_native_install_after_verified_manager_under_lock(
+    directory: int, *, owner_uid: int, distribution: str,
+) -> dict[str, Any]:
+    """Commit audit only inside an uninterrupted trusted package-manager scope.
+
+    The original caller MUST have already proved the fixed signed-source
+    APT/DNF transaction completed successfully without releasing the lock.
+    Reobservation alone is NOT package authorization; this private operation
+    is not exposed by the service or root-worker protocol.
+    """
+    if (type(distribution) is not str
+            or distribution not in _NATIVE_MANAGERS
+            or type(owner_uid) is not int or owner_uid < 0):
+        _deny("NATIVE_COMPLETION_ARGUMENT_INVALID")
+    # Imported lazily to avoid a circular import. The strict, pure candidate
+    # gate is also reused by the independent read-only post-package observer.
+    from repocache.server_native_package_effects_observe_v1 import (
+        _collect_postpackage_facts_while_locked,
+        _validate_native_postpackage_facts,
+        NativeEffectsReconciliationError,
+    )
+    try:
+        facts = _collect_postpackage_facts_while_locked(
+            directory, owner_uid=owner_uid, distribution=distribution,
+        )
+        result = _validate_native_postpackage_facts(distribution, *facts)
+        if (result["native_package_file_integrity_verified"] is not True
+                or result["pending_native_effects_block_reentry"] is not True
+                or result["authorizes_native_marker_removal"] is not False):
+            _deny("NATIVE_COMPLETION_AUDIT_UNVERIFIED")
+        marker = _read_file(directory, NATIVE_PENDING_NAME, owner_uid,
+                            MAX_NATIVE_JOURNAL_BYTES)
+        if marker is None or _read_file(directory, NATIVE_TMP_NAME,
+                                        owner_uid, MAX_NATIVE_JOURNAL_BYTES) is not None:
+            _deny("NATIVE_COMPLETION_JOURNAL_CHANGED")
+        if _read_file(directory, NATIVE_COMPLETE_NAME, owner_uid,
+                      MAX_NATIVE_COMPLETE_BYTES) is not None:
+            _deny("NATIVE_COMPLETION_ALREADY_PRESENT")
+        completed = _canonical({
+            "schema_version": 1,
+            "status": "NATIVE_PACKAGE_EFFECTS_COMPLETED_AFTER_LOCKED_INSTALL",
+            "distribution": distribution,
+            "manager": _NATIVE_MANAGERS[distribution],
+            "pending_sha256": hashlib.sha256(marker).hexdigest(),
+            "vendor_unit_sha256": result["vendor_unit_sha256"],
+            "native_package_file_integrity_verified": True,
+            # This receipt does not attest publisher signing, systemd or SELinux.
+            "publisher_artifact_verified": False,
+            "booted_native_service_verified": False,
+        }, limit=MAX_NATIVE_COMPLETE_BYTES)
+        # Durable receipt BEFORE clearing the old marker. On a crash before
+        # the final fsynced unlink, BOTH remain, and the old pending marker
+        # continues to block staging/re-entry. Never auto-recover ambiguity.
+        _write_exclusive(directory, NATIVE_COMPLETE_NAME, completed,
+                         owner_uid, MAX_NATIVE_COMPLETE_BYTES)
+        _unlink_known(directory, NATIVE_PENDING_NAME, marker,
+                      owner_uid, MAX_NATIVE_JOURNAL_BYTES)
+        return {
+            "status": "NATIVE_PACKAGE_EFFECTS_COMPLETED_AFTER_LOCKED_INSTALL",
+            "native_package_effects_reconciled": True,
+            "publisher_artifact_verified": False,
+            "booted_native_service_verified": False,
+            "authorizes_service_activation": False,
+            "authorizes_package_installation": False,
+        }
+    except NativePackageJournalError:
+        raise
+    except (NativeEffectsReconciliationError, ProtectedStateStoreError,
+            OSError, ValueError, TypeError):
+        _deny("NATIVE_COMPLETION_AUDIT_UNVERIFIED")
 
 
 @contextmanager

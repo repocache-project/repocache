@@ -217,3 +217,22 @@ directory and no group/world-write permissions. Their owner/mode
 differences are counted explicitly; they do not attest every package
 byte or NGINX log-retention behavior. Any other runtime discrepancy
 or untrusted log inode remains a refusal.
+
+## Same-lock package completion — implementation boundary
+
+The private `_complete_native_install_after_verified_manager_under_lock`
+is an in-process completion primitive for the explicitly authorized,
+uninterrupted native APT/DNF installer. It accepts only the root-owned
+canonical pending journal and rechecks the fixed package identity,
+installed operational-file integrity and vendor unit using the SAME
+exclusive #31 lock. A durable root-owned completion receipt is fsynced
+before the original pending marker is removed. Crash/failure before that
+removal preserves the blocking pending marker; an ambiguous post-crash
+native transaction is never silently adopted or retried.
+
+The primitive MUST NOT be invoked from an untrusted client or merely
+because a read-only observer sees installed NGINX. Only a separately
+authenticated native installer that actually executed the fixed
+distro-signed package transaction inside that same lock may invoke it.
+The receipt explicitly does not attest owner-signed REPOCACHE artifacts,
+booted systemd, enforcing SELinux, service exposure or production activation.

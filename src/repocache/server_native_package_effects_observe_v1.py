@@ -252,24 +252,14 @@ def _collect_current_namespace_postpackage_facts(
         os.close(root_fd)
 
 
-def inspect_current_namespace_native_postpackage_candidate(
-    *, distribution: str,
+def _validate_native_postpackage_facts(
+    distribution: str,
+    before: dict[str, Any], package: dict[str, Any],
+    integrity: dict[str, Any], unit: dict[str, Any],
+    after: dict[str, Any],
 ) -> dict[str, Any]:
-    """Correlate three independent read-only native install observations.
-
-    The native package marker is deliberately observed before and after
-    package DB + vendor-unit reads, all within ONE retained exclusive #31
-    lock. That prevents cooperating state writers from entering between the
-    observations, but still cannot authenticate native package signatures,
-    installed host root, SELinux or any noncooperating foreign process.
-    This candidate cannot clear the irreversible APT/DNF effects marker,
-    authorize NGINX/service activation or attest production readiness.
-    """
+    """Pure strict correlation reusable while the original state lock is held."""
     _validate_args(distribution, 0)
-    before, package, integrity, unit, after = _collect_current_namespace_postpackage_facts(
-        distribution=distribution,
-    )
-
     expected_platform = ("debian13" if distribution == "debian"
                          else "almalinux10")
     expected_package = "nginx" if distribution == "debian" else "nginx-core"
@@ -341,3 +331,26 @@ def inspect_current_namespace_native_postpackage_candidate(
         "authorizes_nginx_reload": False,
         "authorizes_host_mutation": False,
     }
+
+
+def inspect_current_namespace_native_postpackage_candidate(
+    *, distribution: str,
+) -> dict[str, Any]:
+    """Correlate three independent read-only native install observations.
+
+    The native package marker is deliberately observed before and after
+    package DB + vendor-unit reads, all within ONE retained exclusive #31
+    lock. That prevents cooperating state writers from entering between the
+    observations, but still cannot authenticate native package signatures,
+    installed host root, SELinux or any noncooperating foreign process.
+    This candidate cannot clear the irreversible APT/DNF effects marker,
+    authorize NGINX/service activation or attest production readiness.
+    """
+    _validate_args(distribution, 0)
+    before, package, integrity, unit, after = _collect_current_namespace_postpackage_facts(
+        distribution=distribution,
+    )
+
+    return _validate_native_postpackage_facts(
+        distribution, before, package, integrity, unit, after,
+    )
