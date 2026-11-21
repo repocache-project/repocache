@@ -344,6 +344,26 @@ booted-VM CI complete on both supported OS targets. Publisher signing,
 SELinux installed-worker deny tests and full issue #31 acceptance remain
 independent prerequisites.
 
+## Installed worker path substitution refusal (native #64 evidence)
+
+The existing synthetic-signed native worker placement scenario now checks an
+actual **root-owned installed executable** path substitution on the booted
+disposable guest, in addition to the previously tested unit-file byte drift.
+After initial placement and successful signed-fixture readback, the test moves
+only the installed fixed worker to a uniquely named temporary sibling and
+replaces its canonical path with a symlink to that sibling. The unchanged real
+`verify_installed_worker` auditor must refuse the symlink; its descriptor-
+pinned, no-follow asset reader rejects non-regular installed paths.
+
+The test then restores the original installed worker inode and mtime, requires
+the complete authenticated installed worker/unit readback to PASS, and proceeds
+to the existing systemd and reboot tests. An unexpected replacement or
+restoration mismatch fails the guest rather than being ignored. This is one
+narrow native helper-path substitution refusal using a **synthetic signing
+key**; it is neither a complete privileged-path attack matrix nor real
+publisher-signed candidate acceptance. See `synthetic-installed-worker.txt`
+in each relevant VM artifact; judge PASS only at the exact tested source SHA.
+
 ## Installed raw-packet unit-injection refusal (native #64 evidence)
 
 The `native-installer` scenario additionally sends one 30-byte raw
