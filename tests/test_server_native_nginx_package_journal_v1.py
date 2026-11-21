@@ -22,6 +22,9 @@ def protected_root(tmp_path):
     for name in ("var", "lib", "repocache", "server"):
         folder = folder / name
         folder.mkdir(mode=0o700)
+    # The real native OS has /var/cache before the package installer runs.
+    # The signed installer must provision only its missing nginx leaf itself.
+    (root / "var" / "cache").mkdir(mode=0o755)
     (folder / LOCK_NAME).write_bytes(b"")
     (folder / LOCK_NAME).chmod(0o600)
     fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
