@@ -21,6 +21,9 @@ from repocache.server_repository_plan_v1 import _canonical_identity
 from repocache.server_repository_v2_transition_v1 import (
     RepositoryV2TransitionError, plan_repository_v2_batch_transition,
 )
+from repocache.server_repository_reconcile_v1 import (
+    ReconciliationPlanError, render_fixed_native_repository_batch_envelope,
+)
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "docs/examples/server-install-v1.json"
 APT = "debian-trixie-main"
@@ -372,3 +375,116 @@ def test_batch_exercises_one_durable_state_include_catalog_wal_per_operation(
     assert all(item["status"] == "retired"
                for item in removed["id_reservations"])
     assert not (directory / ".state-v2-multi.pending").exists()
+
+
+def test_batch_fixed_native_candidate_intake_is_one_exact_wire_message():
+    old = initial()
+    raw = canonical(old)
+    report = render_fixed_native_repository_batch_envelope(
+        raw, expected_generation=1,
+        expected_previous_state_sha256=hashlib.sha256(raw).hexdigest(),
+        operation="enable", repository_ids=(APT, DNF),
+        decision_sha256=DECISION,
+    )
+    assert report["status"] == "FIXED_V2_ATOMIC_BATCH_ENVELOPE_ONLY"
+    assert report["changed"] is True
+    assert len(report["per_repository"]) == 2
+    assert report["requires_native_locked_recheck"] is True
+    wire = json.loads(report["envelope_bytes"])
+    assert set(wire) == {
+        "request_schema_version", "expected_generation",
+        "expected_state_sha256", "next_state_base64", "next_state_sha256",
+    }
+    assert wire["request_schema_version"] == 1
+    assert wire["expected_generation"] == 1
+    assert wire["expected_state_sha256"] == hashlib.sha256(raw).hexdigest()
+    next_raw = base64.b64decode(wire["next_state_base64"], validate=True)
+    assert hashlib.sha256(next_raw).hexdigest() == wire["next_state_sha256"]
+    assert next_raw == canonical(json.loads(next_raw))
+    state = json.loads(next_raw)
+    assert state["state_generation"] == 2
+    assert {r["id"] for r in state["repository_records"]
+            if r["desired_state"] == "active"} == {APT, DNF}
+    assert report["envelope_bytes"] == canonical(wire)
+    for field in ("operator_approval_verified",
+                  "persisted_predecessor_provenance_verified",
+                  "native_state_lock_held",
+                  "authorizes_state_write", "authorizes_nginx_reload",
+                  "authorizes_catalog_publication", "authorizes_cache_cleanup"):
+        assert report[field] is False
+
+    noop = render_fixed_native_repository_batch_envelope(
+        next_raw, expected_generation=2,
+        expected_previous_state_sha256=hashlib.sha256(next_raw).hexdigest(),
+        operation="enable", repository_ids=(DNF, APT),
+        decision_sha256=DECISION,
+    )
+    assert noop["status"] == "NO_CHANGE_FIXED_V2_BATCH_CANDIDATE_ONLY"
+    assert noop["changed"] is False
+    assert noop["envelope_bytes"] is None
+    assert noop["authorizes_state_write"] is False
+
+    removed = render_fixed_native_repository_batch_envelope(
+        next_raw, expected_generation=2,
+        expected_previous_state_sha256=hashlib.sha256(next_raw).hexdigest(),
+        operation="remove", repository_ids=(APT, DNF),
+        decision_sha256=DECISION,
+    )
+    assert removed["retired_ids_proposed"] == sorted((APT, DNF))
+    successor = json.loads(base64.b64decode(
+        json.loads(removed["envelope_bytes"])["next_state_base64"],
+        validate=True,
+    ))
+    assert successor["state_generation"] == 3
+    assert all(r["status"] == "retired" for r in successor["id_reservations"])
+
+
+def test_batch_fixed_native_candidate_rejects_forged_previous_bytes_and_selector():
+    old = initial()
+    raw = canonical(old)
+    with pytest.raises(ReconciliationPlanError, match="fixed batch: candidate rejected"):
+        render_fixed_native_repository_batch_envelope(
+            raw, expected_generation=1,
+            expected_previous_state_sha256="0" * 64,
+            operation="enable", repository_ids=(APT,),
+            decision_sha256=DECISION,
+        )
+    with pytest.raises(ReconciliationPlanError, match="fixed batch: candidate rejected"):
+        render_fixed_native_repository_batch_envelope(
+            raw, expected_generation=1,
+            expected_previous_state_sha256=hashlib.sha256(raw).hexdigest(),
+            operation="enable", repository_ids=("../foreign",),
+            decision_sha256=DECISION,
+        )
+    with pytest.raises(ReconciliationPlanError, match="fixed batch: predecessor invalid"):
+        render_fixed_native_repository_batch_envelope(
+            b"", expected_generation=1,
+            expected_previous_state_sha256="a" * 64,
+            operation="enable", repository_ids=(APT,),
+            decision_sha256=DECISION,
+        )
+
+
+def test_batch_native_envelope_and_builder_never_contact_os_or_modify_input(
+    monkeypatch,
+):
+    import socket
+    import subprocess
+
+    before = initial()
+    previous = copy.deepcopy(before)
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("batch wire and planner cannot mutate the host")
+    monkeypatch.setattr(os, "replace", forbidden)
+    monkeypatch.setattr(os, "unlink", forbidden)
+    monkeypatch.setattr(socket, "create_connection", forbidden)
+    monkeypatch.setattr(subprocess, "run", forbidden)
+
+    result = render_fixed_native_repository_batch_envelope(
+        canonical(before), expected_generation=1,
+        expected_previous_state_sha256=hashlib.sha256(canonical(before)).hexdigest(),
+        operation="enable", repository_ids=(APT, DNF),
+        decision_sha256=DECISION,
+    )
+    assert result["envelope_bytes"]
+    assert before == previous
