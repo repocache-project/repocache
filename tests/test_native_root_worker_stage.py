@@ -563,3 +563,55 @@ def test_stage_does_not_open_a_fifo_for_io(tmp_path):
     with pytest.raises(stage.WorkerStageError, match="WORKER_STAGE_INVALID_ASSET"):
         stage.stage_authenticated_worker(tmp_path, tmp_path / "unused",
                                          commit="a" * 40, archive_sha256="b" * 64)
+
+
+def test_native_installer_requires_signed_worker_before_reading_install_document(
+    tmp_path, monkeypatch,
+):
+    from scripts import install_native_root_worker as host
+    monkeypatch.setattr(host, "_native_distro", lambda: "debian")
+    monkeypatch.setattr(host, "require_native_host_preconditions", lambda: {})
+    def invalid(*_args, **_kwargs):
+        raise stage.WorkerStageError("WORKER_STAGE_SIGNED_IDENTITY_MISMATCH")
+    monkeypatch.setattr(stage, "verify_installed_worker", invalid)
+    with pytest.raises(stage.WorkerStageError, match="SIGNED_IDENTITY_MISMATCH"):
+        host.install_authenticated_native_nginx(
+            tmp_path, tmp_path / "not-found.json", "a" * 64,
+            commit="b" * 40, archive_sha256="c" * 64,
+        )
+    assert not list(tmp_path.iterdir())
+
+
+def test_native_installer_refuses_unpinned_document_without_package_effects(
+    tmp_path, monkeypatch,
+):
+    from scripts import install_native_root_worker as host
+    monkeypatch.setattr(host, "_native_distro", lambda: "debian")
+    monkeypatch.setattr(host, "require_native_host_preconditions", lambda: {})
+    monkeypatch.setattr(stage, "verify_installed_worker", lambda *a, **kw: {})
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("native manager, journal or systemd reached without document trust")
+    monkeypatch.setattr(host, "_execute_native_nginx_install_locked", forbidden)
+    source = tmp_path / "reviewed.json"
+    source.write_text(json.dumps(document(count=1, generation=0)))
+    for digest in ("bad", "a" * 64):
+        with pytest.raises(ValueError, match="NATIVE_DOCUMENT_PIN"):
+            host.install_authenticated_native_nginx(
+                tmp_path, source, digest, commit="b" * 40, archive_sha256="c" * 64,
+            )
+
+
+def test_native_install_cli_refuses_missing_document_digest_before_host_actions(
+    tmp_path,
+):
+    from scripts import install_native_root_worker as host
+    result = subprocess.run(
+        [sys.executable, "-I", str(Path(host.__file__)),
+         "--assets", str(tmp_path), "--commit", "a" * 40,
+         "--archive-sha256", "b" * 64,
+         "--install-native-nginx", str(tmp_path / "reviewed.json")],
+        capture_output=True, timeout=15, check=False,
+    )
+    assert result.returncode == 2
+    assert b"--document-sha256" in result.stderr
+    assert not list(tmp_path.iterdir())
