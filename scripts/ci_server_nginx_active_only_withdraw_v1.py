@@ -21,7 +21,6 @@ import time
 from ci_generated_nginx_route_cache_smoke import (
     nginx_master_children, await_worker_generation_drained,
 )
-from ci_native_nginx_cache_smoke import free_port
 
 from repocache.server_derived_catalog_candidate_v1 import (
     DerivedCatalogCandidateError, preview_derived_catalog_from_nginx_dump,
@@ -115,26 +114,26 @@ def live_lifecycle_withdrawal(
         assert "8.8.8.8" not in upstream
         locations = rendered["server_location_fragment"]
         for name in active_ids:
-            needle = f"location ^~ /__repocache/repos/{name}/ {{\\n"
+            needle = f"location ^~ /__repocache/repos/{name}/ {{\n"
             assert locations.count(needle) == 1
             locations = locations.replace(
-                needle, needle + "    return 204;\\n",
+                needle, needle + "    return 204;\n",
             )
         # The complete final config runs in a *private* process under
         # nonroot UID 65534. Injected fixture return short-circuits proxy.
         content = (
-            f"pid {root / 'live-nginx.pid'};\\n"
-            f"error_log {root / 'live-nginx-error.log'} notice;\\n"
-            "worker_processes 1;\\nevents { worker_connections 64; }\\n"
-            "http { access_log off;\\n"
-            + "".join(f"{name}_temp_path {root / name};\\n"
+            f"pid {root / 'live-nginx.pid'};\n"
+            f"error_log {root / 'live-nginx-error.log'} notice;\n"
+            "worker_processes 1;\nevents { worker_connections 64; }\n"
+            "http { access_log off;\n"
+            + "".join(f"{name}_temp_path {root / name};\n"
                       for name in ("client_body", "proxy", "fastcgi", "uwsgi", "scgi"))
             + upstream
-            + f"server {{ listen 127.0.0.1:{port};\\n"
-            + "server_name localhost;\\n"
-            + "location / { return 404; }\\n"
+            + f"server {{ listen 127.0.0.1:{port};\n"
+            + "server_name localhost;\n"
+            + "location / { return 404; }\n"
             + locations
-            + "}\\n}\\n"
+            + "}\n}\n"
         )
         path.write_text(content, encoding="ascii")
         syntax = subprocess.run(
@@ -149,10 +148,10 @@ def live_lifecycle_withdrawal(
         with socket.create_connection(("127.0.0.1", port), timeout=3) as sock:
             sock.settimeout(3)
             sock.sendall((
-                f"GET {target} HTTP/1.1\\r\\n"
-                "Host: localhost\\r\\nConnection: close\\r\\n\\r\\n"
+                f"GET {target} HTTP/1.1\r\n"
+                "Host: localhost\r\nConnection: close\r\n\r\n"
             ).encode("ascii"))
-            first = sock.recv(1024).split(b"\\r\\n", 1)[0]
+            first = sock.recv(1024).split(b"\r\n", 1)[0]
         assert first.startswith(b"HTTP/1."), "NATIVE_NGINX_RESPONSE_INVALID"
         return int(first.split(b" ", 2)[1])
 
