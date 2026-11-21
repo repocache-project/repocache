@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Actual stock NGINX -T verifies generated active-only route/catalog removal.
 
-Disposable nonroot userspace; candidate-only, no running managed service,
-publication, package traffic, cleanup or installed host authority (#95/#28).
+Disposable nonroot userspace with optional private live NGINX master; no
+installed service, publication, real package traffic or host authority (#95).
 """
 from __future__ import annotations
 
