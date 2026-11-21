@@ -150,3 +150,18 @@ loss mid-APT/DNF. These remain NOT VERIFIED until separately run and accepted.
 The package scenario is deliberately **non-required** and limited to PR #237.
 A failure is a FAIL for this experiment and must be investigated rather than
 interpreted as a permission to bypass native checks.
+
+## Native process-name compatibility boundary
+
+The real native first-package installer correctly refused to proceed on
+Debian 13 because its NGINX process scanner encountered a **43-byte**
+kernel /proc/PID/comm record and required at most 32 bytes. Two reproducible
+QEMU runs recorded the failure; root/systemd, signed OS trust anchor and
+generation-zero protected state checks independently passed.
+
+The scanner now accepts **at most 64 bytes**, maintaining its previous
+bounded first read and mandatory second-read overflow refusal. It does not
+ignore inaccessible process records or a running NGINX task. Focused tests
+cover benign 43/64-byte names, refusal beyond 64 bytes and positive
+detection of long nginx-prefixed names. This source change needs exact-HEAD
+CI and native Debian acceptance before being counted as PASS.

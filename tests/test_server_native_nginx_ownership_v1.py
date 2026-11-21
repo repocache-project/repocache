@@ -247,6 +247,12 @@ def test_custom_systemd_nginx_units_refuse_fresh_install_even_without_binary(
     (b"python3\n", "PROCESS_NGINX_NOT_OBSERVED"),
     (b"not-nginx\n", "PROCESS_NGINX_NOT_OBSERVED"),
     (b"nginxd\n", "PROCESS_NGINX_NOT_OBSERVED"),
+# Booted Debian 13 showed a 43-byte comm; retain explicit 64-byte cap.
+    (b"k" * 42 + b"\n", "PROCESS_NGINX_NOT_OBSERVED"),
+    (b"k" * 63 + b"\n", "PROCESS_NGINX_NOT_OBSERVED"),
+    (b"k" * 64 + b"\n", "PROCESS_SCAN_UNVERIFIED"),
+    (b"nginx: " + b"w" * 50 + b"\n", "PROCESS_NGINX_FOUND"),
+    (b"nginx: " + b"w" * 57 + b"\n", "PROCESS_SCAN_UNVERIFIED"),
 ])
 def test_bounded_proc_process_comm_snapshot(tmp_path, value, expected):
     proc = tmp_path / "proc"
