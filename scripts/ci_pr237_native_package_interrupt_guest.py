@@ -59,16 +59,16 @@ def pending() -> tuple[bytes, os.stat_result]:
 
 
 def direct_manager(installer_pid: int, distribution: str) -> int | None:
-    """Discover ONLY the APT/DNF direct child of our own known installer PID.
+    """Identify an actual pinned OS APT/DNF program, owned by our installer.
 
-    Never send a signal to any package manager not owned by this process.
-    The fixed executable/cmdline and PPid must independently match.
+    DNF4 on AlmaLinux may exec an OS Python interpreter and refer to the
+    distribution DNF script via a *different symlink name*. Compare the
+    script's native inode with the trusted fixed executable, never merely
+    match the untrusted argv basename. This test does not log proc content.
     """
-    names = (
-        {b"/usr/bin/apt-get", b"apt-get"}
-        if distribution == "debian" else
-        {b"/usr/bin/dnf", b"dnf", b"/usr/bin/dnf4", b"dnf4"}
-    )
+    os_manager = "/usr/bin/apt-get" if distribution == "debian" else "/usr/bin/dnf"
+    trusted = os.stat(os_manager)
+    expected_inode = trusted.st_dev, trusted.st_ino
     with os.scandir("/proc") as processes:
         for entry in processes:
             if not entry.name.isascii() or not entry.name.isdecimal():
@@ -78,29 +78,46 @@ def direct_manager(installer_pid: int, distribution: str) -> int | None:
                 continue
             try:
                 status = (Path("/proc") / entry.name / "status").read_bytes()[:4096]
-                ppid_lines = [line for line in status.splitlines()
-                              if line.startswith(b"PPid:")]
+                ppid_lines = [
+                    line for line in status.splitlines() if line.startswith(b"PPid:")
+                ]
                 if len(ppid_lines) != 1 or int(ppid_lines[0].split()[1]) != installer_pid:
                     continue
                 path = Path("/proc") / entry.name / "cmdline"
                 fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
                 try:
-                    arguments = os.read(fd, 1024).split(b"\0")
+                    raw = os.read(fd, 1024)
                 finally:
                     os.close(fd)
-                if arguments and arguments[0] in names:
+                args = raw.rstrip(b"\0").split(b"\0")
+                if not args or not args[0]:
+                    continue
+
+                def same_manager(token: bytes) -> bool:
+                    if not token.startswith((b"/usr/bin/", b"/usr/libexec/")):
+                        return False
+                    try:
+                        path_stat = os.stat(os.fsdecode(token))
+                    except (OSError, ValueError, UnicodeError):
+                        return False
+                    return (path_stat.st_dev, path_stat.st_ino) == expected_inode
+
+                if same_manager(args[0]):
                     return pid
-                # DNF4 on AlmaLinux may use a Python script shebang;
-                # require the exact signed-OS manager path as argv[1].
-                if (len(arguments) >= 2
-                        and arguments[0] in (b"/usr/bin/python3", b"/usr/bin/python3.12",
-                                             b"/usr/libexec/platform-python")
-                        and arguments[1] in names):
+                # A DNF4 executable may be a shebang script. Its Python
+                # interpreter is the first argv; the signed OS script may
+                # appear after -s or a canonicalized dnf-3 name.
+                executable = args[0]
+                interpreter = (
+                    executable in (b"/usr/libexec/platform-python", b"/usr/bin/python3")
+                    or executable.startswith(b"/usr/bin/python3.")
+                )
+                if (distribution == "almalinux" and interpreter
+                        and any(same_manager(arg) for arg in args[1:5])):
                     return pid
-            except (FileNotFoundError, ProcessLookupError, PermissionError):
+            except (FileNotFoundError, ProcessLookupError, PermissionError, OSError):
                 continue
     return None
-
 
 def interrupt(distribution: str) -> None:
     from repocache.server_native_nginx_package_journal_v1 import (
@@ -182,12 +199,23 @@ def interrupt(distribution: str) -> None:
                 raise AssertionError("Native installer ended before manager interruption")
             manager_pid = direct_manager(installer_pid, distribution)
             if manager_pid is not None:
+                # Pin the kernel task identity BEFORE a destructive signal.
+                # A numerical PID may be recycled after a /proc scan; a
+                # pidfd cannot silently retarget another process.
                 try:
-                    os.kill(manager_pid, signal.SIGKILL)
+                    pidfd = os.pidfd_open(manager_pid, 0)
+                except ProcessLookupError:
+                    continue
+                try:
+                    if direct_manager(installer_pid, distribution) != manager_pid:
+                        continue
+                    signal.pidfd_send_signal(pidfd, signal.SIGKILL)
                     observed_manager = True
                     break
                 except ProcessLookupError:
                     pass
+                finally:
+                    os.close(pidfd)
             time.sleep(0.02)
         if not observed_manager:
             raise AssertionError("No actual direct APT/DNF manager was observed and killed")
