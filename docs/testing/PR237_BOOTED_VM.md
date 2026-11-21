@@ -276,3 +276,36 @@ keys, not publisher signing, an interrupted APT/DNF process, a genuine
 power-cut recovery, production approval, or a complete same-version installer
 reinstatement test. On failure, preserve stage-specific errors; never
 reinterpret the desired outcomes as observed PASS.
+
+
+## Real disposable APT/DNF manager interruption (separate two-distro matrix)
+
+The experimental native VM matrix has two additional **independent fresh
+guests** with scenario \`native-package-interruption\`. Neither shares the
+successful installed-server disk. Each uses the same official immutable
+Debian 13 / AlmaLinux 10 image pins, prepares the authenticated synthetic
+signed-source worker and native first-install document, then invokes the
+**unmodified real native NGINX package installer in a child process**.
+
+The guest supervisor only targets a verified **direct child of that exact
+installer process**, independently matching the native APT or DNF executable
+(and DNF4 Python script interpreter when applicable). It sends actual
+SIGKILL during the package-manager command, asserts the install process
+reports failure, and confirms the manager's genuine durable pending journal
+and masked/inactive NGINX service. After a real guest kernel reboot, it
+requires the *same journal inode, timestamp and SHA-256*, no completed
+receipt, disabled control services, preserved mask and two genuine
+journal-reentry refusals without removing or rewriting the marker.
+
+This **does not simulate a complete host power loss**: the package-manager
+process is forcibly terminated, while the kernel and native installer
+supervisor initially remain alive. The separate actual guest reboot proves
+durability of the ambiguous state; it is not the same as power interruption
+during a native transaction. The test never claims rollback of partly
+written APT/DNF databases, automatic repair or publisher trust. Because
+the approved native installer contract is fail-closed, its expected outcome
+is **refusal pending operator reconciliation**, not unsafe automatic retry.
+
+The native interruption acceptance is NOT VERIFIED until both extra jobs
+are completed and their evidence inspected at the same exact source SHA.
+The matrix remains PR237-only, non-required, secret-free and disposable.
