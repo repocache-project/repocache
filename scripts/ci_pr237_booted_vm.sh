@@ -42,6 +42,12 @@ finish() {
 }
 trap finish EXIT
 printf '%s\n' "$sha" > "$out/sha.txt"
+stage=vm-guest-script-syntax
+python3 - <<'PY'
+import ast
+from pathlib import Path
+ast.parse(Path("scripts/ci_pr237_native_socket_guest.py").read_text(encoding="utf-8"))
+PY
 stage=runner-probe
 {
   uname -a
