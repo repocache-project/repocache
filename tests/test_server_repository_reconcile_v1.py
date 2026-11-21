@@ -1,6 +1,7 @@
 """No-effect v1 declarative reconciliation tests for #95 / #18."""
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
 import json
@@ -21,6 +22,7 @@ from repocache.server_repository_reconcile_v1 import (
     preview_repository_lifecycle_nginx_candidate,
     preview_repository_lifecycle_nginx_from_untrusted_document,
     preview_repository_auto_add_nginx_from_untrusted_document,
+    render_fixed_native_v2_candidate_envelope,
 )
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "docs/examples/server-install-v1.json"
@@ -1883,3 +1885,251 @@ def test_explicit_add_saturated_history_rejects_before_nginx_renderer(monkeypatc
             reserved_ids=_complete_reserved_id_history(current, 10000),
             candidate_pins_by_repository={}, ca_bundle_path=_CA,
         )
+
+
+def _v2_native_envelope_fixture_state(
+    config: dict, *, generation: int, previous: dict | None = None,
+) -> dict:
+    """Build canonical v2 test bytes, not any protected native authority."""
+    example = copy.deepcopy(config)
+    example["expected_state_generation"] = generation
+    raw = json.dumps(
+        example, ensure_ascii=True, sort_keys=True, separators=(",", ":"),
+    ).encode("ascii")
+    digest = hashlib.sha256(raw).hexdigest()
+    records = [{
+        "id": row["id"],
+        "canonical_identity_sha256": hashlib.sha256(
+            _canonical_identity(row).encode("utf-8"),
+        ).hexdigest(),
+        "desired_state": row["desired_state"],
+        "observed_state": "not-activated",
+    } for row in example["repositories"]]
+    reserved = {
+        item["id"]: copy.deepcopy(item)
+        for item in (previous or {}).get("id_reservations", [])
+    }
+    current = {row["id"] for row in records}
+    for rid in reserved:
+        if rid not in current:
+            reserved[rid]["status"] = "retired"
+    for row in records:
+        if row["id"] not in reserved:
+            reserved[row["id"]] = {
+                "id": row["id"],
+                "canonical_identity_sha256": row["canonical_identity_sha256"],
+                "status": "allocated",
+            }
+    return {
+        "state_schema_version": 2,
+        "state_generation": generation,
+        "configuration_base64": base64.b64encode(raw).decode("ascii"),
+        "configuration_sha256": digest,
+        "repository_records": records,
+        "id_reservations": [reserved[x] for x in sorted(reserved)],
+        "approval_reference": {
+            "source": "operator",
+            "decision_sha256": "a" * 64,
+            "configuration_sha256": digest,
+            "expected_generation": generation - 1,
+        },
+    }
+
+
+def _native_state_bytes(value: dict) -> bytes:
+    return json.dumps(
+        value, ensure_ascii=True, sort_keys=True, separators=(",", ":"),
+    ).encode("ascii")
+
+
+def _v2_native_fixture_pair():
+    current = document()
+    previous = _v2_native_envelope_fixture_state(current, generation=1)
+    next_document = copy.deepcopy(current)
+    next_document["repositories"][0]["desired_state"] = "active"
+    proposed = _v2_native_envelope_fixture_state(
+        next_document, generation=2, previous=previous,
+    )
+    old = _native_state_bytes(previous)
+    new = _native_state_bytes(proposed)
+    return old, new, previous, proposed
+
+
+def test_native_v2_candidate_envelope_exact_wire_and_no_authority():
+    old, new, previous, proposed = _v2_native_fixture_pair()
+    previous_digest = hashlib.sha256(old).hexdigest()
+    report = render_fixed_native_v2_candidate_envelope(
+        old, new, expected_generation=1,
+        expected_previous_state_sha256=previous_digest,
+    )
+    assert report["status"] == "FIXED_NATIVE_V2_CANDIDATE_ENVELOPE_ONLY"
+    assert report["expected_generation"] == 1
+    assert report["next_state_sha256"] == hashlib.sha256(new).hexdigest()
+    assert report["envelope_sha256"] == hashlib.sha256(
+        report["envelope_bytes"],
+    ).hexdigest()
+    envelope = json.loads(report["envelope_bytes"])
+    # Frozen #31/#64 fixed-root candidate intake: no extra command/path,
+    # shell, callback, operator ID, executable or arbitrary JSON content.
+    assert set(envelope) == {
+        "request_schema_version", "expected_generation",
+        "expected_state_sha256", "next_state_base64", "next_state_sha256",
+    }
+    assert envelope["request_schema_version"] == 1
+    assert envelope["expected_generation"] == 1
+    assert envelope["expected_state_sha256"] == previous_digest
+    assert base64.b64decode(
+        envelope["next_state_base64"], validate=True,
+    ) == new
+    assert envelope["next_state_sha256"] == hashlib.sha256(new).hexdigest()
+    assert report["envelope_bytes"] == json.dumps(
+        envelope, ensure_ascii=True, sort_keys=True, separators=(",", ":"),
+    ).encode("ascii")
+    assert previous["repository_records"][0]["desired_state"] == "disabled"
+    assert proposed["repository_records"][0]["desired_state"] == "active"
+    assert report["requires_native_locked_recheck"] is True
+    for key in (
+        "operator_approval_verified", "persisted_predecessor_provenance_verified",
+        "native_state_lock_held", "native_nginx_exposure_verified",
+        "authorizes_state_write", "authorizes_nginx_reload",
+        "authorizes_catalog_publication", "authorizes_cache_cleanup",
+    ):
+        assert report[key] is False
+
+
+def test_native_v2_candidate_bootstrap_requires_absent_predecessor():
+    next_state = _v2_native_envelope_fixture_state(
+        document(), generation=1,
+    )
+    new = _native_state_bytes(next_state)
+    report = render_fixed_native_v2_candidate_envelope(
+        None, new, expected_generation=0,
+        expected_previous_state_sha256=None,
+    )
+    envelope = json.loads(report["envelope_bytes"])
+    assert envelope["expected_state_sha256"] is None
+    assert envelope["expected_generation"] == 0
+    assert base64.b64decode(envelope["next_state_base64"]) == new
+    with pytest.raises(ReconciliationPlanError, match="predecessor invalid"):
+        render_fixed_native_v2_candidate_envelope(
+            None, new, expected_generation=1,
+            expected_previous_state_sha256=None,
+        )
+    with pytest.raises(ReconciliationPlanError, match="predecessor invalid"):
+        render_fixed_native_v2_candidate_envelope(
+            None, new, expected_generation=0,
+            expected_previous_state_sha256="0" * 64,
+        )
+
+
+@pytest.mark.parametrize("generation", [None, -1, True, 2**63, "1"])
+def test_native_v2_candidate_rejects_wrong_generation_type(generation):
+    old, new, _, _ = _v2_native_fixture_pair()
+    with pytest.raises(ReconciliationPlanError, match="arguments invalid"):
+        render_fixed_native_v2_candidate_envelope(
+            old, new, expected_generation=generation,
+            expected_previous_state_sha256=hashlib.sha256(old).hexdigest(),
+        )
+
+
+@pytest.mark.parametrize("digest", [None, "0" * 64, "A" * 64, "", 0, False])
+def test_native_v2_candidate_rejects_missing_forged_or_ambiguous_previous_digest(
+    digest,
+):
+    old, new, _, _ = _v2_native_fixture_pair()
+    with pytest.raises(ReconciliationPlanError, match="predecessor"):
+        render_fixed_native_v2_candidate_envelope(
+            old, new, expected_generation=1,
+            expected_previous_state_sha256=digest,
+        )
+
+
+def test_native_v2_candidate_refuses_duplicate_keys_and_noncanonical_raw_bytes():
+    old, new, _, _ = _v2_native_fixture_pair()
+    digest = hashlib.sha256(old).hexdigest()
+    bad_next = new[:-1] + b',"state_schema_version":2}'
+    bad_old = old[:-1] + b',"state_schema_version":2}'
+    for prior, proposal in ((bad_old, new), (old, bad_next),
+                            (old, b'{"state_schema_version":2}'),
+                            (old, new + b" ")):
+        with pytest.raises(ReconciliationPlanError, match="canonical transition rejected"):
+            render_fixed_native_v2_candidate_envelope(
+                prior, proposal, expected_generation=1,
+                expected_previous_state_sha256=hashlib.sha256(prior).hexdigest(),
+            )
+    assert hashlib.sha256(old).hexdigest() == digest
+
+
+def test_native_v2_candidate_rejects_stale_generation_and_removed_tombstone():
+    old, _, previous, _ = _v2_native_fixture_pair()
+    next_config = document()
+    next_config["repositories"].pop(0)
+    next_without_history = _v2_native_envelope_fixture_state(
+        next_config, generation=2,
+    )
+    # The next snapshot is internally plausible, but drops an all-time
+    # historical ID. The cross-generation validator must reject it.
+    with pytest.raises(ReconciliationPlanError, match="canonical transition rejected"):
+        render_fixed_native_v2_candidate_envelope(
+            old, _native_state_bytes(next_without_history),
+            expected_generation=1,
+            expected_previous_state_sha256=hashlib.sha256(old).hexdigest(),
+        )
+    historical = _v2_native_envelope_fixture_state(
+        next_config, generation=2, previous=previous,
+    )
+    report = render_fixed_native_v2_candidate_envelope(
+        old, _native_state_bytes(historical),
+        expected_generation=1,
+        expected_previous_state_sha256=hashlib.sha256(old).hexdigest(),
+    )
+    assert report["status"] == "FIXED_NATIVE_V2_CANDIDATE_ENVELOPE_ONLY"
+    next_decoded = json.loads(
+        base64.b64decode(
+            json.loads(report["envelope_bytes"])["next_state_base64"]
+        )
+    )
+    assert next(x for x in next_decoded["id_reservations"]
+                if x["id"] == "debian-trixie-main")["status"] == "retired"
+
+
+def test_native_v2_candidate_rejects_rebinding_id_to_different_upstream():
+    old, _, _, _ = _v2_native_fixture_pair()
+    changed = document()
+    changed["repositories"][0]["upstream"]["base_url"] = (
+        "https://different.example.invalid/debian/"
+    )
+    changed["repositories"][0]["upstream"]["allowed_hosts"] = [
+        "different.example.invalid"
+    ]
+    switched_identity = _v2_native_envelope_fixture_state(
+        changed, generation=2,
+    )
+    with pytest.raises(ReconciliationPlanError, match="canonical transition rejected"):
+        render_fixed_native_v2_candidate_envelope(
+            old, _native_state_bytes(switched_identity),
+            expected_generation=1,
+            expected_previous_state_sha256=hashlib.sha256(old).hexdigest(),
+        )
+
+
+def test_native_v2_envelope_never_touches_host_or_changes_input(monkeypatch):
+    import os
+    import socket
+    import subprocess
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("pure fixed envelope must not mutate host")
+    monkeypatch.setattr(os, "open", forbidden)
+    monkeypatch.setattr(os, "replace", forbidden)
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    monkeypatch.setattr(socket, "create_connection", forbidden)
+    old, new, _, _ = _v2_native_fixture_pair()
+    current = old[:]
+    next_state = new[:]
+    report = render_fixed_native_v2_candidate_envelope(
+        old, new, expected_generation=1,
+        expected_previous_state_sha256=hashlib.sha256(old).hexdigest(),
+    )
+    assert report["envelope_bytes"]
+    assert old == current and new == next_state
