@@ -98,62 +98,62 @@ def _scan(fd: int, *, level: int, uid: int, gid: int, dev: int,
     with os.scandir(fd) as listing:
         names = sorted(entry.name for entry in listing)
     for name in names:
-            count[0] += 1
-            if count[0] > _MAX_ENTRIES:
-                _deny("ENTRY_LIMIT_EXCEEDED")
-            pattern = (_HEX1 if level == 0 else
-                       _HEX2 if level == 1 else _HEX32)
-            if type(name) is not str or pattern.fullmatch(name) is None:
-                _deny("UNEXPECTED_CACHE_LAYOUT")
-            expected_directory = level < 2
-            first = os.stat(name, dir_fd=fd, follow_symlinks=False)
-            # Never *open* a special node merely to discover its type.
-            # O_NONBLOCK avoids one FIFO hang, but a device can still have
-            # observable open-side effects. Refuse foreign inode kind,
-            # ownership, links, mount and permissions before any open(2).
-            # The opened descriptor is rechecked against this preflight
-            # immediately below to detect substitution between the calls.
-            _metadata(first, uid=uid, gid=gid, dev=dev,
+        count[0] += 1
+        if count[0] > _MAX_ENTRIES:
+            _deny("ENTRY_LIMIT_EXCEEDED")
+        pattern = (_HEX1 if level == 0 else
+                   _HEX2 if level == 1 else _HEX32)
+        if type(name) is not str or pattern.fullmatch(name) is None:
+            _deny("UNEXPECTED_CACHE_LAYOUT")
+        expected_directory = level < 2
+        first = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        # Never *open* a special node merely to discover its type.
+        # O_NONBLOCK avoids one FIFO hang, but a device can still have
+        # observable open-side effects. Refuse foreign inode kind,
+        # ownership, links, mount and permissions before any open(2).
+        # The opened descriptor is rechecked against this preflight
+        # immediately below to detect substitution between the calls.
+        _metadata(first, uid=uid, gid=gid, dev=dev,
+                  directory=expected_directory)
+        opened = os.open(
+            name, _DIRECTORY_FLAGS if expected_directory else _FILE_FLAGS,
+            dir_fd=fd,
+        )
+        try:
+            seen = os.fstat(opened)
+            _metadata(seen, uid=uid, gid=gid, dev=dev,
                       directory=expected_directory)
-            opened = os.open(
-                name, _DIRECTORY_FLAGS if expected_directory else _FILE_FLAGS,
-                dir_fd=fd,
-            )
-            try:
-                seen = os.fstat(opened)
-                _metadata(seen, uid=uid, gid=gid, dev=dev,
-                          directory=expected_directory)
-                if _identity(first) != _identity(seen):
-                    _deny("CONTENT_CHANGED")
-                _no_unverified_xattrs(opened)
-                if expected_directory:
-                    subfiles, subdirs, sublogical, suballocated = _scan(
-                        opened, level=level + 1, uid=uid, gid=gid,
-                        dev=dev, count=count, prefix=(*prefix, name),
-                        entries=entries,
-                    )
-                    files += subfiles
-                    dirs += 1 + subdirs
-                    logical += sublogical
-                    allocated += suballocated
-                else:
-                    if (type(seen.st_size) is not int or seen.st_size < 0
-                            or type(seen.st_blocks) is not int
-                            or seen.st_blocks < 0):
-                        _deny("CONTENT_SIZE_UNVERIFIED")
-                    files += 1
-                    logical += seen.st_size
-                    allocated += seen.st_blocks * 512
-                if (logical > MAX_INT or allocated > MAX_INT
-                        or _identity(os.fstat(opened)) != _identity(seen)
-                        or _identity(os.stat(
-                            name, dir_fd=fd, follow_symlinks=False
-                        )) != _identity(seen)):
-                    _deny("CONTENT_CHANGED")
-                entries.append(((*prefix, name), expected_directory,
-                                _identity(seen) + (seen.st_blocks,)))
-            finally:
-                os.close(opened)
+            if _identity(first) != _identity(seen):
+                _deny("CONTENT_CHANGED")
+            _no_unverified_xattrs(opened)
+            if expected_directory:
+                subfiles, subdirs, sublogical, suballocated = _scan(
+                    opened, level=level + 1, uid=uid, gid=gid,
+                    dev=dev, count=count, prefix=(*prefix, name),
+                    entries=entries,
+                )
+                files += subfiles
+                dirs += 1 + subdirs
+                logical += sublogical
+                allocated += suballocated
+            else:
+                if (type(seen.st_size) is not int or seen.st_size < 0
+                        or type(seen.st_blocks) is not int
+                        or seen.st_blocks < 0):
+                    _deny("CONTENT_SIZE_UNVERIFIED")
+                files += 1
+                logical += seen.st_size
+                allocated += seen.st_blocks * 512
+            if (logical > MAX_INT or allocated > MAX_INT
+                    or _identity(os.fstat(opened)) != _identity(seen)
+                    or _identity(os.stat(
+                        name, dir_fd=fd, follow_symlinks=False
+                    )) != _identity(seen)):
+                _deny("CONTENT_CHANGED")
+            entries.append(((*prefix, name), expected_directory,
+                            _identity(seen) + (seen.st_blocks,)))
+        finally:
+            os.close(opened)
     if _identity(os.fstat(fd)) != _identity(original):
         _deny("DIRECTORY_CHANGED")
     return files, dirs, logical, allocated
