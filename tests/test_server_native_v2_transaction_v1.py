@@ -366,7 +366,7 @@ def test_first_install_commits_real_three_resource_paths(filesystem, monkeypatch
     result = apply(filesystem)
     assert result["status"] == "NATIVE_V2_COMMITTED"
     assert result["active_catalog_published"] is True
-    assert events == ["tls", "syntax", ("reload", "debian"),
+    assert events == ["tls", "syntax", "dump", ("reload", "debian"),
                       ("exposure", 1), "dump",
                       ("catalog-exposure", len(catalog.read_bytes()))]
     assert (state / V2_STATE).is_file()
@@ -375,6 +375,45 @@ def test_first_install_commits_real_three_resource_paths(filesystem, monkeypatch
     assert json.loads(catalog.read_text()) == {"schema": 1, "repositories": []}
     assert (state / native._MANIFEST).is_file()
     assert recover(filesystem)["status"] == "NATIVE_V2_CLEAN"
+    assert_no_pending(filesystem)
+
+
+def test_apply_foreign_managed_context_refused_before_candidate_reload(
+    filesystem, monkeypatch,
+):
+    """A bad candidate nginx -T may trigger old-generation rollback only."""
+    initial = snapshot(count=1)
+    stage(filesystem, initial)
+    apply(filesystem)
+    _fd, state, include, catalog, events = filesystem
+    before = [(path.read_bytes(), path.stat().st_ino)
+              for path in (state / V2_STATE, include, catalog, state / native._MANIFEST)]
+    updated = snapshot(count=1, generation=2, previous=initial)
+    stage(filesystem, updated, expected=1,
+          prior=hashlib.sha256(before[0][0]).hexdigest())
+    events.clear()
+    observed_reload_includes = []
+    actual_reload = native._reload_native
+
+    def observe_reload(distribution):
+        observed_reload_includes.append(include.read_bytes())
+        return actual_reload(distribution)
+
+    def refuse_foreign_dump(*_args):
+        raise native.NativeV2TransactionError("NGINX_DUMP_MISMATCH")
+
+    monkeypatch.setattr(native, "_reload_native", observe_reload)
+    monkeypatch.setattr(native, "_route_dump_check", refuse_foreign_dump)
+    with pytest.raises(native.NativeV2TransactionError,
+                       match="APPLY_FAILED_ROLLED_BACK"):
+        apply(filesystem)
+    # A failed pre-reload check may need a compensating old-generation
+    # systemd reload, but must NEVER reload the rejected candidate.
+    assert observed_reload_includes == [before[1][0]]
+    assert events.count(("reload", "debian")) == 1
+    assert ("exposure", 2) not in events
+    assert [(path.read_bytes(), path.stat().st_ino)
+            for path in (state / V2_STATE, include, catalog, state / native._MANIFEST)] == before
     assert_no_pending(filesystem)
 
 

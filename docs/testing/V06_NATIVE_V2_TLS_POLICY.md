@@ -54,3 +54,19 @@ SELinux, independently signed worker or publisher acceptance. The #64
 human-review prerequisite was explicitly removed by the maintainer on
 2026-11-21; this does not waive security testing, fail-closed behavior,
 booted-host proof or the applicable exceptional-operation merge permission.
+
+
+## Refuse a foreign candidate before NGINX reload
+
+For native `APPLY_V2`, the same bounded, fixed `nginx -T` managed-section
+and derived-catalog check now runs **both before and after** the controlled
+NGINX reload. The pre-reload check ensures a foreign, duplicate, absent or
+modified managed include cannot be intentionally activated as the candidate.
+The post-reload recheck catches later drift before public catalog publication.
+When the precheck refuses after WAL publication, the existing locked
+compensation restores the old managed include and may reload **only that
+previous generation** to re-establish service continuity; an attempted
+candidate activation is never performed by the forward path. New tests
+assert successful two-sided observation and exact previous-include bytes
+on the compensating reload after a foreign-context refusal. These are
+source and disposable CI guarantees, not booted systemd/SELinux evidence.

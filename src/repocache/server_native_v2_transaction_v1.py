@@ -794,9 +794,17 @@ def _apply_locked(root_fd: int, state_fd: int,
         _write_private(state_fd, V2_STATE, _STATE_STAGE, old[V2_STATE],
                        new[V2_STATE], _LIMIT[V2_STATE])
         _native_syntax_check()
+        # Verify the unique, byte-exact managed include and its derived
+        # catalog BEFORE asking systemd to activate candidate NGINX config.
+        # Reject foreign/duplicated includes without reloading the candidate;
+        # the WAL still restores the previous known-good generation.
+        _route_dump_check(doc, new[_INCLUDE], new[_CATALOG],
+                          distribution, snapshot["state_generation"], pins)
         _reload_native(distribution)
         # Exactly one fixed generation health endpoint must have become live.
         _local_https_generation(doc, snapshot["state_generation"])
+        # Reobserve AFTER the actual reload: the pre-reload dump alone cannot
+        # prove that another privileged actor left the include unchanged.
         _route_dump_check(doc, new[_INCLUDE], new[_CATALOG],
                           distribution, snapshot["state_generation"], pins)
         # Never publish before observing the new real route generation.
