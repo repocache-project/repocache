@@ -355,6 +355,12 @@ real installed broker must close the connection without returning a successful
 reply. No additional operation, arbitrary unit selection or fallback command
 is permitted.
 
+The same guest also forks a real `repocache` service-UID process, drops all
+supplementary groups and attempts to open the root-owned synthetic TLS private
+key using `O_NOFOLLOW`. A kernel `EACCES` denial is required; an unexpected
+successful read or other OS error fails the test. This is a narrow native
+file-permission negative, not proof of all privileged-file protections.
+
 The test then independently compares the durable managed-state, NGINX
 include, published catalog, TLS generation response and absence of a pending
 WAL to their earlier values. A subsequent legitimate `RELOAD_V2` request
