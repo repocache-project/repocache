@@ -92,6 +92,14 @@ def preview_derived_catalog_from_nginx_dump(
     for line in nginx_dump_text.splitlines():
         if line.lstrip().startswith("#"):
             continue
+        # nginx -T accepts whitespace (including newlines) between tokens
+        # in a location/upstream header. A foreign multi-line definition
+        # could previously evade this line-oriented exact-route inventory,
+        # making an inactive route appear absent. Fail closed on any split
+        # header rather than trying to infer multi-line grammar or claim a
+        # trusted host configuration from a caller-supplied dump.
+        if re.match(r"\s*(?:location|upstream)\b", line) and "{" not in line:
+            _deny("SPLIT_DIRECTIVE_UNVERIFIED")
         if re.match(r"\s*location\b", line) and _PREFIX in line:
             match = _REPO_LOC.fullmatch(line)
             if match is None:

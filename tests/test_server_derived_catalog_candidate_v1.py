@@ -365,3 +365,30 @@ def test_unrelated_nginx_server_does_not_invalidate_exact_managed_https_candidat
     assert result["exact_https_server_context_candidate_matched"] is True
     assert result["authorizes_nginx_activation"] is False
     assert result["authorizes_catalog_publication"] is False
+
+@pytest.mark.parametrize("foreign", [
+    "location\n = /__repocache/repos/almalinux-baseos/private { return 200; }",
+    "location ^~\n /__repocache/repos/almalinux-baseos/ { return 200; }",
+    "location\n ^~ /__repocache/repos/almalinux-baseos/ { return 200; }",
+    "upstream\n repocache_pin_foreign { server 127.0.0.1:80; }",
+])
+def test_split_nginx_directive_never_masks_foreign_live_route(foreign):
+    source = doc(active=("debian-trixie-main",))
+    original = copy.deepcopy(source)
+    raw = dump(source) + "\n" + foreign + "\n"
+    with pytest.raises(DerivedCatalogCandidateError,
+                       match="CATALOG_CANDIDATE_SPLIT_DIRECTIVE_UNVERIFIED"):
+        preview(source, raw=raw)
+    assert source == original
+    # The stronger HTTPS-bound catalog preview must inherit the same refusal.
+    with pytest.raises(DerivedCatalogCandidateError,
+                       match="CATALOG_CANDIDATE_SPLIT_DIRECTIVE_UNVERIFIED"):
+        strict_preview(source, raw=https_dump(source) + "\n" + foreign + "\n")
+
+
+def test_nginx_comment_with_fake_split_header_not_a_real_location():
+    source = doc(active=("debian-trixie-main",))
+    raw = dump(source) + "# location\n# ^~ /__repocache/repos/foreign/ {\n"
+    report = preview(source, raw=raw)
+    assert report["desired_active_repository_ids"] == ["debian-trixie-main"]
+    assert report["authorizes_catalog_publication"] is False
