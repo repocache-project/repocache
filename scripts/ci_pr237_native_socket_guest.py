@@ -19,6 +19,7 @@ import ssl
 import stat
 import subprocess
 import sys
+import time
 
 FIXTURE = Path("/root/pr237-synthetic-fixture")
 STATE = Path("/var/lib/repocache/server")
@@ -173,6 +174,12 @@ def main(distribution: str) -> None:
     sys.path[:0] = [str(SOURCE / "src"), str(SOURCE)]
     from repocache.server_native_root_control_client_v1 import request_native_fixed_v2
 
+    def authenticated_native_operation(operation: str) -> dict:
+        # Each request starts the one-shot installed worker. Preserve its
+        # vendor systemd StartLimitBurst rather than weakening rate limits.
+        time.sleep(3)
+        return request_native_fixed_v2(operation)
+
     accounts()
     certificate, private_key = synthetic_local_tls(distribution)
     saved_tls = {
@@ -213,12 +220,12 @@ def main(distribution: str) -> None:
     assert os.waitstatus_to_exitcode(denial_status) == 0
     print("PASS: kernel denied unprivileged REPOCACHE service identity at fixed admin socket", flush=True)
 
-    clean = request_native_fixed_v2("RECOVER_V2")
+    clean = authenticated_native_operation("RECOVER_V2")
     assert clean["status"] == "CLEAN" and clean["transaction_completed"] is True
     assert not (STATE / "state-v2.json").exists()
     print("PASS: installed root zipapp served actual kernel-credentialed RECOVER_V2/CLEAN", flush=True)
 
-    applied = request_native_fixed_v2("APPLY_V2")
+    applied = authenticated_native_operation("APPLY_V2")
     assert applied["status"] == "APPLIED", applied
     assert applied["state_generation"] == 1
     assert applied["active_catalog_published"] is True
@@ -231,13 +238,13 @@ def main(distribution: str) -> None:
     assert https_response("/.well-known/repocache/catalog.json").endswith(catalog_raw)
     print("PASS: native installed worker APPLY_V2 committed durable generation 1, reloaded nginx and exposed TLS/catalog", flush=True)
 
-    reloaded = request_native_fixed_v2("RELOAD_V2")
+    reloaded = authenticated_native_operation("RELOAD_V2")
     assert (reloaded["status"], reloaded["state_generation"]) == ("RELOADED", 1)
     assert snapshot() == before
-    unchanged = request_native_fixed_v2("APPLY_V2")
+    unchanged = authenticated_native_operation("APPLY_V2")
     assert (unchanged["status"], unchanged["state_generation"]) == ("UNCHANGED", 1)
     assert snapshot() == before
-    clean_again = request_native_fixed_v2("RECOVER_V2")
+    clean_again = authenticated_native_operation("RECOVER_V2")
     assert clean_again["status"] == "CLEAN"
     assert snapshot() == before
     for path in (certificate, private_key):
@@ -313,7 +320,7 @@ def main(distribution: str) -> None:
     assert snapshot() == before
     print("PASS: authenticated generation-two repair staged without premature service changes", flush=True)
 
-    repaired = request_native_fixed_v2("APPLY_V2")
+    repaired = authenticated_native_operation("APPLY_V2")
     assert (repaired["status"], repaired["state_generation"]) == ("APPLIED", 2)
     after_repair = snapshot()
     assert after_repair != before
@@ -329,37 +336,109 @@ def main(distribution: str) -> None:
         ), name
     for path in (certificate, private_key):
         assert hashlib.sha256(path.read_bytes()).hexdigest() == saved_tls[str(path)]
-    unchanged_repair = request_native_fixed_v2("APPLY_V2")
+    unchanged_repair = authenticated_native_operation("APPLY_V2")
     assert (unchanged_repair["status"], unchanged_repair["state_generation"]) == ("UNCHANGED", 2)
-    reloaded_repair = request_native_fixed_v2("RELOAD_V2")
+    reloaded_repair = authenticated_native_operation("RELOAD_V2")
     assert (reloaded_repair["status"], reloaded_repair["state_generation"]) == ("RELOADED", 2)
     assert snapshot() == after_repair
-    assert request_native_fixed_v2("RECOVER_V2")["status"] == "CLEAN"
+    assert authenticated_native_operation("RECOVER_V2")["status"] == "CLEAN"
     assert snapshot() == after_repair
     print("PASS: native worker applied partial same-version v0.6 generation-two repair, preserving nonempty TLS/cache/log/metrics data", flush=True)
 
-    # Real syntax refusal on the running, installed worker: NGINX must keep
-    # serving the prior accepted generation, without changing durable v2.
+    # Stage a second partial repair and force an ACTUAL post-WAL nginx -t
+    # failure on the installed worker. The invalid include is foreign and
+    # deliberately remains until the first compensation attempt. This must
+    # retain the durable WAL for a separate real RECOVER_V2, never certify
+    # the partial candidate as a completed generation.
+    prior_repair_state = (STATE / "state-v2.json").read_bytes()
+    prior_repair_sha = hashlib.sha256(prior_repair_state).hexdigest()
+    repair3_document = json.loads(
+        base64.b64decode(
+            json.loads(prior_repair_state)["configuration_base64"], validate=True
+        )
+    )
+    assert repair3_document["expected_state_generation"] == 2
+    assert repair3_document["deployment"]["logging"]["retention_days"] == 8
+    repair3_document["deployment"]["logging"]["retention_days"] = 9
+    previous3 = FIXTURE / "pr237-previous-state-gen2.json"
+    repair3 = FIXTURE / "pr237-reviewed-repair-gen3.json"
+    proposal3 = FIXTURE / "pr237-repair-proposal-gen3.json"
+    assert not any(path.exists() for path in (previous3, repair3, proposal3))
+    for path, raw in (
+        (previous3, prior_repair_state),
+        (repair3, (json.dumps(repair3_document, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")),
+    ):
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "wb") as output:
+            output.write(raw)
+            output.flush()
+            os.fsync(output.fileno())
+    prep3 = install_native_root_worker.prepare_authenticated_proposal(
+        assets, repair3, proposal3,
+        previous=previous3, previous_sha256=prior_repair_sha,
+        decision_sha256="f" * 64, **pins,
+    )
+    assert prep3["status"] == "AUTHENTICATED_V2_PROPOSAL_PREPARED"
+    assert prep3["state_generation"] == 3
+    stage3 = install_native_root_worker.stage_authenticated_proposal(
+        assets, proposal3, proposal_sha256=hashlib.sha256(proposal3.read_bytes()).hexdigest(),
+        expected_state_sha256=prior_repair_sha, **pins,
+    )
+    assert stage3["expected_generation"] == 2
+    assert snapshot() == after_repair
+
     from repocache.server_native_root_control_client_v1 import NativeRootControlClientError
     invalid = Path("/etc/nginx/conf.d/pr237-disposable-invalid.conf")
     assert not invalid.exists()
     fd = os.open(invalid, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+    failed_wal = STATE / ".state-v2-native.pending"
     try:
         with os.fdopen(fd, "wb") as output:
             output.write(b"unknown_pr237_nginx_directive on;\n")
             output.flush()
             os.fsync(output.fileno())
         try:
-            request_native_fixed_v2("RELOAD_V2")
+            authenticated_native_operation("APPLY_V2")
         except NativeRootControlClientError as error:
             assert str(error) == "NATIVE_ROOT_CLIENT_OPERATION_REFUSED"
         else:
-            raise AssertionError("Invalid live NGINX syntax was reloaded by installed worker")
-        assert snapshot() == after_repair
+            raise AssertionError("Broken NGINX syntax unexpectedly activated generation three")
+        assert failed_wal.is_file(), "Post-WAL syntax failure must retain recoverable journal"
+        assert stat.S_IMODE(failed_wal.stat().st_mode) == 0o600
         assert b"x-repocache-generation: 2" in https_response("/__repocache/healthz").lower()
+        assert hashlib.sha256(
+            Path("/var/lib/repocache/public/catalog.json").read_bytes()
+        ).hexdigest() == after_repair["/var/lib/repocache/public/catalog.json"][0]
     finally:
         invalid.unlink()
-    print("PASS: native installed worker refused live invalid nginx syntax without changing known-good v2 and HTTPS exposure", flush=True)
+    print("PASS: real post-WAL nginx syntax failure refused installed APPLY_V2 and retained durable recovery journal", flush=True)
+
+    restored = authenticated_native_operation("RECOVER_V2")
+    assert restored["status"] == "RECOVERED" and restored["transaction_completed"] is True
+    assert not failed_wal.exists()
+    assert not (STATE / ".state-v2-native.pending-tmp").exists()
+    assert json.loads((STATE / "state-v2.json").read_bytes())["state_generation"] == 2
+    assert b"x-repocache-generation: 2" in https_response("/__repocache/healthz").lower()
+    assert https_response("/.well-known/repocache/catalog.json").endswith(
+        Path("/var/lib/repocache/public/catalog.json").read_bytes()
+    )
+    after_recovery = snapshot()
+    for path, (digest, _inode, _mtime) in after_repair.items():
+        assert after_recovery[path][0] == digest
+    for name, (path, digest, inode, mtime) in preserved.items():
+        st = path.stat()
+        assert (hashlib.sha256(path.read_bytes()).hexdigest(), st.st_ino, st.st_mtime_ns) == (
+            digest, inode, mtime
+        ), name
+    assert authenticated_native_operation("RECOVER_V2")["status"] == "CLEAN"
+    assert snapshot() == after_recovery
+    assert authenticated_native_operation("RELOAD_V2")["status"] == "RELOADED"
+    assert snapshot() == after_recovery
+    for path in (certificate, private_key):
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == saved_tls[str(path)]
+    if distribution == "almalinux":
+        assert command("/usr/sbin/getenforce") == "Enforcing"
+    print("PASS: real installed RECOVER_V2 restored prior live generation and preserved TLS/cache/log/metrics; repeat recovery clean", flush=True)
     command("/usr/bin/systemctl", "stop", "repocache-control.socket")
     command("/usr/bin/systemctl", "stop", "nginx.service")
     assert_disabled("repocache-control.socket")
