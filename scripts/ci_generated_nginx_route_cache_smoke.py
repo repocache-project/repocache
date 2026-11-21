@@ -101,7 +101,21 @@ def await_worker_generation_drained(
     raise AssertionError("NGINX old worker generation did not drain")
 
 
-def trusted_fixture_origin(counts, lock, held_entered, held_release):
+def trusted_fixture_origin(counts, lock, held_entered=None, held_release=None):
+    """Share a fixed HTTPS origin across CI tests with optional drain barrier.
+
+    The generated-route worker-drain test passes BOTH explicit Events and
+    retains its real held-transfer handshake. The separate older native
+    owned-metrics runtime calls the same origin without that scenario, so
+    its unheld mode must not require the newly added barrier arguments.
+    A partial/invalid event pair is an error, never a weakened barrier.
+    """
+    if held_entered is None and held_release is None:
+        held_entered, held_release = threading.Event(), threading.Event()
+        held_release.set()
+    elif (not isinstance(held_entered, threading.Event)
+          or not isinstance(held_release, threading.Event)):
+        raise ValueError("fixture origin requires both explicit barrier events")
     class Origin(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             names = (
