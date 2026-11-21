@@ -439,3 +439,225 @@ def test_wal_rechecks_exact_predecessor_digest_even_with_same_generation(
     assert not (directory / JOURNAL).exists()
     assert all((directory / name).read_bytes() == raw
                for name, raw in baseline.items())
+
+
+# Batch operations exercise the same locked state-v2 and four-resource
+# persistence seam as the individual lifecycle, with no host authority.
+def fixture_batch(layout, *, operation, expected, proposed=(), ids=(), all_ids=False,
+                  pins=None, probe=None, fault=None):
+    from repocache.server_fixture_repository_transaction_v1 import (
+        commit_fixture_repository_batch_under_root,
+    )
+    fd, _, uid = layout
+    return commit_fixture_repository_batch_under_root(
+        fd, owner_uid=uid, expected_generation=expected,
+        operation=operation, proposed_repositories=proposed,
+        repository_ids=ids, all_repositories=all_ids,
+        candidate_pins_by_repository={} if pins is None else pins,
+        ca_bundle_path=CA, fixture_decision_sha256=DECISION,
+        verify_fixture_exposure_before_publish=(
+            (lambda: None) if probe is None else probe
+        ),
+        inject_fault=fault,
+    )
+
+
+def test_batch_fixture_enable_remove_and_retire(protected_fixture, tmp_path):
+    fd, directory, uid = protected_fixture
+    bootstrap(protected_fixture)
+    baseline_catalog = (directory / CATALOG).read_bytes()
+    observed = []
+
+    def before_publish():
+        observed.append((
+            read_state(directory)["state_generation"],
+            (directory / CATALOG).read_bytes(),
+            (directory / JOURNAL).exists(),
+            (directory / INCLUDE).read_bytes(),
+        ))
+
+    activated = fixture_batch(
+        protected_fixture, operation="enable", expected=1,
+        ids=("debian-trixie-main", "almalinux-baseos"),
+        pins={
+            "debian-trixie-main": {HOST: ["8.8.8.8"]},
+            "almalinux-baseos": {HOST: ["8.8.8.8"]},
+        },
+        probe=before_publish,
+    )
+    assert activated["status"] == "COMMITTED_INERT_FIXTURE_MULTI_RESOURCE"
+    assert activated["state_generation"] == 2
+    assert activated["durable_shadow_wal_exercised"] is True
+    assert all(activated[key] is False for key in (
+        "host_activation_verified", "operator_authorization_verified",
+        "authorizes_nginx_reload", "authorizes_catalog_publication",
+        "authorizes_cache_cleanup",
+    ))
+    assert len(observed) == 1
+    assert observed[0][:3] == (2, baseline_catalog, True)
+    assert b"/__repocache/repos/debian-trixie-main/" in observed[0][3]
+    assert b"/__repocache/repos/almalinux-baseos/" in observed[0][3]
+    assert read_catalog(directory)["active_ids"] == [
+        "almalinux-baseos", "debian-trixie-main",
+    ]
+    assert not (directory / JOURNAL).exists()
+
+    # Already-enabled selectors do not advance the ledger or touch inodes.
+    inode = (directory / V2_STATE).stat().st_ino
+    noop = fixture_batch(
+        protected_fixture, operation="enable", expected=2,
+        ids=("almalinux-baseos", "debian-trixie-main"),
+    )
+    assert noop["status"] == "NO_CHANGE_INERT_FIXTURE_REPOSITORY_BATCH"
+    assert noop["state_generation"] == 2
+    assert (directory / V2_STATE).stat().st_ino == inode
+
+    # A normal all-repository removal withdraws the private catalog in one
+    # generation but leaves unrelated retained package/cache objects alone.
+    retained = tmp_path / "signed-payload.cache"
+    retained.write_bytes(b"retained repository cache payload")
+    retained_inode = retained.stat().st_ino
+    removed = fixture_batch(
+        protected_fixture, operation="remove", expected=2, all_ids=True,
+    )
+    assert removed["status"] == "COMMITTED_INERT_FIXTURE_MULTI_RESOURCE"
+    assert removed["state_generation"] == 3
+    assert removed["retired_ids"] == [
+        "almalinux-baseos", "debian-trixie-main",
+    ]
+    assert read_catalog(directory)["active_ids"] == []
+    assert b"/__repocache/repos/" not in (directory / INCLUDE).read_bytes()
+    assert read_state(directory)["repository_records"] == []
+    assert all(row["status"] == "retired"
+               for row in read_state(directory)["id_reservations"])
+    assert retained.read_bytes() == b"retained repository cache payload"
+    assert retained.stat().st_ino == retained_inode
+    assert recover_multi(fd, owner_uid=uid)["status"] == "CLEAN_INERT_FIXTURE"
+
+
+def test_batch_fixture_adds_two_new_sources_with_durable_auto_ids(protected_fixture):
+    fd, directory, uid = protected_fixture
+    original = bootstrap(protected_fixture)
+    first = copy.deepcopy(original["repositories"][0])
+    second = copy.deepcopy(original["repositories"][1])
+    first.pop("id", None)
+    second.pop("id", None)
+    for row, new_host in (
+        (first, "new-apt.example.invalid"),
+        (second, "new-dnf.example.invalid"),
+    ):
+        before = row["upstream"]["base_url"]
+        row["upstream"]["base_url"] = before.replace(HOST, new_host)
+        row["upstream"]["allowed_hosts"] = [new_host]
+    added = fixture_batch(
+        protected_fixture, operation="add", expected=1,
+        proposed=(first, second),
+    )
+    assert added["state_generation"] == 2
+    ids = [row["repository_id"] for row in added["per_repository"]]
+    assert len(ids) == len(set(ids)) == 2
+    assert all(identifier.startswith("repo-") for identifier in ids)
+    persisted = read_state(directory)
+    assert set(ids) <= {row["id"] for row in persisted["id_reservations"]}
+    assert read_catalog(directory)["active_ids"] == []
+    assert not (directory / JOURNAL).exists()
+    assert recover_multi(fd, owner_uid=uid)["status"] == "CLEAN_INERT_FIXTURE"
+    # The durable ledger recognizes an identical repeated add as idempotent.
+    # It must neither allocate a second ID nor advance the generation.
+    prior_inode = (directory / V2_STATE).stat().st_ino
+    replay = fixture_batch(
+        protected_fixture, operation="add", expected=2,
+        proposed=(first,),
+    )
+    assert replay["status"] == "NO_CHANGE_INERT_FIXTURE_REPOSITORY_BATCH"
+    assert replay["state_generation"] == 2
+    assert (directory / V2_STATE).stat().st_ino == prior_inode
+    assert read_state(directory) == persisted
+
+
+def test_batch_fixture_invalid_one_member_refuses_entire_commit(protected_fixture):
+    _, directory, _ = protected_fixture
+    bootstrap(protected_fixture)
+    originals = {
+        name: (directory / name).read_bytes()
+        for name in (V2_STATE, INCLUDE, CATALOG, MANIFEST)
+    }
+    cases = (
+        {"operation": "enable", "expected": 2,
+         "ids": ("debian-trixie-main",)},
+        {"operation": "enable", "expected": 1,
+         "ids": ("debian-trixie-main", "../foreign")},
+        {"operation": "enable", "expected": 1,
+         "ids": ("debian-trixie-main", "debian-trixie-main")},
+        {"operation": "enable", "expected": 1,
+         "ids": ("debian-trixie-main", "almalinux-baseos")},
+        {"operation": "remove", "expected": 1,
+         "ids": ("debian-trixie-main",), "all_ids": True},
+    )
+    for case in cases:
+        with pytest.raises(FixtureRepositoryTransactionError):
+            fixture_batch(protected_fixture, **case)
+        assert {
+            name: (directory / name).read_bytes()
+            for name in (V2_STATE, INCLUDE, CATALOG, MANIFEST)
+        } == originals
+        assert not (directory / JOURNAL).exists()
+
+
+def test_batch_fixture_crash_before_publication_is_rollbackable(protected_fixture):
+    fd, directory, uid = protected_fixture
+    bootstrap(protected_fixture)
+    old = {
+        name: (directory / name).read_bytes()
+        for name in (V2_STATE, INCLUDE, CATALOG, MANIFEST)
+    }
+
+    def interrupt(phase):
+        if phase == "state_durable":
+            raise RuntimeError("test-only crash")
+
+    with pytest.raises(RuntimeError, match="test-only crash"):
+        fixture_batch(
+            protected_fixture, operation="enable", expected=1,
+            ids=("debian-trixie-main", "almalinux-baseos"),
+            pins={
+                "debian-trixie-main": {HOST: ["8.8.8.8"]},
+                "almalinux-baseos": {HOST: ["8.8.8.8"]},
+            },
+            fault=interrupt,
+        )
+    assert (directory / JOURNAL).exists()
+    assert (directory / CATALOG).read_bytes() == old[CATALOG]
+    with pytest.raises(FixtureRepositoryTransactionError):
+        fixture_batch(
+            protected_fixture, operation="remove", expected=2, all_ids=True,
+        )
+    assert recover_multi(fd, owner_uid=uid)[
+        "status"
+    ] == "ROLLED_BACK_INERT_FIXTURE_MULTI_RESOURCE"
+    assert {
+        name: (directory / name).read_bytes()
+        for name in (V2_STATE, INCLUDE, CATALOG, MANIFEST)
+    } == old
+    assert not (directory / JOURNAL).exists()
+
+
+def test_batch_fixture_rejected_exposure_barrier_never_publishes(protected_fixture):
+    fd, directory, uid = protected_fixture
+    bootstrap(protected_fixture)
+    old_catalog = (directory / CATALOG).read_bytes()
+
+    with pytest.raises(FixtureRepositoryTransactionError,
+                       match="BATCH_COMMIT_REFUSED"):
+        fixture_batch(
+            protected_fixture, operation="enable", expected=1,
+            ids=("debian-trixie-main",),
+            pins={"debian-trixie-main": {HOST: ["8.8.8.8"]}},
+            probe=lambda: False,  # The callback MUST return None.
+        )
+    assert (directory / JOURNAL).exists()
+    assert (directory / CATALOG).read_bytes() == old_catalog
+    assert recover_multi(fd, owner_uid=uid)[
+        "status"
+    ] == "ROLLED_BACK_INERT_FIXTURE_MULTI_RESOURCE"
+    assert (directory / CATALOG).read_bytes() == old_catalog
