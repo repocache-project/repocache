@@ -51,6 +51,9 @@ def test_native_nginx_cache_parent_preserves_existing_owned_contents(tmp_path):
     root = _root(tmp_path)
     cache = root / "var" / "cache" / "nginx"
     cache.mkdir(mode=0o755)
+    # A strict CI umask must not accidentally turn an otherwise safe
+    # existing-owned-directory preservation fixture into mode 0700.
+    cache.chmod(0o755)
     record = cache / "foreign-package-cache-not-to-be-deleted"
     record.write_bytes(b"unchanged")
     prior = (cache.stat().st_ino, record.stat().st_ino, record.read_bytes())
