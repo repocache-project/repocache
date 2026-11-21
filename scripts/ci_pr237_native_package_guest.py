@@ -174,6 +174,13 @@ def report(distribution: str) -> None:
         info = complete.stat()
         assert info.st_uid == 0 and info.st_gid == 0 and stat.S_IMODE(info.st_mode) == 0o600
         native_observation()
+        cache_parent = Path("/var/cache/nginx")
+        cache_info = cache_parent.lstat()
+        assert stat.S_ISDIR(cache_info.st_mode)
+        assert cache_info.st_uid == 0 and cache_info.st_gid == 0
+        assert stat.S_IMODE(cache_info.st_mode) == 0o755
+        assert not cache_parent.is_symlink()
+        print("PASS: native installer provisioned exact owned nginx cache sandbox mount target before completion", flush=True)
         existing = complete.read_bytes()
         try:
             install_native_root_worker.install_authenticated_native_nginx(
@@ -193,6 +200,9 @@ def report(distribution: str) -> None:
         assert len(original) == 64
         assert hashlib.sha256(complete.read_bytes()).hexdigest() == original
         native_observation()
+        cache_info = Path("/var/cache/nginx").lstat()
+        assert stat.S_ISDIR(cache_info.st_mode)
+        assert (cache_info.st_uid, cache_info.st_gid, stat.S_IMODE(cache_info.st_mode)) == (0, 0, 0o755)
         assert stage_native_root_worker.verify_installed_worker(assets, **pins)["status"] == "AUTHENTICATED_WORKER_FILES_MATCH"
         for name in ("repocache-control.socket", "repocache-control.service"):
             assert run("/usr/bin/systemctl", "is-active", name).returncode != 0
