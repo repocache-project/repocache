@@ -77,6 +77,10 @@ selected repository's observed counts and allocated/apparent bytes
 are returned. The preflight does not open cached payload for writing,
 unlink anything, change state, stage a catalogue or reload NGINX.
 
+The actual Linux `/` root descriptor is refused **before acquiring the
+protected-state lock or opening any host state file**. The negative test
+instruments the lock to prove the early refusal, not just the final result.
+
 This is still a **detached test-root fixture API**, not an approved
 production broker. The state record `retired` does **not** prove that
 a live NGINX worker has drained, the origin is unshared, the operator
