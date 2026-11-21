@@ -677,6 +677,9 @@ def test_synthetic_signed_candidate_enters_exact_native_journal_once(
 
     state = sysroot / "var/lib/repocache/server"
     state.mkdir(parents=True, mode=0o700)
+    # Match the native OS pre-existing /var/cache anchor. The signed
+    # installer must create ONLY the fixed missing nginx cache leaf.
+    (sysroot / "var" / "cache").mkdir(parents=True, mode=0o755)
     (state / LOCK_NAME).write_bytes(b"")
     (state / LOCK_NAME).chmod(0o600)
     install_document = tmp_path / "reviewed-native-install.json"
