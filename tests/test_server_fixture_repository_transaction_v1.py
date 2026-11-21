@@ -661,3 +661,154 @@ def test_batch_fixture_rejected_exposure_barrier_never_publishes(protected_fixtu
         "status"
     ] == "ROLLED_BACK_INERT_FIXTURE_MULTI_RESOURCE"
     assert (directory / CATALOG).read_bytes() == old_catalog
+
+
+def _locked_native_candidate(layout, *, expected, operation, ids=(),
+                             proposed=(), all_ids=False, expected_digest=None):
+    from repocache.server_fixture_repository_transaction_v1 import (
+        prepare_locked_fixture_native_batch_envelope_under_root,
+    )
+    fd, directory, uid = layout
+    digest = (hashlib.sha256((directory / V2_STATE).read_bytes()).hexdigest()
+              if expected_digest is None else expected_digest)
+    return prepare_locked_fixture_native_batch_envelope_under_root(
+        fd, owner_uid=uid, expected_generation=expected,
+        expected_previous_state_sha256=digest, operation=operation,
+        fixture_decision_sha256=DECISION, proposed_repositories=proposed,
+        repository_ids=ids, all_repositories=all_ids,
+    )
+
+
+def test_locked_fixture_candidate_exactly_matches_committed_wal_state(
+    protected_fixture,
+):
+    _, directory, _ = protected_fixture
+    bootstrap(protected_fixture)
+    original = {
+        name: (directory / name).read_bytes()
+        for name in (V2_STATE, INCLUDE, CATALOG, MANIFEST)
+    }
+    original_inode = (directory / V2_STATE).stat().st_ino
+    prepared = _locked_native_candidate(
+        protected_fixture, expected=1, operation="enable",
+        ids=("debian-trixie-main", "almalinux-baseos"),
+    )
+    assert prepared["status"] == "LOCKED_FIXTURE_FIXED_V2_ATOMIC_BATCH_ENVELOPE_ONLY"
+    assert prepared["changed"] is True
+    assert prepared["fixture_only"] is True
+    assert prepared["fixture_owner_manifest_verified_during_prepare"] is True
+    assert prepared["fixture_exclusive_lock_held_during_prepare"] is True
+    assert prepared["requires_native_locked_recheck"] is True
+    assert all(prepared[name] is False for name in (
+        "operator_approval_verified", "installed_root_provenance_verified",
+        "native_nginx_exposure_verified", "public_catalog_published",
+        "authorizes_state_write", "authorizes_nginx_reload",
+        "authorizes_catalog_publication", "authorizes_cache_cleanup",
+    ))
+    assert {name: (directory / name).read_bytes() for name in original} == original
+    assert (directory / V2_STATE).stat().st_ino == original_inode
+    wire = json.loads(prepared["envelope_bytes"])
+    assert set(wire) == {
+        "request_schema_version", "expected_generation",
+        "expected_state_sha256", "next_state_base64", "next_state_sha256",
+    }
+    assert wire["expected_generation"] == 1
+    assert wire["expected_state_sha256"] == hashlib.sha256(
+        original[V2_STATE],
+    ).hexdigest()
+    next_raw = base64.b64decode(wire["next_state_base64"], validate=True)
+    assert hashlib.sha256(next_raw).hexdigest() == prepared["next_state_sha256"]
+
+    committed = fixture_batch(
+        protected_fixture, operation="enable", expected=1,
+        ids=("debian-trixie-main", "almalinux-baseos"),
+        pins={
+            "debian-trixie-main": {HOST: ["8.8.8.8"]},
+            "almalinux-baseos": {HOST: ["8.8.8.8"]},
+        },
+    )
+    assert committed["state_generation"] == 2
+    assert next_raw == (directory / V2_STATE).read_bytes()
+    assert read_catalog(directory)["active_ids"] == [
+        "almalinux-baseos", "debian-trixie-main",
+    ]
+    with pytest.raises(FixtureRepositoryTransactionError,
+                       match="LOCKED_CANDIDATE_STALE_GENERATION"):
+        _locked_native_candidate(
+            protected_fixture, expected=1, operation="remove", all_ids=True,
+        )
+    inode = (directory / V2_STATE).stat().st_ino
+    noop = _locked_native_candidate(
+        protected_fixture, expected=2, operation="enable",
+        ids=("debian-trixie-main", "almalinux-baseos"),
+    )
+    assert noop["changed"] is False
+    assert noop["envelope_bytes"] is None
+    assert (directory / V2_STATE).stat().st_ino == inode
+
+
+def test_locked_fixture_candidate_rejects_forged_manifest_and_wrong_cas(
+    protected_fixture,
+):
+    _, directory, _ = protected_fixture
+    bootstrap(protected_fixture)
+    before = {name: (directory / name).read_bytes()
+              for name in (V2_STATE, INCLUDE, CATALOG, MANIFEST)}
+    with pytest.raises(FixtureRepositoryTransactionError,
+                       match="LOCKED_CANDIDATE_PREDECESSOR_MISMATCH"):
+        _locked_native_candidate(
+            protected_fixture, expected=1, operation="remove", all_ids=True,
+            expected_digest="f" * 64,
+        )
+    assert {name: (directory / name).read_bytes() for name in before} == before
+    (directory / MANIFEST).write_bytes(b"{}")
+    with pytest.raises(FixtureRepositoryTransactionError,
+                       match="LOCKED_CANDIDATE_REFUSED"):
+        _locked_native_candidate(
+            protected_fixture, expected=1, operation="remove", all_ids=True,
+        )
+    assert (directory / V2_STATE).read_bytes() == before[V2_STATE]
+    assert (directory / CATALOG).read_bytes() == before[CATALOG]
+
+
+def test_locked_fixture_candidate_refuses_pending_wal_and_real_root(
+    protected_fixture,
+):
+    fd, directory, uid = protected_fixture
+    bootstrap(protected_fixture)
+
+    def interrupt(phase):
+        if phase == "state_durable":
+            raise RuntimeError("injected interruption")
+
+    with pytest.raises(RuntimeError, match="injected interruption"):
+        fixture_batch(
+            protected_fixture, operation="enable", expected=1,
+            ids=("debian-trixie-main",),
+            pins={"debian-trixie-main": {HOST: ["8.8.8.8"]}},
+            fault=interrupt,
+        )
+    assert (directory / JOURNAL).exists()
+    with pytest.raises(FixtureRepositoryTransactionError,
+                       match="LOCKED_CANDIDATE_REFUSED"):
+        _locked_native_candidate(
+            protected_fixture, expected=1, operation="remove", all_ids=True,
+        )
+    assert recover_multi(fd, owner_uid=uid)[
+        "status"
+    ] == "ROLLED_BACK_INERT_FIXTURE_MULTI_RESOURCE"
+
+    real_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        from repocache.server_fixture_repository_transaction_v1 import (
+            prepare_locked_fixture_native_batch_envelope_under_root,
+        )
+        with pytest.raises(ValueError, match="CURRENT_NAMESPACE_ROOT_WRITES_REFUSED"):
+            prepare_locked_fixture_native_batch_envelope_under_root(
+                real_fd, owner_uid=os.geteuid(), expected_generation=1,
+                expected_previous_state_sha256="a" * 64,
+                fixture_decision_sha256=DECISION, operation="remove",
+                all_repositories=True,
+            )
+    finally:
+        os.close(real_fd)
