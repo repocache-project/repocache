@@ -240,3 +240,39 @@ validation or permission to disable SELinux. Even a PASS demonstrates only
 recovery, same-version repair, foreign file preservation, SELinux negative
 policy tests, release publisher signing and production acceptance remain
 separate NOT VERIFIED criteria.
+
+
+### Partial same-version native v0.6 repair and genuine failed-apply WAL recovery
+
+The PR237-only guest now prepares an authenticated **generation-two partial
+configuration repair** from the actually committed generation-one state. It
+changes a deployment retention setting while retaining all repository IDs and
+the native worker. The real installed worker/socket attempts a second
+\`APPLY_V2\`, then a real \`RELOAD_V2\`, idempotent \`APPLY_V2\`, and
+\`RECOVER_V2/CLEAN\`. The guest checks nonempty synthetic cache, log and
+metrics files and the genuine TLS certificate/key by SHA-256, inode and mtime.
+A directory merely existing is not accepted as preservation evidence.
+
+A further reviewed synthetic generation-three proposal deliberately meets an
+invalid foreign NGINX directive during the **real installed apply**, after
+the native v2 WAL is published. The expected refusal must leave a recoverable
+root-owned WAL and the previous generation still answering HTTPS. After
+removing only the test-owned invalid include, a separate installed
+\`RECOVER_V2\` must restore exact previous managed byte digests and live
+generation-two exposure; repeated recovery must be CLEAN, real reload must
+pass, and the synthetic TLS/cache/log/metrics contents must remain intact.
+Because recovery may atomically replace files, only content digests (not
+necessarily inode identity) are required across the rollback.
+
+The script also confirms the installed socket refuses the unprivileged
+\`repocache\` service UID at the kernel permissions boundary and keeps both
+control and NGINX units disabled for boot. Requests are spaced to respect
+the unchanged systemd one-shot service start-rate limit; the test never
+modifies that limit or bypasses the kernel credential check.
+
+**Evidence status: NOT VERIFIED until the exact source SHA passes both booted
+VM jobs**. This is a real OS/socket/transaction experiment using synthetic
+keys, not publisher signing, an interrupted APT/DNF process, a genuine
+power-cut recovery, production approval, or a complete same-version installer
+reinstatement test. On failure, preserve stage-specific errors; never
+reinterpret the desired outcomes as observed PASS.
