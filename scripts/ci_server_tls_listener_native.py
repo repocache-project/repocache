@@ -167,6 +167,31 @@ def main():
             assert b"421 Misdirected Request" in denied, "ABSOLUTE_URI_FOREIGN_AUTHORITY_ADMITTED"
             assert b"repocache-https" not in denied, "ABSOLUTE_URI_BODY_LEAK"
             print("PASS: foreign absolute URI denied despite approved HTTP Host", flush=True)
+            # $host excludes the original request-target port. Without the
+            # fixed $request absolute-form gate, the same approved hostname
+            # with a *different* absolute-form port can pass the $host and
+            # raw Host checks. No repository client needs forward-proxy form.
+            for target in (
+                f"https://{HOST}/__test",
+                f"https://{HOST}:19444/__test",
+                f"http://{HOST}/__test",
+            ):
+                with socket.create_connection(("127.0.0.1", PORT), timeout=3) as raw:
+                    with context.wrap_socket(raw, server_hostname=HOST) as sock:
+                        sock.sendall(
+                            (f"GET {target} HTTP/1.1\r\n"
+                             f"Host: {HOST}:{PORT}\r\n"
+                             "Connection: close\r\n\r\n").encode("ascii")
+                        )
+                        denied = sock.recv(4096)
+                assert b"421 Misdirected Request" in denied, (
+                    "ABSOLUTE_FORM_REQUEST_ADMITTED"
+                )
+                assert b"repocache-https" not in denied, (
+                    "ABSOLUTE_FORM_PROTECTED_BODY_LEAK"
+                )
+            print("PASS: canonical, alternate-port and HTTP absolute-form "
+                  "targets refused with approved Host and SNI", flush=True)
             # An unapproved source URL must never become a route, even
             # with two explicitly active APT/DNF repository candidates.
             with socket.create_connection(("127.0.0.1",PORT),timeout=3) as raw:
