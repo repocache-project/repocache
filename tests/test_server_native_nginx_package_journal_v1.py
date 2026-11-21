@@ -761,3 +761,60 @@ def test_non_exception_abrupt_stop_keeps_reentry_blocked(
     assert marker.read_bytes() == raw
     # After unmask, the service mask can be absent until native reconciliation.
     # This test proves journal durability, not booted-host service containment.
+
+
+@pytest.mark.parametrize("distribution", ["debian", "almalinux"])
+@pytest.mark.parametrize("interruption", [
+    "after-completion-receipt-fsync", "after-pending-marker-unlink-fsync",
+])
+def test_abrupt_completion_boundary_never_loses_both_audit_markers(
+    protected_root, monkeypatch, distribution, interruption,
+):
+    """Crash after a durable operation must not create a clean reentry window."""
+    from repocache import server_native_nginx_package_journal_v1 as journal
+
+    root, state, owner = protected_root
+    install, _ = _synthetic_host_native_package(monkeypatch, distribution)
+    original_write = journal._write_exclusive
+    original_unlink = journal._unlink_known
+    injected = []
+
+    def after_write(directory, name, *args, **kwargs):
+        result = original_write(directory, name, *args, **kwargs)
+        if (name == journal.NATIVE_COMPLETE_NAME
+                and interruption == "after-completion-receipt-fsync"):
+            injected.append(name)
+            raise KeyboardInterrupt("interrupted after receipt fsync")
+        return result
+
+    def after_unlink(directory, name, *args, **kwargs):
+        result = original_unlink(directory, name, *args, **kwargs)
+        if (name == journal.NATIVE_PENDING_NAME
+                and interruption == "after-pending-marker-unlink-fsync"):
+            injected.append(name)
+            raise KeyboardInterrupt("interrupted after pending unlink fsync")
+        return result
+
+    monkeypatch.setattr(journal, "_write_exclusive", after_write)
+    monkeypatch.setattr(journal, "_unlink_known", after_unlink)
+    with pytest.raises(KeyboardInterrupt, match="interrupted after"):
+        install._execute_native_nginx_install_locked(
+            root, distribution=distribution, document={}, os_release="", owner_uid=owner,
+        )
+    assert len(injected) == 1
+    completed = state / journal.NATIVE_COMPLETE_NAME
+    assert completed.is_file()
+    receipt = json.loads(completed.read_bytes())
+    assert receipt["distribution"] == distribution
+    assert receipt["publisher_artifact_verified"] is False
+    pending = state / NATIVE_PENDING_NAME
+    assert pending.exists() == (interruption == "after-completion-receipt-fsync")
+    if pending.exists():
+        import hashlib
+        assert receipt["pending_sha256"] == hashlib.sha256(pending.read_bytes()).hexdigest()
+    preserved = completed.read_bytes()
+    with pytest.raises(NativePackageJournalError):
+        _prepare_native_journal_under_root(
+            root, owner_uid=owner, distribution=distribution,
+        )
+    assert completed.read_bytes() == preserved
