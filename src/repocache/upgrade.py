@@ -84,6 +84,7 @@ V06_EXTRA_FILES = frozenset((
     "src/repocache/server_dns_refresh_schedule_v1.py",
     "src/repocache/server_fixture_activation_flow_v1.py",
     "src/repocache/server_fixture_multi_resource_wal_v1.py",
+    "src/repocache/server_fixture_repository_transaction_v1.py",
     "src/repocache/server_host_checks_v1.py",
     "src/repocache/server_install_v1.py",
     "src/repocache/server_locked_manifest_reconcile_v1.py",
