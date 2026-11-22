@@ -16,6 +16,7 @@ on:
       - 'docs/testing/PR237_BOOTED_VM.md'
       - 'docs/testing/V060_NATIVE_VM_COVERAGE_MATRIX.md'
       - 'scripts/collect_v06_vm_campaign_coverage.py'
+      - 'scripts/ci_v06_vm_nginx_cache_guest.py'
       - 'tests/test_v06_vm_campaign_coverage.py'
   workflow_dispatch:
 
