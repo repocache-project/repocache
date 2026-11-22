@@ -39,6 +39,31 @@ def test_complete_guest_scenario_never_implies_original_acceptance(
     assert observed["signed_publisher_candidate"] == "NOT_VERIFIED"
     assert all(item["coverage"] == "EXERCISED_PARTIAL" for item in observed["criteria"])
     assert all(item["acceptance"] == "NOT_VERIFIED" for item in observed["criteria"])
+    if scenario == "smoke":
+        assert observed["other_campaigns"]["P0-2"] == "NOT_VERIFIED"
+
+
+def test_p02_partial_coverage_requires_exact_log_and_completed_guest(tmp_path: Path) -> None:
+    for name in SCENARIOS["smoke"]["files"]:
+        (tmp_path / name).write_text("fixture", encoding="utf-8")
+    (tmp_path / "sha.txt").write_text(HEAD, encoding="utf-8")
+    (tmp_path / "summary.md").write_text(
+        f"## PR #237 — debian13 smoke experimental booted VM\n"
+        f"Source HEAD: {HEAD}\nLast phase: complete\nVM exercise: PASS\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "facts.txt").write_text("ID=debian\nsystemd\n", encoding="utf-8")
+    log = tmp_path / "native-cache-data-plane.txt"
+    log.write_text("PASS: booted native VM stock NGINX disposable HTTPS APT/DNF MISS/HIT",
+                   encoding="utf-8")
+    observed = collect(tmp_path, "debian13", "smoke", HEAD)
+    assert observed["other_campaigns"]["P0-2"] == "EXERCISED_PARTIAL"
+    assert {row["issue_criterion"] for row in observed["criteria"]} >= {
+        "28.01", "28.02", "28.03", "30.01",
+    }
+    assert all(row["acceptance"] == "NOT_VERIFIED" for row in observed["criteria"])
+    (tmp_path / "sha.txt").write_text("2" * 40, encoding="utf-8")
+    assert collect(tmp_path, "debian13", "smoke", HEAD)["other_campaigns"]["P0-2"] == "NOT_VERIFIED"
 
 
 def test_wrong_head_fails_closed(tmp_path: Path) -> None:
