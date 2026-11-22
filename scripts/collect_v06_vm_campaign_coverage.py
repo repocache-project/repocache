@@ -27,6 +27,7 @@ SCENARIOS = {
             "before-reboot.txt", "after-reboot.txt", "reboot-ids.txt",
             "synthetic-installed-worker.txt", "pending-journal-before-reboot.txt",
             "pending-journal-after-reboot.txt", "second-reboot-ids.txt",
+            "native-cache-data-plane.txt",
         ),
         "criteria": ("19.06", "19.10", "26.01", "27.05", "31.03", "64.04"),
     },
@@ -82,6 +83,16 @@ def collect(path: Path, platform: str, scenario: str, expected_head: str) -> dic
         and "VM exercise: PASS" in summary
         and facts_valid
     )
+    secondary = ()
+    if scenario == "smoke":
+        native_log = (path / "native-cache-data-plane.txt")
+        if completed and native_log.is_file():
+            native_text = native_log.read_text(encoding="utf-8")
+            if "PASS: booted native VM stock NGINX disposable HTTPS APT/DNF MISS/HIT" in native_text:
+                secondary = ("28.01", "28.02", "28.03", "30.01")
+    campaigns = {k: "NOT_RUN" for k in CAMPAIGNS if k != "P0-1"}
+    if scenario == "smoke":
+        campaigns["P0-2"] = "EXERCISED_PARTIAL" if secondary else "NOT_VERIFIED"
     return {
         "campaign": "P0-1",
         "platform": platform,
@@ -97,8 +108,12 @@ def collect(path: Path, platform: str, scenario: str, expected_head: str) -> dic
             {"issue_criterion": c, "coverage": "EXERCISED_PARTIAL" if completed else "NOT_VERIFIED",
              "acceptance": "NOT_VERIFIED"}
             for c in SCENARIOS[scenario]["criteria"]
+        ] + [
+            {"issue_criterion": c, "coverage": "EXERCISED_PARTIAL",
+             "acceptance": "NOT_VERIFIED"}
+            for c in secondary
         ],
-        "other_campaigns": {k: "NOT_RUN" for k in CAMPAIGNS if k != "P0-1"},
+        "other_campaigns": campaigns,
     }
 
 
