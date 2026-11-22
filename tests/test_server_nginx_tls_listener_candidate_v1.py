@@ -26,6 +26,7 @@ def test_canonical_default_https_and_operator_key_reference():
         "server_name cache.example.invalid;\n"
         "if ($http_host !~* \"^cache\\.example\\.invalid(:443)?$\") { return 421; }\n"
         "if ($host != cache.example.invalid) { return 421; }\n"
+        'if ($request ~* "^[A-Z]+[ ]+[A-Z][A-Z0-9+.-]*://") { return 421; }\n'
         "ssl_certificate /etc/repocache/tls/example-chain.pem;\n"
         "ssl_certificate_key /etc/repocache/tls/example-key.pem;\n"
         "ssl_protocols TLSv1.2 TLSv1.3;\n"
@@ -106,6 +107,11 @@ def test_listener_is_statically_bound_to_the_exact_approved_http_host():
     expected = 'if ($http_host !~* "^mirror\\.example\\.invalid(:443)?$") { return 421; }'
     assert expected in lines
     assert "if ($host != mirror.example.invalid) { return 421; }" in lines
+    absolute = 'if ($request ~* "^[A-Z]+[ ]+[A-Z][A-Z0-9+.-]*://") { return 421; }'
+    assert absolute in lines
+    assert lines.index(absolute) < lines.index(
+        "ssl_certificate /etc/repocache/tls/example-chain.pem;"
+    )
     assert lines.index(expected) < lines.index(
         "ssl_certificate /etc/repocache/tls/example-chain.pem;"
     )
@@ -121,6 +127,20 @@ def test_tls_sni_bound_to_validated_hostname_and_remains_non_authorizing():
     assert "if ($host != mirror.example.invalid) { return 421; }" in fragment
     assert "ssl_session_tickets off;" in fragment
     assert "authorizes" not in fragment
+
+
+def test_absolute_form_gate_is_static_and_inert_on_ipv4_and_ipv6():
+    for address in ("127.0.0.1", "::1", "0.0.0.0", "::"):
+        d = doc()
+        d["deployment"]["listen"]["bind_address"] = address
+        render = render_native_tls_listener_candidate(d)
+        fragment = render["server_context_fragment"]
+        # A valid SNI and Host MUST NOT bypass a request-target port.
+        assert fragment.count(
+            'if ($request ~* "^[A-Z]+[ ]+[A-Z][A-Z0-9+.-]*://") { return 421; }'
+        ) == 1
+        assert render["authorizes_nginx_activation"] is False
+        assert render["authorizes_firewall_change"] is False
 
 
 def test_ipv6_wildcard_has_explicit_v6_only_socket_and_ipv4_does_not():

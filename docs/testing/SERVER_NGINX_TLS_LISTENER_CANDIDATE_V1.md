@@ -84,6 +84,32 @@ absolute URL under valid TLS SNI and canonical Host, requiring HTTP 421
 with no protected payload. Neither guard is an authorization to
 install/reload NGINX or publish the catalog.
 
+## Reject absolute-form request targets even with canonical hostname
+
+The exact `$http_host` guard and normalized `$host` check reject a
+**different hostname**, but do not on their own reject an absolute-form
+HTTP request target such as `GET https://cache.example.invalid:19444/...`
+when `Host: cache.example.invalid:18443` and TLS SNI are otherwise
+canonical: NGINX `$host` deliberately omits that request-target's port.
+REPOCACHE is an origin-bound repository cache, not a forward HTTP proxy.
+
+The renderer now adds a fixed, non-user-derived `$request` check, refusing
+**all absolute-form scheme:// request targets** with HTTP 421 before a
+managed repository location can run. This deliberately also refuses a
+same-authority absolute-form request: native APT/DNF repository URLs use
+ordinary origin-form requests, so there is no approved need for that form.
+It does not authorize a new listener, TLS credential, proxy mode or
+firewall rule.
+
+The stock Debian 13 and AlmaLinux 10 NGINX CI test now sends valid
+TLS SNI and HTTP Host with (1) the canonical HTTPS absolute-form target,
+(2) the same hostname but a different absolute-form port, and (3) an
+HTTP-scheme absolute-form target over a TLS connection. All must return
+421 without the protected fixture body. Positive origin-form TLS requests
+and the existing malformed/foreign Host/SNI cases remain regression
+coverage. Booted systemd, SELinux and installed root activation are still
+**NOT VERIFIED** until #19.
+
 ## Explicit IPv6-only listeners (#30)
 
 For an administrator-selected IPv6 bind, the deterministic NGINX listener
