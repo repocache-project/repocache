@@ -689,41 +689,165 @@ def main(distribution: str) -> None:
         invalid.unlink()
     print("PASS: real post-WAL nginx syntax failure refused installed APPLY_V2 and retained durable recovery journal", flush=True)
 
-    restored = authenticated_native_operation("RECOVER_V2")
-    assert restored["status"] == "RECOVERED" and restored["transaction_completed"] is True
-    assert not failed_wal.exists()
+    # The genuine interrupted v2 WAL must survive a FULL GUEST REBOOT, not
+    # merely another Python call. Persist only fixed test-harness hashes and
+    # inode observations outside the managed state before shutting down.
+    wal_info = failed_wal.lstat()
+    assert stat.S_ISREG(wal_info.st_mode) and wal_info.st_uid == 0
+    proof = {
+        "schema_version": 1,
+        "distribution": distribution,
+        "synthetic_source_sha": pins["commit"],
+        "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+        "wal_sha256": hashlib.sha256(failed_wal.read_bytes()).hexdigest(),
+        "wal_inode": wal_info.st_ino,
+        "wal_mtime_ns": wal_info.st_mtime_ns,
+        "managed_sha256": {
+            path: data[0] for path, data in after_repair.items()
+        },
+        "unmanaged": {
+            path: list(data) for path, data in unmanaged_before.items()
+        },
+        "preserved": {
+            name: {
+                "path": str(path), "sha256": digest,
+                "inode": inode, "mtime_ns": mtime,
+            }
+            for name, (path, digest, inode, mtime) in preserved.items()
+        },
+        "tls_sha256": saved_tls,
+    }
+    proof_path = FIXTURE / "pr237-v2-recovery-reboot.json"
+    assert not proof_path.exists() and not proof_path.is_symlink()
+    raw_proof = (
+        json.dumps(proof, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        + "\n"
+    ).encode("ascii")
+    fd = os.open(
+        proof_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600,
+    )
+    with os.fdopen(fd, "wb") as output:
+        output.write(raw_proof)
+        output.flush()
+        os.fsync(output.fileno())
+    directory = os.open(FIXTURE, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+    print(
+        "PASS: real installed v2 apply failed after durable WAL; old HTTPS "
+        "generation still serves, WAL and exact recovery proof fsynced for reboot",
+        flush=True,
+    )
+
+
+def recover_after_reboot(distribution: str) -> None:
+    """Verify and recover exact prior generation after actual QEMU kernel reboot."""
+    assert distribution in ("debian", "almalinux")
+    assert os.getresuid() == (0, 0, 0)
+    assert Path("/proc/1/comm").read_text().strip() == "systemd"
+    assert command("/usr/bin/systemd-detect-virt", "--vm") in ("qemu", "kvm")
+    if distribution == "almalinux":
+        assert command("/usr/sbin/getenforce") == "Enforcing"
+    proof_path = FIXTURE / "pr237-v2-recovery-reboot.json"
+    proof_info = proof_path.lstat()
+    assert stat.S_ISREG(proof_info.st_mode) and proof_info.st_uid == 0
+    assert stat.S_IMODE(proof_info.st_mode) == 0o600
+    assert proof_info.st_size < 8192
+    proof = json.loads(proof_path.read_bytes())
+    assert set(proof) == {
+        "schema_version", "distribution", "synthetic_source_sha", "boot_id",
+        "wal_sha256", "wal_inode", "wal_mtime_ns", "managed_sha256",
+        "unmanaged", "preserved", "tls_sha256",
+    }
+    assert proof["schema_version"] == 1 and proof["distribution"] == distribution
+    pins = json.loads((FIXTURE / "pins.json").read_bytes())
+    assert pins["commit"] == proof["synthetic_source_sha"]
+    assert Path("/proc/sys/kernel/random/boot_id").read_text().strip() != proof["boot_id"]
+    wal = STATE / ".state-v2-native.pending"
+    info = wal.lstat()
+    assert stat.S_ISREG(info.st_mode) and info.st_uid == 0
+    assert stat.S_IMODE(info.st_mode) == 0o600
+    assert (hashlib.sha256(wal.read_bytes()).hexdigest(),
+            info.st_ino, info.st_mtime_ns) == (
+        proof["wal_sha256"], proof["wal_inode"], proof["wal_mtime_ns"],
+    )
     assert not (STATE / ".state-v2-native.pending-tmp").exists()
+    assert set(proof["preserved"]) == {"cache", "logs", "metrics"}
+    for name, expected in proof["preserved"].items():
+        fixed = {
+            "cache": "/var/cache/nginx/repocache-managed/pr237-cache-record",
+            "logs": "/var/log/nginx/repocache-managed/pr237-log-record",
+            "metrics": "/var/lib/repocache/metrics/pr237-metrics-record",
+        }[name]
+        assert expected["path"] == fixed
+        path = Path(fixed)
+        current = path.stat()
+        assert (hashlib.sha256(path.read_bytes()).hexdigest(),
+                current.st_ino, current.st_mtime_ns) == (
+            expected["sha256"], expected["inode"], expected["mtime_ns"],
+        ), name
+    assert_static_socket()
+    assert_disabled("nginx.service")
+    # Units are disabled on boot intentionally for these disposable guests.
+    # Start the same installed vendor NGINX and root-owned control socket,
+    # NEVER enable or alter their sandbox for the recovery.
+    command("/usr/bin/systemctl", "start", "nginx.service", timeout=35)
+    command("/usr/bin/systemctl", "start", "repocache-control.socket")
+    assert b"x-repocache-generation: 2" in https_response("/__repocache/healthz").lower()
+    sys.path[:0] = [str(SOURCE / "src"), str(SOURCE)]
+    from repocache.server_native_root_control_client_v1 import request_native_fixed_v2
+
+    def fixed(operation: str) -> dict:
+        time.sleep(3)
+        return request_native_fixed_v2(operation)
+
+    restored = fixed("RECOVER_V2")
+    assert restored["status"] == "RECOVERED"
+    assert restored["transaction_completed"] is True
+    assert not wal.exists() and not (STATE / ".state-v2-native.pending-tmp").exists()
     assert json.loads((STATE / "state-v2.json").read_bytes())["state_generation"] == 2
     assert b"x-repocache-generation: 2" in https_response("/__repocache/healthz").lower()
     assert https_response("/.well-known/repocache/catalog.json").endswith(
         Path("/var/lib/repocache/public/catalog.json").read_bytes()
     )
-    after_recovery = snapshot()
-    for path, (digest, _inode, _mtime) in after_repair.items():
-        assert after_recovery[path][0] == digest
-    for name, (path, digest, inode, mtime) in preserved.items():
-        st = path.stat()
-        assert (hashlib.sha256(path.read_bytes()).hexdigest(), st.st_ino, st.st_mtime_ns) == (
-            digest, inode, mtime
-        ), name
-    assert authenticated_native_operation("RECOVER_V2")["status"] == "CLEAN"
-    assert snapshot() == after_recovery
-    assert authenticated_native_operation("RELOAD_V2")["status"] == "RELOADED"
-    assert snapshot() == after_recovery
-    for path in (certificate, private_key):
-        assert hashlib.sha256(path.read_bytes()).hexdigest() == saved_tls[str(path)]
-    if distribution == "almalinux":
-        assert command("/usr/sbin/getenforce") == "Enforcing"
-    assert unmanaged_nginx_snapshot() == unmanaged_before
-    print("PASS: real installed RECOVER_V2 restored prior live generation and preserved TLS/cache/log/metrics; repeat recovery clean", flush=True)
+    after = snapshot()
+    assert set(after) == set(proof["managed_sha256"])
+    for path, (digest, _inode, _mtime) in after.items():
+        assert digest == proof["managed_sha256"][path], path
+    assert set(proof["unmanaged"]) == set(unmanaged_nginx_snapshot())
+    for path, metadata in unmanaged_nginx_snapshot().items():
+        assert list(metadata) == proof["unmanaged"][path]
+    for path, digest in proof["tls_sha256"].items():
+        assert path in (
+            "/etc/repocache/tls/server.crt", "/etc/repocache/tls/server.key",
+        ) or path.startswith("/etc/repocache/tls/")
+        assert hashlib.sha256(Path(path).read_bytes()).hexdigest() == digest
+    assert fixed("RECOVER_V2")["status"] == "CLEAN"
+    assert snapshot() == after
+    assert fixed("RELOAD_V2")["status"] == "RELOADED"
+    assert snapshot() == after
     command("/usr/bin/systemctl", "stop", "repocache-control.socket")
     command("/usr/bin/systemctl", "stop", "nginx.service")
     assert_static_socket()
     assert_disabled("nginx.service")
-    print("PASS: guest native services stopped; no socket/nginx autostart enabled; synthetic trust only", flush=True)
+    print(
+        "PASS: real kernel reboot preserved native v2 WAL; installed worker "
+        "RECOVER_V2 restored prior live generation and TLS/cache/log/metrics; "
+        "repeated recovery clean, reload valid, no service autostart",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2 or sys.argv[1] not in ("debian", "almalinux"):
-        raise SystemExit("Usage: ci_pr237_native_socket_guest.py debian|almalinux")
-    main(sys.argv[1])
+    if (len(sys.argv) not in (2, 3)
+            or sys.argv[1] not in ("debian", "almalinux")
+            or (len(sys.argv) == 3 and sys.argv[2] != "recover-after-reboot")):
+        raise SystemExit(
+            "Usage: ci_pr237_native_socket_guest.py debian|almalinux [recover-after-reboot]"
+        )
+    if len(sys.argv) == 3:
+        recover_after_reboot(sys.argv[1])
+    else:
+        main(sys.argv[1])

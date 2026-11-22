@@ -179,6 +179,16 @@ if test "$scenario" = native-installer || test "$scenario" = native-package-inte
   sshguest "sudo /usr/bin/python3 -B /home/pr237ci/source/scripts/ci_pr237_native_package_guest.py '$PR237_PLATFORM_ID' after" > "$out/native-install-after-reboot.txt" 2>&1 || { cat "$out/native-install-after-reboot.txt"; exit 1; }
   stage=native-installed-v2-systemd-socket
   sshguest "sudo /usr/bin/python3 -B /home/pr237ci/source/scripts/ci_pr237_native_socket_guest.py '$PR237_PLATFORM_ID'" > "$out/native-socket-v2.txt" 2>&1 || { cat "$out/native-socket-v2.txt"; exit 1; }
+  stage=native-v2-pending-WAL-kernel-reboot
+  boot_wal_before="$(sshguest 'cat /proc/sys/kernel/random/boot_id')"
+  sshguest 'sudo systemctl reboot' >/dev/null 2>&1 || true
+  sleep 8
+  waitssh
+  boot_wal_after="$(sshguest 'cat /proc/sys/kernel/random/boot_id')"
+  test "$boot_wal_after" != "$boot_wal_before"
+  printf 'before=%s\nafter=%s\n' "$boot_wal_before" "$boot_wal_after" > "$out/native-v2-wal-reboot-ids.txt"
+  stage=native-v2-installed-worker-after-reboot-recovery
+  sshguest "sudo /usr/bin/python3 -B /home/pr237ci/source/scripts/ci_pr237_native_socket_guest.py '$PR237_PLATFORM_ID' recover-after-reboot" > "$out/native-v2-recovery-after-reboot.txt" 2>&1 || { cat "$out/native-v2-recovery-after-reboot.txt"; exit 1; }
   stage=complete
   exit 0
 fi

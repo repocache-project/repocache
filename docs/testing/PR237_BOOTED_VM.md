@@ -271,10 +271,16 @@ A further reviewed synthetic generation-three proposal deliberately meets an
 invalid foreign NGINX directive during the **real installed apply**, after
 the native v2 WAL is published. The expected refusal must leave a recoverable
 root-owned WAL and the previous generation still answering HTTPS. After
-removing only the test-owned invalid include, a separate installed
-\`RECOVER_V2\` must restore exact previous managed byte digests and live
-generation-two exposure; repeated recovery must be CLEAN, real reload must
-pass, and the synthetic TLS/cache/log/metrics contents must remain intact.
+removing only the test-owned invalid include, the guest persists a separate
+root-owned, fsynced test record of the WAL inode/hash/mtime and prior managed,
+unmanaged and preservation digests, then performs an **actual kernel reboot**.
+The independent post-reboot process proves a different boot identity and the
+unchanged durable WAL, starts only the already-installed disabled vendor
+NGINX and fixed control socket, and invokes the installed
+\`RECOVER_V2\` operation. It must restore the exact previous managed
+digests and live generation-two HTTPS exposure; repeated recovery must be
+CLEAN, real reload must pass, and synthetic TLS/cache/log/metrics contents and
+unmanaged NGINX files must remain intact.
 Because recovery may atomically replace files, only content digests (not
 necessarily inode identity) are required across the rollback.
 
@@ -286,8 +292,9 @@ modifies that limit or bypasses the kernel credential check.
 
 **Evidence status: NOT VERIFIED until the exact source SHA passes both booted
 VM jobs**. This is a real OS/socket/transaction experiment using synthetic
-keys, not publisher signing, an interrupted APT/DNF process, a genuine
-power-cut recovery, production approval, or a complete same-version installer
+keys, with a real reboot between a failed v2 WAL transaction and recovery;
+it is not publisher signing, a simultaneous hard-power cut during the WAL
+write, production approval, or a complete same-version installer
 reinstatement test. On failure, preserve stage-specific errors; never
 reinterpret the desired outcomes as observed PASS.
 
