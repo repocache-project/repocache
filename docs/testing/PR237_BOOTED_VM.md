@@ -258,6 +258,15 @@ the native worker. The real installed worker/socket attempts a second
 metrics files and the genuine TLS certificate/key by SHA-256, inode and mtime.
 A directory merely existing is not accepted as preservation evidence.
 
+The installed guest now **re-runs the identical signed-fixture worker and unit
+placement after generation two is live**, asserting unchanged hashes, inodes,
+mtimes, owner/mode and current HTTPS response. Re-entry into the separate
+**fresh-install-only APT/DNF** operation must refuse with the exact native
+prepackage boundary code and no new journal, package effects, service reload,
+managed-state change or TLS/cache/log/metrics loss. This is bounded repeat
+installation safety; it does **not** claim that a currently unsupported complete
+same-version deployment installer command was successfully executed.
+
 A further reviewed synthetic generation-three proposal deliberately meets an
 invalid foreign NGINX directive during the **real installed apply**, after
 the native v2 WAL is published. The expected refusal must leave a recoverable

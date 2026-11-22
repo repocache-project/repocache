@@ -554,6 +554,73 @@ def main(distribution: str) -> None:
     assert unmanaged_nginx_snapshot() == unmanaged_before
     print("PASS: native worker applied partial same-version v0.6 generation-two repair, preserving nonempty TLS/cache/log/metrics data", flush=True)
 
+    # Reinstall the *identical authenticated worker and systemd units* while
+    # generation two is actually live. A completed signed candidate must be
+    # a byte/inode/mtime no-op, never replace live root-executable bytes.
+    # The first-install-only APT/DNF entry is intentionally different: it
+    # must reject reentry on the managed host, before package effects.
+    worker_paths = (
+        Path("/usr/libexec/repocache/server-control-worker"),
+        Path("/etc/systemd/system/repocache-control.service"),
+        Path("/etc/systemd/system/repocache-control.socket"),
+    )
+    worker_before = {}
+    for path in worker_paths:
+        info = path.lstat()
+        assert stat.S_ISREG(info.st_mode) and info.st_uid == 0
+        worker_before[str(path)] = (
+            hashlib.sha256(path.read_bytes()).hexdigest(),
+            info.st_dev, info.st_ino, info.st_mtime_ns,
+            info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode),
+        )
+    receipt_path = STATE / ".native-nginx-v1.completed"
+    # The installed package completion marker is durable across host reboots.
+    assert receipt_path.is_file() and not receipt_path.is_symlink()
+    receipt_before = hashlib.sha256(receipt_path.read_bytes()).hexdigest()
+    worker_retry = install_native_root_worker.install_authenticated_worker(
+        assets, **pins,
+    )
+    assert worker_retry["status"] == "AUTHENTICATED_WORKER_FILES_PLACED"
+    assert worker_retry["authorizes_service_activation"] is False
+    for path in worker_paths:
+        info = path.lstat()
+        assert (
+            hashlib.sha256(path.read_bytes()).hexdigest(),
+            info.st_dev, info.st_ino, info.st_mtime_ns,
+            info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode),
+        ) == worker_before[str(path)]
+    assert hashlib.sha256(receipt_path.read_bytes()).hexdigest() == receipt_before
+
+    original_document = FIXTURE / "reviewed-install.json"
+    document_digest = hashlib.sha256(original_document.read_bytes()).hexdigest()
+    try:
+        install_native_root_worker.install_authenticated_native_nginx(
+            assets, original_document, document_digest, **pins,
+        )
+    except ValueError as error:
+        assert str(error) == (
+            "WORKER_PLACEMENT_NATIVE_PREPACKAGE_BOUNDARY_UNVERIFIED"
+        ), str(error)
+    else:
+        raise AssertionError("Fresh-only package installer re-entered active v2 host")
+    assert hashlib.sha256(receipt_path.read_bytes()).hexdigest() == receipt_before
+    assert not (STATE / ".native-nginx-v1.pending").exists()
+    assert not (STATE / ".native-nginx-v1.pending-tmp").exists()
+    assert snapshot() == after_repair
+    assert unmanaged_nginx_snapshot() == unmanaged_before
+    for name, (path, digest, inode, mtime) in preserved.items():
+        info = path.stat()
+        assert (hashlib.sha256(path.read_bytes()).hexdigest(),
+                info.st_ino, info.st_mtime_ns) == (digest, inode, mtime), name
+    for path in (certificate, private_key):
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == saved_tls[str(path)]
+    assert b"x-repocache-generation: 2" in https_response("/__repocache/healthz").lower()
+    print(
+        "PASS: same-version worker+unit installation no-op on active native v2; "
+        "fresh-only APT/DNF reentry refused with no journal or live changes",
+        flush=True,
+    )
+
     # Stage a second partial repair and force an ACTUAL post-WAL nginx -t
     # failure on the installed worker. The invalid include is foreign and
     # deliberately remains until the first compensation attempt. This must
