@@ -116,18 +116,19 @@ waitssh() {
 }
 prepare_pinned_synthetic_source() {
   stage=pinned-pr249-synthetic-candidate
-  # This combines already-reviewed source only in a local throwaway worktree.
-  # It never fetches publisher keys or modifies the #249 PR/branch.
-  PR249_SHA=0ca54da8dc5d73b2df892ecf8551110c36340794
-  git fetch --no-tags origin +refs/heads/fix/76-repository-transfer-v06-candidate-20261107:refs/remotes/origin/pr249
-  test "$(git rev-parse refs/remotes/origin/pr249)" = "$PR249_SHA"
+  # #249 was squash-merged at this exact protected integration commit.
+  # Never trust a moving/deleted source PR branch or confuse source SHA
+  # with its accepted integration ancestry. Only a disposable local merge.
+  PR249_INTEGRATION_SHA=69b13b8882560b29515ec2405463b70e40c8aa44
+  git fetch --no-tags origin +refs/heads/integration/v0.6.0:refs/remotes/origin/integration/v0.6.0
+  git merge-base --is-ancestor "$PR249_INTEGRATION_SHA" refs/remotes/origin/integration/v0.6.0
   git worktree add --detach "$tmp/combined-source" "$sha" >/dev/null
   git -C "$tmp/combined-source" switch -c pr237-synthetic-vm-merge >/dev/null
   git -C "$tmp/combined-source" config user.email "pr237-fixture@repocache.invalid"
   git -C "$tmp/combined-source" config user.name "PR237 disposable synthetic CI"
-  git -C "$tmp/combined-source" merge --no-ff --no-edit "$PR249_SHA" >/dev/null
+  git -C "$tmp/combined-source" merge --no-ff --no-edit "$PR249_INTEGRATION_SHA" >/dev/null
   combined_sha="$(git -C "$tmp/combined-source" rev-parse HEAD)"
-  printf 'pr237_head=%s\npr249_dependency=%s\ncombined_disposable=%s\n' "$sha" "$PR249_SHA" "$combined_sha" > "$out/synthetic-source-provenance.txt"
+  printf 'pr237_head=%s\npr249_integrated=%s\ncombined_disposable=%s\n' "$sha" "$PR249_INTEGRATION_SHA" "$combined_sha" > "$out/synthetic-source-provenance.txt"
   git -C "$tmp/combined-source" archive HEAD | gzip -1 > "$tmp/combined-source.tar.gz"
   scp -i "$tmp/id_ed25519" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
     -o "UserKnownHostsFile=$tmp/known_hosts" -o LogLevel=ERROR \
