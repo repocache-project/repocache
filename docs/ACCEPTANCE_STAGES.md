@@ -41,6 +41,15 @@ staging/tag/publishing and immutable public readback/postpublication smoke.
 Neither Stage A nor Stage B automatically authorizes Stage C. These steps
 occur only when their genuine inputs and separately required permissions exist.
 
+### Owner signing only at the final release boundary (option C, 2026-11-22)
+
+- **Stage A (source/CI):** ordinary code, signed-input parsing, privileged worker protocols, native installer logic, failure injection and signature-refusal tests use source-built artifacts and, where authentication is exercised, fresh disposable test identities. A real publisher private key or published owner-signed artifact is **not a prerequisite** to safely integrating a scoped change with complete applicable Stage-A acceptance.
+- **Stage B (native functionality):** booted Debian 13 and AlmaLinux 10 (SELinux enforcing where relevant) guests may exercise the *unchanged signature-verifying install path* with explicitly disposable test-signed artifacts and guest-local trust anchors. Verify exact build SHA, identity provenance and logs; never install those anchors on production hosts. Record each operational criterion separately; a test-signed host run is not owner-signed release acceptance.
+- **Stage C (official release):** after the final reviewed source is promoted/frozen on protected `main`, the maintainer authorizes the official version/tag/build and signs the **exact final** candidate using the offline, owner-held Ed25519 key. Only this real signed candidate can satisfy #76/#88 publisher-specific acceptance, authorized Draft staging, immutable-asset identity, final signed-candidate tests and public publication. These operations keep their separate permissions and must occur in the existing protected order.
+- **Issue ownership:** #31's original five install/reinstall, same-version repair, NGINX rollback, foreign-state preservation and interruption-recovery criteria are functional/native criteria; their full applicable Stage-A/B acceptance can be evaluated and the issue closed **without owner-key signing**, if every native/privileged requirement is actually proven at the correct revision. Release authenticity and final signed-candidate delivery remain with #76/#88 and the release gate. If any issue's criterion specifically tests genuine publisher signing, it remains a Stage-C criterion until real evidence exists. Do not reclassify missing runtime, security, provenance or native proof as publication-only.
+
+**No product trust downgrade:** no unsigned-install escape hatch, no fallback from failed Ed25519 verification, no trusted key sourced from downloaded assets and no promotion of synthetic CI/VM signatures into owner approval. Preserve fail-closed refusal for unsigned/modified artifacts and existing required CI/security checks. A SHA-256 digest alone is not publisher authentication.
+
 ## Reusable milestone algorithm
 
 1. Check the protected default branch, original issue criteria, existing PRs,

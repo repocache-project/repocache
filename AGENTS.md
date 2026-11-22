@@ -36,6 +36,7 @@ GitHub is the source of truth for *state*; accepted specifications and decisions
 - Preserve secure APT/DNF fallback if REPOCACHE is unavailable. Do not silently rewrite client sources or bypass native package metadata and TLS integrity.
 - Prefer native Linux mechanisms, minimal privileges, strict validation, safe subprocesses, file/secret permissions, atomic configuration changes and rollback. Review NGINX, systemd, SELinux and both supported distros when impacted.
 - Publisher signing keys never belong in GitHub Actions. Signed artifact trust and actual release acceptance must not be inferred from synthetic keys, green CI or mock network tests.
+- **Publisher signing is a final-release gate, not a development gate (maintainer option C, 2026-11-22).** Build and exercise installation, repair, rollback and privileged recovery with isolated, disposable CI/VM signing identities and explicit test-only trust anchors. Neither ordinary Stage-A code integration nor full Stage-B functional/host acceptance requires the maintainer's private release key. Keep all normal install/update, artifact verification and unsigned/tampered-input refusal paths fail-closed; do not ship a skip-signature flag, trust a bundled test key, or claim a synthetic signature proves genuine publisher release acceptance. Only after the reviewed final source is frozen on protected `main` may the maintainer separately authorize offline Ed25519 signing, authenticated final-candidate testing, staging and publication under Stage C.
 
 ## 4. Mandatory change and merge process
 
