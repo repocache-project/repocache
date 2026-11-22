@@ -8,6 +8,8 @@ on:
       - 'src/repocache/server_native_storage_bootstrap_v1.py'
       - 'src/repocache/server_native_repository_cache_v1.py'
       - 'src/repocache/server_native_metrics_file_bootstrap_v1.py'
+      - 'src/repocache/server_native_metrics_logrotate_candidate_v1.py'
+      - 'src/repocache/server_protected_namespace_bootstrap_v1.py'
       - 'src/repocache/server_nginx_metrics_bundle_join_v1.py'
       - 'src/repocache/server_nginx_repository_bundle_v1.py'
       - 'src/repocache/core.py'
@@ -34,15 +36,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install native packaged NGINX, OpenSSL and Python
+      - name: Install native packaged NGINX, OpenSSL, logrotate and Python
         shell: bash
         run: |
           set -Eeuo pipefail
           if [ '${{ matrix.platform }}' = debian13 ]; then
             apt-get update -qq
-            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends nginx openssl python3
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends nginx openssl python3 logrotate
           else
-            dnf -q -y install nginx openssl python3
+            dnf -q -y install nginx openssl python3 logrotate
           fi
       - name: Exercise owned cache, actual worker, private metrics and repeat provisioning
         shell: bash
@@ -54,22 +56,30 @@ jobs:
           set -Eeuo pipefail
           python3 -B scripts/ci_v06_owned_storage_metrics_runtime.py | tee "$RUNNER_TEMP/owned-runtime-receipt.txt"
           python3 -I -B - "$RUNNER_TEMP" <<'PY'
-          import base64, json, sys
+          import base64, gzip, json, sys
           from pathlib import Path
           work = Path(sys.argv[1])
-          prefix = "METRICS_FIXTURE_BASE64:"
+          prefix = "METRICS_ROTATED_FIXTURE_JSON:"
           rows = [line[len(prefix):] for line in (work / "owned-runtime-receipt.txt").read_text().splitlines()
                   if line.startswith(prefix)]
-          assert len(rows) == 1 and len(rows[0]) < 12000
-          raw = base64.b64decode(rows[0], validate=True)
-          assert len(raw.splitlines()) == 8
-          assert all(json.loads(line)["upstream_cache_status"] in ("MISS", "HIT") for line in raw.splitlines())
-          (work / "owned-metrics.jsonl").write_bytes(raw)
+          assert len(rows) == 1 and len(rows[0]) < 24000
+          encoded = json.loads(rows[0])
+          names = ("metrics.jsonl", "metrics.jsonl.1", "metrics.jsonl.2.gz")
+          assert set(encoded) == set(names)
+          sample = work / "owned-metrics"
+          sample.mkdir()
+          raw = {name: base64.b64decode(encoded[name], validate=True) for name in names}
+          assert sum(map(len, raw.values())) <= 16384
+          all_rows = raw[names[0]] + raw[names[1]] + gzip.decompress(raw[names[2]])
+          assert len(all_rows.splitlines()) == 16
+          assert all(json.loads(line)["upstream_cache_status"] in ("MISS", "HIT") for line in all_rows.splitlines())
+          for name in names:
+              (sample / name).write_bytes(raw[name])
           PY
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: owned-metrics-${{ matrix.platform }}
-          path: ${{ runner.temp }}/owned-metrics.jsonl
+          path: ${{ runner.temp }}/owned-metrics/
           if-no-files-found: error
           retention-days: 1
 
@@ -91,24 +101,27 @@ jobs:
         with:
           pattern: owned-metrics-*
           path: ${{ runner.temp }}/native-metrics-samples
-      - name: Verify actual CLI counts from unmodified native samples
+      - name: Verify actual CLI counts from unmodified native samples and archives
         shell: bash
         run: |
           set -Eeuo pipefail
           for distro in debian13 almalinux10; do
-            sample="$RUNNER_TEMP/native-metrics-samples/owned-metrics-$distro/owned-metrics.jsonl"
+            sample="$RUNNER_TEMP/native-metrics-samples/owned-metrics-$distro/metrics.jsonl"
             test -f "$sample"
             REPOCACHE_METRICS_LOG="$sample" python -m repocache.cli metrics show --period 24h --json > "$RUNNER_TEMP/owned-cli-$distro.json"
             python -I -B - "$sample" "$RUNNER_TEMP/owned-cli-$distro.json" <<'PY'
-          import json, sys
+          import gzip, json, sys
           from pathlib import Path
-          rows = [json.loads(line) for line in Path(sys.argv[1]).read_bytes().splitlines()]
+          sample = Path(sys.argv[1])
+          raw = sample.read_bytes() + sample.with_name(sample.name + ".1").read_bytes() + gzip.decompress(sample.with_name(sample.name + ".2.gz").read_bytes())
+          rows = [json.loads(line) for line in raw.splitlines()]
           report = json.loads(Path(sys.argv[2]).read_text())
           assert report["schema_version"] == 1 and report["ok"] is True and report["available"] is True
-          assert report["requests"] == len(rows) == 8
-          assert report["hit"] == sum(row["upstream_cache_status"] == "HIT" for row in rows) == 4
+          assert report["requests"] == len(rows) == 16
+          assert report["hit"] == sum(row["upstream_cache_status"] == "HIT" for row in rows) == 12
           assert report["miss"] == sum(row["upstream_cache_status"] == "MISS" for row in rows) == 4
-          assert report["cache_observed"] == 8
+          assert report["cache_observed"] == 16
+          assert report["history_files_read"] == 3 and report["rotation_incomplete"] is False
           assert report["bytes_sent"] == sum(int(row["body_bytes_sent"]) for row in rows)
           print("PASS: real CLI reads exact native NGINX fixture metrics without fabricated values")
           PY
