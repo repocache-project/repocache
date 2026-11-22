@@ -38,7 +38,7 @@ from repocache.server_proposed_state_v2_store import (
 from repocache.server_protected_state_store_v1 import _locked
 from repocache.server_repository_cache_cleanup_preview_v1 import (
     _FILE_FLAGS, _HEX1, _HEX2, _HEX32, _MAX_ENTRIES,
-    _metadata, preview_repository_cache_cleanup_under_root,
+    _cache_tree_digest, _metadata, preview_repository_cache_cleanup_under_root,
 )
 
 _MAX_INT = 2**63 - 1
@@ -159,6 +159,7 @@ def purge_fixture_retired_repository_cache_objects_under_root(
     repository_id: str, expected_state_generation: int,
     expected_state_sha256: str,
     expected_cache_files: int, expected_allocated_file_bytes: int,
+    expected_cache_tree_sha256: str,
     assert_fixture_quiescent: Callable[[], None],
     inject_fixture_fault: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
@@ -183,6 +184,10 @@ def purge_fixture_retired_repository_cache_objects_under_root(
             or not 0 <= expected_cache_files <= _MAX_ENTRIES
             or type(expected_allocated_file_bytes) is not int
             or not 0 <= expected_allocated_file_bytes <= _MAX_INT
+            or type(expected_cache_tree_sha256) is not str
+            or len(expected_cache_tree_sha256) != 64
+            or any(ch not in "0123456789abcdef"
+                   for ch in expected_cache_tree_sha256)
             or not callable(assert_fixture_quiescent)
             or (inject_fixture_fault is not None
                 and not callable(inject_fixture_fault))):
@@ -254,12 +259,16 @@ def purge_fixture_retired_repository_cache_objects_under_root(
                 )
                 if (sample["cache_files_observed"] != expected_cache_files
                         or sample["allocated_file_bytes_observed"]
-                           != expected_allocated_file_bytes):
+                           != expected_allocated_file_bytes
+                        or sample["cache_tree_sha256_observed"]
+                           != expected_cache_tree_sha256):
                     _deny("SCOPE_CHANGED")
                 first = _inventory(
                     repo_fd, level=0, uid=cache_uid, gid=cache_gid,
                     dev=cache.st_dev, prefix=(), counter=[0],
                 )
+                if _cache_tree_digest(first) != expected_cache_tree_sha256:
+                    _deny("SCOPE_CHANGED")
                 # This callback is TEST-ONLY: only an installed, independently
                 # reviewed native worker can prove real master/transfer drain.
                 try:
@@ -271,7 +280,9 @@ def purge_fixture_retired_repository_cache_objects_under_root(
                     repo_fd, level=0, uid=cache_uid, gid=cache_gid,
                     dev=cache.st_dev, prefix=(), counter=[0],
                 )
-                if second != first:
+                if (second != first
+                        or _cache_tree_digest(second)
+                           != expected_cache_tree_sha256):
                     _deny("CONTENT_CHANGED")
                 if (_structural(os.fstat(repo_fd))
                         != _structural(repo_info)):
@@ -310,6 +321,9 @@ def purge_fixture_retired_repository_cache_objects_under_root(
                     "verified_cache_files_removed": files_removed,
                     "verified_allocated_bytes_preflight": (
                         expected_allocated_file_bytes
+                    ),
+                    "verified_cache_tree_sha256_preflight": (
+                        expected_cache_tree_sha256
                     ),
                     "repository_cache_marker_preserved": True,
                     "retirement_ledger_preserved": True,

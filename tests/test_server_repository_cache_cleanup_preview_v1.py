@@ -655,7 +655,7 @@ def test_locked_retired_cache_preview_rejects_actual_root_before_state_lock(
 # The actual object-deletion rehearsal is intentionally in a DIFFERENT,
 # fixture-only module. The public preflight module above stays read-only.
 def _fixture_purge(layout, *, generation, digest, files, allocated,
-                   probe=None, fault=None, rid=RID):
+                   tree_digest="0" * 64, probe=None, fault=None, rid=RID):
     from repocache.server_fixture_retired_cache_cleanup_v1 import (
         purge_fixture_retired_repository_cache_objects_under_root,
     )
@@ -666,6 +666,7 @@ def _fixture_purge(layout, *, generation, digest, files, allocated,
         expected_state_sha256=digest,
         expected_cache_files=files,
         expected_allocated_file_bytes=allocated,
+        expected_cache_tree_sha256=tree_digest,
         assert_fixture_quiescent=(lambda: None) if probe is None else probe,
         inject_fixture_fault=fault,
     )
@@ -717,6 +718,7 @@ def test_explicit_fixture_purge_is_retired_only_and_preserves_other_cache(
         layout, generation=2, digest=digest,
         files=sample["cache_files_observed"],
         allocated=sample["allocated_file_bytes_observed"],
+        tree_digest=sample["cache_tree_sha256_observed"],
         probe=lambda: observed.append("fixture-drained") or None,
     )
     assert observed == ["fixture-drained"]
@@ -745,6 +747,7 @@ def test_explicit_fixture_purge_is_retired_only_and_preserves_other_cache(
     again = _fixture_purge(
         layout, generation=2, digest=digest,
         files=0, allocated=0,
+        tree_digest=after["cache_tree_sha256_observed"],
     )
     assert again["verified_cache_files_removed"] == 0
     assert other_file.read_bytes() == b"signed-dnf-cache-must-survive"
@@ -766,6 +769,7 @@ def test_fixture_purge_refuses_stale_or_unapproved_scope_without_deletion(
         generation=2, digest=digest,
         files=sample["cache_files_observed"],
         allocated=sample["allocated_file_bytes_observed"],
+        tree_digest=sample["cache_tree_sha256_observed"],
     )
     bad = (
         {"generation": 1},
@@ -815,6 +819,7 @@ def test_fixture_purge_detects_payload_changing_during_quiescence_check(
             layout, generation=2, digest=digest,
             files=report["cache_files_observed"],
             allocated=report["allocated_file_bytes_observed"],
+            tree_digest=report["cache_tree_sha256_observed"],
             probe=tamper,
         )
     assert (directory / DIGEST2).read_bytes() == baseline
@@ -849,6 +854,7 @@ def test_fixture_purge_foreign_objects_fail_before_unlink(
             layout, generation=2, digest=digest,
             files=verified["cache_files_observed"],
             allocated=verified["allocated_file_bytes_observed"],
+            tree_digest=verified["cache_tree_sha256_observed"],
         )
     assert outside.read_bytes() in (b"critical-other-repo",
                                     b"immutable-cached-package" * 10)
@@ -874,6 +880,7 @@ def test_fixture_purge_fault_after_unlink_has_explicit_resumable_partial_state(
             layout, generation=2, digest=digest,
             files=report["cache_files_observed"],
             allocated=report["allocated_file_bytes_observed"],
+            tree_digest=report["cache_tree_sha256_observed"],
             fault=crash,
         )
     assert state_file.is_file()
@@ -886,6 +893,7 @@ def test_fixture_purge_fault_after_unlink_has_explicit_resumable_partial_state(
         layout, generation=2, digest=digest,
         files=remaining["cache_files_observed"],
         allocated=remaining["allocated_file_bytes_observed"],
+        tree_digest=remaining["cache_tree_sha256_observed"],
     )
     assert result["verified_cache_files_removed"] == 1
     assert list(layout[3].iterdir()) == []
@@ -907,7 +915,95 @@ def test_fixture_purge_rejects_actual_root_before_lock(monkeypatch):
                 expected_state_generation=2,
                 expected_state_sha256="0" * 64,
                 expected_cache_files=0, expected_allocated_file_bytes=0,
+                expected_cache_tree_sha256="0" * 64,
                 assert_fixture_quiescent=lambda: None,
             )
     finally:
         os.close(fd)
+
+
+
+def test_preflight_tree_digest_binds_exact_cache_inode_scope(owned):
+    directory = populate(owned)
+    original = inspect(owned)
+    assert len(original["cache_tree_sha256_observed"]) == 64
+    assert original["cache_tree_sha256_observed"] == inspect(owned)[
+        "cache_tree_sha256_observed"
+    ]
+    file = directory / DIGEST1
+    original_size = file.stat().st_size
+    replacement = owned[5] / "same-size-replacement"
+    replacement.write_bytes(b"z" * original_size)
+    os.replace(replacement, file)
+    changed = inspect(owned)
+    assert changed["cache_files_observed"] == original["cache_files_observed"]
+    assert changed["allocated_file_bytes_observed"] == original[
+        "allocated_file_bytes_observed"
+    ]
+    assert changed["cache_tree_sha256_observed"] != original[
+        "cache_tree_sha256_observed"
+    ]
+
+
+def test_purge_requires_exact_preview_tree_even_with_same_counts_and_bytes(
+    owned_with_locked_state,
+):
+    from repocache.server_fixture_retired_cache_cleanup_v1 import (
+        FixtureRetiredCacheCleanupError,
+    )
+    layout, _, state_file = owned_with_locked_state
+    directory = populate(layout)
+    digest = _retire_owned_repo(owned_with_locked_state)
+    previewed = _locked_cleanup_preview(
+        owned_with_locked_state, generation=2, digest=digest,
+    )
+    target = directory / DIGEST1
+    previous_inode = target.stat().st_ino
+    replacement = layout[5] / "foreign-same-size-object"
+    replacement.write_bytes(b"z" * target.stat().st_size)
+    os.replace(replacement, target)
+    assert target.stat().st_ino != previous_inode
+    current = _locked_cleanup_preview(
+        owned_with_locked_state, generation=2, digest=digest,
+    )
+    assert current["cache_files_observed"] == previewed["cache_files_observed"]
+    assert current["allocated_file_bytes_observed"] == previewed[
+        "allocated_file_bytes_observed"
+    ]
+    assert current["cache_tree_sha256_observed"] != previewed[
+        "cache_tree_sha256_observed"
+    ]
+    other = (directory / DIGEST2).read_bytes()
+    with pytest.raises(FixtureRetiredCacheCleanupError, match="SCOPE_CHANGED"):
+        _fixture_purge(
+            layout, generation=2, digest=digest,
+            files=previewed["cache_files_observed"],
+            allocated=previewed["allocated_file_bytes_observed"],
+            tree_digest=previewed["cache_tree_sha256_observed"],
+        )
+    assert target.read_bytes() == b"z" * target.stat().st_size
+    assert (directory / DIGEST2).read_bytes() == other
+    assert hashlib.sha256(state_file.read_bytes()).hexdigest() == digest
+
+
+def test_fixture_purge_rejects_missing_or_malformed_tree_approval(
+    owned_with_locked_state,
+):
+    from repocache.server_fixture_retired_cache_cleanup_v1 import (
+        FixtureRetiredCacheCleanupError,
+    )
+    layout, _, _ = owned_with_locked_state
+    populate(layout)
+    digest = _retire_owned_repo(owned_with_locked_state)
+    sample = _locked_cleanup_preview(
+        owned_with_locked_state, generation=2, digest=digest,
+    )
+    for forged in ("0" * 64, "f" * 63, "Z" * 64, None, True):
+        with pytest.raises(FixtureRetiredCacheCleanupError):
+            _fixture_purge(
+                layout, generation=2, digest=digest,
+                files=sample["cache_files_observed"],
+                allocated=sample["allocated_file_bytes_observed"],
+                tree_digest=forged,
+            )
+    assert (layout[3] / "a" / "bc" / DIGEST1).is_file()

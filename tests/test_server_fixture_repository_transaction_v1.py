@@ -10,6 +10,8 @@ import copy
 import hashlib
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -812,3 +814,210 @@ def test_locked_fixture_candidate_refuses_pending_wal_and_real_root(
             )
     finally:
         os.close(real_fd)
+
+
+
+def _offline_prepared_batch(layout, tmp_path, request, *, generation=1):
+    """Execute the actual #421 operator preparer; do not replan in the fixture."""
+    _, directory, _ = layout
+    prior = (directory / V2_STATE).read_bytes()
+    prior_sha = hashlib.sha256(prior).hexdigest()
+    private = tmp_path / "operator-private"
+    private.mkdir(mode=0o700)
+    request_path = private / "operation.json"
+    request_path.write_bytes(json.dumps(
+        request, sort_keys=True, separators=(",", ":"),
+    ).encode("ascii"))
+    request_path.chmod(0o600)
+    output = private / "next-v2.json"
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve().parents[1] /
+            "scripts/prepare_server_repository_lifecycle.py"),
+        "--previous-v2-state", str(directory / V2_STATE),
+        "--request", str(request_path),
+        "--proposal-output", str(output),
+        "--expected-generation", str(generation),
+        "--expected-state-sha256", prior_sha,
+        "--decision-sha256", DECISION,
+    ]
+    run = subprocess.run(
+        command, cwd=Path(__file__).resolve().parents[1],
+        text=True, capture_output=True, timeout=20, check=False,
+    )
+    assert run.returncode == 0, run.stderr
+    report = json.loads(run.stdout)
+    assert report["status"] == "OFFLINE_LIFECYCLE_PROPOSAL_PREPARED"
+    return output.read_bytes(), prior_sha, report
+
+
+def _commit_prepared(layout, candidate, predecessor, *, pins=None,
+                     probe=None, fault=None, generation=1,
+                     decision=DECISION, expected_candidate=None):
+    from repocache.server_fixture_repository_transaction_v1 import (
+        commit_fixture_prepared_repository_proposal_under_root,
+    )
+    fd, _, uid = layout
+    return commit_fixture_prepared_repository_proposal_under_root(
+        fd, owner_uid=uid, expected_generation=generation,
+        expected_previous_state_sha256=predecessor,
+        expected_prepared_state_sha256=(
+            hashlib.sha256(candidate).hexdigest() if expected_candidate is None
+            else expected_candidate
+        ),
+        prepared_state_bytes=candidate, fixture_decision_sha256=decision,
+        candidate_pins_by_repository={} if pins is None else pins,
+        ca_bundle_path=CA,
+        verify_fixture_exposure_before_publish=(
+            (lambda: None) if probe is None else probe
+        ),
+        inject_fault=fault,
+    )
+
+
+def test_exact_offline_proposal_bytes_commit_to_protected_fixture_wal(
+    protected_fixture, tmp_path,
+):
+    _, directory, uid = protected_fixture
+    bootstrap(protected_fixture)
+    old_catalog = (directory / CATALOG).read_bytes()
+    candidate, predecessor, report = _offline_prepared_batch(
+        protected_fixture, tmp_path, {
+            "operation": "enable",
+            "repository_ids": ["debian-trixie-main"],
+        },
+    )
+    observed = []
+
+    def before_publish():
+        observed.append((
+            (directory / V2_STATE).read_bytes(),
+            (directory / CATALOG).read_bytes(),
+            (directory / JOURNAL).is_file(),
+        ))
+
+    committed = _commit_prepared(
+        protected_fixture, candidate, predecessor,
+        pins={"debian-trixie-main": {HOST: ["8.8.8.8"]}},
+        probe=before_publish,
+    )
+    assert committed["status"] == "COMMITTED_INERT_FIXTURE_MULTI_RESOURCE"
+    assert committed["prepared_state_sha256"] == report["proposed_state_sha256"]
+    assert committed["predecessor_state_sha256"] == predecessor
+    assert committed["state_generation"] == 2
+    assert (directory / V2_STATE).read_bytes() == candidate
+    assert observed == [(candidate, old_catalog, True)]
+    assert read_catalog(directory)["active_ids"] == ["debian-trixie-main"]
+    assert b"/__repocache/repos/debian-trixie-main/" in (
+        directory / INCLUDE
+    ).read_bytes()
+    assert (directory / MANIFEST).is_file()
+    assert not (directory / JOURNAL).exists()
+    assert recover_multi(protected_fixture[0], owner_uid=uid)[
+        "status"
+    ] == "CLEAN_INERT_FIXTURE"
+    assert all(committed[key] is False for key in (
+        "host_activation_verified", "operator_authorization_verified",
+        "authorizes_state_write", "authorizes_nginx_reload",
+        "authorizes_catalog_publication", "authorizes_cache_cleanup",
+    ))
+    with pytest.raises(FixtureRepositoryTransactionError,
+                       match="PREPARED_PREDECESSOR_CHANGED"):
+        _commit_prepared(
+            protected_fixture, candidate, predecessor, generation=1,
+            pins={"debian-trixie-main": {HOST: ["8.8.8.8"]}},
+        )
+    assert (directory / V2_STATE).read_bytes() == candidate
+
+
+def test_exact_offline_remove_keeps_tombstones_and_cache_bytes(
+    protected_fixture, tmp_path,
+):
+    _, directory, _ = protected_fixture
+    bootstrap(protected_fixture)
+    retained = tmp_path / "signed-package"
+    retained.write_bytes(b"retained-cache-bytes")
+    inode = retained.stat().st_ino
+    candidate, predecessor, _ = _offline_prepared_batch(
+        protected_fixture, tmp_path,
+        {"operation": "remove", "all_repositories": True},
+    )
+    result = _commit_prepared(protected_fixture, candidate, predecessor)
+    assert result["state_generation"] == 2
+    assert read_catalog(directory)["active_ids"] == []
+    assert (directory / V2_STATE).read_bytes() == candidate
+    assert all(row["status"] == "retired"
+               for row in read_state(directory)["id_reservations"])
+    assert retained.read_bytes() == b"retained-cache-bytes"
+    assert retained.stat().st_ino == inode
+
+
+def test_offline_prepared_candidate_rejects_unsafe_inputs_before_any_wal(
+    protected_fixture, tmp_path,
+):
+    _, directory, uid = protected_fixture
+    bootstrap(protected_fixture)
+    candidate, predecessor, _ = _offline_prepared_batch(
+        protected_fixture, tmp_path,
+        {"operation": "enable", "repository_ids": ["debian-trixie-main"]},
+    )
+    baseline = {name: (directory / name).read_bytes()
+                for name in (V2_STATE, INCLUDE, CATALOG, MANIFEST)}
+    cases = [
+        (candidate, "0" * 64, DECISION, None),
+        (candidate, predecessor, "f" * 64, None),
+        (candidate + b" ", predecessor, DECISION, None),
+        (candidate, predecessor, DECISION, "f" * 64),
+        (b'{"noncanonical":true}', predecessor, DECISION, None),
+    ]
+    for payload, old_digest, decision, candidate_digest in cases:
+        with pytest.raises(FixtureRepositoryTransactionError):
+            _commit_prepared(
+                protected_fixture, payload, old_digest,
+                decision=decision, expected_candidate=candidate_digest,
+            )
+        assert {name: (directory / name).read_bytes()
+                for name in baseline} == baseline
+        assert not (directory / JOURNAL).exists()
+
+    def refused():
+        raise OSError("deliberate fixture exposure refusal")
+    with pytest.raises(FixtureRepositoryTransactionError,
+                       match="PREPARED_COMMIT_REFUSED"):
+        _commit_prepared(
+            protected_fixture, candidate, predecessor,
+            pins={"debian-trixie-main": {HOST: ["8.8.8.8"]}},
+            probe=refused,
+        )
+    assert (directory / CATALOG).read_bytes() == baseline[CATALOG]
+    assert (directory / JOURNAL).is_file()
+    assert recover_multi(protected_fixture[0], owner_uid=uid)[
+        "status"
+    ] == "ROLLED_BACK_INERT_FIXTURE_MULTI_RESOURCE"
+    assert {name: (directory / name).read_bytes()
+            for name in baseline} == baseline
+
+
+def test_exact_prepared_candidate_fixture_denies_real_root_before_lock(
+    monkeypatch,
+):
+    from repocache import server_fixture_repository_transaction_v1 as fixture
+    monkeypatch.setattr(
+        fixture, "_locked", lambda *_args, **_kwargs: pytest.fail(
+            "real root must be refused before any fixture lock"
+        ),
+    )
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        with pytest.raises(ValueError, match="CURRENT_NAMESPACE_ROOT_WRITES_REFUSED"):
+            fixture.commit_fixture_prepared_repository_proposal_under_root(
+                fd, owner_uid=os.geteuid(), expected_generation=1,
+                expected_previous_state_sha256="a" * 64,
+                expected_prepared_state_sha256="b" * 64,
+                prepared_state_bytes=b"{}",
+                fixture_decision_sha256=DECISION,
+                candidate_pins_by_repository={}, ca_bundle_path=CA,
+                verify_fixture_exposure_before_publish=lambda: None,
+            )
+    finally:
+        os.close(fd)

@@ -80,18 +80,24 @@ def private_file(path, data):
 
 
 def invoke(previous, request, output, *, generation=1, digest=None,
-           decision=DECISION):
+           decision=DECISION, dry_run=False, proposed_sha=None):
     actual = previous.read_bytes()
+    args = [sys.executable, str(SCRIPT),
+            "--previous-v2-state", str(previous),
+            "--request", str(request),
+            "--expected-generation", str(generation),
+            "--expected-state-sha256",
+            hashlib.sha256(actual).hexdigest() if digest is None else digest,
+            "--decision-sha256", decision]
+    if dry_run:
+        args.append("--dry-run")
+    else:
+        args.extend(["--proposal-output", str(output)])
+    if proposed_sha is not None:
+        args.extend(["--expected-proposed-state-sha256", proposed_sha])
     return subprocess.run(
-        [sys.executable, str(SCRIPT),
-         "--previous-v2-state", str(previous),
-         "--request", str(request),
-         "--proposal-output", str(output),
-         "--expected-generation", str(generation),
-         "--expected-state-sha256",
-         hashlib.sha256(actual).hexdigest() if digest is None else digest,
-         "--decision-sha256", decision],
-        cwd=ROOT, text=True, capture_output=True, check=False, timeout=20,
+        args, cwd=ROOT, text=True, capture_output=True,
+        check=False, timeout=20,
     )
 
 
@@ -253,4 +259,172 @@ def test_offline_refuses_noncanonical_or_ambiguous_request(tmp_path, invalid_jso
     run = invoke(previous, request, output)
     assert run.returncode == 1
     assert run.stdout.strip() == '{"status":"OFFLINE_LIFECYCLE_REFUSED"}'
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("operation,request_body", [
+    ("enable", {"operation": "enable", "repository_ids": ["debian-trixie-main"]}),
+    ("remove", {"operation": "remove", "all_repositories": True}),
+])
+def test_offline_dry_run_reviews_exact_proposal_without_writing(
+    tmp_path, operation, request_body,
+):
+    previous, request, output = prepared(tmp_path)
+    private_file(request, request_body)
+    prior = previous.read_bytes()
+    preview = invoke(previous, request, output, dry_run=True)
+    assert preview.returncode == 0, preview.stderr
+    report = json.loads(preview.stdout)
+    assert report["status"] == "OFFLINE_LIFECYCLE_PREVIEW"
+    assert report["changed"] is True
+    assert report["proposal_written"] is False
+    assert report["requires_operator_review"] is True
+    assert report["authorizes_service_activation"] is False
+    assert all(set(row) <= {"repository_id", "result", "id_assignment"}
+               for row in report["per_repository"])
+    assert report["per_repository"]
+    assert not output.exists()
+    assert previous.read_bytes() == prior
+    assert not list(tmp_path.glob(".*.part-*"))
+
+    prepare = invoke(previous, request, output)
+    assert prepare.returncode == 0
+    committed_report = json.loads(prepare.stdout)
+    assert committed_report["proposal_written"] is True
+    assert committed_report["per_repository"] == report["per_repository"]
+    assert committed_report["proposed_state_sha256"] == report["proposed_state_sha256"]
+    assert committed_report["proposed_state_sha256"] == hashlib.sha256(
+        output.read_bytes()
+    ).hexdigest()
+
+
+def test_offline_dry_run_auto_id_is_stable_and_does_not_write(tmp_path):
+    previous, request, output = prepared(tmp_path)
+    repo = copy.deepcopy(json.loads(EXAMPLE.read_text())["repositories"][0])
+    repo.pop("id")
+    repo["upstream"]["base_url"] = "https://newmirror.example.invalid/debian/"
+    repo["upstream"]["allowed_hosts"] = ["newmirror.example.invalid"]
+    private_file(request, {"operation": "add", "proposed_repositories": [repo]})
+    review = invoke(previous, request, output, dry_run=True)
+    assert review.returncode == 0
+    data = json.loads(review.stdout)
+    assert data["per_repository"][0]["id_assignment"] == "AUTO_SUGGESTED"
+    assert data["per_repository"][0]["repository_id"].startswith("repo-")
+    assert not output.exists()
+    next_run = invoke(previous, request, output)
+    assert next_run.returncode == 0
+    assert data["per_repository"] == json.loads(next_run.stdout)["per_repository"]
+    assert data["proposed_state_sha256"] == hashlib.sha256(output.read_bytes()).hexdigest()
+
+
+def test_offline_dry_run_noop_is_nonmutating_and_redacted(tmp_path):
+    previous, request, output = prepared(tmp_path)
+    private_file(request, {"operation": "disable",
+                           "repository_ids": ["debian-trixie-main"]})
+    preview = invoke(previous, request, output, dry_run=True)
+    assert preview.returncode == 0
+    report = json.loads(preview.stdout)
+    assert report["status"] == "OFFLINE_LIFECYCLE_NO_CHANGE"
+    assert report["proposal_written"] is False
+    assert report["changed"] is False
+    assert not output.exists()
+
+
+def test_offline_refuses_ambiguous_preview_output_and_missing_output(tmp_path):
+    previous, request, output = prepared(tmp_path)
+    private_file(request, {"operation": "remove", "all_repositories": True})
+    base_args = [sys.executable, str(SCRIPT),
+                 "--previous-v2-state", str(previous),
+                 "--request", str(request),
+                 "--expected-generation", "1",
+                 "--expected-state-sha256", hashlib.sha256(previous.read_bytes()).hexdigest(),
+                 "--decision-sha256", DECISION]
+    for args in (base_args, base_args + ["--dry-run", "--proposal-output", str(output)]):
+        run = subprocess.run(args, cwd=ROOT, text=True, capture_output=True,
+                             check=False, timeout=20)
+        assert run.returncode == 1
+        assert json.loads(run.stdout)["status"] == "OFFLINE_LIFECYCLE_REFUSED"
+        assert not output.exists()
+
+
+@pytest.mark.parametrize("reviewed_request", [
+    {"operation": "enable", "repository_ids": ["debian-trixie-main"]},
+    {"operation": "remove", "all_repositories": True},
+])
+def test_reviewed_sha_binds_preview_to_exact_created_state(
+    tmp_path, reviewed_request,
+):
+    previous, request, output = prepared(tmp_path)
+    private_file(request, reviewed_request)
+    preview = invoke(previous, request, output, dry_run=True)
+    assert preview.returncode == 0, preview.stderr
+    approved_digest = json.loads(preview.stdout)["proposed_state_sha256"]
+    assert not output.exists()
+
+    run = invoke(previous, request, output, proposed_sha=approved_digest)
+    assert run.returncode == 0, run.stderr
+    report = json.loads(run.stdout)
+    assert report["review_digest_precondition_checked"] is True
+    assert report["proposed_state_sha256"] == approved_digest
+    assert hashlib.sha256(output.read_bytes()).hexdigest() == approved_digest
+    assert stat.S_IMODE(output.stat().st_mode) == 0o600
+    assert report["authorizes_service_activation"] is False
+
+
+def test_changed_request_after_review_cannot_write_unreviewed_proposal(tmp_path):
+    previous, request, output = prepared(tmp_path)
+    private_file(request, {
+        "operation": "enable", "repository_ids": ["debian-trixie-main"],
+    })
+    preview = invoke(previous, request, output, dry_run=True)
+    assert preview.returncode == 0
+    pinned = json.loads(preview.stdout)["proposed_state_sha256"]
+    before = previous.read_bytes()
+
+    # Both operations are valid and would write a different next state if
+    # the caller silently omitted the reviewed-digest condition.
+    private_file(request, {"operation": "remove", "all_repositories": True})
+    run = invoke(previous, request, output, proposed_sha=pinned)
+    assert run.returncode == 1
+    assert json.loads(run.stdout) == {"status": "OFFLINE_LIFECYCLE_REFUSED"}
+    assert not output.exists()
+    assert previous.read_bytes() == before
+    assert not list(tmp_path.glob(".*.part-*"))
+
+    private_file(request, {
+        "operation": "enable", "repository_ids": ["debian-trixie-main"],
+    })
+    matching = invoke(previous, request, output, proposed_sha=pinned)
+    assert matching.returncode == 0
+    assert hashlib.sha256(output.read_bytes()).hexdigest() == pinned
+    # A prior exact file is never overwritten by a subsequent bad pin.
+    preserved = output.read_bytes()
+    mismatch = invoke(previous, request, output, proposed_sha="f" * 64)
+    assert mismatch.returncode == 1
+    assert output.read_bytes() == preserved
+
+
+@pytest.mark.parametrize("bad_sha", ["", "Z" * 64, "f" * 63, "0" * 65])
+def test_invalid_expected_proposal_sha_refused_before_write(tmp_path, bad_sha):
+    previous, request, output = prepared(tmp_path)
+    private_file(request, {"operation": "remove", "all_repositories": True})
+    run = invoke(previous, request, output, proposed_sha=bad_sha)
+    assert run.returncode == 1
+    assert json.loads(run.stdout) == {"status": "OFFLINE_LIFECYCLE_REFUSED"}
+    assert not output.exists()
+
+
+def test_review_sha_pin_refuses_noop_and_preview_combination(tmp_path):
+    previous, request, output = prepared(tmp_path)
+    private_file(request, {
+        "operation": "disable", "repository_ids": ["debian-trixie-main"],
+    })
+    noop = invoke(previous, request, output, proposed_sha="a" * 64)
+    assert noop.returncode == 1
+    assert not output.exists()
+    private_file(request, {"operation": "remove", "all_repositories": True})
+    ambiguous = invoke(
+        previous, request, output, proposed_sha="a" * 64, dry_run=True,
+    )
+    assert ambiguous.returncode == 1
     assert not output.exists()

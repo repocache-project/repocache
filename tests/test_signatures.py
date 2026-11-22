@@ -48,7 +48,7 @@ def _payload(archive: bytes, version: str = "0.3.0") -> bytes:
     now = int(time.time())
     data = {
         "schema": 1, "key_id": "publisher-2026",
-        "repository": "teixemf/repocache", "channel": "stable",
+        "repository": "repocache-project/repocache", "channel": "stable",
         "version": version, "commit": "a" * 40,
         "archive": "repocache-v" + version + ".tar.gz",
         "archive_sha256": hashlib.sha256(archive).hexdigest(),
@@ -223,3 +223,22 @@ def test_valid_signed_offline_bundle_verifies_before_source_install(tmp_path, ke
         upgrade.upgrade("0.4.0", archive, checksum,
                         system={"ID": "debian", "VERSION_ID": "13"})
     assert len(called) == 1
+
+def test_first_operational_publisher_rejects_retired_repository_identity():
+    from repocache import signatures
+
+    source = {
+        "schema": 1, "key_id": "repocache-2026-10",
+        "repository": "teixemf/repocache", "channel": "stable",
+        "version": "0.6.0", "commit": "a" * 40,
+        "archive": "repocache-v0.6.0.tar.gz",
+        "archive_sha256": "a" * 64, "policy_sha256": "b" * 64,
+        "wheelhouse_sha256": "c" * 64, "issued_at": 1,
+        "expires_at": 2,
+    }
+    import json
+
+    with pytest.raises(signatures.SignatureError, match="identity"):
+        signatures._parse(json.dumps(source).encode())
+    source["repository"] = "repocache-project/repocache"
+    assert signatures._parse(json.dumps(source).encode())["schema"] == 1

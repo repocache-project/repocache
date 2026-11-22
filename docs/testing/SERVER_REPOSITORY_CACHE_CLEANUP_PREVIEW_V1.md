@@ -162,3 +162,29 @@ Tests cover positive per-ID purge with another repository untouched,
 zero-object repeat, still-allocated/stale IDs and mismatched space estimate,
 symlink/hardlink/foreign layout, callback refusal and mutation, interrupted
 deletion with exact subsequent preflight/resume, and refusal to access `/`.
+
+
+## Exact cache-tree scope binding before destructive fixture cleanup
+
+The read-only preview now also returns `cache_tree_sha256_observed`: a
+stable SHA-256 of the sorted, relative levels=1:2 path names, file-vs-directory
+types, pinned inode identity/ownership/size/timestamps and allocated blocks.
+It does not read or disclose cached package bytes or any private filesystem
+path. This digest is a *change detector*, not a signature, content-integrity
+claim or authorization token. A new or replaced cache object can preserve
+both count and allocated-byte totals but must not inherit a previous
+preflight's approval scope.
+
+The destructive **detached-fixture-only** operation now requires
+`expected_cache_tree_sha256` in addition to its pinned state generation,
+state digest, cache file count and allocated-byte estimate. It compares the
+exact digest from the read-only pass and both same-lock inode inventories
+**before the first unlink**. A changed or stale digest refuses the entire
+operation, including same-size inode replacement and a resume following a
+partial crash. A genuine partial purge requires a **new** locked preview and
+an explicit fresh expected digest for the remaining objects.
+
+This adds no installed deletion capability, signing, operator authority,
+NGINX worker quiescence, SELinux or real-host acceptance. The original #95
+force-cleanup remains NOT VERIFIED until the separately approved native
+worker and booted-host tests establish those properties.

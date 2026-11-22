@@ -15,7 +15,7 @@ spec.loader.exec_module(provenance)
 
 
 def _fixture(tmp_path):
-    bundle = tmp_path / "repocache-v0.4.0.tar.gz"
+    bundle = tmp_path / "repocache-v0.6.0.tar.gz"
     for suffix in provenance.ASSET_SUFFIXES:
         (tmp_path / (bundle.name + suffix)).write_bytes(
             ("ephemeral-test-input-" + suffix).encode())
@@ -26,8 +26,8 @@ def _build(bundle, **override):
     params = {
         "key_id": "ci-fixture",
         "commit": "a" * 40,
-        "tag": "v0.4.0",
-        "workflow_ref": "teixemf/repocache/.github/workflows/release.yml@refs/tags/v0.4.0",
+        "tag": "v0.6.0",
+        "workflow_ref": "repocache-project/repocache/.github/workflows/release.yml@refs/tags/v0.6.0",
         "run_id": "123",
         "run_attempt": "1",
         "root": ROOT
@@ -39,8 +39,8 @@ def _build(bundle, **override):
 def test_release_statement_binds_wheels_signatures_and_lockfiles(tmp_path):
     bundle = _fixture(tmp_path)
     statement = _build(bundle)
-    assert statement["repository"] == "teixemf/repocache"
-    assert statement["tag"] == "v0.4.0"
+    assert statement["repository"] == "repocache-project/repocache"
+    assert statement["tag"] == "v0.6.0"
     assert len(statement["artifacts"]) == len(provenance.ASSET_SUFFIXES)
     assert len(statement["dependency_locks"]) == 2
     first_digest = statement["artifacts"][bundle.name]
@@ -68,3 +68,13 @@ def test_duplicate_fields_and_symlink_assets_are_rejected(tmp_path):
     bundle.symlink_to(target)
     with pytest.raises(provenance.ProvenanceError):
         provenance.expected_assets(bundle)
+
+def test_transferred_provenance_refuses_historical_workflow_origin(tmp_path):
+    with pytest.raises(provenance.ProvenanceError):
+        _build(
+            _fixture(tmp_path),
+            workflow_ref=(
+                "teixemf/repocache/.github/workflows/release.yml"
+                "@refs/tags/v0.6.0"
+            ),
+        )

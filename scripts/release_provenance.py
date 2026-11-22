@@ -17,7 +17,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-REPO = "teixemf/repocache"
+REPO = "repocache-project/repocache"
 TAG = re.compile(r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 SHA = re.compile(r"^[a-f0-9]{64}$")
 COMMIT = re.compile(r"^[a-f0-9]{40}$")

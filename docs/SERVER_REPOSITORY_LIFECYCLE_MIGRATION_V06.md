@@ -225,3 +225,58 @@ fixed-native builder. It also checks read-only predecessor retention,
 tombstones, auto-ID, no-op, destination collision, malicious requests,
 symlinks, hardlinks and file ownership/mode. This Stage-A execution does
 not replace any Debian 13 / AlmaLinux 10 booted native VM acceptance.
+
+
+### Non-mutating offline change review
+
+Before creating a private proposal file, run the same reviewed request with
+`--dry-run` **instead of** `--proposal-output`. This is a checkout-only
+preview, not the installed `repocache` CLI:
+
+```sh
+python scripts/prepare_server_repository_lifecycle.py \\
+  --previous-v2-state /secure/predecessor-v2.json \\
+  --expected-generation 1 \\
+  --expected-state-sha256 "$PREDECESSOR_SHA256" \\
+  --decision-sha256 "$OPERATOR_DECISION_REFERENCE_SHA256" \\
+  --request /secure/lifecycle-request.json \\
+  --dry-run
+```
+
+The preview validates the exact proposed native state bytes and reports its
+SHA-256, proposed generation and per-repository IDs/results (including
+suggested automatic IDs), but **does not create the candidate file**. Repeat
+without `--dry-run` and with a new private `--proposal-output` path only after
+review. For an automatic exact-byte comparison, provide the digest from the
+`--dry-run` report as `--expected-proposed-state-sha256` on the later
+create-only command; the tool refuses a different proposed snapshot **before
+creating any output file**. See the [review pin walkthrough](testing/SERVER_REPOSITORY_PROPOSAL_REVIEW_PIN.md).
+The two reports must agree on predecessor, proposed SHA and IDs; a changed
+protected predecessor requires a fresh proposal. No stdout field
+contains upstream URLs, signing/trust references, credentials or cache paths.
+A preview neither reserves an ID nor authenticates approval, proves deployed
+NGINX exposure or authorizes the #237 signed native stager. The original
+native lock/CAS, trust, systemd/SELinux and publication gates remain mandatory.
+
+
+## Exact prepared state → protected transaction fixture
+
+The Stage-A fixture function `commit_fixture_prepared_repository_proposal_under_root`
+now consumes **the unchanged canonical v2 bytes** emitted by the offline
+`prepare_server_repository_lifecycle.py` operator tool rather than
+recomputing the repository change from its request. It independently checks
+the pinned predecessor generation/SHA-256 against the actual descriptor-locked
+protected v2 ledger and owner manifest, matches the prepared SHA-256 and
+decision reference, refuses unrelated deployment policy edits and verifies
+the exact fixed native #31/#64 candidate envelope. It derives the matching
+NGINX fragment and active-only *fixture* catalog, then delegates to the
+existing durable four-resource WAL, which repeats predecessor CAS on a
+second lock and preserves the old catalog until the simulated exposure barrier.
+
+Executed subprocess tests cover exact offline output-byte persistence,
+remaining tombstones, default cache retention, stale/corrupt proposals,
+partial activation refusal and durable rollback. This is a **detached-root
+fixture only**, not an installed signed root/NGINX worker: the real `/` is
+forbidden; a callback cannot prove NGINX exposure, transfer drain or SELinux.
+The original #95 native service, real signed provenance and VM gates remain
+mandatory and NOT VERIFIED by fixture CI.
