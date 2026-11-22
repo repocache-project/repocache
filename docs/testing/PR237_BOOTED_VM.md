@@ -369,6 +369,23 @@ key**; it is neither a complete privileged-path attack matrix nor real
 publisher-signed candidate acceptance. See `synthetic-installed-worker.txt`
 in each relevant VM artifact; judge PASS only at the exact tested source SHA.
 
+## First-install foreign state refused before native package-effects journal
+
+The authenticated first-install path now checks the fixed NGINX package
+footprint, trusted native OS signing anchor and fixed service mask under the
+single protected lock *before* creating a persistent APT/DNF effects journal.
+These are refusal-only observations, not authorization. The checks are
+repeated after journal publication before any irreversible package operation;
+a concurrent replacement remains fail-closed with its WAL retained.
+
+The `native-installer` QEMU guest injects an externally owned NGINX file on
+an otherwise clean host and requires the installer to refuse without changing
+its bytes/inode/mode/mtime, starting services, installing packages or writing
+a pending journal. Only that disposable guest file is removed. Debian 13 and
+AlmaLinux 10 run the same negative. Root-lock regression tests ensure a
+pre-journal refusal leaves the host eligible for a later clean attempt.
+This is bounded native/CI evidence only, not publisher acceptance.
+
 ## Native vendor NGINX and foreign include preservation (issue #31)
 
 The installed-worker `native-installer` VM scenario now records the vendor

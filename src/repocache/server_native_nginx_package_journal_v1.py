@@ -269,6 +269,7 @@ def _retain_native_package_journal_lock_under_root(
     inject_fault: Callable[[str], None] | None = None,
     allow_native_package_parent_changes: bool = False,
     expose_audited_completion: bool = False,
+    preflight_before_journal: Callable[[], None] | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Private same-lock scope for the authenticated installer and CI fixtures.
 
@@ -280,6 +281,11 @@ def _retain_native_package_journal_lock_under_root(
     shared-parent-drift flag: APT/DNF can change /var or /var/lib metadata
     without changing their fixed ownership and pinned inodes. The default
     short-lived preparer remains strict. This flag NEVER authenticates root.
+
+    An optional internal refusal-only preflight runs under the same lock,
+    BEFORE the first durable package-effects marker. It never grants authority;
+    already-foreign hosts must not be left with a spurious pending journal.
+    Post-WAL identity checks still detect concurrent changes before effects.
     """
     if (type(root_fd) is not int or root_fd < 0
             or type(owner_uid) is not int or owner_uid < 0
@@ -287,13 +293,20 @@ def _retain_native_package_journal_lock_under_root(
             or distribution not in _NATIVE_MANAGERS
             or (inject_fault is not None and not callable(inject_fault))
             or type(allow_native_package_parent_changes) is not bool
-            or type(expose_audited_completion) is not bool):
+            or type(expose_audited_completion) is not bool
+            or (preflight_before_journal is not None
+                and not callable(preflight_before_journal))):
         _deny("NATIVE_JOURNAL_ARGUMENT_INVALID")
     try:
         with _locked(
             root_fd, owner_uid,
             allow_native_package_parent_changes=allow_native_package_parent_changes,
         ) as directory:
+            # A foreign footprint at lock acquisition is not an interrupted
+            # package installation. Refuse before any persistent marker.
+            if (preflight_before_journal is not None
+                    and preflight_before_journal() is not None):
+                _deny("NATIVE_JOURNAL_PREFLIGHT_INVALID")
             try:
                 prepared = _prepare_native_journal_under_lock(
                     directory, owner_uid=owner_uid,

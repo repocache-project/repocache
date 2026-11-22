@@ -191,6 +191,77 @@ def test_concurrent_state_lock_prevents_second_journal_writer(protected_root):
     assert not (folder / NATIVE_PENDING_NAME).exists()
 
 
+
+@pytest.mark.parametrize("distribution", ["debian", "almalinux"])
+def test_foreign_prejournal_refusal_under_lock_does_not_write_native_marker(
+    protected_root, distribution,
+):
+    from repocache.server_native_nginx_package_journal_v1 import (
+        _retain_native_package_journal_lock_under_root, NATIVE_COMPLETE_NAME,
+    )
+    from repocache.server_protected_state_store_v1 import ProtectedStateStoreError
+    fd, folder, uid = protected_root
+    called = []
+    def deny_foreign():
+        called.append(True)
+        assert not (folder / NATIVE_PENDING_NAME).exists()
+        assert not (folder / NATIVE_TMP_NAME).exists()
+        with pytest.raises(ProtectedStateStoreError, match="PROTECTED_LOCK_UNAVAILABLE"):
+            with _locked(fd, uid):
+                pytest.fail("refusal-only preflight did not hold the root lock")
+        raise ValueError("NATIVE_NGINX_FOREIGN_FOOTPRINT")
+    with pytest.raises(ValueError, match="^NATIVE_NGINX_FOREIGN_FOOTPRINT$"):
+        with _retain_native_package_journal_lock_under_root(
+            fd, owner_uid=uid, distribution=distribution,
+            preflight_before_journal=deny_foreign,
+        ):
+            pytest.fail("refused foreign host reached package transaction")
+    assert called == [True]
+    assert not any((folder / x).exists() for x in (
+        NATIVE_PENDING_NAME, NATIVE_TMP_NAME, NATIVE_COMPLETE_NAME,
+    ))
+    # A stable preflight refusal must permit a later clean first-install.
+    with _retain_native_package_journal_lock_under_root(
+        fd, owner_uid=uid, distribution=distribution,
+        preflight_before_journal=lambda: None,
+    ) as result:
+        assert result["status"] == "NATIVE_PACKAGE_EFFECTS_JOURNAL_DURABLE"
+    assert (folder / NATIVE_PENDING_NAME).is_file()
+
+
+def test_prejournal_guard_result_is_not_install_authority(protected_root):
+    from repocache.server_native_nginx_package_journal_v1 import (
+        _retain_native_package_journal_lock_under_root,
+    )
+    fd, folder, uid = protected_root
+    with pytest.raises(NativePackageJournalError, match="NATIVE_JOURNAL_PREFLIGHT_INVALID"):
+        with _retain_native_package_journal_lock_under_root(
+            fd, owner_uid=uid, distribution="debian",
+            preflight_before_journal=lambda: {"approved": True},
+        ):
+            pytest.fail("callback result must never grant authority")
+    assert not (folder / NATIVE_PENDING_NAME).exists()
+
+
+@pytest.mark.parametrize("distribution", ["debian", "almalinux"])
+def test_signed_native_foreign_precheck_refuses_before_journal_or_systemd(
+    protected_root, monkeypatch, distribution,
+):
+    root, state, uid = protected_root
+    installer, effects = _synthetic_host_native_package(monkeypatch, distribution)
+    def foreign(*_a):
+        raise ValueError("NATIVE_NGINX_FOREIGN_FOOTPRINT")
+    monkeypatch.setattr(installer, "_fresh_nginx_under_lock", foreign)
+    with pytest.raises(ValueError, match="^NATIVE_NGINX_FOREIGN_FOOTPRINT$"):
+        installer._execute_native_nginx_install_locked(
+            root, distribution=distribution, document={},
+            os_release="", owner_uid=uid,
+        )
+    assert not (state / NATIVE_PENDING_NAME).exists()
+    assert not (state / NATIVE_TMP_NAME).exists()
+    assert effects["actions"] == [] and effects["commands"] == []
+
+
 @pytest.mark.parametrize("distribution", ["debian", "almalinux"])
 def test_retained_lock_spans_package_effects_scope_and_blocks_concurrent_state(
     protected_root, distribution,

@@ -136,6 +136,50 @@ def report(distribution: str) -> None:
         assert not pending.exists() and not complete.exists()
         print("PASS: genuine installed-worker package entry refused tampered document pin before APT/DNF")
 
+        # Native foreign-footprint refusal before any package command. The
+        # guest starts without NGINX; this is a private, self-removed marker.
+        foreign_dir = Path("/etc/nginx")
+        assert not foreign_dir.exists() and not foreign_dir.is_symlink()
+        foreign_dir.mkdir(mode=0o755)
+        foreign = foreign_dir / "pr237-foreign-owner.conf"
+        foreign_raw = b"# foreign NGINX configuration: never adopt\\n"
+        fd = os.open(foreign, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(foreign_raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        before_foreign = foreign.lstat()
+        try:
+            try:
+                install_native_root_worker.install_authenticated_native_nginx(
+                    assets, doc, digest, **pins,
+                )
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("Foreign NGINX ownership was adopted")
+            after_foreign = foreign.lstat()
+            assert stat.S_ISREG(after_foreign.st_mode)
+            assert (after_foreign.st_dev, after_foreign.st_ino,
+                    after_foreign.st_mtime_ns, after_foreign.st_uid,
+                    stat.S_IMODE(after_foreign.st_mode)) == (
+                before_foreign.st_dev, before_foreign.st_ino,
+                before_foreign.st_mtime_ns, before_foreign.st_uid,
+                stat.S_IMODE(before_foreign.st_mode),
+            )
+            assert foreign.read_bytes() == foreign_raw
+            assert not Path("/usr/sbin/nginx").exists()
+            assert not pending.exists() and not complete.exists()
+            assert run("/usr/bin/systemctl", "is-active", "nginx.service").returncode != 0
+        finally:
+            # Only remove our own original inode, never another actor's file.
+            if (foreign.is_file() and not foreign.is_symlink()
+                    and foreign.lstat().st_ino == before_foreign.st_ino
+                    and foreign.read_bytes() == foreign_raw):
+                foreign.unlink()
+            foreign_dir.rmdir()
+        print("PASS: native foreign NGINX footprint refused without durable package journal, service effects or mutation", flush=True)
+
         # Print only fixed, redacted preflight codes from the REAL observers.
         # This does not bypass any native guard or modify host/package state.
         from repocache.server_install_v1 import parse_install_bytes

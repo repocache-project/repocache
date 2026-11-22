@@ -457,9 +457,19 @@ def _execute_native_nginx_install_locked(
     A failure retains the blocking journal. The persistent systemd mask
     survives power loss while native package effects may be incomplete.
     """
+    def refuse_stable_foreign_host_before_journal() -> None:
+        # Same exclusive lock as the journal. A stable foreign host must not
+        # receive a misleading pending marker when no package effect began.
+        _fresh_nginx_under_lock(distribution, document, os_release)
+        if not _trusted_key(_NATIVE[distribution][2]):
+            _reject("NATIVE_TRUST_ANCHOR_UNVERIFIED")
+        if os.path.lexists(_NGINX_MASK):
+            _reject("NATIVE_FOREIGN_SERVICE_MASK")
+
     with _retain_native_package_journal_lock_under_root(
         root_fd, owner_uid=owner_uid, distribution=distribution,
         allow_native_package_parent_changes=True, expose_audited_completion=True,
+        preflight_before_journal=refuse_stable_foreign_host_before_journal,
     ) as transaction:
         if (transaction.get("status") != "NATIVE_PACKAGE_EFFECTS_JOURNAL_DURABLE"
                 or transaction.get("authorizes_package_installation") is not False
