@@ -283,3 +283,120 @@ def rehearse_managed_include_under_root(
         raise
     except (OSError, ValueError, TypeError):
         _deny("MANAGED_INCLUDE_TRANSACTION_UNVERIFIED")
+
+
+def recover_interrupted_owned_include_fixture_under_root(
+    root_fd: int, *, owner_uid: int, expected_previous_sha256: str,
+    expected_candidate_sha256: str,
+) -> dict[str, Any]:
+    """Restore a known previous owned include after *post-promotion* crash.
+
+    This is a deliberately private, non-activating, **fixture-only** recovery
+    of one unambiguous crash phase. Both the original backup and published
+    candidate must be single-linked, bounded, pinned-owner regular files
+    whose complete bytes match independently supplied trusted digests.
+
+    Only the backup+published-candidate/no-stage phase is recoverable. A
+    stage still present, absent backup, unexpected names, a drifted inode or
+    missing previous owner digest fail closed. No automatic recovery of first
+    installs, package effects, live NGINX workers or state-v2 is claimed.
+
+    The caller must retain a separately authenticated exclusive lock; this
+    fixture cannot attest that lock or the expected digest provenance. The
+    current host '/' is rejected unless it is an explicit disposable Docker
+    test root. This is NOT an installed root worker or host repair command.
+    """
+    if (type(root_fd) is not int or root_fd < 0
+            or type(owner_uid) is not int
+            or not 0 <= owner_uid < 2**32 - 1
+            or type(expected_previous_sha256) is not str
+            or not _HEX.fullmatch(expected_previous_sha256)
+            or type(expected_candidate_sha256) is not str
+            or not _HEX.fullmatch(expected_candidate_sha256)
+            or expected_previous_sha256 == expected_candidate_sha256):
+        _deny("MANAGED_INCLUDE_RECOVERY_ARGUMENT_INVALID")
+    try:
+        pinned = os.fstat(root_fd)
+        current_root = os.stat("/", follow_symlinks=False)
+        if (pinned.st_dev, pinned.st_ino) == (
+            current_root.st_dev, current_root.st_ino,
+        ):
+            if (os.environ.get("REPOCACHE_NATIVE_TEST_CONTAINER")
+                    != "CONFIRMED_DISPOSABLE_DOCKER_ONLY"
+                    or not os.path.isfile("/.dockerenv")
+                    or os.geteuid() != 0
+                    or Path("/proc/1/comm").read_text(
+                        encoding="ascii",
+                    ).strip() == "systemd"):
+                _deny("MANAGED_INCLUDE_LIVE_HOST_ROOT_REFUSED")
+        with ExitStack() as stack:
+            directory, ancestry = _walk(
+                root_fd, _INCLUDE_SEGMENTS, stack, owner_uid,
+            )
+            parent = _safe_directory(directory, owner_uid)
+            group = parent.st_gid
+            if (_present(directory, _STAGE)
+                    or not _present(directory, _ROLLBACK)
+                    or not _present(directory, MANAGED_NAME)):
+                _deny("MANAGED_INCLUDE_RECOVERY_PHASE_UNVERIFIED")
+
+            previous = _read_owned(directory, _ROLLBACK, owner_uid, group)
+            candidate = _read_owned(directory, MANAGED_NAME, owner_uid, group)
+            if (previous is None or candidate is None
+                    or previous[1][0] != parent.st_dev
+                    or candidate[1][0] != parent.st_dev
+                    or previous[1][1] == candidate[1][1]
+                    or hashlib.sha256(previous[0]).hexdigest()
+                       != expected_previous_sha256
+                    or hashlib.sha256(candidate[0]).hexdigest()
+                       != expected_candidate_sha256):
+                _deny("MANAGED_INCLUDE_RECOVERY_IDENTITY_UNVERIFIED")
+
+            # Detect ancestor or file drift before changing a single name.
+            # The protected parent is the same-directory atomic rename root.
+            _recheck(ancestry[:-1], owner_uid)
+            if (_read_owned(directory, _ROLLBACK, owner_uid, group) != previous
+                    or _read_owned(
+                        directory, MANAGED_NAME, owner_uid, group,
+                    ) != candidate
+                    or _present(directory, _STAGE)):
+                _deny("MANAGED_INCLUDE_RECOVERY_CHANGED")
+
+            # This is the only authorized fixture operation: restore the
+            # digest-pinned prior inode over the still-present candidate.
+            # Do not use unlink/replace on unknown stage or backup phases.
+            os.replace(
+                _ROLLBACK, MANAGED_NAME,
+                src_dir_fd=directory, dst_dir_fd=directory,
+            )
+            os.fsync(directory)
+
+            restored = _read_owned(directory, MANAGED_NAME, owner_uid, group)
+            if (restored != previous
+                    or _present(directory, _STAGE)
+                    or _present(directory, _ROLLBACK)):
+                _deny("MANAGED_INCLUDE_RECOVERY_RESTORE_UNVERIFIED")
+            _recheck(ancestry[:-1], owner_uid)
+            if (os.fstat(directory).st_dev != parent.st_dev
+                    or os.fstat(directory).st_ino != parent.st_ino
+                    or _safe_directory(directory, owner_uid).st_mode
+                       != parent.st_mode):
+                _deny("MANAGED_INCLUDE_RECOVERY_PARENT_CHANGED")
+            return {
+                "schema_version": 1,
+                "status": "FIXTURE_INTERRUPTED_OWNED_INCLUDE_RESTORED",
+                "recovered_phase": "PROMOTED_WITH_PINNED_PREVIOUS_BACKUP",
+                "previous_file_inode_and_bytes_restored": True,
+                "pending_package_effects_reconciled": False,
+                "transaction_fixture_only": True,
+                "external_state_lock_authenticated": False,
+                "protected_manifest_authenticated": False,
+                "host_root_authenticated": False,
+                "authorizes_host_installation": False,
+                "authorizes_nginx_reload": False,
+                "authorizes_catalog_publication": False,
+            }
+    except ManagedIncludeRehearsalError:
+        raise
+    except (OSError, ValueError, TypeError):
+        _deny("MANAGED_INCLUDE_RECOVERY_TRANSACTION_UNVERIFIED")

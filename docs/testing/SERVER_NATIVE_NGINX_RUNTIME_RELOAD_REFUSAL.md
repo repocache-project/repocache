@@ -57,3 +57,29 @@ authority, prove real DNS/TLS, validate a signed installed release,
 exercise booted systemd or AlmaLinux SELinux enforcing, or attest
 crash-consistent filesystem rollback. Those original issue and #19
 release criteria stay NOT VERIFIED until separately executed.
+
+## #95: a disabled catalog candidate is not the installed route set
+
+The stock-NGINX failed-reload matrix additionally composes the existing
+strictly validated **active APT and DNF** repository route fragments from
+the project install document, with the private NGINX cache zones and
+upstream pin syntax, and injects test-only HTTP 200 probes inside their
+validated locations. A separate syntactically valid generation disables
+the DNF repository and selects a second already-occupied listener.
+
+Before signalling its private master, NGINX `-T` successfully parses
+this disabled-only prospective generation and the pure derived catalog
+projects only APT. The preview explicitly refuses catalog publication
+authority. The native master **cannot** bind the extra listener during
+reload, so the old worker and both previously active repository routes
+must remain live. The experiment verifies that a syntactically valid,
+inactive-only catalog candidate cannot honestly be promoted to an
+installed exposure claim. Finally, rollback of the exact original
+configuration rechecks both active routes and real worker generation
+replacement.
+
+Only a disposable nonroot NGINX master is used. HTTP 200 probes are
+synthetic and short-circuit the public-pin upstreams, not signed package
+cache evidence. This is **NOT VERIFIED** for installed privileged state,
+actual catalog publication, systemd/SELinux or native server reboot; the
+real #31/#64 locked activation path must prove exposure before publication.

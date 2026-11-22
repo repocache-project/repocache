@@ -45,7 +45,54 @@ If syntax fails, the fixture restores the original inode/absence before
 returning a fixed error code. If replacement or restoration itself cannot
 be proven safe, the function **fails closed**: it does not silently discard
 unreconciled objects or represent recovery as successful. A complete crash
-recovery algorithm remains #31's responsibility.
+recovery algorithm remains #31's responsibility; only the specifically
+backed-up post-promotion fixture phase is supported below.
+
+## Bounded post-promotion crash recovery (Stage A)
+
+The new private `recover_interrupted_owned_include_fixture_under_root`
+function handles **exactly one** previously unrecoverable state of the
+test-only include transaction: a separate process exits after atomic
+promotion of a candidate, leaving a single-linked, previously managed
+backup inode at `.repocache-managed.rollback`, the candidate still at
+`repocache-managed.conf`, and no `.repocache-managed.stage`.
+
+The recovery accepts two independently supplied trusted SHA-256 values:
+the **prior owned include** and the expected **promoted candidate**.
+Before changing any name, it validates each file's bounded content,
+owner/group, mode, single link and identity through no-follow dirfds,
+checks both exact hashes, rejects every other stage/backup shape and
+rechecks the ancestor chain. Only then does it atomically rename the
+known-good backup over the exact candidate, fsync the directory and
+verify the original inode and bytes are restored. It never deletes an
+unknown stage, fabricates the expected digest, recovers the first-install
+(no-prior-backup) case or silently retries an ambiguous operation.
+
+**This is not a production crash recovery algorithm.** The test-only
+caller must already hold an authenticated external state lock, but this
+function does not check or grant that lock. Even a passing recovery
+does not authenticate the host root, protected #31 v2 generation or
+manifest ownership, pending native package effects, signed publisher,
+real systemd/SELinux context or active NGINX worker health. It neither
+runs `systemctl` nor reloads NGINX; real host-root invocation remains
+refused outside the disposable Docker guard. A post-`rename`,
+pre-`fsync` power failure can still be ambiguous and must be
+independently reconciled by #31/#64, not automatically treated as PASS.
+
+The native Debian 13 / AlmaLinux 10 CI workflow now forks a separate
+Python process, promotes a real managed include and exits that process
+with `os._exit(73)` from the syntax callback, deliberately bypassing
+all Python `finally` blocks. The parent verifies the actual orphaned
+backup and candidate, confirms the real distribution NGINX parser,
+recovers the original file **at the original inode**, repeats a real
+NGINX syntax check, and rejects an unsupported second recovery.
+No live service reload or host package recovery is claimed.
+
+Regression coverage also deliberately poisons both digests, introduces
+a stale stage, replaces a backup with a symlink or hardlink, changes the
+candidate after the crash, simulates `os.replace` I/O failure and
+forbids a current host-root recovery. Every such case must fail
+closed without changing the candidate/known-good backup.
 
 ## CI evidence and execution
 
@@ -66,6 +113,9 @@ For **each** distribution it uses real stock `/usr/sbin/nginx -t -q`:
    remains syntactically valid.
 4. Reject a conflicting foreign include without changing its contents.
 5. Reject an interrupted pending stage without automatically adopting it.
+6. Crash a separate process after the owned candidate has been promoted,
+   recover the digest-pinned backup inode under explicit fixture constraints,
+   and refuse unsupported repeated recovery or foreign drift.
 
 Local pure-fixture regressions (no packages/services):
 

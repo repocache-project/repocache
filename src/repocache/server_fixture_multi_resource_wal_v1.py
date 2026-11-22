@@ -235,6 +235,7 @@ def _commit_fixture_multi_resource_under_root(
     root_fd: int, proposed_snapshot: dict[str, Any], *,
     owner_uid: int, expected_generation: int,
     include_bytes: bytes, catalog_bytes: bytes,
+    expected_previous_state_sha256: str | None = None,
     inject_fault: Callable[[str], None] | None = None,
     verify_fixture_effects: Callable[[], None] | None = None,
     verify_fixture_exposure_before_publish: Callable[[], None] | None = None,
@@ -264,6 +265,12 @@ def _commit_fixture_multi_resource_under_root(
         _refuse("CANDIDATE_INVALID")
     if not _catalog_matches_state(catalog_bytes, frozen):
         _refuse("CATALOG_INVALID")
+    if (expected_previous_state_sha256 is not None
+            and (type(expected_previous_state_sha256) is not str
+                 or len(expected_previous_state_sha256) != 64
+                 or any(ch not in "0123456789abcdef"
+                        for ch in expected_previous_state_sha256))):
+        _refuse("PREDECESSOR_DIGEST_INVALID")
     if inject_fault is not None and not callable(inject_fault):
         _refuse("FAULT_HOOK_INVALID")
     if verify_fixture_effects is not None and not callable(verify_fixture_effects):
@@ -278,6 +285,14 @@ def _commit_fixture_multi_resource_under_root(
         existing, old_state = _read_v2(directory, owner_uid)
         old = _read_all(directory, owner_uid)
         _validate_old(old)
+        if old_state != old[V2_STATE]:
+            _refuse("PREDECESSOR_READ_DRIFT")
+        # Exact prior bytes, not only the generation, bind callers that plan
+        # before entering the WAL lock. Same-generation substitutions must
+        # not allow a stale candidate to overwrite a different predecessor.
+        if (expected_previous_state_sha256 is not None
+                and _digest(old[V2_STATE]) != expected_previous_state_sha256):
+            _refuse("PREDECESSOR_CHANGED")
         generation = 0 if existing is None else existing["state_generation"]
         if generation != expected_generation:
             _refuse("STALE_GENERATION")
