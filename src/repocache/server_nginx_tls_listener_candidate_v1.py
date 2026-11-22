@@ -56,6 +56,13 @@ def render_native_tls_listener_candidate(document: dict[str, Any]
             # missing/foreign Host, while $host forbids absolute-form
             # request-target domain-fronting with an approved Host.
             f"if ($host != {hostname}) {{ return 421; }}\n"
+            # The $host variable strips an absolute request-target's port.
+            # Thus GET https://approved.example:9999/ with an approved Host
+            # and SNI can otherwise pass both host/authority guards. A
+            # repository endpoint is not an HTTP forward proxy: refuse
+            # absolute-form request-targets entirely before any route.
+            'if ($request ~* "^[A-Z]+[ ]+[A-Z][A-Z0-9+.-]*://") '
+            "{ return 421; }\n"
             f"ssl_certificate {cert};\n"
             f"ssl_certificate_key {key};\n"
             "ssl_protocols TLSv1.2 TLSv1.3;\n"
