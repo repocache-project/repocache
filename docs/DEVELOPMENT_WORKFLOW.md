@@ -59,6 +59,8 @@ per-criterion outcomes back to the original issues. A missing VM blocks
 only the affected Stage-B/operational acceptance, not an independently
 accepted safe CI increment.
 
+**Option C: owner signing is release-only.** Do not hold a feature PR, an independently proven #31 functional criterion, or a coordinated native VM campaign waiting for the maintainer's official signature. Source-built, disposable test-signed inputs may exercise the same authenticated production installer and privileged worker in isolated CI/VM environments. All signature-negative, fixed trust-anchor, privilege, rollback and real-host checks remain applicable. A test key is never a production trust anchor; no unsigned-install mode may be introduced. Publisher-private-key signing is performed once the final reviewed `main` candidate is frozen, under the existing separate tag/sign/stage/publish authorizations; only then can #76/#88's genuine signed-candidate and public-release criteria PASS. If final signed bytes reveal a defect, correct the code and re-run affected acceptance at the new SHA.
+
 ## 3. Implementation and integration
 
 - Use a dedicated feature/docs/test/fix branch from a verified base. Respect protected `main`, `release/*` and `integration/*` branches, PR-only routing, strict checks and no force/deletion bypass.

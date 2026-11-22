@@ -10,6 +10,8 @@
 4. Let required CI run; inspect failed or missing jobs and the actual source/acceptance. For fully accepted ordinary `integration/vMAJOR.MINOR.PATCH` changes, apply PR #245 conditional authority after exact-SHA verification. Main/release/tag/sign/publish/ruleset/queue changes still need separate explicit authorization.
 5. Use the existing issue checklist for the complete criteria and link one concise source/CI evidence record in the PR. Update only on a material change. Keep unrun booted VM and genuine signed-release requirements **NOT VERIFIED**, not PASS.
 
+**Owner-signing boundary (option C, 2026-11-22):** Complete Stage-A development and Stage-B functional/native VM evidence without requesting the maintainer's official release signature. Use only disposable, isolated test keys to exercise the real signature-verification and install/repair/recovery protocols in development; never disable verification, install test anchors in production, or treat test-signed bytes as publisher-approved. For #31, evaluate the five installation/idempotency/rollback/foreign-state/recovery criteria with real booted Debian 13 and AlmaLinux 10 evidence, independent of #76/#88 owner-key publication evidence. The owner signs the frozen, reviewed final release candidate under Stage C, **before** its real signed-candidate acceptance and publication; #76/#88 and public release gates still require genuine owner-key evidence and separate authorizations.
+
 ## 2. Extra tests follow the impact
 
 | Change | Additional evidence beyond protected required CI |

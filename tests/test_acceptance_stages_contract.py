@@ -56,3 +56,33 @@ def test_stages_do_not_erase_native_or_owner_gate():
     assert "issue-specific" in governance
     assert "protected" in governance
     assert "all applicable" in governance
+
+
+def test_option_c_separates_functional_proof_from_real_publisher_signature():
+    """Static policy guard, not a substitute for booted VMs or real signatures."""
+    stages = STAGES.read_text(encoding="utf-8")
+    fast = (ROOT / "docs/DEVELOPMENT_FAST_PATH.md").read_text(encoding="utf-8")
+    workflow = (ROOT / "docs/DEVELOPMENT_WORKFLOW.md").read_text(encoding="utf-8")
+    agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    signature_verifier = (ROOT / "src/repocache/signatures.py").read_text(encoding="utf-8")
+    for text in (stages, fast, workflow, agents):
+        assert "option C" in text, "missing maintainer-approved development signing boundary"
+        assert "Stage" in text
+        assert "Ed25519" in text
+    assert "#31" in stages and "#31" in fast and "#31" in workflow
+    assert "#76/#88" in stages and "#76/#88" in fast and "#76/#88" in workflow
+    for expected in (
+        "no unsigned-install escape hatch",
+        "guest-local trust anchors",
+        "after the final reviewed source",
+        "full applicable Stage-A/B acceptance",
+        "Stage C",
+    ):
+        assert expected in stages, expected
+    for expected in (
+        "Publisher release signature is invalid",
+        "Publisher trust anchor is not provisioned",
+        "Missing or invalid Ed25519 signature",
+        "if result.returncode != 0:",
+    ):
+        assert expected in signature_verifier, expected
