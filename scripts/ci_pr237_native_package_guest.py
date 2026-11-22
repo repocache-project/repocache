@@ -136,6 +136,78 @@ def report(distribution: str) -> None:
         assert not pending.exists() and not complete.exists()
         print("PASS: genuine installed-worker package entry refused tampered document pin before APT/DNF")
 
+        # A valid but unsupported legacy state-v1 generation must not be
+        # imported, repaired or silently replaced during the first v0.6
+        # installation. Exercise the real signed-fixture installer and
+        # protected root inode on BOTH booted distros, not only a mock.
+        from repocache.server_protected_state_store_v1 import (
+            STATE_NAME as LEGACY_STATE_NAME, validate_protected_state,
+        )
+        legacy = STATE / LEGACY_STATE_NAME
+        assert not legacy.exists() and not legacy.is_symlink()
+        legacy_state = {
+            "state_schema_version": 1,
+            "state_generation": 1,
+            "configuration_sha256": "a" * 64,
+            "repositories": [],
+            "ownership_manifest": [],
+        }
+        validate_protected_state(legacy_state)
+        legacy_raw = json.dumps(
+            legacy_state, sort_keys=True, separators=(",", ":"),
+        ).encode("ascii")
+        legacy_fd = os.open(
+            legacy, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600,
+        )
+        with os.fdopen(legacy_fd, "wb") as stream:
+            stream.write(legacy_raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        legacy_info = legacy.lstat()
+        try:
+            try:
+                install_native_root_worker.install_authenticated_native_nginx(
+                    assets, doc, digest, **pins,
+                )
+            except ValueError as error:
+                assert str(error) == (
+                    "WORKER_PLACEMENT_NATIVE_PREPACKAGE_BOUNDARY_UNVERIFIED"
+                ), str(error)
+            else:
+                raise AssertionError("Legacy v1 state was adopted as fresh v0.6")
+            after_legacy = legacy.lstat()
+            assert stat.S_ISREG(after_legacy.st_mode)
+            assert (
+                after_legacy.st_dev, after_legacy.st_ino,
+                after_legacy.st_mtime_ns, after_legacy.st_uid, after_legacy.st_gid,
+                stat.S_IMODE(after_legacy.st_mode),
+            ) == (
+                legacy_info.st_dev, legacy_info.st_ino,
+                legacy_info.st_mtime_ns, legacy_info.st_uid, legacy_info.st_gid,
+                stat.S_IMODE(legacy_info.st_mode),
+            )
+            assert legacy.read_bytes() == legacy_raw
+            assert not Path("/usr/sbin/nginx").exists()
+            assert not pending.exists() and not complete.exists()
+            assert run("/usr/bin/systemctl", "is-active", "nginx.service").returncode != 0
+        finally:
+            # Remove only the fixed regular file we created inside the
+            # disposable guest; never unlink an unexpected replacement.
+            current = legacy.lstat()
+            assert (
+                stat.S_ISREG(current.st_mode)
+                and (current.st_dev, current.st_ino)
+                    == (legacy_info.st_dev, legacy_info.st_ino)
+                and legacy.read_bytes() == legacy_raw
+            ), "Legacy fixture unexpectedly replaced; refuse cleanup"
+            legacy.unlink()
+        assert not legacy.exists() and not legacy.is_symlink()
+        print(
+            "PASS: valid legacy v1 protected generation refused on booted "
+            "host without package effects, journal or legacy-state mutation",
+            flush=True,
+        )
+
         # Native foreign-footprint refusal before any package command. The
         # guest starts without NGINX; this is a private, self-removed marker.
         foreign_dir = Path("/etc/nginx")

@@ -386,6 +386,15 @@ AlmaLinux 10 run the same negative. Root-lock regression tests ensure a
 pre-journal refusal leaves the host eligible for a later clean attempt.
 This is bounded native/CI evidence only, not publisher acceptance.
 
+The same `native-installer` QEMU scenario also introduces a **valid canonical
+state-v1 generation** into the existing protected root, invokes the actual
+signed-fixture native installer, and requires the fixed legacy-state refusal
+before any native APT/DNF package or systemd effect. It compares the legacy
+file's inode, owner, mode, mtime and exact bytes, checks for absence of the
+native-effects journal and NGINX executable, then removes only the original
+test-created inode. This is a booted Debian/Alma negative for #31's unsupported
+older-state refusal, **not** a v0.4-to-v0.6 migration or publisher acceptance.
+
 ## Native vendor NGINX and foreign include preservation (issue #31)
 
 The installed-worker `native-installer` VM scenario now records the vendor
