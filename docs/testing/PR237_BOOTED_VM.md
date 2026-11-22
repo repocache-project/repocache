@@ -369,6 +369,28 @@ key**; it is neither a complete privileged-path attack matrix nor real
 publisher-signed candidate acceptance. See `synthetic-installed-worker.txt`
 in each relevant VM artifact; judge PASS only at the exact tested source SHA.
 
+## Native vendor NGINX and foreign include preservation (issue #31)
+
+The installed-worker `native-installer` VM scenario now records the vendor
+`/etc/nginx/nginx.conf` (and `mime.types`, when installed) before its first
+v2 apply. It compares file hashes, device/inode identities, modification times,
+ownership and modes after an idempotent reload, a generation-two same-version
+repair and a real journal-backed recovery. Both Debian 13 and AlmaLinux 10
+must retain the original global files exactly.
+
+After generation one is live, the disposable guest also replaces the single
+REPOCACHE-managed NGINX include temporarily with a symlink to its original
+inode. The installed privileged worker must refuse `RELOAD_V2` without
+following that foreign replacement, creating a WAL, changing published state
+or disturbing the live TLS health endpoint. The test restores the original
+include inode and mtime, verifies its original hash, then requires normal
+authenticated reload to succeed. Only the temporary guest-owned symlink is
+removed; no user-owned or real host configuration is modified.
+
+This is **bounded booted-VM Stage B evidence** for vendor config preservation
+and one managed-resource drift refusal, not proof of every foreign-state,
+owner-signed installed-product or production release acceptance criterion.
+
 ## Installed raw-packet unit-injection refusal (native #64 evidence)
 
 The `native-installer` scenario additionally sends one 30-byte raw

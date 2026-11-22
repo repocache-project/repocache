@@ -175,6 +175,24 @@ def snapshot() -> dict[str, tuple[str, int, int]]:
 
 
 
+def unmanaged_nginx_snapshot() -> dict[str, tuple[str, int, int, int, int, int]]:
+    """Bounded read-only proof that the vendor's global NGINX files stay intact."""
+    records = {}
+    for path in (Path("/etc/nginx/nginx.conf"), Path("/etc/nginx/mime.types")):
+        # A vendor may omit mime.types, but nginx.conf is mandatory on both
+        # supported packaged NGINX installations. Never follow a foreign link.
+        if not path.exists() and not path.is_symlink():
+            continue
+        info = path.lstat()
+        assert stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode)
+        records[str(path)] = (
+            hashlib.sha256(path.read_bytes()).hexdigest(), info.st_dev,
+            info.st_ino, info.st_mtime_ns, info.st_uid, stat.S_IMODE(info.st_mode),
+        )
+    assert "/etc/nginx/nginx.conf" in records
+    return records
+
+
 def assert_native_socket_refuses_arbitrary_unit() -> None:
     """Exercise actual installed root dispatch, bypassing the safe client allowlist.
 
@@ -301,6 +319,7 @@ def main(distribution: str) -> None:
         str(path): hashlib.sha256(path.read_bytes()).hexdigest()
         for path in (certificate, private_key)
     }
+    unmanaged_before = unmanaged_nginx_snapshot()
     command("/usr/bin/systemctl", "daemon-reload")
     command("/usr/bin/systemctl", "start", "nginx.service", timeout=35)
     assert command("/usr/bin/systemctl", "is-active", "nginx.service") == "active"
@@ -398,6 +417,49 @@ def main(distribution: str) -> None:
     if distribution == "almalinux":
         assert command("/usr/sbin/getenforce") == "Enforcing"
     print("PASS: real native RELOAD_V2, idempotent APPLY_V2 and RECOVER_V2/CLEAN preserve managed bytes and TLS", flush=True)
+    # A foreign actor may replace the managed include with a symlink after
+    # generation one was committed. The installed broker must refuse to follow
+    # it or reload anything. Restore the exact original inode afterwards.
+    owned_include = Path("/etc/nginx/conf.d/repocache-managed.conf")
+    displaced = owned_include.with_name(".pr237-owned-include-displaced")
+    assert owned_include.is_file() and not owned_include.is_symlink()
+    assert not displaced.exists() and not displaced.is_symlink()
+    previous_include = owned_include.lstat()
+    previous_include_digest = hashlib.sha256(owned_include.read_bytes()).hexdigest()
+    os.rename(owned_include, displaced)
+    try:
+        os.symlink(displaced.name, owned_include)
+        assert owned_include.is_symlink()
+        try:
+            authenticated_native_operation("RELOAD_V2")
+        except NativeRootControlClientError as error:
+            assert str(error) == "NATIVE_ROOT_CLIENT_OPERATION_REFUSED"
+        else:
+            raise AssertionError("Installed root worker accepted foreign managed include link")
+        assert owned_include.is_symlink()
+        assert os.readlink(owned_include) == displaced.name
+        assert not (STATE / ".state-v2-native.pending").exists()
+        assert b"x-repocache-generation: 1" in https_response("/__repocache/healthz").lower()
+    finally:
+        # Restore only the link introduced here. Never overwrite an unexpected
+        # substituted inode in a failed negative-path test.
+        if owned_include.is_symlink() and os.readlink(owned_include) == displaced.name:
+            owned_include.unlink()
+        assert not owned_include.exists() and not owned_include.is_symlink()
+        assert displaced.is_file() and not displaced.is_symlink()
+        os.rename(displaced, owned_include)
+    restored_include = owned_include.lstat()
+    assert (restored_include.st_dev, restored_include.st_ino,
+            restored_include.st_mtime_ns) == (
+        previous_include.st_dev, previous_include.st_ino,
+        previous_include.st_mtime_ns,
+    )
+    assert hashlib.sha256(owned_include.read_bytes()).hexdigest() == previous_include_digest
+    assert snapshot() == before
+    assert unmanaged_nginx_snapshot() == unmanaged_before
+    assert authenticated_native_operation("RELOAD_V2")["status"] == "RELOADED"
+    assert snapshot() == before
+    print("PASS: installed root worker refused foreign managed include symlink without changing vendor NGINX, TLS, catalog or active generation", flush=True)
 
     # Prepare a genuine generation-two partial repair on the already live
     # v0.6 deployment. The operator proposal is synthetic but staged via
@@ -489,6 +551,7 @@ def main(distribution: str) -> None:
     assert snapshot() == after_repair
     assert authenticated_native_operation("RECOVER_V2")["status"] == "CLEAN"
     assert snapshot() == after_repair
+    assert unmanaged_nginx_snapshot() == unmanaged_before
     print("PASS: native worker applied partial same-version v0.6 generation-two repair, preserving nonempty TLS/cache/log/metrics data", flush=True)
 
     # Stage a second partial repair and force an ACTUAL post-WAL nginx -t
@@ -584,6 +647,7 @@ def main(distribution: str) -> None:
         assert hashlib.sha256(path.read_bytes()).hexdigest() == saved_tls[str(path)]
     if distribution == "almalinux":
         assert command("/usr/sbin/getenforce") == "Enforcing"
+    assert unmanaged_nginx_snapshot() == unmanaged_before
     print("PASS: real installed RECOVER_V2 restored prior live generation and preserved TLS/cache/log/metrics; repeat recovery clean", flush=True)
     command("/usr/bin/systemctl", "stop", "repocache-control.socket")
     command("/usr/bin/systemctl", "stop", "nginx.service")
