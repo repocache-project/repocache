@@ -308,3 +308,88 @@ catalog, or claim publisher/SELinux/booted-service acceptance. Those remain
 separately authorized steps of the coordinated final Debian 13 / AlmaLinux
 10 booted-host campaign. Disposable CI validates the shared native package
 commands and guarded WAL/receipt code, not real booted systemd behavior.
+
+
+## Native operator authorization, revocation and recovery (issues #31/#64)
+
+This section documents the **fixed-operation installed-worker boundary**, not a
+grant of permission to deploy on production. For development, use only the
+isolated Debian 13 and AlmaLinux 10 (SELinux Enforcing) guests with disposable
+Ed25519 identities. The real owner-signed candidate, staging and publication
+remain separately authorized Stage C steps under #76/#88.
+
+**Before separately authorized host activation**, the administrator must
+authenticate the installed worker against the **trusted host Ed25519 anchor**
+and exact source/archive pins, verify the fixed systemd service/socket unit
+bytes and current distro-provided NGINX package/unit, and inspect the actual
+systemd/SELinux security context. An installed worker, a source-built archive,
+a successful read-only preflight, and a `--yes` flag are not OS
+authorization. Never copy a disposable test trust anchor into production.
+
+The authorized operator group is `repocache-admin`, distinct from the
+unprivileged service account `repocache`. Verify its membership and the
+fixed root-owned AF_UNIX control socket (`/run/repocache/server-control.sock`:
+root:repocache-admin, mode 0660). Group admission is a separate, logged
+administrator decision; do not grant sudoers or broad systemctl rights.
+Review effective memberships in a **new** login session after any change.
+The systemd socket is intentionally **static/non-enableable**: explicitly
+starting it after approval is not enabling it for boot. No installation or
+repair command may silently start or enable it. The one-shot service is
+root-owned and limited to `APPLY_V2`, `RELOAD_V2` and
+`RECOVER_V2` with fixed arguments; the client cannot select an
+executable, path, unit, environment, raw command or shell.
+
+For a separately authorized already-installed managed deployment:
+
+~~~sh
+/usr/bin/systemctl is-enabled repocache-control.socket
+/usr/bin/systemctl is-active repocache-control.socket
+/usr/bin/systemctl show repocache-control.socket -p FragmentPath -p DropInPaths
+/usr/bin/systemctl show repocache-control.service -p FragmentPath -p DropInPaths
+/usr/bin/getent group repocache-admin
+/usr/bin/getent passwd repocache
+~~~
+
+Review the fixed installed units and host-native security evidence before
+starting the socket. To authorize **only that installed socket** under the
+existing OS administration boundary, a root administrator may separately
+start it with `systemctl start repocache-control.socket`; the user-group
+membership and kernel peer credentials still control subsequent access.
+There is no auto-enablement and no generic privilege escalation. On
+AlmaLinux 10, require `getenforce` to report `Enforcing` and inspect
+actual worker/socket labels and denials rather than inferring SELinux
+acceptance merely from a green container CI check.
+
+**Immediate revocation** is a separately authorized root administrator action:
+stop `repocache-control.socket` and, if necessary, its one-shot service;
+remove the individual from `repocache-admin` using the distribution's
+approved account-management procedure, and invalidate the individual's
+existing login sessions so cached supplementary group membership cannot
+continue to authorize requests. Do **not** delete native journals, worker
+receipts, TLS material, cache directories or managed NGINX includes as a
+revocation shortcut. Revoking access or stopping the socket never implies
+that a previously dispatched transaction rolled back; inspect durable state
+before changing anything else.
+
+**Noninteractive recovery**, after authorized installation and separate
+socket activation, is `repocache deployment rollback --yes` (or `--json`).
+It only invokes `RECOVER_V2` for a pending **native v2 WAL**:
+`RECOVERED` or `CLEAN` are exact confirmed results. Missing socket,
+wrong membership, unsafe unit/worker, invalid NGINX, foreign configuration,
+lost reply or unverifiable state must refuse without fallback to direct
+systemctl. A lost reply is **unknown**, never permission to retry blindly.
+This action does not undo a completed release or replay native APT/DNF;
+after an interrupted package manager, retain the persistent mask and
+package-effects journal for explicit privileged offline reconciliation.
+Repeat only read-only inspections until the operator has separately proven
+the exact package, unit, filesystem and journal state.
+
+**Compatibility and rollback limits:** support only clean initial v0.6.0
+installations on Debian 13 and AlmaLinux 10 x86_64, plus same-version managed
+v0.6.0 repair. Do not adopt legacy v1, v0.4.0 deployments, foreign NGINX or
+third-party service units. A failed NGINX syntax/reload/health check must
+retain or recover the last known-good protected generation and active-only
+catalog. Real native APT/DNF effects are not universally atomic and cannot
+be declared undone from a successful JSON WAL recovery. The exact-head booted
+QEMU campaign and original issue checklist are the acceptance evidence; a
+synthetically signed fixture must not be called a published release.
