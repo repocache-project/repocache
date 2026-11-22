@@ -18,8 +18,21 @@ unsafe links, or excessive PID counts produce a separate fail-closed
 `NGINX_PROCESS_SCAN_UNVERIFIED` result. It never emits PIDs, process
 command-line arguments, environment variables, paths, or contents.
 
+A privileged (EUID 0) scan also checks the kernel's read-only
+`/proc/<pid>/exe` symlink after the bounded `comm` read. A native executable
+whose final path component is exactly `nginx` (including the kernel's
+` (deleted)` suffix after unlinking) blocks installation even when the
+process renamed its `comm` to a harmless-looking value. Unreadable executable
+links fail closed as `PROCESS_SCAN_UNVERIFIED`; vanished processes and kernel
+threads without an executable do not produce a false conflict. No executable
+target is opened, followed, returned or logged. Unprivileged scans preserve
+their earlier, weaker `comm`-only behavior and cannot serve as install proof.
+The targeted executable-name check is intentionally not a complete binary
+identity or cross-namespace inventory.
+
 This is intentionally a **conservative early refusal**, not proof of no
-NGINX instance: process names can be altered, a process can appear after
+NGINX instance: process names and executable filenames can be altered,
+a process can appear after
 the scan, there may be separate mount/PID namespaces, and other service
 implementations or listeners may exist. Consequently the familiar
 `FRESH_NGINX_FOOTPRINT_NOT_OBSERVED` result remains `NOT VERIFIED`,
@@ -45,6 +58,11 @@ neither the metadata probe nor any APT/DNF manager. The NGINX fixture
 process is terminated in a finally block. The native CI reports
 `CI_REAL_NGINX_PROCESS_CONFLICT_REFUSED` and explicit false host
 installation, booted systemd and SELinux flags.
+
+The journaled native APT/DNF late-recheck workflow also runs a disposable
+executable named `nginx`, renames its live kernel process name, and verifies
+it still causes pre-manager refusal under the retained protected lock; native
+install proceeds only after the fixture exits.
 
 Unit regressions cover two distro inputs, real process-name variants,
 symlinked comm files, disappearing PIDs, /proc denial, scan bounds,

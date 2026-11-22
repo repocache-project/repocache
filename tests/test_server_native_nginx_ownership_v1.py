@@ -395,3 +395,78 @@ def test_missing_proc_root_fails_closed():
     assert ownership._scan_nginx_process_footprint(
         proc_root="/nonexistent/repocache-ci-proc",
     ) == "PROCESS_SCAN_UNVERIFIED"
+
+
+@pytest.mark.parametrize("exe", [
+    "/usr/sbin/nginx",
+    "/usr/sbin/nginx (deleted)",
+    "/opt/vendor/sbin/nginx",
+])
+def test_root_proc_executable_refuses_renamed_running_nginx(
+    tmp_path, monkeypatch, exe,
+):
+    proc = tmp_path / "proc"
+    task = proc / "123"
+    task.mkdir(parents=True)
+    (task / "comm").write_bytes(b"quietworker\n")
+    (task / "exe").symlink_to(exe)
+    monkeypatch.setattr(ownership.os, "geteuid", lambda: 0)
+    assert ownership._scan_nginx_process_footprint(
+        proc_root=str(proc)
+    ) == "PROCESS_NGINX_FOUND"
+
+
+def test_root_proc_exe_denial_fails_closed_without_leaking_path(
+    tmp_path, monkeypatch,
+):
+    proc = tmp_path / "proc"
+    task = proc / "123"
+    task.mkdir(parents=True)
+    (task / "comm").write_bytes(b"quietworker\n")
+    monkeypatch.setattr(ownership.os, "geteuid", lambda: 0)
+    original = ownership.os.readlink
+
+    def denied(path, *args, **kwargs):
+        if path == str(task / "exe"):
+            raise PermissionError("SECRET_PROC_EXE_TARGET")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(ownership.os, "readlink", denied)
+    result = ownership._scan_nginx_process_footprint(proc_root=str(proc))
+    assert result == "PROCESS_SCAN_UNVERIFIED"
+    assert "SECRET_PROC_EXE_TARGET" not in result
+
+
+def test_unprivileged_process_snapshot_does_not_probe_executables(
+    tmp_path, monkeypatch,
+):
+    proc = tmp_path / "proc"
+    task = proc / "123"
+    task.mkdir(parents=True)
+    (task / "comm").write_bytes(b"quietworker\n")
+    (task / "exe").symlink_to("/usr/sbin/nginx")
+    monkeypatch.setattr(ownership.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(
+        ownership.os, "readlink",
+        lambda *_a, **_k: pytest.fail("unprivileged exe probing forbidden"),
+    )
+    assert ownership._scan_nginx_process_footprint(
+        proc_root=str(proc)
+    ) == "PROCESS_NGINX_NOT_OBSERVED"
+
+
+@pytest.mark.parametrize("target", [
+    "/usr/sbin/not-nginx", "/usr/sbin/nginxd", "nginx", "/opt/nginx/sbin/master",
+])
+def test_root_proc_exe_does_not_classify_unrelated_executable(
+    tmp_path, monkeypatch, target,
+):
+    proc = tmp_path / "proc"
+    task = proc / "123"
+    task.mkdir(parents=True)
+    (task / "comm").write_bytes(b"quietworker\n")
+    (task / "exe").symlink_to(target)
+    monkeypatch.setattr(ownership.os, "geteuid", lambda: 0)
+    assert ownership._scan_nginx_process_footprint(
+        proc_root=str(proc)
+    ) == "PROCESS_NGINX_NOT_OBSERVED"

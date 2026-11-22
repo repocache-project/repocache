@@ -91,6 +91,15 @@ def _scan_nginx_process_footprint(*, proc_root: str = "/proc") -> str:
     if (type(proc_root) is not str or not proc_root.startswith("/")
             or len(proc_root) > 4096 or "\x00" in proc_root):
         return "PROCESS_SCAN_UNVERIFIED"
+    # An NGINX master can change its kernel comm via prctl(PR_SET_NAME).
+    # Root-only executable-path observation catches a still-running native
+    # nginx executable even after that rename, including an unlinked binary.
+    # Unprivileged snapshots remain non-authorizing; they cannot reliably
+    # inspect other users' /proc/<pid>/exe links.
+    try:
+        inspect_executable = os.geteuid() == 0
+    except (OSError, TypeError, ValueError):
+        return "PROCESS_SCAN_UNVERIFIED"
     observed = 0
     try:
         with os.scandir(proc_root) as entries:
@@ -130,6 +139,26 @@ def _scan_nginx_process_footprint(*, proc_root: str = "/proc") -> str:
                 name_bytes = value.removesuffix(b"\n")
                 if name_bytes == b"nginx" or name_bytes.startswith(b"nginx:"):
                     return "PROCESS_NGINX_FOUND"
+                if inspect_executable:
+                    # The kernel supplies this symlink; never open its target,
+                    # inspect cmdlines or expose the resulting path. A missing
+                    # exe is normal for a kernel thread or vanished/zombie PID.
+                    # Other read failures mean the inventory is incomplete.
+                    try:
+                        executable = os.readlink(
+                            proc_root + "/" + name + "/exe"
+                        )
+                    except FileNotFoundError:
+                        continue
+                    except OSError:
+                        return "PROCESS_SCAN_UNVERIFIED"
+                    if (type(executable) is not str or not executable
+                            or len(executable) > 4096 or "\x00" in executable):
+                        return "PROCESS_SCAN_UNVERIFIED"
+                    executable = executable.removesuffix(" (deleted)")
+                    if (executable.startswith("/")
+                            and executable.rsplit("/", 1)[-1] == "nginx"):
+                        return "PROCESS_NGINX_FOUND"
         return "PROCESS_NGINX_NOT_OBSERVED"
     except (OSError, TypeError, ValueError):
         return "PROCESS_SCAN_UNVERIFIED"
