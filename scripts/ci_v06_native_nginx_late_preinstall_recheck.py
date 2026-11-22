@@ -105,6 +105,85 @@ def _invoke_native_manager_guarded(
     return runner(argv, **kwargs)
 
 
+def _simulate_renamed_executable_race(
+    state_fd: int, *, distribution: str, release: str,
+    document: dict[str, Any], seen: list[str], scans: list[str],
+) -> None:
+    """Prove a renamed kernel comm cannot hide an executing native nginx path.
+
+    This copies the disposable container's Python interpreter to a file
+    literally named nginx. It does not run an NGINX service or open a port.
+    Only the executable name should be sufficient to trigger refusal, despite
+    an unrelated kernel comm value. Never execute this outside the guarded CI.
+    """
+    import shutil
+    import tempfile
+
+    _require(
+        _scan_nginx_process_footprint() == "PROCESS_NGINX_NOT_OBSERVED",
+        "RENAMED_EXEC_BASELINE_NOT_CLEAN",
+    )
+    with tempfile.TemporaryDirectory(prefix="repocache-nginx-exe-") as temp:
+        executable = Path(temp) / "nginx"
+        shutil.copy2(sys.executable, executable)
+        child = subprocess.Popen(
+            [str(executable), "-B", "-c",
+             "import ctypes,time;"
+             "assert ctypes.CDLL(None).prctl(15,ctypes.c_char_p(b'quietworker'),0,0,0)==0;"
+             "time.sleep(15)"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"}, cwd="/",
+        )
+        try:
+            observed = False
+            for _ in range(80):
+                _require(child.poll() is None, "RENAMED_EXEC_EXITED_EARLY")
+                if Path(f"/proc/{child.pid}/comm").read_bytes() == b"quietworker\n":
+                    _require(
+                        os.readlink(f"/proc/{child.pid}/exe") == str(executable),
+                        "RENAMED_EXEC_INODE_TARGET_INVALID",
+                    )
+                    observed = _scan_nginx_process_footprint() == "PROCESS_NGINX_FOUND"
+                    if observed:
+                        break
+                time.sleep(0.05)
+            _require(observed, "RENAMED_EXEC_CONFLICT_NOT_DETECTED")
+
+            invoked: list[list[str]] = []
+            def forbidden(argv: list[str], **kwargs: Any):
+                invoked.append(argv)
+                _deny("INSTALL_EXECUTED_AFTER_RENAMED_NGINX")
+
+            try:
+                _invoke_native_manager_guarded(
+                    state_fd, distribution=distribution, release=release,
+                    document=document, seen=seen, scans=scans,
+                    argv=[_MANAGER[distribution], "install", "nginx"],
+                    runner=forbidden,
+                )
+            except NativeNginxPreinstallGuardError as exc:
+                _require(
+                    str(exc) == "NATIVE_PREINSTALL_FRESH_NGINX_RUNNING_PROCESS_REFUSED",
+                    "RENAMED_EXEC_WRONG_REFUSAL",
+                )
+            else:
+                _deny("RENAMED_EXEC_INSTALL_ACCEPTED")
+            _require(not invoked, "RENAMED_EXEC_REACHED_NATIVE_MANAGER")
+        finally:
+            if child.poll() is None:
+                child.terminate()
+            try:
+                child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait(timeout=5)
+    _require(
+        _scan_nginx_process_footprint() == "PROCESS_NGINX_NOT_OBSERVED",
+        "RENAMED_EXEC_LEFTOVER",
+    )
+
+
 def _simulate_late_process_race(
     state_fd: int, *, distribution: str, release: str,
     document: dict[str, Any], seen: list[str], scans: list[str],
@@ -214,6 +293,10 @@ def run() -> dict[str, Any]:
                     state_fd, distribution=distribution, release=release,
                     document=document, seen=seen, scans=scans,
                 )
+                _simulate_renamed_executable_race(
+                    state_fd, distribution=distribution, release=release,
+                    document=document, seen=seen, scans=scans,
+                )
                 _require(
                     (_STATE / NATIVE_PENDING_NAME).read_bytes()
                     == original_marker,
@@ -274,6 +357,7 @@ def run() -> dict[str, Any]:
             "status": _SUCCESS,
             "distribution": distribution,
             "real_proc_late_process_refused_before_native_install": True,
+            "renamed_native_nginx_executable_refused_before_install": True,
             "forbidden_native_install_never_invoked": True,
             "native_apt_dnf_update_and_install_each_rechecked": True,
             "exclusive_protected_lock_contended_through_native_effects": True,

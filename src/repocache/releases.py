@@ -15,7 +15,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-REPOSITORY = "teixemf/repocache"
+REPOSITORY = "repocache-project/repocache"
 API_ORIGIN = "https://api.github.com"
 TOKEN_FILE = Path("/etc/repocache/github-token")
 MAX_RESPONSE = 2_000_000
