@@ -9,8 +9,8 @@ published frontend on an operator-managed NGINX server.
 
 | Target | Native prerequisites |
 | --- | --- |
-| Debian 13 | OS Python 3.13, APT, distribution NGINX and booted systemd |
-| AlmaLinux 10 | OS Python 3.12, DNF, distribution NGINX, booted systemd and SELinux enforcing |
+| Debian 13 (x86_64 / native amd64 packages) | OS Python 3.13, APT, distribution NGINX and booted systemd |
+| AlmaLinux 10 (x86_64) | OS Python 3.12, DNF, distribution NGINX, booted systemd and SELinux enforcing |
 | Debian 12 and earlier, AlmaLinux 9 and earlier, other distributions | Unsupported |
 
 ## Prepare a clean host
@@ -39,6 +39,92 @@ REPOCACHE state and external NGINX ownership require preserving the current
 installation and selecting a separate clean host. If a managed include,
 state directory or service already exists, establish its ownership and
 provenance before selecting a recovery or repair operation.
+
+## Choose the right supported deployment path (#20)
+
+**Fresh v0.6.0 target (not yet shipped):** a reviewed, clean-install-only
+server candidate on **x86_64** Debian 13 or AlmaLinux 10, with native APT/DNF
+NGINX, protected managed state, operator-provided TLS and explicit
+administrator-approved repository mappings. A read-only preflight can run
+today; a preflight PASS-like observation, a rendered NGINX candidate or
+a green CI workflow is **not** a working provisioner or installation
+approval. Do not invoke hypothetical `deployment install` or
+`repos add` commands as though they had been released. Their
+full privileged lifecycle and booted-host acceptance are still tracked by
+#19/#26/#27/#28/#30/#31/#64/#95.
+
+**Existing independently configured NGINX:** the published v0.4.0
+`install.sh` contract installs a frontend, not native infrastructure
+and not a full v0.6 server. Follow
+[the v0.4.0 existing-NGINX guide](PRODUCTION_EXISTING_NGINX.md)
+for that separately owned service. The v0.6 candidate must **refuse**
+unreviewed pre-existing NGINX processes, units, includes and conflicting
+ownership; never import its TLS keys, overwrite its routes, enable a new
+listener or replace its package-managed systemd unit merely because a
+configuration file parses. Stop if ownership is uncertain, preserve original
+inodes and bytes, and restore from an independently verified snapshot.
+
+**Unsupported host:** Debian 12 or older, AlmaLinux 9 or older, other
+distributions/derivatives, non-x86_64 CPUs, wrong OS Python, containers
+claimed as booted hosts and unexpected NGINX owners are not migration
+shortcuts. Refuse native infrastructure changes until preflight and
+ownership acceptance identify a supported clean target. An existing
+v0.4.0 server is not implicitly authorized for an in-place v0.6.0
+migration just because the next public-version compatibility gate must
+separately prove the authentic published v0.4.0 transition.
+
+## Application/dependency provenance and offline operation (#20)
+
+The selected v0.6.0 release baseline remains the **reviewed
+owner-authenticated, eight-asset, legacy offline-wheelhouse candidate**
+from the [release target](RELEASE_TARGET_V0.6.0.md) and the
+[signed-candidate contract](SIGNED_CANDIDATE_ACCEPTANCE.md),
+subject to final candidate-specific evidence. The historic v0.5.0 signing
+examples are **not** authority to accept a v0.6.0 tag without its distinct
+review. Owner-held Ed25519 private keys and passphrases stay on the
+authorized signing workstation, never on an installer host or GitHub CI.
+Obtain publisher public-key trust independently of downloaded source
+and verify the exact reviewed manifest, source, wheelhouse, dependencies,
+platform tags, SBOM, notice files and SHA-256 identities **before** executing
+candidate-supplied software. A source or wheel hash alone is not the
+publisher's signature.
+
+**Separate first-party and third-party trust:** the REPOCACHE application
+wheel is part of the owner-signed candidate. External Python wheels retain
+their own upstream bytes, individual hash/ABI lock, license grants and
+notices. The CI
+[native upstream wheel test](CI_NATIVE_UPSTREAM_WHEELS_V06.md)
+downloads pinned public PyPI wheels **only** as a disposable compatibility
+experiment with a legacy lock; it is not an approved online runtime installer,
+not a new signed v0.6.0 source-only profile and not proof of a real
+publisher-approved dependency lock. Avoid silently mixing these profiles.
+
+Do **not** permit source distribution builds, implicit transitive
+resolution, floating versions, unpinned fallback, arbitrary package indexes,
+unreviewed CA bundles, pip configuration inherited from a user account,
+root-wide pip writes or service-account privilege escalation. A future
+separately approved online dependency path must use the exact independently
+reviewed index/CA allowlist, pinned wheel hashes, a bounded non-root
+generation-specific virtualenv, redacted downloads/logs and its own
+isolation/activation acceptance. Do not print index credentials, URL tokens,
+TLS private keys or internal repository addresses. These future controls
+are not implied to be operational in v0.6.0.
+
+A PyPI outage is **not** authorization to loosen hash, TLS, signature or
+version checks. With the authenticated offline wheelhouse already available,
+Python dependency installation must not need a live PyPI fetch; native NGINX
+package installation, authentic APT/DNF upstream metadata and a missing
+signed release asset have **separate** availability and trust constraints.
+If required authenticated assets or distro packages are unavailable,
+report the bounded failure and preserve the prior working installation;
+do not substitute unofficial mirrors automatically.
+
+Review [third-party notices and rights](THIRD_PARTY_RIGHTS_REVIEW.md)
+with the **actual final asset set**. Licenses and redistribution obligations
+continue under the individual grants; downloading dependencies does not
+transfer legal responsibility automatically to an upstream registry.
+The reviewed software supply-chain and legal notices must accompany the
+published artifact when required. This guidance is not legal certification.
 
 ## Run the read-only preflight
 

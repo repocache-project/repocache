@@ -109,11 +109,12 @@ def _package_binary_check(system: str) -> PreflightCheck:
                   "REQUIRED_NATIVE_EXECUTABLES_OBSERVED_ONLY")
 
 
-def _safe_existing_ancestor(path: str) -> tuple[str | None, str]:
+def _safe_existing_ancestor(path: str, *, require_root_leaf: bool = False) -> tuple[str | None, str]:
     """Reject symlink or unsafe world-writable components; never create paths.
 
     Returns the closest existing directory and a static classification.
-    Ownership cannot be inferred even for an otherwise safe path.
+    Every ancestor must be root-owned. The storage leaf can be a service-owned
+    directory, but its managed ownership cannot be inferred from this check.
     """
     # A TLS file directly below / has / as its legitimate parent. Inspect
     # root metadata below instead of treating this canonical path as unsafe.
@@ -131,6 +132,8 @@ def _safe_existing_ancestor(path: str) -> tuple[str | None, str]:
         return None, "UNSAFE_STORAGE_PATH"
     if root_info.st_mode & (stat.S_IWOTH | stat.S_IWGRP):
         return None, "UNSAFE_WRITABLE_PATH"
+    if root_info.st_uid != 0:
+        return None, "UNSAFE_PATH_OWNER"
     for part in parts:
         current = os.path.join(current, part)
         try:
@@ -145,22 +148,36 @@ def _safe_existing_ancestor(path: str) -> tuple[str | None, str]:
         if info.st_mode & (stat.S_IWOTH | stat.S_IWGRP):
             # Group trust is not authenticated in this observation layer.
             return None, "UNSAFE_WRITABLE_PATH"
+        if (current != path or require_root_leaf) and info.st_uid != 0:
+            return None, "UNSAFE_PATH_OWNER"
         last_directory = current
     return last_directory, "EXISTING_PATH_OWNERSHIP_UNVERIFIED"
 
 
 def _storage_checks(spec: HostInspectionSpec) -> tuple[PreflightCheck, PreflightCheck]:
     roots = (spec.state_root, spec.cache_root, spec.log_root)
-    observations = [_safe_existing_ancestor(path) for path in roots]
+    observations = [_safe_existing_ancestor(path, require_root_leaf=(index == 0))
+                    for index, path in enumerate(roots)]
     if any(code.startswith("UNSAFE_") for _, code in observations):
         path_check = _check("storage_path_safety", PreflightStatus.FAIL,
                             "STORAGE_PATH_UNSAFE_OR_CONFLICTING")
-    elif any(directory is None for directory, _ in observations):
-        path_check = _check("storage_path_safety", PreflightStatus.NOT_VERIFIED,
-                            "STORAGE_PATH_ACCESS_UNVERIFIED")
     else:
         path_check = _check("storage_path_safety", PreflightStatus.NOT_VERIFIED,
-                            "STORAGE_OWNERSHIP_MANIFEST_UNVERIFIED")
+                            "STORAGE_PATH_ACCESS_UNVERIFIED"
+                            if any(directory is None for directory, _ in observations)
+                            else "STORAGE_OWNERSHIP_MANIFEST_UNVERIFIED")
+        # The protected state leaf is private and root-owned; cache/log leaves
+        # may belong to the native service. Never infer adoption from metadata.
+        if observations[0] == (spec.state_root, "EXISTING_PATH_OWNERSHIP_UNVERIFIED"):
+            try:
+                state = os.lstat(spec.state_root)
+                if (not stat.S_ISDIR(state.st_mode) or state.st_uid != 0
+                        or stat.S_IMODE(state.st_mode) != 0o700):
+                    path_check = _check("storage_path_safety", PreflightStatus.FAIL,
+                                        "PROTECTED_STATE_DIRECTORY_UNSAFE")
+            except OSError:
+                path_check = _check("storage_path_safety", PreflightStatus.NOT_VERIFIED,
+                                    "STORAGE_PATH_ACCESS_UNVERIFIED")
     if any(directory is None for directory, _ in observations):
         return path_check, _check("storage_free_space", PreflightStatus.NOT_VERIFIED,
                                   "STORAGE_CAPACITY_UNVERIFIED")
@@ -293,7 +310,7 @@ def _nginx_checks(spec: HostInspectionSpec) -> tuple[PreflightCheck, ...]:
                         "NGINX_EXECUTABLE_OBSERVED_ONLY")
     # A missing leaf is insufficient when its parent is symlinked or writable
     # by unrelated users. Inspect every existing parent without following links.
-    parent, safety = _safe_existing_ancestor(os.path.dirname(spec.generated_include))
+    parent, safety = _safe_existing_ancestor(os.path.dirname(spec.generated_include), require_root_leaf=True)
     if parent is None or safety.startswith("UNSAFE_"):
         include = _check("nginx_managed_include_collision", PreflightStatus.FAIL
                          if safety.startswith("UNSAFE_") else PreflightStatus.NOT_VERIFIED,
@@ -374,7 +391,7 @@ def _tls_reference_check(spec: HostInspectionSpec) -> PreflightCheck:
         (spec.tls_certificate_file, False),
         (spec.tls_private_key_file, True),
     ):
-        directory, marker = _safe_existing_ancestor(os.path.dirname(path))
+        directory, marker = _safe_existing_ancestor(os.path.dirname(path), require_root_leaf=True)
         if marker.startswith("UNSAFE_"):
             failure = failure or "TLS_REFERENCE_PARENT_UNSAFE"
             continue
@@ -393,6 +410,8 @@ def _tls_reference_check(spec: HostInspectionSpec) -> PreflightCheck:
             uncertain = uncertain or "TLS_REFERENCE_SYMLINK_UNVERIFIED"
         elif not stat.S_ISREG(info.st_mode):
             failure = failure or "TLS_REFERENCE_NONREGULAR"
+        elif info.st_uid != 0 or info.st_nlink != 1:
+            failure = failure or "TLS_REFERENCE_OWNER_OR_LINK_UNSAFE"
         elif info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
             failure = failure or "TLS_REFERENCE_WRITABLE_BY_OTHERS"
         elif is_key and info.st_mode & stat.S_IROTH:
@@ -426,7 +445,7 @@ def assess_deployment_host(
     # identity with otherwise positive host probes, even when injected by a
     # caller of this pure assembly API.
     identity_failed = any(
-        c.name in ("supported_os_and_python", "architecture_identity")
+        c.name in ("supported_os_and_python", "architecture_identity", "architecture_supported", "native_python_identity")
         and c.status is PreflightStatus.FAIL
         for c in baseline.checks
     )
@@ -465,7 +484,7 @@ def inspect_deployment_host(
     baseline = assess_native_host(facts, intent=intent)
     # Do not inspect local files, sockets or services after an invalid
     # OS/Python or architecture identity. The report stays non-authorizing.
-    if any(c.name in ("supported_os_and_python", "architecture_identity")
+    if any(c.name in ("supported_os_and_python", "architecture_identity", "architecture_supported", "native_python_identity")
            and c.status is PreflightStatus.FAIL for c in baseline.checks):
         return baseline
     from repocache.server_install_v1 import validate_os_identity

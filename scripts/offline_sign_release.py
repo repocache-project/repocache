@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PUBLIC = ROOT / "keys/repocache-2026-10.pem"
 PUBLIC_DER_SHA256 = "7bbf4b840f762a610da648869564a5b77669f24191d0c5c7af04c14c043dc0fb"
 KEY_ID = "repocache-2026-10"
-REPOSITORY = "teixemf/repocache"
+REPOSITORY = "repocache-project/repocache"
 
 
 class OfflineSigningError(ValueError):

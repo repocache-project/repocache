@@ -45,6 +45,67 @@ with the existing bootstrap and executes adversarial filesystem tests
 as UID/GID 65534. Both Debian 13 and AlmaLinux 10 runs are userspace
 containers, not booted native host/SELinux acceptance.
 
+## Joined protected-v2 retirement and cache ownership preflight
+
+`preview_locked_retired_repository_cache_cleanup_under_root` provides a
+**functional read-only integration** between two previously separate
+fixture boundaries. It acquires the existing owner-pinned exclusive
+protected state-v2 lock, refuses legacy/multi-resource recovery, reads
+the actual canonical persisted v2 snapshot and requires:
+
+- An exact caller-pinned generation and exact SHA-256 of those persisted
+  bytes; an untrusted caller-provided history is never accepted.
+- The selected repository ID is a permanent `retired` reservation in
+  `id_reservations`, absent from current `repository_records`.
+- The existing fixed cache-root and repository ownership markers,
+  inode identity and expected native NGINX levels=1:2 cache layout
+  successfully pass the earlier bounded filesystem preview.
+- The protected ledger remains byte-identical with no newly pending
+  journal after the scan, while the same state lock is held throughout.
+- Both the earlier state-only fixture and the **committed, four-resource
+  state/include/catalog/manifest domain** from merged #410 are supported
+  in read-only mode. A completed #410 owner manifest is validated against
+  exact state/include/catalog bytes, not confused with an interrupted
+  multi-resource journal. Unknown, mismatched or partial owner resources
+  fail closed; outstanding multi-resource and v2 state journals block
+  the scan independently of retired-ID status.
+
+An allocated/active/unknown ID fails **before any cache scan**. A
+changed generation or state digest, foreign/symlinked cached object,
+pending recovery journal or lock contention fails closed. Only the
+selected repository's observed counts and allocated/apparent bytes
+are returned. The preflight does not open cached payload for writing,
+unlink anything, change state, stage a catalogue or reload NGINX.
+
+The actual Linux `/` root descriptor is refused **before acquiring the
+protected-state lock or opening any host state file**. The negative test
+instruments the lock to prove the early refusal, not just the final result.
+
+This is still a **detached test-root fixture API**, not an approved
+production broker. The state record `retired` does **not** prove that
+a live NGINX worker has drained, the origin is unshared, the operator
+authorized irreversible deletion, or that the installed signed root
+control service is the caller. A passing report cannot be used as an
+unlink or force-cleanup token. All authority flags are false; the
+root lock is released before return. The future native owner must
+re-derive and revalidate cache ownership, active transfer quiescence
+and selected identity at the actual destructive transaction boundary.
+
+CI regression command:
+
+```sh
+python -m pytest -q tests/test_server_repository_cache_cleanup_preview_v1.py
+```
+
+The protected-v2 tests use **actual durable fixture filesystem commits**
+for a present APT repository, then retire it through the merged #95
+v2 operation planner. A second scenario uses the exact committed #410
+multi-resource WAL with a derived catalog and checks that tampered owner
+manifests and pending WAL markers never become cleanup authority. They inspect its retained package cache while
+the state lock is held, reject still-allocated state and unsafe objects,
+and verify journal refusal and byte-for-byte cache preservation. This
+is useful Stage-A evidence, not installed native systemd/SELinux proof.
+
 ## Requirements before any real force-cleanup feature
 
 A future, separately reviewed installed root worker must prove the
@@ -60,3 +121,70 @@ The v0.6.0 original #95 force-cleanup, selective isolation and native
 Debian 13 / AlmaLinux 10 end-to-end criteria remain NOT VERIFIED; final
 host acceptance belongs to #19. This preview does not expose any CLI
 command, root broker or production-operation switch.
+
+## Explicit retired-object deletion rehearsal (fixture only)
+
+The new `server_fixture_retired_cache_cleanup_v1.py` contains a deliberately
+**detached-test-root-only**, actual unlink/rmdir rehearsal for explicit #95
+force-cleanup. This is separate from the existing strictly read-only preview.
+It reads and verifies the canonical retired state-v2 ID under the owner-pinned
+exclusive lock, refuses pending journals and foreign owner manifests, and
+requires the exact expected state generation/hash plus expected observed
+file count and allocated bytes. Its bounded two-pass inode inventory
+rejects unfamiliar levels=1:2 layouts, symlinks, devices, hardlinks,
+foreign ACL/xattrs and changed contents before starting deletion. It only
+unlinks verified objects below the **selected retired repository root**,
+rechecks each descriptor and ancestor, and fsyncs the parent after each
+removal. The protected tombstone and root-owned repository marker remain.
+
+The mandatory `assert_fixture_quiescent` callback is deliberately untrusted
+test code; its successful return is **not** native NGINX worker-drain
+evidence, root/administrator authorization or an installed cleanup capability.
+This function absolutely refuses `/` and must never be exposed through a
+CLI/socket/privileged host process. Do not treat the fixture's byte removal
+as the original #95 production force-cleanup acceptance.
+
+**Crash semantics:** cache object deletion is not atomic. If a fault occurs
+after some verified unlinks, preserve the retired ledger and marker, run a
+**fresh locked preflight** to inspect the reduced scope, then repeat the
+explicit fixture-only operation. No rollback of deleted package bytes is
+claimed. The installed worker must separately authenticate operator intent,
+enforce true NGINX transfer quiescence/reload, verify shared objects, audit
+live root/SELinux boundaries and implement its approved recovery contract.
+
+CI regression command:
+
+```sh
+python -m pytest -q tests/test_server_repository_cache_cleanup_preview_v1.py
+```
+
+Tests cover positive per-ID purge with another repository untouched,
+zero-object repeat, still-allocated/stale IDs and mismatched space estimate,
+symlink/hardlink/foreign layout, callback refusal and mutation, interrupted
+deletion with exact subsequent preflight/resume, and refusal to access `/`.
+
+
+## Exact cache-tree scope binding before destructive fixture cleanup
+
+The read-only preview now also returns `cache_tree_sha256_observed`: a
+stable SHA-256 of the sorted, relative levels=1:2 path names, file-vs-directory
+types, pinned inode identity/ownership/size/timestamps and allocated blocks.
+It does not read or disclose cached package bytes or any private filesystem
+path. This digest is a *change detector*, not a signature, content-integrity
+claim or authorization token. A new or replaced cache object can preserve
+both count and allocated-byte totals but must not inherit a previous
+preflight's approval scope.
+
+The destructive **detached-fixture-only** operation now requires
+`expected_cache_tree_sha256` in addition to its pinned state generation,
+state digest, cache file count and allocated-byte estimate. It compares the
+exact digest from the read-only pass and both same-lock inode inventories
+**before the first unlink**. A changed or stale digest refuses the entire
+operation, including same-size inode replacement and a resume following a
+partial crash. A genuine partial purge requires a **new** locked preview and
+an explicit fresh expected digest for the remaining objects.
+
+This adds no installed deletion capability, signing, operator authority,
+NGINX worker quiescence, SELinux or real-host acceptance. The original #95
+force-cleanup remains NOT VERIFIED until the separately approved native
+worker and booted-host tests establish those properties.

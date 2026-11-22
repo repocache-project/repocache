@@ -101,12 +101,14 @@ def test_venv_is_not_accepted_as_native_python_provenance():
     assert status(report, "python_environment") is PreflightStatus.NOT_VERIFIED
 
 
-def test_unknown_architecture_is_not_silently_accepted():
+@pytest.mark.parametrize("machine", ["aarch64", "ppc64le", "s390x", "i686", "amd64", "X86_64", "../amd64", "", None])
+def test_unknown_architecture_is_not_silently_accepted(machine):
     report = assess_native_host(facts(machine="x86_64"))
     assert status(report, "architecture_identity") is PreflightStatus.PASS
-    assert status(report, "architecture_supported") is PreflightStatus.NOT_VERIFIED
-    report = assess_native_host(facts(machine="../amd64"))
-    assert status(report, "architecture_identity") is PreflightStatus.FAIL
+    assert status(report, "architecture_supported") is PreflightStatus.PASS
+    report = assess_native_host(facts(machine=machine))
+    assert status(report, "architecture_supported") is PreflightStatus.FAIL
+    assert report.has_failures and not report.authorizes_installation
 
 
 def test_systemd_and_selinux_are_never_claimed_verified():
@@ -127,7 +129,7 @@ def test_systemd_and_selinux_are_never_claimed_verified():
 def test_no_unverified_critical_gates_are_omitted():
     report = assess_native_host(facts())
     required = {
-        "architecture_supported", "python_package_origin",
+        "python_package_origin",
         "native_package_availability", "storage_ownership_and_capacity",
         "listen_port_conflicts", "nginx_ownership_and_features",
         "tls_and_ca_trust", "systemd_native_runtime",
@@ -232,6 +234,65 @@ def test_current_host_inspection_without_system_activation(monkeypatch):
     report = inspect_native_host()
     assert status(report, "supported_os_and_python") is PreflightStatus.PASS
     assert report.authorizes_installation is False
+
+
+@pytest.mark.parametrize("mode,expected", [
+    ("native", True), ("different_inode", False), ("symlink", False),
+    ("nonroot_owner", False), ("writable_parent", False), ("drift", False),
+    ("unreadable", None),
+])
+def test_native_python_inode_uses_fixed_owned_leaf(monkeypatch, mode, expected):
+    import stat
+    from dataclasses import replace
+    from collections import namedtuple
+    info = namedtuple("Info", "st_dev st_ino st_mode st_uid st_size st_ctime_ns")
+    parent = info(1, 1, stat.S_IFDIR | 0o755, 0, 0, 0)
+    binary = info(1, 42, stat.S_IFREG | 0o755, 0, 100, 123)
+    calls = []
+
+    def local(path):
+        calls.append(path)
+        if path in ("/", "/usr", "/usr/bin"):
+            return parent._replace(st_mode=stat.S_IFDIR | 0o777) if mode == "writable_parent" else parent
+        assert path == "/usr/bin/python3.13"
+        if mode == "symlink":
+            return binary._replace(st_mode=stat.S_IFLNK | 0o777)
+        if mode == "nonroot_owner":
+            return binary._replace(st_uid=1000)
+        if mode == "drift" and calls.count(path) > 1:
+            return binary._replace(st_ctime_ns=124)
+        return binary
+
+    def active(path):
+        assert path == "/proc/self/exe"
+        if mode == "unreadable":
+            raise PermissionError("not observable")
+        return binary._replace(st_ino=43) if mode == "different_inode" else binary
+
+    monkeypatch.setattr(native.os, "lstat", local)
+    monkeypatch.setattr(native.os, "stat", active)
+    assert native._native_python_identity("debian") is expected
+
+
+@pytest.mark.parametrize("identity,venv,result", [
+    (True, False, PreflightStatus.PASS), (False, False, PreflightStatus.FAIL),
+    (True, True, PreflightStatus.FAIL), (None, False, PreflightStatus.NOT_VERIFIED),
+])
+def test_native_python_is_required_for_install_intent(identity, venv, result):
+    report = assess_native_host(facts(native_python_identity=identity, running_in_venv=venv), intent="install")
+    assert status(report, "native_python_identity") is result
+    assert status(report, "python_package_origin") is PreflightStatus.NOT_VERIFIED
+    assert not report.authorizes_installation
+
+
+def test_unsupported_architecture_does_not_observe_native_manager(monkeypatch):
+    monkeypatch.setattr(native, "_read_os_release", lambda _: DEBIAN)
+    monkeypatch.setattr(native, "sys", SimpleNamespace(
+        version_info=SimpleNamespace(major=3, minor=13), prefix="/usr", base_prefix="/usr",
+    ))
+    monkeypatch.setattr(native.platform, "machine", lambda: "aarch64")
+    monkeypatch.setattr(native, "_manager_exists", lambda _: pytest.fail("manager inspected"))
+    assert capture_native_host_facts().native_manager_visible is None
 
 
 def test_manager_presence_only_checks_fixed_native_binary(monkeypatch):

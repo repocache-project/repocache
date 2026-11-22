@@ -70,6 +70,18 @@ def test_docker_guard_without_effective_root_denied(monkeypatch):
         smoke.run_rehearsal(distribution="debian")
 
 
+def test_unsupported_architecture_refused_before_package_mutation(monkeypatch):
+    monkeypatch.setenv("REPOCACHE_NATIVE_TEST_CONTAINER", "CONFIRMED_DISPOSABLE_DOCKER_ONLY")
+    monkeypatch.setattr(smoke.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(Path, "is_file", lambda _: True)
+    monkeypatch.setattr(smoke, "validate_os_identity", lambda *_: "debian")
+    monkeypatch.setattr(smoke.platform, "machine", lambda: "aarch64")
+    monkeypatch.setattr(smoke, "_trusted_key", lambda _: pytest.fail("trust probe reached"))
+    monkeypatch.setattr(smoke, "_commands", lambda *a: pytest.fail("package commands reached"))
+    with pytest.raises(smoke.ContainerInstallRehearsalError, match="^UNSUPPORTED_NATIVE_ARCHITECTURE$"):
+        smoke.run_rehearsal(distribution="debian")
+
+
 def test_existing_container_nginx_prevents_any_package_mutation(monkeypatch):
     monkeypatch.setenv("REPOCACHE_NATIVE_TEST_CONTAINER",
                        "CONFIRMED_DISPOSABLE_DOCKER_ONLY")

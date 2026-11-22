@@ -1,0 +1,73 @@
+name: Server v0.6 Native NGINX Late Preinstall Recheck (Containers)
+
+on:
+  pull_request:
+    paths:
+      - 'src/repocache/server_native_nginx_ownership_v1.py'
+      - 'tests/test_server_native_nginx_preinstall_guard_v1.py'
+      - 'scripts/ci_v06_native_nginx_late_preinstall_recheck.py'
+      - 'docs/testing/SERVER_NATIVE_NGINX_LATE_PREINSTALL_RECHECK_V1.md'
+      - '.github/workflows/server-v06-native-nginx-late-recheck.yml'
+  push:
+    branches: [main, 'integration/**']
+    paths:
+      - 'src/repocache/server_native_nginx_ownership_v1.py'
+      - 'tests/test_server_native_nginx_preinstall_guard_v1.py'
+      - 'scripts/ci_v06_native_nginx_late_preinstall_recheck.py'
+      - 'docs/testing/SERVER_NATIVE_NGINX_LATE_PREINSTALL_RECHECK_V1.md'
+      - '.github/workflows/server-v06-native-nginx-late-recheck.yml'
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  late-nginx-recheck:
+    name: NGINX late preinstall process refusal (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: debian13
+            image: debian:trixie-slim
+          - platform: almalinux10
+            image: almalinux:10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Reject late foreign NGINX then perform real guarded APT/DNF transaction
+        shell: bash
+        env:
+          DISTRO_IMAGE: ${{ matrix.image }}
+        run: |
+          set -Eeuo pipefail
+          docker run --rm --network bridge \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace,readonly" \
+            --workdir /workspace "$DISTRO_IMAGE" sh -ec '
+              set -eu
+              if command -v apt-get >/dev/null 2>&1; then
+                apt-get update -qq
+                DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends python3 ca-certificates openssl systemd >/dev/null
+              else
+                dnf -y -q install python3 ca-certificates openssl systemd >/dev/null
+              fi
+              export PYTHONPATH=/workspace/src
+              export REPOCACHE_NATIVE_TEST_CONTAINER=CONFIRMED_DISPOSABLE_DOCKER_ONLY
+              if ! python3 -B scripts/ci_v06_native_nginx_late_preinstall_recheck.py > /tmp/nginx-native-late-guard.json; then
+                cat /tmp/nginx-native-late-guard.json
+                exit 1
+              fi
+              cat /tmp/nginx-native-late-guard.json
+              grep -Fq DISPOSABLE_LOCKED_LATE_NGINX_PREINSTALL_REFUSAL_PASS /tmp/nginx-native-late-guard.json
+              for flag in real_proc_late_process_refused_before_native_install forbidden_native_install_never_invoked native_apt_dnf_update_and_install_each_rechecked exclusive_protected_lock_contended_through_native_effects pending_effects_journal_durable_and_unchanged native_package_reentry_remained_blocked actual_native_nginx_installed_only_in_disposable_container; do
+                grep -Fq "\"$flag\":true" /tmp/nginx-native-late-guard.json
+              done
+              for flag in host_root_authenticated systemd_pid1_tested selinux_enforcing_tested package_effects_reconciled authorizes_host_package_install; do
+                grep -Fq "\"$flag\":false" /tmp/nginx-native-late-guard.json
+              done
+              echo "PASS: late /proc process conflict refused before APT/DNF; real fresh install independently rechecked"
+              echo "NOT VERIFIED: installed host privilege, systemd, SELinux and elimination of post-check races"
+            '

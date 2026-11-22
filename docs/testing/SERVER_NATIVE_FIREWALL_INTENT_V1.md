@@ -49,3 +49,34 @@ validated input contract, actual native bind, packet filter backend and
 host-root authority must be rechecked by an eventual protected worker.
 No real firewall rules, NGINX files or services are modified. Booted
 systemd/SELinux acceptance remains NOT VERIFIED under #30/#19.
+
+## Independent network listener exposure review (#30)
+
+A disabled or absent `deployment.firewall.modify` means **only** "do not
+modify existing firewall rules". It must **never** be interpreted as a
+verified deny-by-default firewall or permission to expose NGINX on an
+externally routable address. In particular, existing administrator rules
+can already admit a listener bound to `0.0.0.0`, `::`, or a specific
+non-loopback IP, without any firewall command by REPOCACHE.
+
+The preview now provides two separate flags:
+`firewall_change_review_required` means the operator explicitly
+requested firewall modification on a non-loopback listener, whereas
+`network_exposure_review_required` reflects the independent need to
+review a *potential* non-loopback NGINX listener, **regardless** of the
+firewall setting. Loopback-only `127.0.0.1` and `::1` produce false
+for external listener review, but still require installed NGINX ownership
+and explicit activation checks. `network_exposure_verified` remains
+**false** for all cases, because these are configuration proposals, not
+readings of kernel listeners or live firewall rules.
+
+The existing public fields and statuses are unchanged. A new
+cross-component regression suite compares the same validated
+install-v1 document across firewall intent and rendered NGINX TLS
+listener, checking the precise address/port, both protocol families,
+opt-in/opt-out and no activation or firewall authorization. It runs
+under both distro-native Python versions in the existing
+`server-native-firewall-intent.yml` CI workflow. The test does not
+open a socket, change a firewall or prove site policy; booted-host
+network observation and operator consent remain mandatory Stage B
+and original criterion #30-AC5.

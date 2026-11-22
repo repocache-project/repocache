@@ -60,6 +60,15 @@ def test_paste_line_is_compact_redacted_and_non_authorizing():
     assert "PRIVATE_EXAMPLE_VALUE" not in str(result)
 
 
+def test_unsupported_architecture_survives_redaction():
+    value = sample()
+    value.update(native_distribution="debian", native_probe_code="UNSUPPORTED_NATIVE_ARCHITECTURE")
+    code, result = run(json.dumps(value).encode())
+    assert code == 2
+    assert result["native_probe_code"] == "UNSUPPORTED_NATIVE_ARCHITECTURE"
+    assert not result["native_prerequisites_reported_only"]
+
+
 def test_readonly_prerequisite_report_is_not_release_pass():
     value = sample()
     value.update(code="DIGEST_MATCH_NATIVE_READONLY_OBSERVED",
