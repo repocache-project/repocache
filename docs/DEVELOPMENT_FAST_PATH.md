@@ -22,7 +22,7 @@
 
 ## 3. Handoffs and backlog
 
-Record just **branch/base/HEAD, what passed (link), what failed or remains unverified, and next action**. No duplicate full test transcripts, speculative progress reports, or per-stage comments. Evidence at a different SHA/environment is a starting point, not automatically a PASS.
+Record just **branch/base/HEAD, what passed (link), what failed or remains unverified, and next action**. Disclose substantive AI assistance in the PR (see `CONTRIBUTING.md`), without inventing human reviews or independent test provenance. No duplicate full test transcripts, speculative progress reports, or per-stage comments. Evidence at a different SHA/environment is a starting point, not automatically a PASS.
 
 Limit concurrent overlapping feature work to approximately two or three active PRs. First reconcile stale/stacked PRs against integration and the accepted release requirements; close or retarget only with appropriate authority, never discard unmerged unique changes. Keep Dependabot updates separate from feature delivery and review pinned signed dependency profiles before accepting updates.
 

@@ -3,6 +3,7 @@
 Primary issue: #N
 Target milestone / branch:
 **What changed and why?** (2–4 sentences)
+Substantive AI assistance, if any:
 
 ## Evidence
 

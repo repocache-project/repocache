@@ -25,6 +25,8 @@ def test_component_smokes_remain_manually_runnable_and_cover_shared_code():
         assert "  pull_request:\n    # " in section, name
         assert "    paths:" in section and "  workflow_dispatch:" in section, name
         assert "paths-ignore:" not in section
+        assert "\'.github/workflows/**\'" not in section
+        assert "\'src/repocache/**\'" not in section
         for path in (
             "'client/**'", "'src/repocache/core.py'",
             "'src/repocache/cli.py'", "'scripts/*client*'",
@@ -40,6 +42,8 @@ def test_presign_operator_has_explicit_manual_and_component_runs():
     assert "  pull_request:\n    # " in section
     assert "    paths:" in section
     assert "  workflow_dispatch:" in section and "  push:" in section
+    assert "\'.github/workflows/**\'" not in section
+    assert "\'src/repocache/**\'" not in section
     for path in (
         "'workstation/**'", "'src/repocache/signatures.py'",
         "'scripts/*sign*.py'", "'tests/test_release_operator*.py'",
