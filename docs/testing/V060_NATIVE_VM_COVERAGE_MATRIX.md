@@ -90,13 +90,13 @@ Issue: https://github.com/repocache-project/repocache/issues/27 · Campaign: **P
 | 27.05 | Failed NGINX validation or reload leaves the previous working configuration usable. | A+B | **T** | Inspect exact-HEAD QEMU artifacts; extend to the full original criterion and pin exact candidate. |
 
 ### #28 — feat: Generate validated NGINX cache configuration from managed repositories
-Issue: https://github.com/repocache-project/repocache/issues/28 · Campaign: **P0-2** · Source probes: `scripts/ci_native_nginx_cache_smoke.py`, `scripts/ci_generated_nginx_route_cache_smoke.py`. All probes are partial and not necessarily on the merged integration branch.
+Issue: https://github.com/repocache-project/repocache/issues/28 · Campaign: **P0-2** · Source probes: `scripts/ci_native_nginx_cache_smoke.py`, `scripts/ci_generated_nginx_route_cache_smoke.py`, `scripts/ci_v06_vm_nginx_cache_guest.py`. All probes are partial and not necessarily on the merged integration branch.
 
 | ID | Original unchecked acceptance criterion | Stage | Current coverage | Smallest next action |
 | --- | --- | --- | --- | --- |
-| 28.01 | Valid Debian/APT and AlmaLinux/DNF repository examples render into correct routes. | A+B | **R** | Port the existing test to an installed booted guest, retaining native OS/systemd/SELinux checks. |
-| 28.02 | Repository metadata and package artifacts traverse the proxy correctly on both supported OS targets. | B | **R** | Port the existing test to an installed booted guest, retaining native OS/systemd/SELinux checks. |
-| 28.03 | Repeated fetches demonstrate real observable caching without response corruption. | B | **R** | Port the existing test to an installed booted guest, retaining native OS/systemd/SELinux checks. |
+| 28.01 | Valid Debian/APT and AlmaLinux/DNF repository examples render into correct routes. | A+B | **T** | Inspect exact-HEAD QEMU P0-2 native HTTPS cache artifact; still require real installed route, signed APT/DNF and production activation. |
+| 28.02 | Repository metadata and package artifacts traverse the proxy correctly on both supported OS targets. | B | **T** | Inspect exact-HEAD QEMU P0-2 native HTTPS cache artifact; still require real installed route, signed APT/DNF and production activation. |
+| 28.03 | Repeated fetches demonstrate real observable caching without response corruption. | B | **T** | Inspect exact-HEAD QEMU P0-2 native HTTPS cache artifact; still require real installed route, signed APT/DNF and production activation. |
 | 28.04 | Invalid hosts, paths and generated configurations are rejected before reload. | A+B | **R** | Port the existing test to an installed booted guest, retaining native OS/systemd/SELinux checks. |
 | 28.05 | Neither unapproved configuration nor client-submitted repository data creates an active route. | A+B | **R** | Port the existing test to an installed booted guest, retaining native OS/systemd/SELinux checks. |
 
@@ -217,6 +217,12 @@ Issue: https://github.com/repocache-project/repocache/issues/107 · Campaign: **
 | 107.09 | Implement future command registry for workstation `repocache-release` with #88, before claiming it available. | A+C | **I** | Complete and integrate the approved production implementation, then exercise it in a VM. |
 | 107.10 | Port checks and review conflicts from #42/#52/#46, account for new command registration, and retain operational NGINX safety. | A+B | **I** | Complete and integrate the approved production implementation, then exercise it in a VM. |
 
+### Newly implemented shared-guest P0-2 cache probe
+
+The existing P0-1 `smoke` QEMU guest now also runs `scripts/ci_v06_vm_nginx_cache_guest.py` **as the non-root disposable guest user** after native NGINX was installed, exercised and stopped. The probe calls the same generated-route syntax validator used in existing container CI, starts only a separate unprivileged loopback HTTPS NGINX process and local fixture backend, and checks synthetic APT/DNF metadata/package MISS/HIT, exact response bytes, denied unapproved routes, rejected POST, and refused unsafe redirects. It does **not** modify the installed service or APT/DNF source files, relax SELinux, install packages from the fixture or assert publisher signatures.
+
+`scripts/collect_v06_vm_campaign_coverage.py` emits `v06-campaign-coverage.json` in the same job evidence bundle, with P0-2 `EXERCISED_PARTIAL` only if the exact-HEAD guest scenario and fixed PASS marker both exist. All original criteria remain `NOT_VERIFIED`. This new P0-2 native execution is **NOT VERIFIED** until the updated six-job QEMU matrix completes.
+
 ## Reproducible evidence protocol
 
 1. Pin the full source SHA, immutable qcow2 image SHA, guest `/etc/os-release`, `uname -a`, PID1 systemd, `getenforce`, candidate/issuer fingerprint and exact asset digests; use disposable x86_64 guests. Keep synthetic and authentic publisher signers in separate runs.
@@ -232,9 +238,9 @@ Issue: https://github.com/repocache-project/repocache/issues/107 · Campaign: **
 - **D: 18** — Documentation, policy or standalone CI gate — no intrinsic VM
 - **G: 10** — No sufficient VM test identified — develop
 - **I: 9** — Blocked on assembled feature/real installer behavior
-- **R: 30** — CI/container test exists — booted VM NOT VERIFIED
+- **R: 27** — CI/container test exists — booted VM NOT VERIFIED
 - **S: 9** — Requires owner-signed candidate or owner-only operation
-- **T: 24** — VM TEST EXISTS — partial; exact current HEAD NOT VERIFIED
+- **T: 27** — VM TEST EXISTS — partial; exact current HEAD NOT VERIFIED
 - **U: 6** — CLI/unit regression exists — VM not intrinsic
 
 **Blocking dependencies:** #249 real signed release prerequisite; PR #237 experimental VM code still draft/divergent from integration; #24 native source writer/transaction and #95 managed repository lifecycle require implemented end-to-end behavior; #76/#88 release stages require genuine owner-held signing and distinct authorization. Do not use green container tests or prior synthetic VM runs as substitutes.
