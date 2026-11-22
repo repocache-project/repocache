@@ -300,8 +300,38 @@ def after(distribution: str) -> None:
         os.close(rootfd)
     for unit in ("repocache-control.service", "repocache-control.socket"):
         assert run("/usr/bin/systemctl", "is-active", unit).returncode != 0
+    # The operator-facing authenticated entrypoint must ALSO reject reentry,
+    # not merely the private journal preparer. The package footprint may
+    # contain partial native effects after SIGKILL; refuse the identical
+    # signed-fixture first-install request before any further manager call.
+    from scripts import install_native_root_worker
+    document = FIXTURE / "reviewed-install.json"
+    digest = hashlib.sha256(document.read_bytes()).hexdigest()
+    try:
+        install_native_root_worker.install_authenticated_native_nginx(
+            FIXTURE / "assets", document, digest, **pins,
+        )
+    except ValueError as error:
+        assert str(error) == (
+            "WORKER_PLACEMENT_NATIVE_PREPACKAGE_BOUNDARY_UNVERIFIED"
+        ), str(error)
+    else:
+        raise AssertionError("Native package installation retried after SIGKILL")
+    repeat_raw, repeat_info = pending()
+    assert repeat_raw == raw
+    assert (repeat_info.st_ino, repeat_info.st_mtime_ns) == (
+        info.st_ino, info.st_mtime_ns,
+    )
+    assert run("/usr/bin/systemctl", "is-enabled", "nginx.service").stdout.strip() == "masked"
+    assert run("/usr/bin/systemctl", "is-active", "nginx.service").returncode != 0
+    for unit in ("repocache-control.service", "repocache-control.socket"):
+        assert run("/usr/bin/systemctl", "is-active", unit).returncode != 0
     print("PASS: real kernel reboot retained interrupted APT/DNF journal and NGINX mask", flush=True)
-    print("PASS: repeated package-manager retry denied; no auto-reinstall or control service activation", flush=True)
+    print(
+        "PASS: both installed signed-fixture first-install entrypoint and native "
+        "journal preparer refuse retry after SIGKILL/reboot without effects",
+        flush=True,
+    )
     print("NOT VERIFIED: automatic native package side-effect rollback; requires explicit reconciliation", flush=True)
 
 

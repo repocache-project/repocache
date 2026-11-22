@@ -310,6 +310,12 @@ and masked/inactive NGINX service. After a real guest kernel reboot, it
 requires the *same journal inode, timestamp and SHA-256*, no completed
 receipt, disabled control services, preserved mask and two genuine
 journal-reentry refusals without removing or rewriting the marker.
+The same guest now retries the **actual signed-fixture first-install entrypoint**
+after reboot with the identical reviewed document and source digest. It must
+return the fixed prepackage refusal before any fresh APT/DNF execution and
+preserve the native journal bytes/inode/mtime, masked inactive NGINX and
+inactive worker services. A private journal-reader refusal alone is not
+treated as proof that the installed public entrypoint is fail-closed.
 
 This **does not simulate a complete host power loss**: the package-manager
 process is forcibly terminated, while the kernel and native installer
