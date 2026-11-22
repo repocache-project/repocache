@@ -94,3 +94,12 @@ detached root and every pinned ancestor before any directory creation;
 the actual write stage repeats those observations. Unknown labeling is
 not repaired or dropped, and SELinux-enabled installed storage still
 requires its separate reviewed native policy.
+
+The read-only dual-root health observation measures byte/inode headroom
+only through the same pinned owner-marked directory descriptors, using
+the existing #97 pressure policy for cache hysteresis. It also reports
+the expected owner's POSIX ancestor-search mode and explicit log capacity
+exhaustion or read-only mount observations. Missing or unreadable capacity
+is unknown, never zero; a writable-looking mode/mount never proves actual
+NGINX or root-master write access. No write probe, permission repair,
+host authority or SELinux inference is introduced.
