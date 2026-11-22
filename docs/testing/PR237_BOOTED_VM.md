@@ -82,14 +82,19 @@ recovery or production service behavior. A genuine interrupted package
 manager acceptance case remains NOT VERIFIED. No marker is cleared: the
 entire VM is discarded after the experiment.
 
-## Actual installed worker: pinned synthetic #249 prerequisite, never publisher acceptance
+## Actual installed worker: pinned synthetic fixture using integrated #249, never publisher acceptance
 
-The native guest now additionally receives a disposable **exact-source combined
-tree**: the current PR #237 HEAD plus the *read-only, pinned* #249 source
-`0ca54da8dc5d73b2df892ecf8551110c36340794`. The CI runner uses a
-throwaway Git worktree and records all three identities (PR head, dependency,
-ephemeral local merge). It refuses an unexpectedly moved dependency. There is
-**no GitHub merge, queue operation, publisher signing or production key**.
+PR #249 was squash-merged into protected `integration/v0.6.0` on
+2026-11-22 as commit
+`69b13b8882560b29515ec2405463b70e40c8aa44`. Its historical PR
+source HEAD `0ca54da8dc5d73b2df892ecf8551110c36340794` is **not**
+the commit to use for protected-branch ancestry checks. The VM runner now
+fetches the protected integration ref, requires that exact accepted merge
+commit to be an ancestor, and locally combines it with the current PR #237
+HEAD in a throwaway Git worktree. It records three identities: current PR
+HEAD, accepted integration commit, and ephemeral merge. It does not rely on
+the mutable/deletable #249 source branch. There is **no additional GitHub
+merge, queue operation, publisher signing or production key**.
 
 Only after the actual full-VM kernel/systemd/NGINX tests, the guest generates
 its own short-lived **synthetic Ed25519 private key** and host trust anchor,
