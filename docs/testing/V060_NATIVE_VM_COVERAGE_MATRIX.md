@@ -60,14 +60,14 @@ Issue: https://github.com/repocache-project/repocache/issues/20 · Campaign: **P
 | 20.07 | Record PASS/FAIL/NOT VERIFIED results from repeatable Debian 13 and AlmaLinux 10 tests before closure. | B | **G** | Implement a self-checking, reversible native guest scenario before asserting coverage. |
 
 ### #24 — feat: Implement opt-in, reversible APT/DNF repository sync
-Issue: https://github.com/repocache-project/repocache/issues/24 · Campaign: **P0-3** · Source probes: `scripts/smoke_client_native_held_package_locks.py`, `scripts/smoke_client_source_preflight.py`, `scripts/smoke_client_root_source_boundary.py`. All probes are partial and not necessarily on the merged integration branch.
+Issue: https://github.com/repocache-project/repocache/issues/24 · Campaign: **P0-3** · Source probes: `scripts/smoke_client_native_held_package_locks.py`, `scripts/smoke_client_source_preflight.py`, `scripts/smoke_client_root_source_boundary.py`, `scripts/ci_v06_vm_client_cli_guest.py`. All probes are partial and not necessarily on the merged integration branch.
 
 | ID | Original unchecked acceptance criterion | Stage | Current coverage | Smallest next action |
 | --- | --- | --- | --- | --- |
 | 24.01 | Positive and negative tests exercise supported APT and DNF source formats on the target distributions. | A+B | **R** | Port the existing test to an installed booted guest, retaining native OS/systemd/SELinux checks. |
 | 24.02 | Repeated `--apply` is idempotent. | B | **I** | Complete and integrate the approved production implementation, then exercise it in a VM. |
 | 24.03 | Errors and interrupted writes restore a valid previous repository configuration. | B | **I** | Complete and integrate the approved production implementation, then exercise it in a VM. |
-| 24.04 | `check`, `repos list` and the default `repos sync` do not modify any package manager sources. | A+B | **R** | Port the existing test to an installed booted guest, retaining native OS/systemd/SELinux checks. |
+| 24.04 | `check`, `repos list` and the default `repos sync` do not modify any package manager sources. | A+B | **T** | Inspect exact-HEAD P0-3 guest source-integrity and fail-closed CLI artifact; real approved apply/fallback remains separate. |
 | 24.05 | Failover is tested so a REPOCACHE outage does not unnecessarily block access to external repositories. | B | **I** | Complete and integrate the approved production implementation, then exercise it in a VM. |
 
 ### #26 — feat: Add strict Debian 13 and AlmaLinux 10 preflight validation
@@ -202,20 +202,24 @@ Issue: https://github.com/repocache-project/repocache/issues/97 · Campaign: **P
 | 97.07 | No acceptance criterion requires #94 to yield GO; clearly document the native-policy fallback if advanced priorities are NO-GO. | A | **D** | Verify source, documentation, audit/CI, or maintainer decision independently; do not count as a VM PASS. |
 
 ### #107 — feat(cli): converge existing commands and enforce architecture contract in CI
-Issue: https://github.com/repocache-project/repocache/issues/107 · Campaign: **P0-3** · Source probes: `docs/architecture/CLI_CONFORMANCE.md`, `scripts/ci_pr237_native_socket_guest.py`. All probes are partial and not necessarily on the merged integration branch.
+Issue: https://github.com/repocache-project/repocache/issues/107 · Campaign: **P0-3** · Source probes: `docs/architecture/CLI_CONFORMANCE.md`, `scripts/ci_pr237_native_socket_guest.py`, `scripts/ci_v06_vm_client_cli_guest.py`. All probes are partial and not necessarily on the merged integration branch.
 
 | ID | Original unchecked acceptance criterion | Stage | Current coverage | Smallest next action |
 | --- | --- | --- | --- | --- |
 | 107.01 | Supported read-only `repos list/ls`, `repos show/info`, `repo(s)` and `log(s)` aliases on server, with no privileged side effects and consistent help. | A | **U** | Retain exact-HEAD parser/contract CI; add installed CLI integration only if applicable. |
 | 107.02 | `--json` before object or after action for finite already-supported server commands; clear refusal for unsupported/unbounded JSON, no accidental mutations. | A | **U** | Retain exact-HEAD parser/contract CI; add installed CLI integration only if applicable. |
-| 107.03 | Client global `--json` / `--server` both before and after action, aliases `repo(s)`, `list/ls`, object-only help; original four command contracts remain intact. | A | **U** | Retain exact-HEAD parser/contract CI; add installed CLI integration only if applicable. |
-| 107.04 | Explicit syntax and behavior regression tests for both parsers, JSON/error channels, options, no-op help, non-interactive CLI, and no client source modifications. | A | **U** | Retain exact-HEAD parser/contract CI; add installed CLI integration only if applicable. |
+| 107.03 | Client global `--json` / `--server` both before and after action, aliases `repo(s)`, `list/ls`, object-only help; original four command contracts remain intact. | A | **T** | Inspect exact-HEAD P0-3 guest source-integrity and fail-closed CLI artifact; real approved apply/fallback remains separate. |
+| 107.04 | Explicit syntax and behavior regression tests for both parsers, JSON/error channels, options, no-op help, non-interactive CLI, and no client source modifications. | A | **T** | Inspect exact-HEAD P0-3 guest source-integrity and fail-closed CLI artifact; real approved apply/fallback remains separate. |
 | 107.05 | A source-controlled inventory of *registered* current commands and a required CI contract test, forcing contributors to acknowledge any new/renamed command or public alias. | A | **U** | Retain exact-HEAD parser/contract CI; add installed CLI integration only if applicable. |
 | 107.06 | Native distribution and semantic security claims marked NOT VERIFIED where only synthetic CI is available. | B | **D** | Verify source, documentation, audit/CI, or maintainer decision independently; do not count as a VM PASS. |
 | 107.07 | Migrate remaining flat commands and retired unsafe manual `catalog publish` only together with #95/#28 implementation; do not imply server repository lifecycle exists today. | A+B | **I** | Complete and integrate the approved production implementation, then exercise it in a VM. |
 | 107.08 | Reconcile exact shared numeric exit codes/JSON schema with the dedicated client session; preserve approved contracts. | A | **U** | Retain exact-HEAD parser/contract CI; add installed CLI integration only if applicable. |
 | 107.09 | Implement future command registry for workstation `repocache-release` with #88, before claiming it available. | A+C | **I** | Complete and integrate the approved production implementation, then exercise it in a VM. |
 | 107.10 | Port checks and review conflicts from #42/#52/#46, account for new command registration, and retain operational NGINX safety. | A+B | **I** | Complete and integrate the approved production implementation, then exercise it in a VM. |
+
+### Newly implemented shared-guest P0-3 client non-mutation probe
+
+The **same** PR #237 `smoke` guest also runs `scripts/ci_v06_vm_client_cli_guest.py` as an unprivileged OS user after P0-2. It fingerprints only regular APT/DNF source-definition files, runs the actual source-tree client parser/help and two `repos sync --apply` JSON refusal variants, and requires identical native source inode/mode/mtime/SHA before and after. There is **no client privileged writer**, no catalog network request, no source rewriting, and no claim of successful native `--apply`. The collector indexes only partial #24.04, #107.03 and #107.04 coverage when exact-HEAD QEMU and a verified guest log both exist; every original criterion remains `NOT_VERIFIED`. Native execution of this newly added code is not yet confirmed.
 
 ### Newly implemented shared-guest P0-2 cache probe
 
@@ -238,10 +242,10 @@ The existing P0-1 `smoke` QEMU guest now also runs `scripts/ci_v06_vm_nginx_cach
 - **D: 18** — Documentation, policy or standalone CI gate — no intrinsic VM
 - **G: 10** — No sufficient VM test identified — develop
 - **I: 9** — Blocked on assembled feature/real installer behavior
-- **R: 27** — CI/container test exists — booted VM NOT VERIFIED
+- **R: 26** — CI/container test exists — booted VM NOT VERIFIED
 - **S: 9** — Requires owner-signed candidate or owner-only operation
-- **T: 27** — VM TEST EXISTS — partial; exact current HEAD NOT VERIFIED
-- **U: 6** — CLI/unit regression exists — VM not intrinsic
+- **T: 30** — VM TEST EXISTS — partial; exact current HEAD NOT VERIFIED
+- **U: 4** — CLI/unit regression exists — VM not intrinsic
 
 **Blocking dependencies:** #249 real signed release prerequisite; PR #237 experimental VM code still draft/divergent from integration; #24 native source writer/transaction and #95 managed repository lifecycle require implemented end-to-end behavior; #76/#88 release stages require genuine owner-held signing and distinct authorization. Do not use green container tests or prior synthetic VM runs as substitutes.
 
