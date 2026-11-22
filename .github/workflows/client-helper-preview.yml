@@ -4,7 +4,10 @@ on:
   pull_request:
     # Optional component smoke tests; the protected nine required checks stay unfiltered.
     paths:
-      - '.github/workflows/**'
+      - '.github/workflows/client-*.yml'
+      - '.github/workflows/tests.yml'
+      - '.github/workflows/offline-wheelhouse.yml'
+      - '.github/workflows/upgrade-distros.yml'
       - 'client/**'
       - 'src/repocache/cli.py'
       - 'src/repocache/core.py'

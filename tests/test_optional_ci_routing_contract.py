@@ -30,7 +30,7 @@ def test_component_smokes_remain_manually_runnable_and_cover_shared_code():
             "'src/repocache/cli.py'", "'scripts/*client*'",
             "'tests/test_client*'", "'tests/test_cli*'",
             "'tests/conftest.py'", "'pyproject.toml'",
-            "'deps/**'", "'.github/workflows/**'",
+            "'deps/**'", "'.github/workflows/client-*.yml'",
         ):
             assert path in section, (name, path)
 
@@ -43,7 +43,7 @@ def test_presign_operator_has_explicit_manual_and_component_runs():
     for path in (
         "'workstation/**'", "'src/repocache/signatures.py'",
         "'scripts/*sign*.py'", "'tests/test_release_operator*.py'",
-        "'pyproject.toml'", "'.github/workflows/**'",
+        "'pyproject.toml'", "'.github/workflows/release-operator-native-presign.yml'",
     ):
         assert path in section
 

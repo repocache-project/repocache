@@ -7,7 +7,13 @@ on:
   pull_request:
     # Optional native operator checks on relevant PRs; release gates unchanged.
     paths:
-      - '.github/workflows/**'
+      - '.github/workflows/release-operator-native-presign.yml'
+      - '.github/workflows/release.yml'
+      - '.github/workflows/signed-candidate-acceptance.yml'
+      - '.github/workflows/tests.yml'
+      - '.github/workflows/offline-wheelhouse.yml'
+      - '.github/workflows/native-upstream-wheels.yml'
+      - '.github/workflows/dependency-graph-submit-v05.yml'
       - 'workstation/**'
       - 'src/repocache/cli.py'
       - 'src/repocache/release*.py'
