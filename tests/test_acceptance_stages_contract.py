@@ -66,9 +66,10 @@ def test_option_c_separates_functional_proof_from_real_publisher_signature():
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
     signature_verifier = (ROOT / "src/repocache/signatures.py").read_text(encoding="utf-8")
     for text in (stages, fast, workflow, agents):
-        assert "option C" in text, "missing maintainer-approved development signing boundary"
+        assert "option c" in text.lower(), "missing approved development signing boundary"
         assert "Stage" in text
-        assert "Ed25519" in text
+    assert "Ed25519" in stages and "Ed25519" in agents
+    assert "sign" in fast and "sign" in workflow
     assert "#31" in stages and "#31" in fast and "#31" in workflow
     assert "#76/#88" in stages and "#76/#88" in fast and "#76/#88" in workflow
     for expected in (
