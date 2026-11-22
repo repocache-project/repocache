@@ -65,6 +65,7 @@ def test_option_c_separates_functional_proof_from_real_publisher_signature():
     workflow = (ROOT / "docs/DEVELOPMENT_WORKFLOW.md").read_text(encoding="utf-8")
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
     signature_verifier = (ROOT / "src/repocache/signatures.py").read_text(encoding="utf-8")
+    release_acceptance = (ROOT / "docs/RELEASE_ACCEPTANCE_POLICY.md").read_text(encoding="utf-8")
     for text in (stages, fast, workflow, agents):
         assert "option c" in text.lower(), "missing approved development signing boundary"
         assert "Stage" in text
@@ -80,6 +81,10 @@ def test_option_c_separates_functional_proof_from_real_publisher_signature():
         "Stage C",
     ):
         assert expected in stages, expected
+    # The production publication policy must still demand authentic final bytes.
+    assert "genuine offline publisher" in release_acceptance
+    assert "independently provisioned trust anchor" in release_acceptance
+    assert "Before extracting or running candidate code" in release_acceptance
     for expected in (
         "Publisher release signature is invalid",
         "Publisher trust anchor is not provisioned",
