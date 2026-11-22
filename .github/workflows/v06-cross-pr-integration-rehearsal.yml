@@ -62,7 +62,7 @@ jobs:
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       FORK_SHA: 675e7b49b3573b1e5ede2ca023ed55e270397d4f
       PR64_INTEGRATION_SHA: fb67b5e459690cb96affb7238bdca16b0d8be410
-      PR76_SHA: fba69bc8baad0dc6b5d6be7d59812572928f5efa
+      PR249_INTEGRATION_SHA: 69b13b8882560b29515ec2405463b70e40c8aa44
     steps:
       # Install git before checkout: the stock distro container images
       # lack git, so checkout would otherwise fall back to an archive with
@@ -114,19 +114,18 @@ jobs:
           git config user.name "REPOCACHE disposable CI"
           git switch -c local-v06-rehearsal
           git merge --no-ff --no-edit "$BASE_SHA"
-          # Prove the #31/#95 Stage-A implementation *independently* from
-          # owner-signing/release #249. Separately rehearse the pinned #249
-          # source when present, without making it a prerequisite for
-          # non-activating protected-state code acceptance.
+          # Keep the #31 Stage-A server-only proof independent of release
+          # acceptance, then exercise the #249 integration delta separately.
+          # PR #249 was squash-merged into the protected branch on 2026-11-22.
+          # Its source SHA is NOT the integration ancestry identity. Pin the
+          # accepted squash commit instead of relying on a mutable PR branch.
           if [ '${{ matrix.variant }}' = 'with-pr249' ]; then
-            git fetch --no-tags origin \
-              +refs/heads/fix/76-repository-transfer-v06-candidate-20261107:refs/remotes/origin/pr76
-            test "$(git rev-parse refs/remotes/origin/pr76)" = "$PR76_SHA" || {
-              echo "Dependency #249 moved; pinned combined release rehearsal refused"
+            git merge-base --is-ancestor "$PR249_INTEGRATION_SHA" \
+              refs/remotes/origin/integration/v0.6.0 || {
+              echo "Expected exact #249 integration commit absent from protected integration"
               exit 1
             }
-            git merge-base --is-ancestor "$FORK_SHA" refs/remotes/origin/pr76
-            git merge --no-ff --no-edit refs/remotes/origin/pr76
+            git merge --no-ff --no-edit "$PR249_INTEGRATION_SHA"
           fi
           # Enforce whitespace only on this PR's owned server integration
           # surface. Other exact-SHA sibling PRs run their independent CI;
@@ -138,8 +137,8 @@ jobs:
             'tests/test_server_*' \
             'scripts/ci_v06_cross_pr_*'
           test -z "$(git status --porcelain)"
-          printf 'Rehearsal source: variant=%s base=%s head=%s pr254-integrated=%s pr249-candidate=%s combined=%s\n' \
-            '${{ matrix.variant }}' "$BASE_SHA" "$HEAD_SHA" "$PR64_INTEGRATION_SHA" "$PR76_SHA" "$(git rev-parse HEAD)"
+          printf 'Rehearsal source: variant=%s base=%s head=%s pr254-integrated=%s pr249-integrated=%s combined=%s\n' \
+            '${{ matrix.variant }}' "$BASE_SHA" "$HEAD_SHA" "$PR64_INTEGRATION_SHA" "$PR249_INTEGRATION_SHA" "$(git rev-parse HEAD)"
           echo "NOT VERIFIED: protected integration merge, host-root, systemd, SELinux, release"
       - name: Run combined state, NGINX, catalog, systemd and lifecycle tests
         shell: bash
@@ -160,9 +159,8 @@ jobs:
           # installer argument safety and signed-release provenance parser.
           # The owners' full independent CI still governs original criteria.
           if [ '${{ matrix.variant }}' = 'with-pr249' ]; then
-            # #249 owns the canonical v0.6 signing/source identity changes.
-            # Its still-unmerged code is required for signed staging fixtures,
-            # but NOT for validating #31's protected v2 transaction.
+            # #249's accepted integration code is required for the signed
+            # staging fixtures, but this does not prove real owner signing.
             python3 -B -m pytest -q -rs \
               tests/test_client.py \
               tests/test_client_source_helper_preview.py \
