@@ -31,7 +31,7 @@ def test_unreviewed_target_rejected(tag):
 
 
 @pytest.mark.parametrize("url", (
-    "http://api.github.com/repos/teixemf/repocache/releases",
+    "http://api.github.com/repos/repocache-project/repocache/releases",
     "https://evil.example.com/file",
     "https://github.com.evil.example.com/file",
     "https://user:pass@github.com/file",
@@ -44,7 +44,7 @@ def test_non_github_network_target_rejected(url):
 
 def test_off_origin_redirect_refused():
     handler = accept.StrictRedirect()
-    request = urllib.request.Request("https://github.com/teixemf/repocache")
+    request = urllib.request.Request("https://github.com/repocache-project/repocache")
     for url in ("https://evil.example.com/target", "http://github.com/unsafe",
                 "https://user:password@github.com/file"):
         with pytest.raises(accept.AcceptanceError):
@@ -73,7 +73,7 @@ def release_fixture():
         "id": p["release_id"], "tag_name": "v0.4.0", "draft": False,
         "prerelease": False, "immutable": True,
         "published_at": "2026-10-21T08:11:22Z",
-        "html_url": "https://github.com/teixemf/repocache/releases/tag/v0.4.0",
+        "html_url": "https://github.com/repocache-project/repocache/releases/tag/v0.4.0",
         "assets": assets,
     }
 
@@ -134,3 +134,23 @@ def test_matching_release_identity_fixture(monkeypatch):
         return json.dumps(value).encode()
     monkeypatch.setattr(accept, "download", fake)
     accept.assert_public_release("v0.4.0", pinned)
+
+def test_transferred_release_keeps_immutable_legacy_signed_identity():
+    assert accept.REPO == "teixemf/repocache"
+    assert accept.API_REPO == "repocache-project/repocache"
+    assert accept.API == "https://api.github.com/repos/" + accept.API_REPO
+    assert accept.DOWNLOAD == (
+        "https://github.com/" + accept.API_REPO + "/releases/download/"
+    )
+
+
+def test_transferred_release_rejects_stale_canonical_url(monkeypatch):
+    previous_location = release_fixture()
+    previous_location["html_url"] = (
+        "https://github.com/teixemf/repocache/releases/tag/v0.4.0"
+    )
+    monkeypatch.setattr(
+        accept, "download", lambda *_: json.dumps(previous_location).encode(),
+    )
+    with pytest.raises(accept.AcceptanceError, match="unapproved public release"):
+        accept.assert_public_release("v0.4.0", accept.target("v0.4.0"))
