@@ -302,8 +302,15 @@ def _retain_native_package_journal_lock_under_root(
             root_fd, owner_uid,
             allow_native_package_parent_changes=allow_native_package_parent_changes,
         ) as directory:
-            # A foreign footprint at lock acquisition is not an interrupted
-            # package installation. Refuse before any persistent marker.
+            # Under this exact lock, a previous interrupted native install
+            # takes precedence over any mask or host-footprint probe. In
+            # particular, our own persistent nginx.service mask after a crash
+            # must not be misclassified as a fresh foreign service. Refuse
+            # before invoking the preflight and without changing the journal.
+            if preflight_before_journal is not None:
+                _no_pending_native_effects(directory, owner_uid)
+            # A genuinely fresh foreign host is still refused before the
+            # first durable marker or any package/systemd side effect.
             if (preflight_before_journal is not None
                     and preflight_before_journal() is not None):
                 _deny("NATIVE_JOURNAL_PREFLIGHT_INVALID")

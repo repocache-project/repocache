@@ -229,6 +229,38 @@ def test_foreign_prejournal_refusal_under_lock_does_not_write_native_marker(
     assert (folder / NATIVE_PENDING_NAME).is_file()
 
 
+@pytest.mark.parametrize("distribution", ["debian", "almalinux"])
+@pytest.mark.parametrize("name", [
+    NATIVE_PENDING_NAME, NATIVE_TMP_NAME, ".native-nginx-v1.completed",
+])
+def test_existing_native_marker_precedes_host_preflight_without_mutation(
+    protected_root, distribution, name,
+):
+    """An interrupted install never reaches a fresh-host mask check."""
+    from repocache.server_native_nginx_package_journal_v1 import (
+        _retain_native_package_journal_lock_under_root,
+    )
+
+    root, state, owner = protected_root
+    marker = state / name
+    marker.write_bytes(b"previous-native-package-effects")
+    marker.chmod(0o600)
+    with pytest.raises(
+        NativePackageJournalError,
+        match="^NATIVE_PACKAGE_EFFECTS_RECONCILIATION_REQUIRED$",
+    ):
+        with _retain_native_package_journal_lock_under_root(
+            root, owner_uid=owner, distribution=distribution,
+            preflight_before_journal=lambda: pytest.fail(
+                "interrupted native install reached fresh-host preflight",
+            ),
+        ):
+            pytest.fail("interrupted native install reached execution scope")
+    assert marker.read_bytes() == b"previous-native-package-effects"
+    assert not (state / NATIVE_PENDING_NAME).exists() or name == NATIVE_PENDING_NAME
+    assert not (state / NATIVE_TMP_NAME).exists() or name == NATIVE_TMP_NAME
+
+
 def test_prejournal_guard_result_is_not_install_authority(protected_root):
     from repocache.server_native_nginx_package_journal_v1 import (
         _retain_native_package_journal_lock_under_root,
