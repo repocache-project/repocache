@@ -86,7 +86,7 @@ entire VM is discarded after the experiment.
 
 The native guest now additionally receives a disposable **exact-source combined
 tree**: the current PR #237 HEAD plus the *read-only, pinned* #249 source
-`fba69bc8baad0dc6b5d6be7d59812572928f5efa`. The CI runner uses a
+`0ca54da8dc5d73b2df892ecf8551110c36340794`. The CI runner uses a
 throwaway Git worktree and records all three identities (PR head, dependency,
 ephemeral local merge). It refuses an unexpectedly moved dependency. There is
 **no GitHub merge, queue operation, publisher signing or production key**.
