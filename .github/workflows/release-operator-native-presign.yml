@@ -5,6 +5,28 @@ name: Release Operator native pre-signing checks
 
 on:
   pull_request:
+    # Optional native operator checks on relevant PRs; release gates unchanged.
+    paths:
+      - '.github/workflows/**'
+      - 'workstation/**'
+      - 'src/repocache/cli.py'
+      - 'src/repocache/release*.py'
+      - 'src/repocache/signatures.py'
+      - 'src/repocache/updater.py'
+      - 'src/repocache/upgrade.py'
+      - 'scripts/*sign*.py'
+      - 'scripts/*release*.py'
+      - 'scripts/*candidate*.py'
+      - 'scripts/build_release.py'
+      - 'scripts/ci_dependency_graph_*.py'
+      - 'tests/test_release_operator*.py'
+      - 'tests/test_draft_release_gate.py'
+      - 'tests/test_presign_*.py'
+      - 'tests/test_signed_*.py'
+      - 'tests/conftest.py'
+      - 'pyproject.toml'
+      - 'deps/**'
+  workflow_dispatch:
   push:
     branches: [main, integration/v0.5.0]
 

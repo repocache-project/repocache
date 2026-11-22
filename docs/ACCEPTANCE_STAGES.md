@@ -13,7 +13,7 @@ independently useful, reviewable increment of an existing issue. Complete code,
 negative/security tests, applicable real APT/DNF or NGINX work in disposable
 Linux environments, compatibility, rollback and deterministic integration
 checks. Use exact source HEAD, parent/base, current rulesets and every
-required/applicable GitHub check. A source-only helper, sandbox transaction,
+required/applicable GitHub check. Do not repeat unchanged acceptance evidence in each PR or agent checkpoint: link the exact-run results and keep wider remaining criteria on the original issue. The [fast path](DEVELOPMENT_FAST_PATH.md) never authorizes activation from a Stage-A success. A source-only helper, sandbox transaction,
 staged release candidate or non-activating policy module may be integrated
 *only if its own explicitly approved, bounded acceptance criteria all PASS*.
 It must not expose an unverified privileged/write/production path. Never use

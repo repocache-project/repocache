@@ -1,6 +1,8 @@
 # Development workflow — coordinated AI-assisted contributions
 
-**Purpose:** autonomous completion of authorized work and efficient, evidence-backed session handoffs without growing milestones automatically or relaxing acceptance. See [AGENTS.md](../AGENTS.md) for the mandatory entry point. This document complements, rather than supersedes, [CONTRIBUTING.md](../CONTRIBUTING.md), [TESTING.md](TESTING.md), [release acceptance](RELEASE_ACCEPTANCE_POLICY.md), [PR milestone governance](PR_MILESTONE_GOVERNANCE.md) and the [CLI contract](architecture/CLI_ARCHITECTURE.md).
+**Purpose:** autonomous completion of authorized work and efficient, evidence-backed session handoffs without growing milestones automatically or relaxing acceptance. See [AGENTS.md](../AGENTS.md) for the mandatory entry point. For ordinary changes, start with [the one-page development fast path](DEVELOPMENT_FAST_PATH.md); use this longer contract for exceptions and protected operations. **Do not demand a separate report where a linked CI run and an unchanged issue checklist already provide the required evidence.**
+
+This document complements, rather than supersedes, [CONTRIBUTING.md](../CONTRIBUTING.md), [TESTING.md](TESTING.md), [release acceptance](RELEASE_ACCEPTANCE_POLICY.md), [PR milestone governance](PR_MILESTONE_GOVERNANCE.md) and the [CLI contract](architecture/CLI_ARCHITECTURE.md).
 
 ## 0. Autonomous execution and decision boundaries
 
@@ -78,6 +80,8 @@ Map **every original applicable criterion** to one of the following statuses:
 | FAIL | Verified negative outcome or security/regression defect | Exact reproduction, evidence and blocking owner |
 | NOT VERIFIED | Test absent, inaccessible, wrong environment, stale SHA, missing review or ambiguous criterion | Missing evidence and the smallest next step |
 
+**Keep one source of evidence.** In the PR, link the CI run and only record criteria requiring additional proof, failures, exceptions or outstanding native/release gates. Reuse the original issue checklist without copying it wholesale. Automated summaries may show PASS/FAIL/NOT VERIFIED, but they do not grant merge authority. Do not repeat unchanged evidence after a successful rerun of unrelated jobs.
+
 Execute available checks and inspect actual outcomes, not only green workflow badges. Tests **added but not executed** remain NOT VERIFIED. Differentiate GitHub-hosted distro containers from native booted systemd/SELinux, synthetic signatures from owner-key signatures, and prepublication candidate acceptance from postpublication smoke.
 
 Before any merge, re-check PR head/base, diff, scope, dependency ancestry, required job contexts and integration provenance, any applicable technical security acceptance and ruleset-mandated approvals, unresolved threads, original applicable criteria and material security findings. Any applicable FAIL/NOT VERIFIED, blocking review, missing required check or security defect blocks integration. Apply the [PR acceptance policy](PR_REVIEW_GOVERNANCE.md) effective on protected `main`: the global mandatory independent-review/provenance gate has been retired. Advisory AI assessments are not human GitHub approvals. Substantive issue-specific security criteria, maintainer approvals, native/release evidence, all required CI and security boundaries remain in force; commissioned independent human reviews are optional across issues once the governing amendment is adopted. A report alone is not merge permission.
@@ -89,24 +93,17 @@ Before any merge, re-check PR head/base, diff, scope, dependency ancestry, requi
 At a genuine session boundary, new blocker or material evidence change, update the existing issue/PR with a concise English checkpoint using only relevant fields (omit unchanged or inapplicable fields). Never stop merely to write a checkpoint:
 
 ```text
-Checkpoint (UTC): YYYY-MM-DD
-Primary issue / milestone:
-Authoritative branch / HEAD / target base:
-Scope completed and files changed:
-Acceptance: criterion -> PASS | FAIL | NOT VERIFIED -> exact evidence
-Tests executed: command, environment, results, CI run / SHA
-Tests added but not run:
-Security / compatibility / rollback impact:
-Overlapping or superseded PRs (do not close without authorization):
-Remaining blockers / required owner decisions:
-Next minimal action:
-Merge / sign / publish / deploy authority: exact specific approval or adopted conditional integration delegation; otherwise NOT GRANTED
+Checkpoint (UTC) / primary issue:
+PR branch, HEAD and target base:
+New evidence: test/CI links; criterion -> PASS | FAIL | NOT VERIFIED only where changed
+Open technical/native/release blockers and exact next action:
+Protected-operation authority: qualifying delegated integration or separate owner decision; else NOT GRANTED
 ```
 
 Do not present an earlier session's assertions as independently verified. A new session checks current GitHub HEAD and changes since the checkpoint, then resumes the next feasible approved step without redoing unchanged research. Avoid narrative comments unless material evidence or state changed.
 
 ## 6. Minimizing process overhead
 
-Do not create a new issue to document the same test, a new PR to restate a completed acceptance report, or an AI-specific history that competes with GitHub. Use the issue checklist, current PR and canonical release scope ledger. Keep the short [AGENTS.md](../AGENTS.md) stable; put detailed engineering requirements in their existing canonical documents.
+Follow [the fast path](DEVELOPMENT_FAST_PATH.md): one independently useful PR per increment, risk-based extra CI, and one concise evidence record. The nine protected required checks are not path-filtered, and a full native/signed release gate is never inferred from focused CI. Do not create a new issue to document the same test, a new PR to restate a completed acceptance report, or an AI-specific history that competes with GitHub. Use the issue checklist, current PR and canonical release scope ledger. Keep the short [AGENTS.md](../AGENTS.md) stable; put detailed engineering requirements in their existing canonical documents.
 
 **Do not merge this workflow into a release simply to raise a milestone completion percentage.** Publication readiness is determined by all applicable substantive and release acceptance criteria, not the number of closed tracking issues.

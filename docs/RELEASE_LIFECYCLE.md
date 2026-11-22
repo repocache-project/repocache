@@ -97,8 +97,7 @@ and `release/v0.4.0`, are retained for audit without repurposing them.
    signed-candidate and compatibility policy, genuine owner-held Ed25519
    signature, official unsigned build run and independent #74-G4 readback.
    Execute the full #76/#88 genuine signed-candidate installation,
-   v0.4.0-to-v0.6.0 (for the first v0.6.0 public release) or otherwise
-   most recent public stable upgrade, repair, rollback, negative/security
+   **clean-install-only v0.6.0 with explicit refusal of unsupported older installations** (for the first operational v0.6.0 public release), or the separately approved previous-public-stable upgrade path for later releases, plus repair, rollback, negative/security
    and two-native-OS acceptance as applicable. Store PASS / FAIL /
    NOT VERIFIED evidence for the exact SHA and signed bytes. A changed
    candidate demands a new review, source identity and complete re-test.

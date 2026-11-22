@@ -3,6 +3,8 @@
 **Audience:** AI-assisted and human contributors. **Scope:** repository-wide.
 **Canonical code and documentation:** the reviewed protected default branch of [repocache-project/repocache](https://github.com/repocache-project/repocache), plus current GitHub issues, PRs, checks and approvals.
 
+**Default execution:** [the short development fast path](docs/DEVELOPMENT_FAST_PATH.md) is the operational checklist for ordinary work. Its risk tiers select relevant extra checks, never suppress protected required checks, original acceptance criteria, or release gates. Avoid repetitive issue/PR comments when existing run links already prove the same facts.
+
 This file is the short entry point, not a replacement for the architecture, security and release contracts. Read [the development workflow](docs/DEVELOPMENT_WORKFLOW.md) for implementation steps and [the v0.5.0 scope ledger](docs/RELEASE_SCOPE_V0.5.0.md) when working on that release. Read files from the **actual current default branch**; a proposed file in an unmerged PR is not an adopted policy.
 
 ## 1. Establish context before changing anything
