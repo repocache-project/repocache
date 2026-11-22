@@ -376,6 +376,7 @@ def run() -> dict[str, Any]:
                 "NATIVE_POSTPACKAGE_CORRELATION_CANDIDATE_ONLY"
                 or correlation.get("distribution") != distribution
                 or correlation.get("pending_journal_stable_across_observations") is not True
+                or correlation.get("single_protected_lock_spanned_native_package_and_unit_reads") is not True
                 or correlation.get("native_package_db_owner_observed") is not True
                 or correlation.get("native_vendor_unit_shape_observed") is not True
                 or correlation.get("pending_native_effects_block_reentry") is not True

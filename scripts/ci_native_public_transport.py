@@ -15,8 +15,8 @@ import urllib.request
 
 from repocache import releases, upgrade
 
-API = "https://api.github.com/repos/teixemf/repocache/releases/assets/123"
-META = "https://api.github.com/repos/teixemf/repocache/releases"
+API = "https://api.github.com/repos/repocache-project/repocache/releases/assets/123"
+META = "https://api.github.com/repos/repocache-project/repocache/releases"
 CDN = "https://release-assets.githubusercontent.com/disposable?sig=synthetic"
 
 
@@ -89,7 +89,8 @@ def main():
         "https://untrusted.invalid/resource",
         "http://release-assets.githubusercontent.com/resource",
         "https://release-assets.githubusercontent.com:8080/resource",
-        "https://api.github.com/repos/teixemf/repocache/releases/assets/124",
+        "https://api.github.com/repos/repocache-project/repocache/releases/assets/124",
+        "https://api.github.com/repos/teixemf/repocache/releases/assets/123",
     ):
         fake = intercept([redir(rejected)])
         must_reject(lambda: upgrade._request_bytes(API, 40),

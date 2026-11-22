@@ -84,6 +84,9 @@ V06_EXTRA_FILES = frozenset((
     "src/repocache/server_dns_refresh_schedule_v1.py",
     "src/repocache/server_fixture_activation_flow_v1.py",
     "src/repocache/server_fixture_multi_resource_wal_v1.py",
+    "src/repocache/server_fixture_repository_inventory_v1.py",
+    "src/repocache/server_fixture_repository_transaction_v1.py",
+    "src/repocache/server_fixture_retired_cache_cleanup_v1.py",
     "src/repocache/server_host_checks_v1.py",
     "src/repocache/server_install_v1.py",
     "src/repocache/server_locked_manifest_reconcile_v1.py",
@@ -125,6 +128,16 @@ V06_EXTRA_FILES = frozenset((
     "src/repocache/server_repository_cache_usage_v1.py",
     "src/repocache/server_repository_plan_v1.py",
     "src/repocache/server_repository_reconcile_v1.py",
+    "src/repocache/server_repository_v2_transition_v1.py",
+    "src/repocache/server_root_control_client_v1.py",
+    "src/repocache/server_root_control_fixed_candidate_v1.py",
+    "src/repocache/server_root_control_full_context_v1.py",
+    "src/repocache/server_root_control_host_preflight_v1.py",
+    "src/repocache/server_root_control_native_syntax_v1.py",
+    "src/repocache/server_root_control_pinned_tls_pair_v1.py",
+    "src/repocache/server_root_control_pre_reload_v1.py",
+    "src/repocache/server_root_control_protocol_v1.py",
+    "src/repocache/server_root_control_worker_v1.py",
     "src/repocache/server_stock_nginx_package_owner_v1.py",
     "src/repocache/server_upstream_address_preflight_v1.py",
     "src/repocache/server_upstream_rotation_v1.py",
@@ -313,10 +326,10 @@ def _verified_dependency_profile(signed: Dict[str, Any],
                                  policy: Dict[str, Any], version: str) -> str:
     """Identify the *already authenticated* release's dependency profile.
 
-    A v0.4.0 updater understands only the schema-1 signed manifest/policy and
-    publisher-bound wheelhouse. v0.5.0 must preserve that envelope so the
-    immutable public v0.4.0 can install the transition release. Future online
-    schemas need separately implemented, accepted download/rollback controls.
+    The first operational v0.6.0 clean-install path accepts only the signed
+    offline wheelhouse schema-1 envelope; it does NOT upgrade public v0.4.0.
+    Future online schemas need separately implemented and independently
+    accepted download, signature and rollback controls.
 
     Only call after signatures.verify() and the signed policy digest check;
     this returned label is never an independent trust anchor.

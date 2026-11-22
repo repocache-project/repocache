@@ -3951,17 +3951,47 @@ def test_locked_v2_digest_current_root_nonroot_refused_before_open(monkeypatch):
         )
 
 
-def _locked_catalog_binding_case(fixture_root):
+def _locked_catalog_binding_case(fixture_root, *, multi_resource=False):
     from repocache.server_proposed_v2_locked_catalog_binding_v1 import (
         _preview_locked_v2_catalog_binding_under_root,
     )
+    from repocache.server_nginx_repository_bundle_v1 import (
+        render_repository_https_server_candidate,
+    )
     fd, folder, uid = fixture_root
     committed = two_layout_active_snapshot()
-    apply(fixture_root, committed)
+    if multi_resource:
+        from repocache.server_fixture_multi_resource_wal_v1 import (
+            _commit_fixture_multi_resource_under_root as commit_multi,
+        )
+        catalog = json.dumps({
+            "schema_version": 1,
+            "status": "fixture-only-observed-candidate",
+            "active_ids": ["almalinux-baseos", "debian-trixie-main"],
+        }, sort_keys=True, separators=(",", ":")).encode("ascii")
+        result = commit_multi(
+            fd, committed, owner_uid=uid, expected_generation=0,
+            include_bytes=b"# private HTTPS fixture generation\n",
+            catalog_bytes=catalog,
+        )
+        assert result["status"] == "COMMITTED_INERT_FIXTURE_MULTI_RESOURCE"
+    else:
+        apply(fixture_root, committed)
     raw = (folder / V2_STATE).read_bytes()
-    candidate = persisted_render(fixture_root)
-    dump = (candidate["http_upstream_fragment"]
-            + candidate["server_location_fragment"])
+    document = json.loads(base64.b64decode(committed["configuration_base64"]))
+    full = render_repository_https_server_candidate(
+        document, expected_state_generation=1,
+        candidate_pins_by_repository=pinned_two_layouts(),
+        ca_bundle_path="/etc/ssl/certs/ca-certificates.crt",
+    )
+    assert full["authorizes_catalog_publication"] is False
+    # This is still a caller-supplied nginx -T test string, never an actual
+    # executed syntax check, TLS handshake or installed-root attestation.
+    dump = (
+        "pid /tmp/nginx.pid;\nevents { worker_connections 64; }\n"
+        "http {\n" + full["http_context_fragment"]
+        + full["server_block_fragment"] + "}\n"
+    )
     arguments = {
         "owner_uid": uid,
         "expected_generation": 1,
@@ -3979,7 +4009,8 @@ def test_locked_v2_catalog_binding_deterministic_and_no_publication(fixture_root
     first = inspect(fd, **kwargs)
     second = inspect(fd, **kwargs)
     assert first == second
-    assert first["status"] == "LOCKED_V2_INERT_CATALOG_BINDING_ONLY"
+    assert first["status"] == "LOCKED_V2_INERT_HTTPS_CATALOG_BINDING_ONLY"
+    assert first["untrusted_dump_matches_exact_https_server_context_only"] is True
     assert first["canonical_state_and_render_consistent_under_one_lock"] is True
     assert first["untrusted_dump_matches_inert_render_structure_only"] is True
     assert first["proposed_active_ids"] == [
@@ -4011,6 +4042,9 @@ def test_locked_v2_catalog_binding_deterministic_and_no_publication(fixture_root
     ("double_fragment", "NGINX_DUMP_MISMATCH"),
     ("foreign_route", "NGINX_DUMP_MISMATCH"),
     ("incomplete_pins", "NGINX_RENDER_INVALID"),
+    ("route_only", "NGINX_DUMP_MISMATCH"),
+    ("tls_drift", "NGINX_DUMP_MISMATCH"),
+    ("listener_drift", "NGINX_DUMP_MISMATCH"),
 ])
 def test_locked_v2_catalog_binding_denies_foreign_or_stale_input(
     fixture_root, bad, code,
@@ -4041,6 +4075,20 @@ def test_locked_v2_catalog_binding_denies_foreign_or_stale_input(
         opts["candidate_pins_by_repository"] = {
             "debian-trixie-main": pinned_two_layouts()["debian-trixie-main"],
         }
+    elif bad == "route_only":
+        candidate = persisted_render(fixture_root)
+        opts["untrusted_nginx_dump"] = (
+            candidate["http_upstream_fragment"]
+            + candidate["server_location_fragment"]
+        )
+    elif bad == "tls_drift":
+        opts["untrusted_nginx_dump"] = opts["untrusted_nginx_dump"].replace(
+            "ssl_certificate ", "ssl_certificate /untrusted-prefix/", 1,
+        )
+    elif bad == "listener_drift":
+        opts["untrusted_nginx_dump"] = opts["untrusted_nginx_dump"].replace(
+            "server_name ", "server_name foreign-", 1,
+        )
     with pytest.raises(LockedV2CatalogBindingError, match=code):
         inspect(fd, **opts)
     assert (folder / V2_STATE).read_bytes() == before
@@ -4105,3 +4153,53 @@ def test_locked_v2_catalog_binding_refuses_actual_namespace_root_fd():
             )
     finally:
         os.close(fd)
+
+
+
+def test_locked_v2_https_catalog_accepts_only_complete_owned_multi_resource_manifest(
+    fixture_root,
+):
+    from repocache.server_proposed_v2_locked_catalog_binding_v1 import (
+        LockedV2CatalogBindingError,
+    )
+    from repocache.server_fixture_multi_resource_wal_v1 import MANIFEST
+    fd, folder, raw, kwargs, inspect = _locked_catalog_binding_case(
+        fixture_root, multi_resource=True,
+    )
+    before = (folder / MANIFEST).read_bytes()
+    report = inspect(fd, **kwargs)
+    assert report["status"] == "LOCKED_V2_INERT_HTTPS_CATALOG_BINDING_ONLY"
+    assert report["untrusted_dump_matches_exact_https_server_context_only"]
+    assert report["candidate_catalog"]["schema"] == 1
+    assert len(report["candidate_catalog"]["repositories"]) == 2
+    assert report["authorizes_catalog_publication"] is False
+    assert (folder / MANIFEST).read_bytes() == before
+    assert (folder / V2_STATE).read_bytes() == raw
+
+    # A stale/fabricated manifest must never upgrade caller-supplied
+    # 'nginx -T' text into a trusted catalogue even when state SHA matches.
+    marker = folder / MANIFEST
+    marker.write_bytes(b"untrusted-owner-marker")
+    with pytest.raises(LockedV2CatalogBindingError,
+                       match="PROTECTED_STATE_UNVERIFIED"):
+        inspect(fd, **kwargs)
+    assert (folder / V2_STATE).read_bytes() == raw
+
+
+def test_locked_v2_https_catalog_refuses_multi_resource_pending_wal(
+    fixture_root,
+):
+    from repocache.server_proposed_v2_locked_catalog_binding_v1 import (
+        LockedV2CatalogBindingError,
+    )
+    from repocache.server_fixture_multi_resource_wal_v1 import JOURNAL_TMP
+    fd, folder, raw, kwargs, inspect = _locked_catalog_binding_case(
+        fixture_root, multi_resource=True,
+    )
+    pending = folder / JOURNAL_TMP
+    pending.write_bytes(b"unpublished-private-transaction")
+    pending.chmod(0o600)
+    with pytest.raises(LockedV2CatalogBindingError):
+        inspect(fd, **kwargs)
+    assert pending.read_bytes() == b"unpublished-private-transaction"
+    assert (folder / V2_STATE).read_bytes() == raw

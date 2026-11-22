@@ -1,6 +1,8 @@
 """Native inode-backed per-repository cache retention and refusal regressions."""
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -13,6 +15,17 @@ from repocache.server_native_storage_bootstrap_v1 import (
 from repocache.server_native_repository_cache_v1 import (
     RepositoryCacheBootstrapError,
     bootstrap_repository_cache_under_root,
+    preview_locked_active_repository_cache_roots_under_root,
+)
+from repocache.server_fixture_multi_resource_wal_v1 import (
+    _commit_fixture_multi_resource_under_root as commit_multi,
+    JOURNAL_TMP,
+)
+from repocache.server_proposed_state_v2_store import V2_STATE
+from repocache.server_protected_state_store_v1 import LOCK_NAME
+from repocache.server_repository_plan_v1 import _canonical_identity
+from repocache.server_repository_v2_transition_v1 import (
+    plan_repository_v2_transition,
 )
 
 RID = "debian-trixie-main"
@@ -229,3 +242,269 @@ def test_unknown_or_replaced_cache_root_owner_marker_is_not_adopted(fixture_root
     directory, marker = locations(root)
     assert not directory.exists()
     assert not marker.exists()
+
+
+def _v2_fixture_bytes(value):
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ).encode("ascii")
+
+
+def _v2_state_fixture():
+    sample = Path(__file__).resolve().parents[1] / "docs/examples/server-install-v1.json"
+    from repocache.server_install_v1 import validate_install_document
+    config = json.loads(sample.read_text(encoding="utf-8"))
+    config["repositories"][1]["id"] = "almalinux-baseos"
+    config["expected_state_generation"] = 1
+    config = validate_install_document(config, for_apply=True)
+    content = _v2_fixture_bytes(config)
+    digest = hashlib.sha256(content).hexdigest()
+    records = [{
+        "id": repo["id"],
+        "canonical_identity_sha256": hashlib.sha256(
+            _canonical_identity(repo).encode("utf-8"),
+        ).hexdigest(),
+        "desired_state": repo["desired_state"],
+        "observed_state": "not-activated",
+    } for repo in config["repositories"]]
+    return {
+        "state_schema_version": 2,
+        "state_generation": 1,
+        "configuration_base64": base64.b64encode(content).decode("ascii"),
+        "configuration_sha256": digest,
+        "repository_records": records,
+        "id_reservations": [{
+            "id": row["id"],
+            "canonical_identity_sha256": row["canonical_identity_sha256"],
+            "status": "allocated",
+        } for row in records],
+        "approval_reference": {
+            "source": "operator",
+            "decision_sha256": "a" * 64,
+            "configuration_sha256": digest,
+            "expected_generation": 0,
+        },
+    }
+
+
+@pytest.fixture
+def active_cache_state(fixture_root):
+    root, fd, uid, gid = fixture_root
+    for path in ("var/lib", "var/lib/repocache", "var/lib/repocache/server"):
+        (root / path).mkdir(mode=0o700)
+    target = root / "var/lib/repocache/server"
+    lock = target / LOCK_NAME
+    lock.write_bytes(b"")
+    lock.chmod(0o600)
+    initial = _v2_state_fixture()
+    result = commit_multi(
+        fd, initial, owner_uid=uid, expected_generation=0,
+        include_bytes=b"# no active fixture routes\n",
+        catalog_bytes=_v2_fixture_bytes({
+            "schema_version": 1,
+            "status": "fixture-only-observed-candidate",
+            "active_ids": [],
+        }),
+    )
+    assert result["state_generation"] == 1
+    return fixture_root, initial, target
+
+
+def _v2_active_preview(active_cache_state, *, generation=None, digest=None):
+    (root, fd, uid, gid), state, target = active_cache_state
+    if generation is None:
+        generation = state["state_generation"]
+    if digest is None:
+        digest = hashlib.sha256((target / V2_STATE).read_bytes()).hexdigest()
+    return preview_locked_active_repository_cache_roots_under_root(
+        fd, root_uid=uid, cache_uid=uid, cache_gid=gid,
+        expected_state_generation=generation,
+        expected_state_sha256=digest,
+    )
+
+
+def _next_active_v2(active_cache_state, *, generation, operation, rid=RID):
+    fixture, previous, target = active_cache_state
+    _, fd, uid, gid = fixture
+    previous_digest = hashlib.sha256((target / V2_STATE).read_bytes()).hexdigest()
+    plan = plan_repository_v2_transition(
+        previous, expected_generation=generation,
+        expected_previous_state_sha256=previous_digest,
+        operation=operation, repository_id=rid,
+        decision_sha256="b" * 64,
+    )
+    next_state = plan["proposed_snapshot"]
+    active_ids = sorted(x["id"] for x in next_state["repository_records"]
+                        if x["desired_state"] == "active")
+    result = commit_multi(
+        fd, next_state, owner_uid=uid,
+        expected_generation=generation,
+        expected_previous_state_sha256=previous_digest,
+        include_bytes=("# fixture generation " + str(generation + 1) + "\n").encode(),
+        catalog_bytes=_v2_fixture_bytes({
+            "schema_version": 1,
+            "status": "fixture-only-observed-candidate",
+            "active_ids": active_ids,
+        }),
+    )
+    assert result["state_generation"] == generation + 1
+    return fixture, next_state, target
+
+
+def test_locked_active_cache_roots_refuse_missing_marker_before_exposure(
+    active_cache_state,
+):
+    original = _v2_active_preview(active_cache_state)
+    assert original["active_repository_count"] == 0
+    fixture, state, target = _next_active_v2(
+        active_cache_state, generation=1, operation="enable",
+    )
+    current = (fixture, state, target)
+    with pytest.raises(RepositoryCacheBootstrapError,
+                       match="ACTIVE_REPOSITORY_CACHE_UNOWNED"):
+        _v2_active_preview(current)
+    assert operate(fixture)["directory_created"] is True
+    verified = _v2_active_preview(current)
+    assert verified["status"] == "FIXTURE_ACTIVE_REPOSITORY_CACHE_ROOTS_ONLY"
+    assert verified["state_generation"] == 2
+    assert verified["desired_active_repository_ids"] == [RID]
+    assert verified["active_repository_count"] == 1
+    assert verified["all_active_cache_root_markers_verified"] is True
+    assert verified["complete_fixture_state_and_catalog_owned"] is True
+    for k,v in verified.items():
+        if k.startswith("authorizes_") or k.endswith("_verified") and (
+            k not in ("all_active_cache_root_markers_verified",)
+        ):
+            assert v is False
+
+
+def test_locked_active_cache_refuses_second_missing_repository_then_recovers(
+    active_cache_state,
+):
+    fixture, previous, target = _next_active_v2(
+        active_cache_state, generation=1, operation="enable",
+    )
+    first = (fixture, previous, target)
+    operate(fixture)
+    second_fixture, second_state, second_target = _next_active_v2(
+        first, generation=2, operation="enable", rid="almalinux-baseos",
+    )
+    together = (second_fixture, second_state, second_target)
+    with pytest.raises(RepositoryCacheBootstrapError,
+                       match="ACTIVE_REPOSITORY_CACHE_UNOWNED"):
+        _v2_active_preview(together)
+    assert operate(fixture, "almalinux-baseos")["directory_created"]
+    report = _v2_active_preview(together)
+    assert report["desired_active_repository_ids"] == [
+        "almalinux-baseos", RID,
+    ]
+
+
+def test_locked_active_cache_default_removal_leaves_cache_inode_and_bytes(
+    active_cache_state,
+):
+    fixture, enabled, target = _next_active_v2(
+        active_cache_state, generation=1, operation="enable",
+    )
+    active = (fixture, enabled, target)
+    operate(fixture)
+    directory, marker = locations(fixture[0])
+    cached = directory / "package-payload"
+    cached.write_bytes(b"retained-signed-artifact")
+    before = cached.stat().st_ino
+    assert _v2_active_preview(active)["active_repository_count"] == 1
+    _, disabled, target = _next_active_v2(
+        active, generation=2, operation="disable",
+    )
+    _, removed, target = _next_active_v2(
+        (fixture, disabled, target), generation=3, operation="remove",
+    )
+    report = _v2_active_preview((fixture, removed, target))
+    assert report["desired_active_repository_ids"] == []
+    assert report["active_repository_count"] == 0
+    assert cached.read_bytes() == b"retained-signed-artifact"
+    assert cached.stat().st_ino == before
+    assert marker.is_file()
+
+
+def test_active_cache_owner_marker_and_symlink_refused_without_mutation(
+    active_cache_state, tmp_path,
+):
+    fixture, state, target = _next_active_v2(
+        active_cache_state, generation=1, operation="enable",
+    )
+    current = (fixture, state, target)
+    operate(fixture)
+    directory, marker = locations(fixture[0])
+    marker.write_bytes(b"forged-owner")
+    with pytest.raises(RepositoryCacheBootstrapError):
+        _v2_active_preview(current)
+    assert directory.is_dir()
+
+    # An attacker cannot substitute a different cache directory via symlink.
+    # The root-level marker is now deliberately untrusted; that never
+    # authorizes adopt/delete of the symlink or of a foreign target.
+    outside = tmp_path / "unrelated"
+    outside.mkdir()
+    directory.rename(directory.with_name("original-cache"))
+    directory.symlink_to(outside)
+    with pytest.raises(RepositoryCacheBootstrapError):
+        _v2_active_preview(current)
+    assert outside.is_dir()
+
+
+def test_active_cache_cas_and_pending_multi_journal_refused(active_cache_state):
+    fixture, state, target = _next_active_v2(
+        active_cache_state, generation=1, operation="enable",
+    )
+    operate(fixture)
+    current = (fixture, state, target)
+    with pytest.raises(RepositoryCacheBootstrapError, match="ACTIVE_STATE_CHANGED"):
+        _v2_active_preview(current, digest="0" * 64)
+    with pytest.raises(RepositoryCacheBootstrapError, match="ACTIVE_STATE_CHANGED"):
+        _v2_active_preview(current, generation=1)
+    wal_tmp = target / JOURNAL_TMP
+    wal_tmp.write_bytes(b"unpublished-multi-WAL")
+    wal_tmp.chmod(0o600)
+    with pytest.raises(RepositoryCacheBootstrapError,
+                       match="ACTIVE_OWNERSHIP_UNVERIFIED"):
+        _v2_active_preview(current)
+    assert wal_tmp.read_bytes() == b"unpublished-multi-WAL"
+
+
+def test_active_cache_live_root_refused_before_state_lock(monkeypatch):
+    from repocache import server_native_repository_cache_v1 as module
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("no state lock on installed host")
+    monkeypatch.setattr(module, "_locked", forbidden)
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        with pytest.raises(RepositoryCacheBootstrapError,
+                           match="ACTIVE_LIVE_ROOT_REFUSED"):
+            preview_locked_active_repository_cache_roots_under_root(
+                fd, root_uid=os.geteuid(), cache_uid=os.geteuid(),
+                cache_gid=os.getegid(), expected_state_generation=1,
+                expected_state_sha256="a" * 64,
+            )
+    finally:
+        os.close(fd)
+
+
+def test_active_cache_does_not_write_reconfigure_or_delete( monkeypatch,
+    active_cache_state,
+):
+    import socket
+    import subprocess
+    fixture, state, target = _next_active_v2(
+        active_cache_state, generation=1, operation="enable",
+    )
+    operate(fixture)
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("active cache inspection is read-only")
+    monkeypatch.setattr(os, "replace", forbidden)
+    monkeypatch.setattr(os, "unlink", forbidden)
+    monkeypatch.setattr(socket, "create_connection", forbidden)
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    assert _v2_active_preview((fixture, state, target))[
+        "all_active_cache_root_markers_verified"
+    ] is True
