@@ -70,8 +70,15 @@ def native_guard(platform: str) -> None:
 
 def main(platform: str) -> None:
     native_guard(platform)
-    nginx, openssl = shutil.which("nginx"), shutil.which("openssl")
-    require(bool(nginx and openssl), "stock NGINX and OpenSSL available")
+    # On Debian 13 the stock nginx binary lives in /usr/sbin, which is not
+    # necessarily included in the non-root SSH guest PATH. Use the distro's
+    # fixed packaged executable paths, never a caller-controlled PATH.
+    nginx, openssl = "/usr/sbin/nginx", "/usr/bin/openssl"
+    require(
+        all(Path(binary).is_file() and os.access(binary, os.X_OK)
+            for binary in (nginx, openssl)),
+        "fixed stock NGINX and OpenSSL executables available",
+    )
     with tempfile.TemporaryDirectory(prefix="repocache-p02-vm-cache-") as temp:
         root = Path(temp)
         check_candidate_syntax(root, nginx)
