@@ -10,6 +10,8 @@ import argparse
 import importlib.util
 import json
 import tomllib
+
+import pytest
 from pathlib import Path
 
 from typer.main import get_command
@@ -158,6 +160,95 @@ def test_managed_reload_has_no_direct_command_fallback(monkeypatch):
     result = runner.invoke(cli.app, ["service", "reload", "--yes"])
     assert result.exit_code == 1
     assert "DO_NOT_PRINT_PRIVATE_DETAIL" not in result.output
+
+
+def test_native_deployment_rollback_is_only_authorized_fixed_recovery(monkeypatch):
+    from repocache import server_native_root_control_client_v1 as broker
+
+    operations = []
+    monkeypatch.setattr(
+        cli, "command", lambda *_a, **_kw: pytest.fail("direct command fallback"),
+    )
+    monkeypatch.setattr(
+        broker, "request_native_fixed_v2",
+        lambda op: operations.append(op)
+        or {"status": "RECOVERED", "transaction_completed": True},
+    )
+    runner = CliRunner()
+    for argv in (
+        ["deployment", "rollback"],
+        ["--json", "deployment", "rollback"],
+        ["deployment", "rollback", "--json"],
+    ):
+        result = runner.invoke(cli.app, argv)
+        assert result.exit_code == 2, (argv, result.output)
+        if "--json" in argv:
+            assert json.loads(result.stdout)["error"]["code"] == (
+                "ACKNOWLEDGEMENT_REQUIRED"
+            )
+    assert operations == []
+
+    for argv in (
+        ["deployment", "rollback", "--yes", "--json"],
+        ["--json", "deployment", "rollback", "--yes"],
+    ):
+        result = runner.invoke(cli.app, argv)
+        assert result.exit_code == 0, (argv, result.output)
+        report = json.loads(result.stdout)
+        assert report["schema_version"] == 1 and report["ok"] is True
+        assert report["native_operation"] == "RECOVER_V2"
+        assert report["pending_transaction_recovered"] is True
+        assert report["reverts_completed_release"] is False
+        assert report["authorizes_native_package_replay"] is False
+    assert operations == ["RECOVER_V2"] * 2
+
+    monkeypatch.setattr(
+        broker, "request_native_fixed_v2",
+        lambda op: operations.append(op)
+        or {"status": "CLEAN", "transaction_completed": True},
+    )
+    clean = runner.invoke(
+        cli.app, ["deployment", "rollback", "--yes", "--json"],
+    )
+    assert clean.exit_code == 0, clean.output
+    assert json.loads(clean.stdout)["pending_transaction_recovered"] is False
+    assert operations[-1] == "RECOVER_V2"
+
+
+def test_native_deployment_rollback_never_retries_or_exposes_errors(monkeypatch):
+    from repocache import server_native_root_control_client_v1 as broker
+    calls = []
+
+    def refused(operation):
+        calls.append(operation)
+        raise broker.NativeRootControlClientError("SECRET_INTERNAL_PATH_OR_TOKEN")
+
+    monkeypatch.setattr(broker, "request_native_fixed_v2", refused)
+    monkeypatch.setattr(
+        cli, "command", lambda *_a, **_kw: pytest.fail("direct command fallback"),
+    )
+    for argv in (
+        ["deployment", "rollback", "--yes", "--json"],
+        ["--json", "deployment", "rollback", "--yes"],
+    ):
+        result = CliRunner().invoke(cli.app, argv)
+        assert result.exit_code == 1, result.output
+        body = json.loads(result.stdout)
+        assert body["error"]["code"] == "NATIVE_RECOVERY_UNCONFIRMED"
+        assert "SECRET_INTERNAL_PATH_OR_TOKEN" not in result.output
+    assert calls == ["RECOVER_V2", "RECOVER_V2"]
+
+    monkeypatch.setattr(
+        broker, "request_native_fixed_v2",
+        lambda op: {"status": "APPLIED", "transaction_completed": True},
+    )
+    malformed = CliRunner().invoke(
+        cli.app, ["deployment", "rollback", "--yes", "--json"],
+    )
+    assert malformed.exit_code == 1, malformed.output
+    assert json.loads(malformed.stdout)["error"]["code"] == (
+        "NATIVE_RECOVERY_UNCONFIRMED"
+    )
 
 
 def test_operator_owned_reload_retains_validate_then_reload_order(monkeypatch):

@@ -15,6 +15,7 @@
     "dashboard",
     "deployment",
     "deployment preflight",
+    "deployment rollback",
     "health",
     "log",
     "log follow",

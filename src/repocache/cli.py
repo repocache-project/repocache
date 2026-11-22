@@ -72,7 +72,7 @@ logs_app = typer.Typer(help="Read and follow logs", no_args_is_help=True)
 service_app = typer.Typer(help="NGINX status and safe operations", no_args_is_help=True)
 update_app = typer.Typer(help="Discover trusted GitHub Releases and manage server upgrades", no_args_is_help=False)
 config_app = typer.Typer(help="Configuration checks and discovery", no_args_is_help=True)
-deployment_app = typer.Typer(help="Read-only native deployment diagnostics", no_args_is_help=True)
+deployment_app = typer.Typer(help="Native deployment diagnostics and controlled recovery", no_args_is_help=True)
 catalog_app = typer.Typer(help="Explicitly approved read-only repository catalog", no_args_is_help=True)
 app.add_typer(repos_app, name="repos")
 app.add_typer(repos_app, name="repo", hidden=True)
@@ -629,6 +629,65 @@ def deployment_preflight(
             )
         typer.echo(f"ERROR [PREFLIGHT_NOT_READY]: {message}", err=True)
     raise typer.Exit(1)
+
+
+@deployment_app.command("rollback")
+def deployment_rollback(
+    ctx: typer.Context,
+    yes: bool = typer.Option(
+        False, "--yes", help="Explicit non-interactive recovery acknowledgement",
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="One bounded v1 JSON result",
+    ),
+) -> None:
+    """Recover only an interrupted native v2 WAL; never revert a released version.
+
+    This delegates one fixed RECOVER_V2 request to the OS-authorized,
+    root-owned socket. It has no direct service/NGINX/FS fallback, never
+    retries a transport-unknown outcome, and cannot repair APT/DNF effects.
+    """
+    if not yes:
+        _cli_error(
+            ctx, "ACKNOWLEDGEMENT_REQUIRED",
+            "Native recovery requires explicit --yes; no changes made.",
+            status=2, local_json=json_output,
+        )
+    try:
+        from repocache.server_native_root_control_client_v1 import (
+            request_native_fixed_v2,
+        )
+        response = request_native_fixed_v2("RECOVER_V2")
+    except (ImportError, OSError, ValueError):
+        _cli_error(
+            ctx, "NATIVE_RECOVERY_UNCONFIRMED",
+            "Native recovery was refused or its outcome could not be confirmed; "
+            "inspect the protected state before retrying.",
+            status=1, local_json=json_output,
+        )
+    if (type(response) is not dict
+            or response.get("status") not in ("CLEAN", "RECOVERED")
+            or response.get("transaction_completed") is not True):
+        _cli_error(
+            ctx, "NATIVE_RECOVERY_UNCONFIRMED",
+            "Native recovery outcome could not be confirmed.",
+            status=1, local_json=json_output,
+        )
+    report = {
+        "kind": "repocache.server.native-recovery",
+        "status": response["status"],
+        "native_operation": "RECOVER_V2",
+        "transaction_completed": True,
+        "pending_transaction_recovered": response["status"] == "RECOVERED",
+        "reverts_completed_release": False,
+        "authorizes_native_package_replay": False,
+    }
+    if _json_enabled(ctx, json_output):
+        emit_json(report)
+    elif response["status"] == "CLEAN":
+        console.print("Native v2 state is clean; no recovery was necessary.")
+    else:
+        console.print("Interrupted native v2 transaction recovered.")
 
 
 @config_app.command("show")

@@ -329,6 +329,32 @@ Unreadable/invalid JSON fails before host probing with exit status **2**.
 The original #26 missing-native-package outcome remains dependent on #27;
 the library and CLI are not a complete installer readiness certificate.
 
+**Explicit native v2 journal recovery (#31, OS-authorized):**
+
+```console
+repocache deployment rollback --yes
+repocache deployment rollback --yes --json
+```
+
+The implemented `deployment rollback` action is **limited to a pending, journaled
+native v2 transaction**; it does not roll back a completed release, undo a
+native APT/DNF package-manager transaction or choose an old state generation.
+It only sends the existing fixed `RECOVER_V2` request over the root-owned
+AF_UNIX socket. The kernel-enforced administrative socket permissions and
+installed signed worker are required independently of `--yes`, which only
+acknowledges intent. Without it the command exits 2 without any request.
+A confirmed recovered journal or already clean state exits 0. Unavailable
+socket, refusal or ambiguous lost response returns a redacted bounded error,
+exit 1, and **never** invokes direct systemctl, replays APT/DNF, guesses
+rollback success or retries automatically. Both root-level and local
+`--json` forms return a single version-1 JSON result. Genuine v0.6
+package-effects reconciliation remains a separately reviewed operator
+operation; no untrusted or remote source can authorize recovery.
+
+The independent `deployment install` and full deployment verification
+commands remain planned, and this limited recovery action is not a claim of
+complete public server provisioning or publisher-signed release acceptance.
+
 ### 4.5 Configuration, provisioning, application updates
 
 Three different change scopes:
