@@ -118,7 +118,7 @@ prepare_pinned_synthetic_source() {
   stage=pinned-pr249-synthetic-candidate
   # This combines already-reviewed source only in a local throwaway worktree.
   # It never fetches publisher keys or modifies the #249 PR/branch.
-  PR249_SHA=fba69bc8baad0dc6b5d6be7d59812572928f5efa
+  PR249_SHA=0ca54da8dc5d73b2df892ecf8551110c36340794
   git fetch --no-tags origin +refs/heads/fix/76-repository-transfer-v06-candidate-20261107:refs/remotes/origin/pr249
   test "$(git rev-parse refs/remotes/origin/pr249)" = "$PR249_SHA"
   git worktree add --detach "$tmp/combined-source" "$sha" >/dev/null
