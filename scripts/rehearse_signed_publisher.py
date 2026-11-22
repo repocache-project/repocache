@@ -83,7 +83,7 @@ def main(output: Path) -> None:
         p_spec.loader.exec_module(provenance)
         tag = "v" + version
         workflow_ref = (
-            "teixemf/repocache/.github/workflows/release.yml@refs/tags/" + tag)
+            "repocache-project/repocache/.github/workflows/release.yml@refs/tags/" + tag)
         doc = provenance.make_document(
             archive, "ci-ephemeral-publisher", "a" * 40, tag,
             workflow_ref, "12345", "1", ROOT)

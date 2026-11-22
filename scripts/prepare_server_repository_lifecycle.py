@@ -213,6 +213,7 @@ def prepare_offline_lifecycle(
     expected_state_sha256: str,
     decision_sha256: str,
     dry_run: bool = False,
+    expected_proposed_state_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Write a canonical exact next snapshot for separately approved staging."""
     if (type(expected_generation) is not int or expected_generation < 1
@@ -220,7 +221,9 @@ def prepare_offline_lifecycle(
             or not _sha(decision_sha256)
             or type(dry_run) is not bool
             or (dry_run and output is not None)
-            or (not dry_run and not isinstance(output, Path))):
+            or (not dry_run and not isinstance(output, Path))
+            or (expected_proposed_state_sha256 is not None
+                and (dry_run or not _sha(expected_proposed_state_sha256)))):
         _deny()
     old = _read_owned(previous, _MAX_PREVIOUS)
     if hashlib.sha256(old).hexdigest() != expected_state_sha256:
@@ -243,7 +246,9 @@ def prepare_offline_lifecycle(
         _deny()
     reviewed = _review_outcomes(candidate)
     if candidate["changed"] is False:
-        if candidate["envelope_bytes"] is not None:
+        # A reviewed changed generation must not degrade to a silent no-op.
+        if (candidate["envelope_bytes"] is not None
+                or expected_proposed_state_sha256 is not None):
             _deny()
         return {
             "status": "OFFLINE_LIFECYCLE_NO_CHANGE",
@@ -263,6 +268,12 @@ def prepare_offline_lifecycle(
             or hashlib.sha256(next_state).hexdigest()
                != envelope["next_state_sha256"]):
         _deny()
+    # Optionally bind the create-only operation to the SHA displayed by a
+    # previous read-only review, without making the review an approval token.
+    next_digest = hashlib.sha256(next_state).hexdigest()
+    if (expected_proposed_state_sha256 is not None
+            and next_digest != expected_proposed_state_sha256):
+        _deny()
     if not dry_run:
         _atomic_create(output, next_state)
     return {
@@ -270,7 +281,10 @@ def prepare_offline_lifecycle(
                    else "OFFLINE_LIFECYCLE_PROPOSAL_PREPARED"),
         "changed": True,
         "state_generation": expected_generation + 1,
-        "proposed_state_sha256": hashlib.sha256(next_state).hexdigest(),
+        "proposed_state_sha256": next_digest,
+        "review_digest_precondition_checked": (
+            expected_proposed_state_sha256 is not None
+        ),
         "expected_state_sha256": expected_state_sha256,
         "requires_operator_review": True,
         "authorizes_service_activation": False,
@@ -289,6 +303,9 @@ def main() -> int:
     parser.add_argument("--expected-generation", required=True, type=int)
     parser.add_argument("--expected-state-sha256", required=True)
     parser.add_argument("--decision-sha256", required=True)
+    parser.add_argument("--expected-proposed-state-sha256",
+                        help="Optional exact SHA from prior --dry-run review; "
+                             "refuse changed candidates before file creation")
     args = parser.parse_args()
     try:
         result = prepare_offline_lifecycle(
@@ -297,6 +314,9 @@ def main() -> int:
             expected_state_sha256=args.expected_state_sha256,
             decision_sha256=args.decision_sha256,
             dry_run=args.dry_run,
+            expected_proposed_state_sha256=(
+                args.expected_proposed_state_sha256
+            ),
         )
     except (OfflineLifecycleError, OSError, ValueError, TypeError,
             OverflowError, RecursionError, UnicodeError):

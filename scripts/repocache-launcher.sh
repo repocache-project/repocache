@@ -11,10 +11,22 @@ if [ -e "$BASE/.migration-v030.json" ] || [ -L "$BASE/.migration-v030.json" ]; t
 fi
 
 uid=$(/usr/bin/id -u)
+account=$(/usr/bin/getent passwd repocache) || exit 77
+IFS=: read -r account_name password service_uid service_gid gecos service_home login_shell <<EOF
+$account
+EOF
+if [ "$account_name" != repocache ] || [ "$service_uid" = 0 ] || [ "$service_gid" = 0 ]; then
+    echo 'REPOCACHE service identity is unsafe.' >&2
+    exit 77
+fi
+case "$service_home" in
+    /var/lib/repocache|/var/lib/repocache-runtime) ;;
+    *) echo 'REPOCACHE service home is unsupported.' >&2; exit 77 ;;
+esac
 if [ "$uid" -eq 0 ]; then
     # Do not execute the managed package as root.
     exec /usr/sbin/runuser -u repocache -- /usr/bin/env -i \
-        HOME=/var/lib/repocache PATH=/usr/local/bin:/usr/bin:/bin \
+        HOME="$service_home" PATH=/usr/local/bin:/usr/bin:/bin \
         LANG=C.UTF-8 PYTHONNOUSERSITE=1 PYTHONSAFEPATH=1 \
         /usr/local/bin/repocache "$@"
 fi
@@ -26,7 +38,7 @@ fi
 
 # Invoke only the separately installed, root-owned recovery coordinator.
 # Fail closed if recovery is not possible.
-if ! /usr/bin/env -i HOME=/var/lib/repocache \
+if ! /usr/bin/env -i HOME="$service_home" \
         PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 \
         PYTHONNOUSERSITE=1 PYTHONSAFEPATH=1 \
         /usr/bin/python3 -I /usr/local/libexec/repocache-recover.py >/dev/null; then
@@ -34,7 +46,7 @@ if ! /usr/bin/env -i HOME=/var/lib/repocache \
     exit 70
 fi
 
-exec /usr/bin/env -i HOME=/var/lib/repocache \
+exec /usr/bin/env -i HOME="$service_home" \
     PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 \
     PYTHONNOUSERSITE=1 PYTHONSAFEPATH=1 \
     /opt/repocache-cli/managed/current/bin/repocache "$@"
