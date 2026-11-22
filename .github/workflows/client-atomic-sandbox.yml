@@ -2,6 +2,28 @@ name: Client Atomic Sandbox Native
 
 on:
   pull_request:
+    # Optional component smoke tests; the protected nine required checks stay unfiltered.
+    paths:
+      - '.github/workflows/client-*.yml'
+      - '.github/workflows/tests.yml'
+      - '.github/workflows/offline-wheelhouse.yml'
+      - '.github/workflows/upgrade-distros.yml'
+      - 'client/**'
+      - 'src/repocache/cli.py'
+      - 'src/repocache/core.py'
+      - 'src/repocache/catalog.py'
+      - 'src/repocache/upgrade.py'
+      - 'src/repocache/updater.py'
+      - 'src/repocache/submission*.py'
+      - 'scripts/*client*'
+      - 'scripts/smoke_upgrade_distros.sh'
+      - 'scripts/smoke_release_bundle.sh'
+      - 'scripts/build_release.py'
+      - 'tests/test_client*'
+      - 'tests/test_cli*'
+      - 'tests/conftest.py'
+      - 'pyproject.toml'
+      - 'deps/**'
   workflow_dispatch:
 
 permissions:

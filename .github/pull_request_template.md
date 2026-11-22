@@ -1,92 +1,27 @@
-## Summary
-
-Explain the change and the user-facing impact in English.
-
-## Linked Issue and milestone
-
-Identify a primary **same-repository issue** when one exists. For authorized standalone governance/maintenance work, assign an appropriate existing release milestone explicitly instead of inventing an issue. Conflicting issue milestones require maintainer resolution.
+## Change
 
 Primary issue: #N
+Target milestone / branch:
+**What changed and why?** (2–4 sentences)
+Substantive AI assistance, if any:
 
-Closes #
+## Evidence
 
-## Implementation notes
+- Exact PR HEAD / target base:
+- Relevant acceptance criteria: PASS / FAIL / NOT VERIFIED, with CI/test links (link the existing issue checklist; list only changed or exceptional results):
+- Tests executed beyond required CI, or tests not executed:
+- Native VM / signed-candidate / broader parent-issue criteria still open (if applicable):
 
-Describe design choices, API/CLI compatibility, and any changes to NGINX, repository sources or stored metrics.
+## Risk and recovery
 
-## Acceptance stage and evidence owner (all milestones)
+- Risk: low (docs/test), normal (feature/fix), or high (privileged install, TLS, APT/DNF, signing, recovery, trust boundary).
+- Security/compatibility effect; negative tests if relevant:
+- Rollback / refusal / recovery behaviour if applicable:
 
-Follow [the cross-milestone acceptance stages](https://github.com/repocache-project/repocache/blob/main/docs/ACCEPTANCE_STAGES.md).
-Identify the actual stage of **this PR**, not merely the stage of its parent
-issue or intended release. Every applicable original criterion must PASS in
-the environment required by its approved scope before protected integration.
+## Integration
 
-- [ ] **Stage A — CI implementation:** exact source SHA, native-container and
-      regression/security/failure tests, and any safe non-activating behavior
-      are independently complete. State explicitly if privileged writes or
-      live activation remain unavailable.
-- [ ] **Stage B — booted native acceptance:** completed on the appropriate
-      installed host where applicable, or **NOT VERIFIED** and tracked against
-      the final host-campaign owner. Never label an unexecuted VM test PASS.
-- [ ] **Stage C — review/publisher/owner authority:** applicable independent
-      issue-specific reviews, genuine signing and release operations are
-      completed separately or explicitly remain **NOT VERIFIED**.
-- [ ] The parent issue's still-open requirements and the next implementable
-      CI task are linked; an independently accepted PR does not close them.
-- [ ] If the original issue mandates VM/security review **before any PR merge**,
-      cite an authenticated issue-specific scope decision before excluding
-      that requirement from the bounded Stage-A PR. No silent waiver.
+- Required checks and blocking threads: inspect on the **exact** HEAD/base immediately before merge.
+- Authority: PR #245 standing conditional **versioned-integration** delegation only if all applicable gates PASS; otherwise separate explicit maintainer approval. No automatic main/release merge or publication authority.
+- Link: [staged acceptance](../docs/ACCEPTANCE_STAGES.md) and [default fast path](../docs/DEVELOPMENT_FAST_PATH.md).
 
-**This PR's stage and accepted scope:**
-
-**Parent issue / native final-acceptance owner:**
-
-**Stage-A evidence; Stage-B/C PASS / FAIL / NOT VERIFIED:**
-
-## Verification
-
-- [ ] `PYTHONPATH=src python -m pytest -q` passes.
-- [ ] Tested on supported Python versions or documented what could not be tested.
-- [ ] Release-bundle/installer tests were run where applicable.
-- [ ] English documentation and user-facing text were updated as needed.
-- [ ] PR milestone matches the primary issue's planned release (not an acceptance claim).
-
-**Test evidence:**
-
-## Safety and rollout
-
-- [ ] The default behaviour remains read-only/non-destructive, unless explicitly reviewed.
-- [ ] No tokens, keys, private hostnames, logs or client identifiers are included.
-- [ ] Changes to privileged configuration have a documented rollout and rollback plan, if applicable.
-- [ ] Existing stable commands/JSON consumers remain compatible, or migrations are described.
-
-**Deployment plan:**
-
-**Rollback plan:**
-
-## Acceptance and protected merge (required)
-
-Follow the [effective PR acceptance and review policy](https://github.com/repocache-project/repocache/blob/main/docs/PR_REVIEW_GOVERNANCE.md) from protected `main`. PR #245 adopted optional global reviews and narrowly delegated qualifying versioned-integration merges; protected exceptions still need specific permission.
-
-- [ ] Every applicable primary-issue/PR acceptance criterion is PASS with reproducible executed or reviewed evidence.
-- [ ] Exact PR HEAD, target SHA, ancestry, allowed merge method, issue/milestone routing and all currently required GitHub Actions contexts verified.
-- [ ] Security, compatibility, install, upgrade, rollback and documentation impacts evaluated; mandatory FAIL/NOT VERIFIED gates resolved.
-- [ ] Independently required issue-specific human/security reviews completed, if any; an optional AI assessment is not a human GitHub approval.
-- [ ] Actual submitted human GitHub reviews, unresolved threads, active protection rules and mergeability independently checked.
-- [ ] Record either applicable standing conditional integration authority with exact-SHA PASS evidence or separate maintainer approval for this protected operation.
-
-**Applicable acceptance criterion | PASS / FAIL / NOT VERIFIED | evidence:**
-
-**Optional external technical review (if obtained; reviewer type and scope):**
-
-**Actual submitted human GitHub approvals:**
-
-**Tests executed (run IDs/logs); tests not executed:**
-
-**Security findings and remaining native/release/production gates:**
-
-**Merge basis (conditional integration delegation, trusted specific owner decision, or NOT GRANTED):**
-
-## Reviewer notes
-
-List substantive limitations and genuine maintainer decisions. A clean CI status or completed template alone does not authorize merge. Use conditional delegation only for fully accepted ordinary versioned-integration PRs; otherwise require specific permission.
+The issue checklist is the full acceptance ledger. Do not paste duplicated CI logs or omit a required criterion. A green CI run does not establish native-host, signing or release acceptance.
