@@ -154,8 +154,13 @@ def report(distribution: str) -> None:
                 install_native_root_worker.install_authenticated_native_nginx(
                     assets, doc, digest, **pins,
                 )
-            except ValueError:
-                pass
+            except ValueError as error:
+                # Pin the refusal class: an unrelated IO, signing or root
+                # failure cannot masquerade as successful foreign-state denial.
+                assert str(error) in (
+                    "WORKER_PLACEMENT_NATIVE_PREPACKAGE_BOUNDARY_UNVERIFIED",
+                    "WORKER_PLACEMENT_NATIVE_NGINX_FOREIGN_FOOTPRINT",
+                ), str(error)
             else:
                 raise AssertionError("Foreign NGINX ownership was adopted")
             after_foreign = foreign.lstat()
