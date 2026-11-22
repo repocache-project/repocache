@@ -1,6 +1,6 @@
 # Release acceptance: candidate gates and published smoke
 
-> **Current target alignment (2026-11-02):** The maintainer approved skipping public v0.5.0 and making **v0.6.0 the next public release**, delivering a complete server. All applicable Stage A/Stage B obligations below (with the v0.4.0-to-v0.6.0 in-place upgrade requirement expressly superseded by a clean-install-only v0.6.0 and old-state refusal), including [#76](https://github.com/teixemf/repocache/issues/76), [#88](https://github.com/teixemf/repocache/issues/88), the genuine official Node24 `release.yml` upload/readback gate transferred from #74, and owner-only signing and publication, remain mandatory without waiver. For v0.6.0, test genuine signed **clean installation on both supported OSs**, same-version repair/recovery/rollback and **fail-closed rejection** of legacy/unapproved installation states. Do not claim that v0.4.0-to-v0.6.0 in-place upgrade is supported or required; later releases need their own approved upgrade matrix. Any v0.5.0-specific candidate wording below is historical. The currently approved legacy schema-1/offline-wheelhouse eight-asset profile remains the baseline unless separately changed by reviewed maintainer decision. See [v0.6.0 release target](RELEASE_TARGET_V0.6.0.md). This clarification does not authorize a tag, release dispatch, signing, staging, publication or production activation.
+> **Current target alignment (2026-11-02):** The maintainer approved skipping public v0.5.0 and making **v0.6.0 the next public release**, delivering a complete server. All original Stage A/Stage B obligations below, including [#76](https://github.com/teixemf/repocache/issues/76), [#88](https://github.com/teixemf/repocache/issues/88), the genuine official Node24 `release.yml` upload/readback gate transferred from #74, and owner-only signing and publication, remain mandatory without waiver. Test an actual *public v0.4.0 -> final signed v0.6.0* path; any v0.5.0-specific candidate wording below is historical. The currently approved legacy schema-1/offline-wheelhouse eight-asset profile remains the baseline unless separately changed by reviewed maintainer decision. See [v0.6.0 release target](RELEASE_TARGET_V0.6.0.md). This clarification does not authorize a tag, release dispatch, signing, staging, publication or production activation.
 
 
 This policy applies to subsequent releases. First-public v0.4.0 is special:
@@ -26,8 +26,7 @@ version-specific signed trust/baseline policy (issue #76).
 ## Stage A: release candidate (prepublication, mandatory for v0.5.0 onward)
 
 1. Freeze the reviewed commit, compatibility policy and dependencies. Test
-   the accepted compatibility path: v0.6.0 is clean-install-only with explicit
-   legacy-state refusal; a later version needs an approved prior-public upgrade matrix.
+   an upgrade from the most recent already published stable version.
 2. Produce reproducible candidate source archive and offline wheelhouse.
    Authenticate the exact FINAL candidate with the genuine offline publisher
    signature and an independently provisioned trust anchor, not a disposable
@@ -35,7 +34,7 @@ version-specific signed trust/baseline policy (issue #76).
 3. Before extracting or running candidate code, verify signatures, source
    digest, signed policy, runtime wheelchain hashes, SBOM and lockfile.
 4. On disposable Debian 13 / Python 3.13 and AlmaLinux 10 / Python 3.12
-   systems: clean install, the approved upgrade or legacy-refusal policy for the selected
+   systems: clean install, upgrade from the prior public stable, selected
    version, same-version repair, rootless privileges, journal recovery,
    rollback, concurrency and failure injection. Preserve NGINX/TLS/APT/DNF.
 5. Reject incompatible and unsupported downgrade paths, including all
