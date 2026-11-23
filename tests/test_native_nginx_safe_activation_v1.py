@@ -193,6 +193,45 @@ def test_poststart_failed_enable_stops_own_unit_and_disables(monkeypatch):
     assert state["active"] is False and state["enabled"] is False
 
 
+
+def test_systemctl_start_error_after_service_started_is_compensated(monkeypatch):
+    state = _setup_activation(monkeypatch)
+    def partial_start(action):
+        state["commands"].append(action)
+        if action == "start":
+            state["active"] = True
+            raise stage.WorkerStageError(
+                "WORKER_PLACEMENT_NATIVE_ACTIVATION_COMMAND_FAILED"
+            )
+        if action == "stop":
+            state["active"] = False
+        if action == "disable":
+            state["enabled"] = False
+    monkeypatch.setattr(native, "_nginx_activation_command", partial_start)
+    with pytest.raises(stage.WorkerStageError,
+                       match="NATIVE_ACTIVATION_FAILED_ROLLED_BACK"):
+        native._activate_audited_native_nginx_under_lock(11, "debian")
+    assert state["commands"] == ["start", "stop", "disable"]
+    assert not state["active"] and not state["enabled"]
+
+
+def test_start_error_with_unknown_runtime_does_not_kill_foreign_service(monkeypatch):
+    state = _setup_activation(monkeypatch)
+    def ambiguous_start(action):
+        state["commands"].append(action)
+        if action == "start":
+            state["active"] = True
+            raise stage.WorkerStageError("WORKER_PLACEMENT_START_AMBIGUOUS")
+    monkeypatch.setattr(native, "_nginx_activation_command", ambiguous_start)
+    def foreign(_distribution):
+        raise ValueError("foreign runtime")
+    monkeypatch.setattr(native, "inspect_effective_native_nginx_unit", foreign)
+    with pytest.raises(stage.WorkerStageError,
+                       match="NATIVE_ACTIVATION_RECOVERY_REQUIRED"):
+        native._activate_audited_native_nginx_under_lock(11, "almalinux")
+    assert state["commands"] == ["start"]
+
+
 def test_foreign_replacement_after_start_not_stopped(monkeypatch):
     state = _setup_activation(monkeypatch)
     observed = 0
