@@ -862,7 +862,12 @@ def recover_after_reboot(distribution: str) -> None:
     assert all(owned_identity(path) == previous_workers[str(path)]
                for path in worker_files)
     assert owned_identity(completed_receipt) == receipt_before
-    assert fixed("APPLY_V2")["status"] == "UNCHANGED"
+    # A reviewed generation-three proposal intentionally remains staged
+    # after compensating WAL recovery. Do NOT submit a fresh APPLY_V2 here:
+    # that would be a new administrator instruction to apply that proposal,
+    # not an idempotent reinstall. Prove that worker replacement itself does
+    # not reactivate a recovered transaction.
+    assert fixed("RECOVER_V2")["status"] == "CLEAN"
     assert snapshot() == after
 
     reviewed = FIXTURE / "reviewed-install.json"
@@ -888,7 +893,7 @@ def recover_after_reboot(distribution: str) -> None:
         assert hashlib.sha256(Path(entry["path"]).read_bytes()).hexdigest() == entry["sha256"]
     print(
         "PASS: post-reboot identical worker/units preserved byte/inode/mtime; "
-        "v2 apply unchanged; fresh-only APT/DNF re-entry refused without "
+        "v2 recovery clean without proposal replay; APT/DNF re-entry refused without "
         "native journal or TLS/cache/log/metrics mutation", flush=True,
     )
     command("/usr/bin/systemctl", "stop", "repocache-control.socket")
