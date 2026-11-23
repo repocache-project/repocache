@@ -162,7 +162,7 @@ def main(platform: str) -> None:
             original = conf.read_bytes()
             assert len(warmed) == 4
             try:
-                conf.write_bytes(b"repocache_invalid_candidate on;\\n" + original)
+                conf.write_bytes(b"repocache_invalid_candidate on;\n" + original)
                 invalid = subprocess.run(
                     [nginx, "-t", "-e", str(root / "failed-candidate.log"),
                      "-p", str(root), "-c", str(conf)],
