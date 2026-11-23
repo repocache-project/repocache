@@ -530,6 +530,41 @@ def test_reviewed_proposal_refuses_unreconciled_native_package_effects(filesyste
     assert not include.exists() and not catalog.exists() and not events
 
 
+def test_live_inactive_nginx_refused_before_any_persistent_wal_or_include(
+    filesystem, monkeypatch,
+):
+    # This is an isolated root-FD transaction, not a production service call.
+    # The native package audit has already been exercised separately; test
+    # that a clean but intentionally inactive nginx.service cannot cause
+    # partial v2 state, a WAL or a compensating reload.
+    stage(filesystem, snapshot(count=1))
+    fd, state, include, catalog, events = filesystem
+    proposal = state / _NAME
+    before = proposal.read_bytes()
+
+    monkeypatch.setattr(
+        native, "_require_audited_native_package_for_activation",
+        lambda *_args, **_kwargs: None,
+    )
+    def inactive(_distribution):
+        raise native.NativeV2TransactionError("NGINX_NOT_ACTIVE_BEFORE_WAL")
+    monkeypatch.setattr(native, "_require_active_nginx_before_wal", inactive)
+
+    with pytest.raises(
+        native.NativeV2TransactionError, match="^NGINX_NOT_ACTIVE_BEFORE_WAL$",
+    ):
+        native._operation_under_root(
+            fd, distribution="debian", operation="APPLY_V2", fixture=False,
+        )
+    assert proposal.read_bytes() == before
+    assert not (state / V2_STATE).exists()
+    assert not include.exists() and not catalog.exists()
+    assert not (state / native._MANIFEST).exists()
+    assert_no_pending(filesystem)
+    assert all(not isinstance(event, tuple) or event[0] != "reload"
+               for event in events)
+
+
 def test_first_install_commits_real_three_resource_paths(filesystem, monkeypatch):
     stage(filesystem, snapshot(count=1))
     _fd, state, include, catalog, events = filesystem
