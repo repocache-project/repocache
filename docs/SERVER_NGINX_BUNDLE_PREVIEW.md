@@ -1,29 +1,30 @@
-# Non-activating multi-repository NGINX preview (#28)
+# Stock NGINX multi-repository HTTPS evidence (#28)
 
-The internal function `render_pinned_repository_bundle` composes the existing
-per-repository NGINX pin renderer into one ordered candidate for up to 64
-repositories whose **desired state** is `active`. It is a pure Stage-A
-preview, not a deployed configuration or a public CLI interface.
+The existing `render_repository_nginx_bundle_candidate` and
+`render_repository_https_server_candidate` in
+`server_nginx_repository_bundle_v1.py` already implement strict, inert
+multi-repository candidate assembly. **Do not introduce a second renderer.**
 
-Callers must supply a separate complete, validated candidate address set for
-every active repository. Missing, extra, disabled or unsafe candidate targets
-refuse the **entire** preview. A deployment with no desired-active repositories
-produces empty fragments and cannot implicitly expose a disabled source. Both
-APT and DNF repositories retain independent cache zones and allowlisted HTTPS
-origin verification. The fragments are intended for the managed `http{}`
-and dedicated `server{}` contexts and still require a separately trusted
-TLS listener and ownership-controlled installation.
+This increment adds a focused regression for the existing complete HTTPS
+server composer and runs both that regression and the existing multi-repository
+suite with stock, distribution-packaged NGINX on **Debian 13** and
+**AlmaLinux 10** in disposable CI containers via
+`server-nginx-pins-native.yml`. The additional test composes active APT and
+DNF upstreams with separate pin sets and cache zones, generates a disposable
+self-signed test certificate, checks the complete NGINX HTTPS configuration
+with the *actual* `nginx -t` parser, and refuses unsafe or disabled routes.
+The test never starts/reloads a system-managed service, uses external network
+destinations, or modifies production paths. No actual upstream fetch occurs.
 
-The output does **not** prove current protected state, administrator approval,
-trusted DNS provenance, available native NGINX directives, successful
-`nginx -t`, a safe reload, a reachable route or catalog publication. All
-activation/publication flags are false. Before any native promotion, #31/#64
-must authenticate the source and write authority, stage the complete candidate,
-verify native configuration and reload, confirm exposed routes, and atomically
-publish only successfully active repositories. Failures must preserve or
-restore the last known-good route/catalog generation.
+The generated output is **not** proof of operator approval, authenticated
+DNS inputs, trusted state generation or root-owned NGINX include, live TLS
+hostname trust, successful reload, cache HIT, or atomic catalog publication.
+All authority and live-host evidence fields remain false. Installation
+and activation require independent #31/#64 transaction protections; #19
+collects final booted Debian 13 and enforcing AlmaLinux 10 acceptance.
+Stock NGINX container syntax is useful Stage-A evidence, never a substitute
+for those mandatory host/rollback/security checks.
 
-Run `pytest -q tests/test_server_nginx_bundle_v1.py` to exercise
-composition, privacy, invalid-last-target refusal, zero-route behavior and
-the optional disposable stock-NGINX syntax check. A passing container-based
-`nginx -t` is not booted Debian 13/AlmaLinux 10 systemd/SELinux acceptance.
+Run locally with `pytest -q tests/test_server_nginx_repository_bundle_v1.py
+tests/test_server_nginx_https_bundle_native_v1.py`. The `nginx -t`
+positive case skips unless stock NGINX and OpenSSL are installed.
