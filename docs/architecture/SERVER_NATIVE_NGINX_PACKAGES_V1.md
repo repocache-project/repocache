@@ -453,3 +453,47 @@ prove absence of persistent changes on the early refusal. They are not
 evidence of booted Debian 13 / AlmaLinux 10 systemd/SELinux acceptance or
 full #27 first-operational-service completion; those retain separate native
 and release acceptance requirements.
+
+### Explicit native NGINX service activation (#27)
+
+The existing authenticated package installation intentionally leaves nginx.service
+disabled and inactive. Fresh native NGINX from Debian 13 and AlmaLinux 10
+can otherwise bind all interfaces on plaintext HTTP port 80. The operator
+must never mistake mere signed package installation for authorization to
+open this listener.
+
+The separate and explicitly selected invocation is:
+
+    python3 scripts/install_native_root_worker.py --assets ASSETS --commit SHA \
+      --archive-sha256 ARCHIVE_SHA256 --activate-native-nginx
+
+This verifies native OS and authenticated installed release-worker identity,
+retains the protected state lock, reads the durable completed package receipt,
+rechecks native package files and the exact vendor service, and rejects
+pending WAL/recovery or an existing v2 state. It verifies the inactive systemd
+unit has no foreign overrides, then verifies installed NGINX syntax and the
+bounded effective -T dump. Only explicitly bound IPv4/IPv6 loopback listeners
+are accepted. Wildcard/public HTTP, default implicit port 80 listeners and
+ambiguous syntax are refused before any systemctl start or enable.
+
+When every gate passes, the fixed service command starts nginx.service,
+checks PID1 and the actual kernel NGINX master executable identity, enables
+the unit for boot and rechecks the same identity and package completion.
+Repeated authenticated activation of the already healthy enabled vendor unit
+is a read-only successful no-op. Failed enable or post-start verification
+compensates by stopping only a positively verified vendor master, disabling
+the unit and verifying its inactive/disabled state. An ambiguous or failed
+compensation refuses with a fixed RECOVERY_REQUIRED code rather than risking
+a stop of a foreign process. The operation does not modify nginx.conf,
+packages, firewall rules, signed trust anchors or repository state.
+
+The optional booted-QEMU activation workflow uses test-only signed assets,
+real APT/DNF packages and systemd in Debian 13 and AlmaLinux 10 guests. It
+first proves that unmodified stock public/plaintext HTTP is refused; it then
+uses a disposable **VM-only** root-owned loopback NGINX config fixture to
+test actual start, enable, rollback after injected enable failure, HTTP 204,
+idempotence and post-kernel-reboot activation. This fixture is not a
+production configuration writer and does not prove original AC1/AC2 for an
+entire initial REPOCACHE deployment. A safe authorized managed HTTPS bootstrap
+still needs implementation and end-to-end acceptance; publisher signing and
+live production activation are separate gates.
