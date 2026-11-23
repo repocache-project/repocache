@@ -54,7 +54,7 @@ def test_foreign_or_invalid_unit_refused(monkeypatch, delta):
     )
     with pytest.raises(
         native.NativeV2TransactionError,
-        match="^NGINX_NOT_ACTIVE_BEFORE_WAL$",
+        match="^NATIVE_V2_NGINX_NOT_ACTIVE_BEFORE_WAL$",
     ):
         native._require_active_nginx_before_wal("almalinux")
 
@@ -66,7 +66,7 @@ def test_missing_or_incomplete_observation_refused(monkeypatch, report):
     )
     with pytest.raises(
         native.NativeV2TransactionError,
-        match="^NGINX_NOT_ACTIVE_BEFORE_WAL$",
+        match="^NATIVE_V2_NGINX_NOT_ACTIVE_BEFORE_WAL$",
     ):
         native._require_active_nginx_before_wal("debian")
 
@@ -77,5 +77,5 @@ def test_inactive_or_unreadable_systemd_is_redacted(monkeypatch):
     monkeypatch.setattr(native, "inspect_effective_native_nginx_unit", unavailable)
     with pytest.raises(native.NativeV2TransactionError) as denied:
         native._require_active_nginx_before_wal("debian")
-    assert str(denied.value) == "NGINX_NOT_ACTIVE_BEFORE_WAL"
+    assert str(denied.value) == "NATIVE_V2_NGINX_NOT_ACTIVE_BEFORE_WAL"
     assert "private" not in str(denied.value)
