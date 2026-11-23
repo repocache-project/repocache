@@ -8,6 +8,9 @@ on:
       - 'src/repocache/server_upstream_address_preflight_v1.py'
       - 'src/repocache/server_upstream_rotation_v1.py'
       - 'src/repocache/server_nginx_pin_render_v1.py'
+      - 'src/repocache/server_nginx_repository_bundle_v1.py'
+      - 'tests/test_server_nginx_repository_bundle_v1.py'
+      - 'tests/test_server_nginx_https_bundle_native_v1.py'
       - 'src/repocache/server_bounded_dns_v1.py'
       - 'src/repocache/server_dns_refresh_schedule_v1.py'
       - 'src/repocache/server_nginx_repository_bundle_v1.py'
@@ -26,6 +29,9 @@ on:
       - 'src/repocache/server_upstream_address_preflight_v1.py'
       - 'src/repocache/server_upstream_rotation_v1.py'
       - 'src/repocache/server_nginx_pin_render_v1.py'
+      - 'src/repocache/server_nginx_repository_bundle_v1.py'
+      - 'tests/test_server_nginx_repository_bundle_v1.py'
+      - 'tests/test_server_nginx_https_bundle_native_v1.py'
       - 'src/repocache/server_bounded_dns_v1.py'
       - 'src/repocache/server_dns_refresh_schedule_v1.py'
       - 'src/repocache/server_nginx_repository_bundle_v1.py'
@@ -85,6 +91,8 @@ jobs:
           set -Eeuo pipefail
           python3 -m pytest -q \
             tests/test_server_nginx_pin_render_v1.py \
+            tests/test_server_nginx_repository_bundle_v1.py \
+            tests/test_server_nginx_https_bundle_native_v1.py \
             tests/test_server_nginx_pin_redirect_integration.py \
             tests/test_server_upstream_rotation_v1.py \
             tests/test_server_upstream_address_preflight_v1.py \
