@@ -43,6 +43,14 @@ SCENARIOS = {
             "31.01", "31.03", "31.05", "64.01", "64.02", "64.03",
         ),
     },
+    "native-lifecycle": {
+        "files": (
+            "installer-prerequisites.txt", "native-install.txt",
+            "native-install-after-reboot.txt", "installer-reboot-ids.txt",
+            "synthetic-installed-worker.txt", "native-v2-repository-lifecycle.txt",
+        ),
+        "criteria": ("95.02", "95.03", "95.04", "95.05", "95.06", "28.04", "28.05"),
+    },
     "native-package-interruption": {
         "files": (
             "installer-prerequisites.txt",
@@ -84,6 +92,12 @@ def collect(path: Path, platform: str, scenario: str, expected_head: str) -> dic
         and "VM exercise: PASS" in summary
         and facts_valid
     )
+    if scenario == "native-lifecycle" and completed:
+        log = (path / "native-v2-repository-lifecycle.txt").read_text(encoding="utf-8")
+        completed = (
+            "PASS: booted native test-signed repository add/remove and durable" in log
+            and "NOT VERIFIED: active approved upstream cache MISS/HIT" in log
+        )
     secondary = ()
     if scenario == "smoke":
         native_log = (path / "native-cache-data-plane.txt")
@@ -99,6 +113,8 @@ def collect(path: Path, platform: str, scenario: str, expected_head: str) -> dic
             if "PASS: booted native VM client CLI --apply refusal and APT/DNF source integrity" in client_text:
                 client_criteria = ("24.04", "107.03", "107.04")
     campaigns = {k: "NOT_RUN" for k in CAMPAIGNS if k != "P0-1"}
+    if scenario == "native-lifecycle":
+        campaigns["P0-2"] = "EXERCISED_PARTIAL" if completed else "NOT_VERIFIED"
     if scenario == "smoke":
         campaigns["P0-2"] = "EXERCISED_PARTIAL" if secondary else "NOT_VERIFIED"
         campaigns["P0-3"] = "EXERCISED_PARTIAL" if client_criteria else "NOT_VERIFIED"
