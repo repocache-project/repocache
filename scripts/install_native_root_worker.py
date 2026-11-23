@@ -516,6 +516,40 @@ def _place_signed_private_config(raw: bytes) -> None:
         _reject("NATIVE_PRIVATE_CONFIG_PLACEMENT_REFUSED")
 
 
+def _unlink_inert_nginx_syntax_pid(directory: int) -> None:
+    """Remove only the empty file created by nginx -t before activation.
+
+    Never use this helper for a running service. A nonempty/foreign PID
+    remains untouched and blocks the pre-start operation.
+    """
+    info = _named(directory, "nginx.pid")
+    if info is None:
+        return
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
+            or info.st_gid != 0 or info.st_nlink != 1 or info.st_size != 0
+            or stat.S_IMODE(info.st_mode) & 0o022):
+        _reject("NATIVE_RUNTIME_PID_FOREIGN")
+    again = os.stat("nginx.pid", dir_fd=directory, follow_symlinks=False)
+    if _identity(again) != _identity(info) or again.st_ctime_ns != info.st_ctime_ns:
+        _reject("NATIVE_RUNTIME_PID_CHANGED")
+    os.unlink("nginx.pid", dir_fd=directory)
+    os.fsync(directory)
+
+
+def _cleanup_own_nginx_syntax_pid() -> None:
+    try:
+        with ExitStack() as stack:
+            root = os.open("/", stage._DIRECTORY)
+            stack.callback(os.close, root)
+            run = _open_directory(root, "run", stack)
+            own = _open_directory(run, "repocache-nginx", stack)
+            _unlink_inert_nginx_syntax_pid(own)
+    except stage.WorkerStageError:
+        raise
+    except (OSError, ValueError, TypeError):
+        _reject("NATIVE_RUNTIME_PID_UNVERIFIED")
+
+
 def _prepare_own_runtime_directory() -> None:
     """Make a bounded empty /run directory before pre-start nginx -t.
 
@@ -535,8 +569,10 @@ def _prepare_own_runtime_directory() -> None:
             if (os.fstat(own).st_dev != os.fstat(run).st_dev
                     or os.fstat(own).st_uid != 0
                     or os.fstat(own).st_gid != 0
-                    or stat.S_IMODE(os.fstat(own).st_mode) not in (0o700, 0o755)
-                    or os.listdir(own)):
+                    or stat.S_IMODE(os.fstat(own).st_mode) not in (0o700, 0o755)):
+                _reject("NATIVE_RUNTIME_DIRECTORY_UNSAFE")
+            _unlink_inert_nginx_syntax_pid(own)
+            if os.listdir(own):
                 _reject("NATIVE_RUNTIME_DIRECTORY_UNSAFE")
             if stat.S_IMODE(os.fstat(own).st_mode) == 0o700:
                 os.fchmod(own, 0o755)
@@ -560,6 +596,9 @@ def _require_private_nginx_listeners() -> None:
         )
         if type(proc.returncode) is not int or proc.returncode != 0:
             _reject("NATIVE_LISTENERS_UNVERIFIED")
+        # NGINX -t creates an empty PID file even in syntax-only mode.
+        # Clean exactly that inert inode; do not truncate a live master PID.
+        _cleanup_own_nginx_syntax_pid()
         _private_config_present()
     except stage.WorkerStageError:
         raise
@@ -727,7 +766,7 @@ def _activate_audited_native_nginx_under_lock(
     current_enabled = _own_systemctl("is-enabled")
     current_active = _own_systemctl("is-active")
     if current_enabled == (0, b"enabled\n") and current_active == (0, b"active\n"):
-        _require_private_nginx_listeners()
+        _private_config_present()
         _own_service_observation(active=True)
         return {"status": "AUTHENTICATED_REPOCACHE_NGINX_ALREADY_ACTIVE",
                 "nginx_active_verified": True, "nginx_enabled_verified": True}
@@ -742,14 +781,14 @@ def _activate_audited_native_nginx_under_lock(
     try:
         _nginx_activation_command("start")
         before = _own_service_observation(active=True)
-        _require_private_nginx_listeners()
+        _private_config_present()
         _nginx_activation_command("enable")
         after = _own_service_observation(active=True)
         if (after["main_pid_observed"] != before["main_pid_observed"]
                 or _own_systemctl("is-enabled") != (0, b"enabled\n")
                 or _own_systemctl("is-active") != (0, b"active\n")):
             _reject("NATIVE_ACTIVATION_POSTCHECK_FAILED")
-        _require_private_nginx_listeners()
+        _private_config_present()
         _require_audited_native_package_for_activation(state_fd, distribution=distribution)
         _nginx_inactive_vendor_service(distribution)
         return {"status": "AUTHENTICATED_REPOCACHE_NGINX_ACTIVE",
