@@ -22,6 +22,12 @@ def test_complete_guest_scenario_never_implies_original_acceptance(
 ) -> None:
     for item in SCENARIOS[scenario]["files"]:
         (tmp_path / item).write_text("test fixture", encoding="utf-8")
+    if scenario == "native-lifecycle":
+        (tmp_path / "native-v2-repository-lifecycle.txt").write_text(
+            "PASS: booted native test-signed repository add/remove and durable\n"
+            "NOT VERIFIED: active approved upstream cache MISS/HIT\n",
+            encoding="utf-8",
+        )
     (tmp_path / "sha.txt").write_text(HEAD, encoding="utf-8")
     (tmp_path / "summary.md").write_text(
         f"## PR #237 — {platform} {scenario} experimental booted VM\n"
@@ -88,3 +94,33 @@ def test_wrong_head_fails_closed(tmp_path: Path) -> None:
 def test_unexpected_inputs_rejected(tmp_path: Path, platform: str, scenario: str, head: str) -> None:
     with pytest.raises(ValueError):
         collect(tmp_path, platform, scenario, head)
+
+
+def test_native_lifecycle_evidence_requires_final_guest_markers(tmp_path: Path) -> None:
+    for name in SCENARIOS["native-lifecycle"]["files"]:
+        (tmp_path / name).write_text("fixture", encoding="utf-8")
+    (tmp_path / "sha.txt").write_text(HEAD, encoding="utf-8")
+    (tmp_path / "summary.md").write_text(
+        "## PR #237 — almalinux10 native-lifecycle experimental booted VM\n"
+        f"Source HEAD: {HEAD}\nLast phase: complete\nVM exercise: PASS\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "facts.txt").write_text(
+        "ID=almalinux\nsystemd\nEnforcing\n", encoding="utf-8",
+    )
+    result = collect(tmp_path, "almalinux10", "native-lifecycle", HEAD)
+    assert result["scenario_status"] == "NOT_VERIFIED"
+    assert result["other_campaigns"]["P0-2"] == "NOT_VERIFIED"
+    log = tmp_path / "native-v2-repository-lifecycle.txt"
+    log.write_text(
+        "PASS: booted native test-signed repository add/remove and durable\n"
+        "NOT VERIFIED: active approved upstream cache MISS/HIT\n",
+        encoding="utf-8",
+    )
+    result = collect(tmp_path, "almalinux10", "native-lifecycle", HEAD)
+    assert result["scenario_status"] == "EXECUTED"
+    assert result["other_campaigns"]["P0-2"] == "EXERCISED_PARTIAL"
+    assert {row["issue_criterion"] for row in result["criteria"]} >= {
+        "95.02", "95.03", "95.04", "28.05",
+    }
+    assert all(row["acceptance"] == "NOT_VERIFIED" for row in result["criteria"])
