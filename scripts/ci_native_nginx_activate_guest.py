@@ -41,7 +41,7 @@ def require_status(expected_active: bool, expected_enabled: bool) -> None:
 
 
 def verify_live_loopback() -> None:
-    with socket.create_connection(("127.0.0.1", 18080), timeout=5) as connection:
+    with socket.create_connection(("127.0.0.1", 8080), timeout=5) as connection:
         connection.settimeout(5)
         connection.sendall(
             b"GET /__repocache/private HTTP/1.1\r\n"
@@ -100,7 +100,7 @@ def verify_guest(distribution: str) -> None:
             b"events { worker_connections 128; }\n"
             b"http {\n"
             b"  server {\n"
-            b"    listen 127.0.0.1:18080;\n"
+            b"    listen 127.0.0.1:8080;\n"
             b"    location = /__repocache/private { return 204; }\n"
             b"  }\n"
             b"}\n"
