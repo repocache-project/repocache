@@ -18,7 +18,7 @@ import subprocess
 import sys
 
 
-ROOT = Path("/var/tmp/repocache-pr237")
+ROOT = Path("/root/pr237-synthetic-fixture")
 STATE = Path("/var/lib/repocache/server")
 CONF = Path("/etc/nginx/nginx.conf")
 SOURCE = Path("/home/pr237ci/combined")
