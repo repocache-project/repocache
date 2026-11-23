@@ -171,7 +171,9 @@ def main(distribution: str) -> None:
             expected_generation=1, expected_state_sha256=prior_sha,
             decision_sha256="a" * 64, dry_run=True,
         )
-    except OfflineLifecycleError:
+    except ValueError:
+        # Source planners may raise their own fixed-code ValueError rather
+        # than the offline file-boundary wrapper exception.
         pass
     else:
         raise AssertionError("Unsafe repository ID generated a native candidate")
