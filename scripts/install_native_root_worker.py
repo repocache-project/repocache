@@ -38,7 +38,16 @@ from repocache.server_locked_manifest_reconcile_v1 import (
     _validate_proposed_v2_snapshot, preview_proposed_v2_state_transition,
 )
 from repocache.server_repository_reconcile_v1 import plan_declarative_reconciliation
-from repocache.server_native_v2_transaction_v1 import _no_conflicting_pending, _write_private
+from repocache.server_native_v2_transaction_v1 import (
+    _no_conflicting_pending, _write_private,
+    _require_audited_native_package_for_activation,
+    _native_syntax_check,
+)
+from repocache.server_native_nginx_effective_unit_v1 import (
+    inspect_effective_native_nginx_unit, _observe_systemd_pid1,
+    _safe_native_systemctl, _FIXED_ARGS as _EFFECTIVE_SYSTEMCTL_ARGS,
+)
+from repocache.server_root_control_full_context_v1 import _capture_default_nginx_dump_private
 from repocache.server_proposed_state_v2_store import _read_v2
 from repocache.server_protected_state_store_v1 import _canonical, _locked, _unlink_known
 from repocache.server_root_control_fixed_candidate_v1 import (
@@ -448,6 +457,213 @@ def _ensure_fixed_nginx_cache_parent_under_root(root_fd: int, *, owner_uid: int 
         _reject("NATIVE_CACHE_PARENT_UNVERIFIED")
 
 
+
+def _require_private_nginx_listeners() -> None:
+    """Fail closed on implicit, wildcard or non-loopback packaged listeners.
+
+    Actual nginx -T expands every include. This restrictive bootstrap policy
+    only accepts explicitly bound loopback sockets, one per server block at
+    minimum. It is deliberately NOT a general nginx configuration parser:
+    unfamiliar compressed/ambiguous forms are refused before systemctl start.
+    """
+    _native_syntax_check()
+    try:
+        dump = _capture_default_nginx_dump_private()
+        if type(dump) is not bytes or not 1 <= len(dump) <= 1024 * 1024:
+            _reject("NATIVE_LISTENERS_UNVERIFIED")
+        lines = dump.decode("utf-8", "strict").splitlines()
+        depth = 0
+        servers: list[list[int | bool]] = []
+        count = 0
+        for raw in lines:
+            line = raw.split("#", 1)[0].strip()
+            if not line:
+                continue
+            # NGINX permits multiple statements per line. Such syntax is
+            # valid but not safely assessable by this intentionally narrow
+            # pre-start gate; refuse instead of guessing at socket exposure.
+            if line.count(";") > 1 or line.count("{") > 1 or line.count("}") > 1:
+                _reject("NATIVE_LISTENERS_UNVERIFIED")
+            if re.search(r"\bserver\s*\{", line):
+                if line != "server {":
+                    _reject("NATIVE_LISTENERS_UNVERIFIED")
+                servers.append([depth + 1, False])
+            elif re.search(r"\bserver\b", line):
+                # A server block with no explicit listen would default to
+                # wildcard port 80. Reject unusual split/inline constructs.
+                _reject("NATIVE_LISTENERS_UNVERIFIED")
+            if re.search(r"\blisten\b", line):
+                match = re.fullmatch(
+                    r"listen\s+(?:127\.0\.0\.1:(\d{1,5})|\[::1\]:(\d{1,5}))"
+                    r"(?:\s+ssl)?\s*;", line,
+                )
+                if match is None or not servers:
+                    _reject("NATIVE_LISTENERS_UNVERIFIED")
+                port = int(match.group(1) or match.group(2))
+                if not 1 <= port <= 65535:
+                    _reject("NATIVE_LISTENERS_UNVERIFIED")
+                servers[-1][1] = True
+                count += 1
+            depth += line.count("{") - line.count("}")
+            if depth < 0:
+                _reject("NATIVE_LISTENERS_UNVERIFIED")
+            while servers and depth < servers[-1][0]:
+                if servers[-1][1] is not True:
+                    _reject("NATIVE_LISTENERS_UNVERIFIED")
+                servers.pop()
+        if depth != 0 or servers or count == 0:
+            _reject("NATIVE_LISTENERS_UNVERIFIED")
+    except stage.WorkerStageError:
+        raise
+    except (OSError, ValueError, UnicodeError, TypeError):
+        _reject("NATIVE_LISTENERS_UNVERIFIED")
+
+
+def _nginx_inactive_vendor_service(distribution: str) -> None:
+    """Verify the effective PID1 unit while inactive, before starting it."""
+    try:
+        _observe_systemd_pid1()
+        _safe_native_systemctl()
+        vendor = inspect_native_nginx_unit(distribution).to_dict()
+        if (vendor.get("code") != "VENDOR_NGINX_UNIT_OBSERVED"
+                or vendor.get("vendor_unit_bounded_and_owned") is not True
+                or not re.fullmatch(r"[0-9a-f]{64}", vendor.get("vendor_unit_sha256", ""))):
+            _reject("NATIVE_INACTIVE_UNIT_UNVERIFIED")
+        result = subprocess.run(
+            _EFFECTIVE_SYSTEMCTL_ARGS, shell=False, check=False, capture_output=True,
+            text=True, timeout=5, cwd="/", stdin=subprocess.DEVNULL,
+            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"}, start_new_session=True,
+        )
+        if (result.returncode != 0 or type(result.stdout) is not str
+                or not 1 <= len(result.stdout) <= 8192
+                or type(result.stderr) is not str or len(result.stderr) > 4096):
+            _reject("NATIVE_INACTIVE_UNIT_UNVERIFIED")
+        fields = {}
+        for line in result.stdout.splitlines():
+            if "=" not in line:
+                _reject("NATIVE_INACTIVE_UNIT_UNVERIFIED")
+            k, v = line.split("=", 1)
+            if k in fields:
+                _reject("NATIVE_INACTIVE_UNIT_UNVERIFIED")
+            fields[k] = v
+        expected = {
+            "Id": "nginx.service", "Names": "nginx.service",
+            "FragmentPath": "/usr/lib/systemd/system/nginx.service",
+            "DropInPaths": "", "LoadState": "loaded",
+            "ActiveState": "inactive", "SubState": "dead",
+            "MainPID": "0", "CanReload": "yes", "NeedDaemonReload": "no",
+        }
+        if fields != expected:
+            _reject("NATIVE_INACTIVE_UNIT_UNVERIFIED")
+    except stage.WorkerStageError:
+        raise
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        _reject("NATIVE_INACTIVE_UNIT_UNVERIFIED")
+
+
+def _nginx_activation_command(action: str) -> None:
+    if action not in ("start", "enable", "stop", "disable"):
+        _reject("NATIVE_ACTIVATION_COMMAND_REFUSED")
+    _safe_native_systemctl()
+    try:
+        proc = subprocess.run(
+            [*_SYSTEMCTL, action, "nginx.service"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, cwd="/", timeout=30, check=False,
+            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C", "LANG": "C"},
+            start_new_session=True,
+        )
+        if type(proc.returncode) is not int or proc.returncode != 0:
+            _reject("NATIVE_ACTIVATION_COMMAND_FAILED")
+    except stage.WorkerStageError:
+        raise
+    except (OSError, subprocess.SubprocessError, TypeError, ValueError):
+        _reject("NATIVE_ACTIVATION_COMMAND_FAILED")
+
+
+def _activate_audited_native_nginx_under_lock(state_fd: int, distribution: str) -> dict:
+    """Explicit fixed activation after signed install; never adopt foreign NGINX.
+
+    No socket request can call this operation. The authenticated install tool
+    owns the external operator action and the exclusive protected state lock.
+    """
+    _require_audited_native_package_for_activation(state_fd, distribution=distribution)
+    _no_conflicting_pending(state_fd)
+    if _read_v2(state_fd, 0)[0] is not None:
+        _reject("NATIVE_ACTIVATION_MANAGED_STATE_REFUSED")
+    enabled = _nginx_systemctl("is-enabled")
+    active = _nginx_systemctl("is-active")
+    if enabled == (0, b"enabled\n") and active == (0, b"active\n"):
+        verified = inspect_effective_native_nginx_unit(distribution)
+        if (verified.get("status") != "NATIVE_NGINX_EFFECTIVE_READ_ONLY_OBSERVATION"
+                or verified.get("authorizes_systemctl") is not False):
+            _reject("NATIVE_ACTIVATION_UNIT_UNVERIFIED")
+        return {"status": "AUTHENTICATED_NATIVE_NGINX_ALREADY_ACTIVE",
+                "nginx_active_verified": True, "nginx_enabled_verified": True}
+    if enabled != (1, b"disabled\n") or active != (3, b"inactive\n"):
+        _reject("NATIVE_ACTIVATION_FOREIGN_SERVICE_STATE")
+    _nginx_inactive_vendor_service(distribution)
+    _require_private_nginx_listeners()
+    started = False
+    try:
+        _nginx_activation_command("start")
+        started = True
+        observed = inspect_effective_native_nginx_unit(distribution)
+        if (observed.get("status") != "NATIVE_NGINX_EFFECTIVE_READ_ONLY_OBSERVATION"
+                or type(observed.get("main_pid_observed")) is not int
+                or observed["main_pid_observed"] <= 1):
+            _reject("NATIVE_ACTIVATION_UNIT_UNVERIFIED")
+        _nginx_activation_command("enable")
+        after = inspect_effective_native_nginx_unit(distribution)
+        if (after.get("vendor_unit_sha256") != observed.get("vendor_unit_sha256")
+                or after.get("main_pid_observed") != observed["main_pid_observed"]
+                or _nginx_systemctl("is-enabled") != (0, b"enabled\n")
+                or _nginx_systemctl("is-active") != (0, b"active\n")):
+            _reject("NATIVE_ACTIVATION_POSTCHECK_FAILED")
+        _require_audited_native_package_for_activation(state_fd, distribution=distribution)
+        return {"status": "AUTHENTICATED_NATIVE_NGINX_ACTIVE",
+                "nginx_active_verified": True, "nginx_enabled_verified": True}
+    except Exception:
+        # Only stop a positively identified vendor master we started. If
+        # identity drifted, require explicit recovery; never kill foreign PID.
+        try:
+            if started:
+                inspect_effective_native_nginx_unit(distribution)
+                _nginx_activation_command("stop")
+            _nginx_activation_command("disable")
+            _nginx_inactive_vendor_service(distribution)
+            if (_nginx_systemctl("is-enabled") != (1, b"disabled\n")
+                    or _nginx_systemctl("is-active") != (3, b"inactive\n")):
+                _reject("NATIVE_ACTIVATION_RECOVERY_REQUIRED")
+        except Exception:
+            _reject("NATIVE_ACTIVATION_RECOVERY_REQUIRED")
+        _reject("NATIVE_ACTIVATION_FAILED_ROLLED_BACK")
+
+
+def activate_authenticated_native_nginx(
+    assets: Path, *, commit: str, archive_sha256: str,
+) -> dict:
+    """Opt-in activation, with repeatable signed worker and OS checks."""
+    distribution = _native_distro()
+    require_native_host_preconditions()
+    attested = stage.verify_installed_worker(
+        assets, commit=commit, archive_sha256=archive_sha256,
+    )
+    if (type(attested) is not dict
+            or attested.get("status") != "AUTHENTICATED_WORKER_FILES_MATCH"
+            or attested.get("source_sha") != commit
+            or attested.get("archive_sha256") != archive_sha256
+            or attested.get("authorizes_host_installation") is not False
+            or attested.get("authorizes_service_activation") is not False):
+        _reject("NATIVE_SIGNED_WORKER_AUDIT_UNVERIFIED")
+    root = os.open("/", stage._DIRECTORY)
+    try:
+        with _locked(root, 0) as state:
+            return _activate_audited_native_nginx_under_lock(state, distribution)
+    finally:
+        os.close(root)
+
+
 def _execute_native_nginx_install_locked(
     root_fd: int, *, distribution: str, document: dict, os_release: str,
     owner_uid: int = 0,
@@ -822,6 +1038,7 @@ def main() -> int:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--stage-v2-proposal", type=Path)
     mode.add_argument("--install-native-nginx", type=Path)
+    mode.add_argument("--activate-native-nginx", action="store_true")
     mode.add_argument("--prepare-initial-v2-proposal", type=Path)
     mode.add_argument("--prepare-v2-repair", type=Path)
     parser.add_argument("--proposal-sha256")
@@ -852,6 +1069,8 @@ def main() -> int:
                 args.proposal_output, decision_sha256=args.decision_sha256,
                 previous=args.previous_v2_state, previous_sha256=args.previous_state_sha256, **pins,
             )
+        elif args.activate_native_nginx:
+            result = activate_authenticated_native_nginx(args.assets, **pins)
         elif args.install_native_nginx is not None:
             result = install_authenticated_native_nginx(
                 args.assets, args.install_native_nginx, args.document_sha256, **pins,
@@ -870,6 +1089,8 @@ def main() -> int:
             refused = "AUTHENTICATED_V2_PROPOSAL_REFUSED"
         elif args.install_native_nginx is not None:
             refused = "AUTHENTICATED_NATIVE_NGINX_INSTALL_REFUSED"
+        elif args.activate_native_nginx:
+            refused = "AUTHENTICATED_NATIVE_NGINX_ACTIVATION_REFUSED"
         result = {"status": refused}
         status = 1
     else:
