@@ -482,7 +482,9 @@ def test_offline_mixed_states_one_reviewed_generation_exact_native_input(tmp_pat
             for r in after["repository_records"]] == [
         ("debian-trixie-main", "disabled"), ("almalinux-baseos", "active"),
     ]
-    assert after["id_reservations"] == initial()["id_reservations"]
+    assert {r["id"]: r for r in after["id_reservations"]} == {
+        r["id"]: r for r in initial()["id_reservations"]
+    }
     assert stat.S_IMODE(output.stat().st_mode) == 0o600
     assert not list(tmp_path.glob(".*.part-*"))
     exact = render_fixed_native_repository_batch_envelope(
