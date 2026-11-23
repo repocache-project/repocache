@@ -284,16 +284,18 @@ unmanaged NGINX files must remain intact.
 Because recovery may atomically replace files, only content digests (not
 necessarily inode identity) are required across the rollback.
 
-The same `native-installer` jobs also repeat the authenticated worker/unit
-placement and native v2 no-op operation **after the real recovery reboot**,
-requiring unchanged worker/units/receipt bytes, inodes, timestamps and modes,
-unchanged live HTTPS generation, TLS/cache/log/metrics and no new package WAL.
-The original fresh-install-only APT/DNF command must still refuse to re-enter
-an existing managed v2 system before package effects. This is deliberate
-fail-closed repeat-install behavior, not an unsafe replay of APT/DNF or proof
-that partially completed native package effects can automatically roll back.
-Check the exact revised source SHA and both executed native VM jobs before
-reporting this added post-reboot assertion as PASS.
+The same `native-installer` jobs also repeat authenticated worker/unit
+placement **after the real recovery reboot**, requiring unchanged worker,
+unit and native receipt bytes, inodes, timestamps and modes; live HTTPS,
+TLS/cache/log/metrics and the committed v2 generation remain unchanged.
+Repeated `RECOVER_V2` must report `CLEAN`, while the separate reviewed
+next-generation proposal is **not** automatically replayed: submitting
+`APPLY_V2` again would constitute a *new operator request*, not an
+idempotent reinstall. The original fresh-install-only APT/DNF command
+must refuse to re-enter an existing managed v2 system before effects.
+This is deliberate fail-closed repeat-install behavior, not an unsafe
+native package replay or proof that partial APT/DNF effects are reversible.
+Count this added assertion only after inspecting both exact-HEAD VM jobs.
 
 The script also confirms the installed socket refuses the unprivileged
 \`repocache\` service UID at the kernel permissions boundary and keeps both
