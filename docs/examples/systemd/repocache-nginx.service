@@ -1,0 +1,26 @@
+# REPOCACHE-owned native NGINX service; never override the vendor nginx.service.
+# Installed only from the authenticated release, with a matching owned config.
+[Unit]
+Description=REPOCACHE isolated native NGINX service
+After=network.target
+ConditionPathIsExecutable=/usr/sbin/nginx
+
+[Service]
+Type=forking
+PIDFile=/run/repocache-nginx.pid
+ExecStartPre=/usr/sbin/nginx -t -q -c /etc/nginx/repocache.conf
+ExecStart=/usr/sbin/nginx -c /etc/nginx/repocache.conf
+ExecReload=/usr/sbin/nginx -s reload -c /etc/nginx/repocache.conf
+ExecStop=/usr/sbin/nginx -s quit -c /etc/nginx/repocache.conf
+TimeoutStartSec=30s
+TimeoutStopSec=30s
+KillMode=mixed
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/run /var/cache/nginx /var/log/nginx
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target
