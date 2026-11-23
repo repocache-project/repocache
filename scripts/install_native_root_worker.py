@@ -594,6 +594,10 @@ def _activate_audited_native_nginx_under_lock(state_fd: int, distribution: str) 
     enabled = _nginx_systemctl("is-enabled")
     active = _nginx_systemctl("is-active")
     if enabled == (0, b"enabled\n") and active == (0, b"active\n"):
+        # An operator may have started stock wildcard HTTP outside this
+        # helper. Never certify that existing exposure merely because the
+        # package receipt and vendor executable are authentic.
+        _require_private_nginx_listeners()
         verified = inspect_effective_native_nginx_unit(distribution)
         if (verified.get("status") != "NATIVE_NGINX_EFFECTIVE_READ_ONLY_OBSERVATION"
                 or verified.get("authorizes_systemctl") is not False):
