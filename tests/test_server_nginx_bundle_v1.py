@@ -144,12 +144,15 @@ def test_packaged_nginx_accepts_two_repository_candidate_without_activation(tmp_
         + "error_log " + str(tmp_path / "nginx.log") + " notice;\n"
         + "events {}\nhttp { access_log off;\n"
         + "".join(
-            name + "_path " + str(tmp_path / name) + ";\n"
-            for name in (
-                "client_body_temp", "proxy_temp", "fastcgi_temp",
-                "uwsgi_temp", "scgi_temp",
+            directive + " " + str(tmp_path / folder) + ";\n"
+            for directive, folder in (
+                ("client_body_temp_path", "client_temp"),
+                ("proxy_temp_path", "proxy_temp"),
+                ("fastcgi_temp_path", "fastcgi_temp"),
+                ("uwsgi_temp_path", "uwsgi_temp"),
+                ("scgi_temp_path", "scgi_temp"),
             )
-        ).replace("client_body_temp_path", "client_body_temp_path")
+        )
         + rendered["http_upstream_fragment"]
         + "server { listen 127.0.0.1:19993;\n"
         + rendered["server_location_fragment"]
