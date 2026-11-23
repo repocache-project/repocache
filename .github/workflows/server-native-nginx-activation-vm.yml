@@ -1,0 +1,76 @@
+name: Server native NGINX activation in booted VMs
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '.github/workflows/server-native-nginx-activation-vm.yml'
+      - 'scripts/ci_pr237_booted_vm.sh'
+      - 'scripts/ci_native_nginx_activate_guest.py'
+      - 'scripts/ci_pr237_native_package_guest.py'
+      - 'scripts/ci_pr237_synthetic_worker_guest.py'
+      - 'scripts/install_native_root_worker.py'
+      - 'tests/test_native_nginx_safe_activation_v1.py'
+      - 'docs/architecture/SERVER_NATIVE_NGINX_PACKAGES_V1.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  booted-native-activation:
+    name: Signed test-worker activation (${{ matrix.platform }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: debian13
+            image_url: https://cloud.debian.org/images/cloud/trixie/20261001-2618/debian-13-genericcloud-amd64-20261001-2618.qcow2
+            image_sha512: f46f0671a6e5bdec5291ab8972bae2f10e5408c2f64a74078f11efc2f06a436a9d0313ed50e0472542eeabf780e9f7c792ac0a314c6c20507fcd9fd81b468c3d
+            image_sha256: ''
+          - platform: almalinux10
+            image_url: https://repo.almalinux.org/almalinux/10/cloud/x86_64/images/AlmaLinux-10-GenericCloud-10.3-20261116.0.x86_64.qcow2
+            image_sha512: ''
+            image_sha256: 845d3a4e41fde973bdbf9763b62a88538c1a1fadc2332a89f6ea01e2c17c78ee
+    steps:
+      - name: Checkout exact source without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Install disposable QEMU and cloud image tools
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends qemu-system-x86 qemu-utils cloud-image-utils openssh-client
+      - name: Signed test-worker native activation, rollback and reboot
+        shell: bash
+        env:
+          PR237_PLATFORM: ${{ matrix.platform }}
+          PR237_IMAGE_URL: ${{ matrix.image_url }}
+          PR237_IMAGE_SHA512: ${{ matrix.image_sha512 }}
+          PR237_IMAGE_SHA256: ${{ matrix.image_sha256 }}
+          PR237_SCENARIO: native-activation
+        run: bash scripts/ci_pr237_booted_vm.sh
+      - name: Summarize VM evidence
+        if: always()
+        shell: bash
+        run: |
+          if test -f pr237-vm-evidence/summary.md; then
+            cat pr237-vm-evidence/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'Booted NGINX activation: NOT VERIFIED (no VM evidence).' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo 'Unmodified stock public HTTP activation, managed TLS bootstrap and genuine publisher signature: NOT VERIFIED.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload bounded native evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-nginx-activation-${{ matrix.platform }}
+          path: pr237-vm-evidence/
+          if-no-files-found: warn
+          retention-days: 7
