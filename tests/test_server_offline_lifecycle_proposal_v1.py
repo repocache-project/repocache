@@ -428,3 +428,167 @@ def test_review_sha_pin_refuses_noop_and_preview_combination(tmp_path):
     )
     assert ambiguous.returncode == 1
     assert not output.exists()
+
+
+def test_offline_mixed_states_one_reviewed_generation_exact_native_input(tmp_path):
+    previous, request, output = prepared(tmp_path)
+    initial_bytes = previous.read_bytes()
+    initial_sha = hashlib.sha256(initial_bytes).hexdigest()
+    enabled = render_fixed_native_repository_batch_envelope(
+        initial_bytes, expected_generation=1,
+        expected_previous_state_sha256=initial_sha, operation="enable",
+        repository_ids=("debian-trixie-main",), decision_sha256=DECISION,
+    )
+    previous.write_bytes(base64.b64decode(
+        json.loads(enabled["envelope_bytes"])["next_state_base64"],
+        validate=True,
+    ))
+    original = previous.read_bytes()
+    assert json.loads(original)["state_generation"] == 2
+    changes = [
+        {"repository_id": "debian-trixie-main", "desired_state": "disabled"},
+        {"repository_id": "almalinux-baseos", "desired_state": "active"},
+    ]
+    private_file(request, {"operation": "set-states", "state_changes": changes})
+    preview = invoke(previous, request, None, generation=2, dry_run=True)
+    assert preview.returncode == 0, preview.stderr
+    details = json.loads(preview.stdout)
+    assert details["status"] == "OFFLINE_LIFECYCLE_PREVIEW"
+    assert details["requires_operator_review"] is True
+    assert details["authorizes_service_activation"] is False
+    assert not output.exists()
+    result = invoke(
+        previous, request, output, generation=2,
+        proposed_sha=details["proposed_state_sha256"],
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["status"] == "OFFLINE_LIFECYCLE_PROPOSAL_PREPARED"
+    assert report["review_digest_precondition_checked"] is True
+    assert report["state_generation"] == 3
+    assert report["per_repository"] == [
+        {"repository_id": "debian-trixie-main",
+         "result": "STATE_CHANGE_CANDIDATE"},
+        {"repository_id": "almalinux-baseos",
+         "result": "STATE_CHANGE_CANDIDATE"},
+    ]
+    assert report["proposed_state_sha256"] == hashlib.sha256(
+        output.read_bytes(),
+    ).hexdigest()
+    assert previous.read_bytes() == original
+    after = json.loads(output.read_bytes())
+    assert after["state_generation"] == 3
+    assert [(r["id"], r["desired_state"])
+            for r in after["repository_records"]] == [
+        ("debian-trixie-main", "disabled"), ("almalinux-baseos", "active"),
+    ]
+    assert after["id_reservations"] == initial()["id_reservations"]
+    assert stat.S_IMODE(output.stat().st_mode) == 0o600
+    assert not list(tmp_path.glob(".*.part-*"))
+    exact = render_fixed_native_repository_batch_envelope(
+        original, expected_generation=2,
+        expected_previous_state_sha256=hashlib.sha256(original).hexdigest(),
+        operation="set-states",
+        state_changes=(
+            ("debian-trixie-main", "disabled"),
+            ("almalinux-baseos", "active"),
+        ),
+        decision_sha256=DECISION,
+    )
+    assert output.read_bytes() == base64.b64decode(
+        json.loads(exact["envelope_bytes"])["next_state_base64"],
+        validate=True,
+    )
+    # The offline result is source-only data; only the installed worker
+    # can independently authenticate, stage and actually apply these bytes.
+
+
+def test_offline_mixed_states_idempotent_noop_has_no_candidate(tmp_path):
+    previous, request, output = prepared(tmp_path)
+    private_file(request, {
+        "operation": "set-states",
+        "state_changes": [
+            {"repository_id": "debian-trixie-main", "desired_state": "disabled"},
+            {"repository_id": "almalinux-baseos", "desired_state": "disabled"},
+        ],
+    })
+    before = previous.read_bytes()
+    for _ in range(2):
+        completed = invoke(previous, request, output)
+        assert completed.returncode == 0
+        report = json.loads(completed.stdout)
+        assert report["status"] == "OFFLINE_LIFECYCLE_NO_CHANGE"
+        assert report["proposal_written"] is False
+    assert previous.read_bytes() == before and not output.exists()
+
+
+@pytest.mark.parametrize("bad", [
+    {"operation": "set-states"},
+    {"operation": "set-states", "state_changes": []},
+    {"operation": "set-states", "state_changes": "malicious"},
+    {"operation": "set-states", "repository_ids": ["debian-trixie-main"],
+     "state_changes": [{"repository_id": "almalinux-baseos", "desired_state": "active"}]},
+    {"operation": "set-states", "all_repositories": True,
+     "state_changes": [{"repository_id": "almalinux-baseos", "desired_state": "active"}]},
+    {"operation": "set-states", "proposed_repositories": [{"id": "x"}],
+     "state_changes": [{"repository_id": "almalinux-baseos", "desired_state": "active"}]},
+    {"operation": "set-states", "state_changes": [
+        {"repository_id": "debian-trixie-main", "desired_state": "active"},
+        {"repository_id": "debian-trixie-main", "desired_state": "disabled"},
+    ]},
+    {"operation": "set-states", "state_changes": [
+        {"repository_id": "debian-trixie-main", "desired_state": "active"},
+        {"repository_id": "nonexistent-repository", "desired_state": "disabled"},
+    ]},
+    {"operation": "set-states", "state_changes": [
+        {"repository_id": "../etc/passwd", "desired_state": "active"},
+    ]},
+    {"operation": "set-states", "state_changes": [
+        {"repository_id": "debian-trixie-main", "desired_state": True},
+    ]},
+    {"operation": "set-states", "state_changes": [
+        {"repository_id": "debian-trixie-main", "desired_state": "approved"},
+    ]},
+    {"operation": "set-states", "state_changes": [
+        {"repository_id": "debian-trixie-main", "desired_state": "active", "extra": True},
+    ]},
+    {"operation": "set-states", "state_changes": [
+        {"repository_id": "debian-trixie-main", "desired_state": "active"},
+    ] * 65},
+    {"operation": "enable", "repository_ids": ["debian-trixie-main"],
+     "state_changes": []},
+])
+def test_offline_mixed_state_invalid_request_refuses_without_output(tmp_path, bad):
+    previous, request, output = prepared(tmp_path)
+    private_file(request, bad)
+    before = previous.read_bytes()
+    refused = invoke(previous, request, output)
+    assert refused.returncode == 1
+    assert json.loads(refused.stdout) == {"status": "OFFLINE_LIFECYCLE_REFUSED"}
+    assert not output.exists() and previous.read_bytes() == before
+    assert not list(tmp_path.glob(".*.part-*"))
+
+
+def test_offline_mixed_review_digest_pin_rejects_stale_candidate(tmp_path):
+    previous, request, output = prepared(tmp_path)
+    private_file(request, {
+        "operation": "set-states",
+        "state_changes": [
+            {"repository_id": "debian-trixie-main", "desired_state": "active"},
+            {"repository_id": "almalinux-baseos", "desired_state": "disabled"},
+        ],
+    })
+    preview = invoke(previous, request, None, dry_run=True)
+    assert preview.returncode == 0
+    pinned = json.loads(preview.stdout)["proposed_state_sha256"]
+    request.write_bytes(canonical({
+        "operation": "set-states", "state_changes": [
+            {"repository_id": "debian-trixie-main", "desired_state": "disabled"},
+            {"repository_id": "almalinux-baseos", "desired_state": "active"},
+        ],
+    }))
+    before = previous.read_bytes()
+    refused = invoke(previous, request, output, proposed_sha=pinned)
+    assert refused.returncode == 1
+    assert json.loads(refused.stdout) == {"status": "OFFLINE_LIFECYCLE_REFUSED"}
+    assert not output.exists() and previous.read_bytes() == before
