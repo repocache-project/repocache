@@ -442,7 +442,7 @@ managed include, state, manifest or discovery catalog. It requires the exact
 vendor unit identity, a real nonzero main PID, kernel-observed NGINX executable
 identity and a bounded vendor unit digest. Inactive, unreadable, foreign or
 ambiguous unit observations fail closed with the fixed redacted
-`NGINX_NOT_ACTIVE_BEFORE_WAL` diagnostic. The later native reload still
+`NATIVE_V2_NGINX_NOT_ACTIVE_BEFORE_WAL` diagnostic. The later native reload still
 rechecks the effective unit, and a concurrent service failure after the
 pre-WAL observation remains subject to normal WAL-held compensation and
 explicit recovery.
