@@ -237,6 +237,10 @@ def _reject_conflicting_units(root: Path, unit_paths: tuple[str, ...]) -> None:
                             and entry.name == "multi-user.target.wants"
                             and stat.S_ISLNK(link.st_mode)
                             and link.st_uid == 0 and link.st_gid == 0
+                            and stat.S_ISDIR(entry.lstat().st_mode)
+                            and entry.lstat().st_uid == 0
+                            and entry.lstat().st_gid == 0
+                            and not (stat.S_IMODE(entry.lstat().st_mode) & 0o022)
                             and os.readlink(entry / unit) == "../repocache-nginx.service"
                             and (directory / unit).is_file()
                             and (not (directory / unit).is_symlink())):
