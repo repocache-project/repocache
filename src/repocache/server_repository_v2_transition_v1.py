@@ -193,6 +193,7 @@ def plan_repository_v2_batch_transition(
     proposed_repositories: tuple[dict[str, Any], ...] = (),
     repository_ids: tuple[str, ...] = (),
     all_repositories: bool = False,
+    state_changes: tuple[tuple[str, str], ...] = (),
 ) -> dict[str, Any]:
     """Compose frozen #95 batch operations as ONE complete state-v2 generation.
 
@@ -208,11 +209,17 @@ def plan_repository_v2_batch_transition(
             or not _hex(expected_previous_state_sha256)
             or not _hex(decision_sha256)
             or type(operation) is not str
-            or operation not in ("add", "update", "enable", "disable", "remove")
+            or operation not in ("add", "update", "enable", "disable", "remove", "set-states")
             or type(proposed_repositories) is not tuple
             or type(repository_ids) is not tuple
+            or type(state_changes) is not tuple
             or type(all_repositories) is not bool):
         _deny("BATCH_ARGUMENT_INVALID")
+    if operation == "set-states":
+        if proposed_repositories or repository_ids or all_repositories:
+            _deny("BATCH_SELECTORS_INVALID")
+    elif state_changes:
+        _deny("BATCH_SELECTORS_INVALID")
     if operation in ("add", "update"):
         if repository_ids or all_repositories:
             _deny("BATCH_SELECTORS_INVALID")
@@ -254,6 +261,18 @@ def plan_repository_v2_batch_transition(
                 document, current_generation=expected_generation,
                 repository_ids=repository_ids,
                 all_repositories=all_repositories,
+            )
+        elif operation == "set-states":
+            # Reuse the strict mixed-state planner from #431. As with the
+            # homogeneous planner, it cannot authenticate a locked state or
+            # approve a native reload; the full canonical v2 transition
+            # and CAS digest are checked independently below.
+            from repocache.server_repository_state_batch_v1 import (
+                plan_mixed_repository_states,
+            )
+            plan = plan_mixed_repository_states(
+                document, current_generation=expected_generation,
+                changes=state_changes,
             )
         else:
             # The batch desired-state planner lives in the v1 reconciliation
