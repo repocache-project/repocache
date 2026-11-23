@@ -474,7 +474,7 @@ _OWN_UNIT = "repocache-nginx.service"
 _OWN_CONFIG = "/etc/nginx/repocache.conf"
 # A fixed, reviewed immutable bootstrap; the source archive must contain
 # precisely these signed bytes. Managed TLS deployment is a different step.
-_BOOTSTRAP_CONFIG = "# Authenticated bootstrap only. Never include the vendor's nginx.conf.\n# The fixed local endpoint has no repository routes, TLS or external listener.\n# Full managed TLS/route activation remains a separate guarded transaction.\npid /run/repocache-nginx.pid;\nworker_processes 1;\nevents {\n    worker_connections 128;\n}\nhttp {\n    server {\n        listen 127.0.0.1:8080;\n        server_name localhost;\n        location = /__repocache/private {\n            return 204;\n        }\n        location / {\n            return 404;\n        }\n    }\n}\n".encode("ascii")
+_BOOTSTRAP_CONFIG = "# Authenticated bootstrap only. Never include the vendor's nginx.conf.\n# The fixed local endpoint has no repository routes, TLS or external listener.\n# Full managed TLS/route activation remains a separate guarded transaction.\npid /run/repocache-nginx/nginx.pid;\nerror_log stderr warn;\nworker_processes 1;\nevents {\n    worker_connections 128;\n}\nhttp {\n    access_log off;\n    server {\n        listen 127.0.0.1:8080;\n        server_name localhost;\n        location = /__repocache/private {\n            return 204;\n        }\n        location / {\n            return 404;\n        }\n    }\n}\n".encode("ascii")
 _OWN_PROPERTIES = (
     "Id", "Names", "FragmentPath", "DropInPaths", "LoadState",
     "ActiveState", "SubState", "MainPID", "CanReload", "NeedDaemonReload",
