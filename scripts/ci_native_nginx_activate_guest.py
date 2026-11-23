@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
-"""Disposable, booted two-distro proof of signed-worker NGINX activation.
+"""Disposable VM evidence for the independently owned REPOCACHE NGINX unit.
 
-This fixture rewrites a vendor config INSIDE A DISPOSABLE VM to constrain all
-listeners to loopback. It is not a deployed REPOCACHE configuration writer,
-does not prove the default vendor HTTP listener is safe, and uses only an
-isolated synthetic release-signing identity.
+This exercises real PID1, native APT/DNF, NGINX and SELinux enforcing with
+test-only signed archive assets, not an authorized production deployment.
 """
 from __future__ import annotations
 
@@ -13,15 +11,16 @@ import json
 import os
 from pathlib import Path
 import socket
-import stat
 import subprocess
 import sys
 
-
 ROOT = Path("/root/pr237-synthetic-fixture")
 STATE = Path("/var/lib/repocache/server")
-CONF = Path("/etc/nginx/nginx.conf")
 SOURCE = Path("/home/pr237ci/combined")
+VENDOR_CONFIG = Path("/etc/nginx/nginx.conf")
+OWN_CONFIG = Path("/etc/nginx/repocache.conf")
+VENDOR = "nginx.service"
+OWN = "repocache-nginx.service"
 
 
 def run(*cmd: str) -> subprocess.CompletedProcess:
@@ -29,29 +28,29 @@ def run(*cmd: str) -> subprocess.CompletedProcess:
                           check=False)
 
 
-def require_status(expected_active: bool, expected_enabled: bool) -> None:
-    active = run("/usr/bin/systemctl", "is-active", "nginx.service")
-    enabled = run("/usr/bin/systemctl", "is-enabled", "nginx.service")
-    assert (active.returncode, active.stdout.strip()) == (
-        (0, "active") if expected_active else (3, "inactive")
-    ), (active.returncode, active.stdout)
-    assert (enabled.returncode, enabled.stdout.strip()) == (
-        (0, "enabled") if expected_enabled else (1, "disabled")
-    ), (enabled.returncode, enabled.stdout)
+def require_status(unit: str, active: bool, enabled: bool) -> None:
+    state = run("/usr/bin/systemctl", "is-active", unit)
+    policy = run("/usr/bin/systemctl", "is-enabled", unit)
+    assert (state.returncode, state.stdout.strip()) == (
+        (0, "active") if active else (3, "inactive")
+    ), (unit, state.returncode, state.stdout)
+    assert (policy.returncode, policy.stdout.strip()) == (
+        (0, "enabled") if enabled else (1, "disabled")
+    ), (unit, policy.returncode, policy.stdout)
 
 
-def verify_live_loopback() -> None:
-    with socket.create_connection(("127.0.0.1", 8080), timeout=5) as connection:
-        connection.settimeout(5)
-        connection.sendall(
+def loopback_response() -> None:
+    with socket.create_connection(("127.0.0.1", 8080), timeout=5) as client:
+        client.settimeout(5)
+        client.sendall(
             b"GET /__repocache/private HTTP/1.1\r\n"
             b"Host: localhost\r\nConnection: close\r\n\r\n"
         )
-        received = connection.recv(2048)
-    assert received.startswith(b"HTTP/1.1 204"), received[:70]
+        response = client.recv(2048)
+    assert response.startswith(b"HTTP/1.1 204"), response[:70]
 
 
-def verify_guest(distribution: str) -> None:
+def verify_guest(distribution: str, phase: str) -> None:
     assert os.getresuid() == (0, 0, 0)
     assert Path("/proc/1/comm").read_text().strip() == "systemd"
     assert run("/usr/bin/systemd-detect-virt", "--vm").returncode == 0
@@ -60,102 +59,104 @@ def verify_guest(distribution: str) -> None:
     sys.path[:0] = [str(SOURCE / "src"), str(SOURCE)]
     from scripts import install_native_root_worker as native
     from scripts import stage_native_root_worker as stage
-    from repocache.server_native_nginx_effective_unit_v1 import (
-        inspect_effective_native_nginx_unit,
+    from repocache.server_stock_nginx_package_owner_v1 import (
+        inspect_stock_nginx_package_file_integrity,
     )
+
     pins = json.loads((ROOT / "pins.json").read_bytes())
     assert set(pins) == {"commit", "archive_sha256"}
     assets = ROOT / "assets"
     assert stage.verify_installed_worker(assets, **pins)[
         "status"] == "AUTHENTICATED_WORKER_FILES_MATCH"
     completion = STATE / ".native-nginx-v1.completed"
-    original = completion.read_bytes()
-    digest = hashlib.sha256(original).hexdigest()
+    receipt = hashlib.sha256(completion.read_bytes()).hexdigest()
+    vendor_conf = hashlib.sha256(VENDOR_CONFIG.read_bytes()).hexdigest()
     assert not (STATE / ".native-nginx-v1.pending").exists()
     assert not (STATE / ".state-v2-native.pending").exists()
+    assert inspect_stock_nginx_package_file_integrity()[
+        "native_package_file_integrity_verified"] is True
 
-    phase = sys.argv[2]
     if phase == "activate":
-        require_status(False, False)
-        # A stock distro service typically binds HTTP on all interfaces.
-        # Explicit activation MUST first refuse without affecting service.
-        try:
-            native.activate_authenticated_native_nginx(assets, **pins)
-        except stage.WorkerStageError as error:
-            assert str(error) == "WORKER_PLACEMENT_NATIVE_LISTENERS_UNVERIFIED"
-        else:
-            raise AssertionError("Fresh stock HTTP listener unexpectedly activated")
-        require_status(False, False)
-        assert completion.read_bytes() == original
-        print("PASS: signed-worker activation refused stock public/plaintext NGINX", flush=True)
+        require_status(VENDOR, False, False)
+        require_status(OWN, False, False)
+        assert not OWN_CONFIG.exists() and not OWN_CONFIG.is_symlink()
 
-        # VM-ONLY operator-controlled minimal loopback configuration. Never
-        # write the vendor nginx.conf in the product's activation operation.
-        before = CONF.lstat()
-        assert (stat.S_ISREG(before.st_mode) and before.st_uid == 0
-                and before.st_gid == 0 and before.st_nlink == 1
-                and stat.S_IMODE(before.st_mode) == 0o644)
-        safe = (
-            b"pid /run/nginx.pid;\n"
-            b"events { worker_connections 128; }\n"
-            b"http {\n"
-            b"  server {\n"
-            b"    listen 127.0.0.1:8080;\n"
-            b"    location = /__repocache/private { return 204; }\n"
-            b"  }\n"
-            b"}\n"
-        )
-        CONF.write_bytes(safe)
-        assert CONF.lstat().st_ino == before.st_ino
-        assert run("/usr/sbin/nginx", "-t", "-q").returncode == 0
-
-        original_command = native._nginx_activation_command
-        def injected_enable_failure(action: str) -> None:
-            if action == "enable":
-                raise stage.WorkerStageError("WORKER_PLACEMENT_VM_ENABLE_FAULT")
-            original_command(action)
-        native._nginx_activation_command = injected_enable_failure
+        # An untrusted pre-existing path must never be adopted or overwritten.
+        OWN_CONFIG.symlink_to(VENDOR_CONFIG)
         try:
             try:
                 native.activate_authenticated_native_nginx(assets, **pins)
-            except stage.WorkerStageError as error:
-                assert str(error) == "WORKER_PLACEMENT_NATIVE_ACTIVATION_FAILED_ROLLED_BACK"
+            except stage.WorkerStageError as exc:
+                assert str(exc) == "WORKER_PLACEMENT_FOREIGN_FILE"
             else:
-                raise AssertionError("Injected systemd enable failure was accepted")
+                raise AssertionError("pre-existing private config symlink adopted")
         finally:
-            native._nginx_activation_command = original_command
-        require_status(False, False)
-        assert completion.read_bytes() == original
-        print("PASS: actual started NGINX returned to disabled/inactive after injected enable failure", flush=True)
+            OWN_CONFIG.unlink()
+        require_status(OWN, False, False)
+        require_status(VENDOR, False, False)
+        print("PASS: foreign private configuration symlink rejected without service mutation", flush=True)
+
+        original = native._nginx_activation_command
+
+        def inject_failed_enable(action: str) -> None:
+            if action == "enable":
+                raise stage.WorkerStageError("WORKER_PLACEMENT_VM_ENABLE_FAULT")
+            original(action)
+
+        native._nginx_activation_command = inject_failed_enable
+        try:
+            try:
+                native.activate_authenticated_native_nginx(assets, **pins)
+            except stage.WorkerStageError as exc:
+                assert str(exc) == "WORKER_PLACEMENT_NATIVE_ACTIVATION_FAILED_ROLLED_BACK"
+            else:
+                raise AssertionError("injected systemd enable failure passed")
+        finally:
+            native._nginx_activation_command = original
+        require_status(OWN, False, False)
+        require_status(VENDOR, False, False)
+        assert hashlib.sha256(VENDOR_CONFIG.read_bytes()).hexdigest() == vendor_conf
+        assert hashlib.sha256(completion.read_bytes()).hexdigest() == receipt
+        print("PASS: real own-service systemd enable failure rolls back start", flush=True)
 
         activated = native.activate_authenticated_native_nginx(assets, **pins)
-        assert activated["status"] == "AUTHENTICATED_NATIVE_NGINX_ACTIVE"
-        verify_live_loopback()
-        observed = inspect_effective_native_nginx_unit(distribution)
-        assert observed["main_pid_observed"] > 1
-        require_status(True, True)
+        assert activated["status"] == "AUTHENTICATED_REPOCACHE_NGINX_ACTIVE"
+        assert native._own_service_observation(active=True)["main_pid_observed"] > 1
+        require_status(OWN, True, True)
+        require_status(VENDOR, False, False)
+        loopback_response()
         repeated = native.activate_authenticated_native_nginx(assets, **pins)
-        assert repeated["status"] == "AUTHENTICATED_NATIVE_NGINX_ALREADY_ACTIVE"
-        assert completion.read_bytes() == original
-        (ROOT / "native-activation-receipt-sha256.txt").write_text(digest + "\n")
-        print("PASS: authenticated native service started and enabled, real PID/kernel inode and loopback HTTP 204 verified", flush=True)
+        assert repeated["status"] == "AUTHENTICATED_REPOCACHE_NGINX_ALREADY_ACTIVE"
+        assert hashlib.sha256(completion.read_bytes()).hexdigest() == receipt
+        assert hashlib.sha256(VENDOR_CONFIG.read_bytes()).hexdigest() == vendor_conf
+        assert inspect_stock_nginx_package_file_integrity()[
+            "native_package_file_integrity_verified"] is True
+        (ROOT / "native-activation-integrity.json").write_text(json.dumps({
+            "receipt_sha256": receipt, "vendor_config_sha256": vendor_conf,
+            "owned_config_sha256": hashlib.sha256(OWN_CONFIG.read_bytes()).hexdigest(),
+        }, sort_keys=True))
+        print("PASS: own signed systemd unit enabled and active, vendor unchanged, real PID and loopback HTTP 204", flush=True)
     elif phase == "after":
-        expected = (ROOT / "native-activation-receipt-sha256.txt").read_text().strip()
-        assert digest == expected
-        require_status(True, True)
-        observed = inspect_effective_native_nginx_unit(distribution)
-        assert observed["main_pid_observed"] > 1
-        verify_live_loopback()
+        original = json.loads((ROOT / "native-activation-integrity.json").read_text())
+        assert hashlib.sha256(completion.read_bytes()).hexdigest() == original["receipt_sha256"]
+        assert hashlib.sha256(VENDOR_CONFIG.read_bytes()).hexdigest() == original["vendor_config_sha256"]
+        assert hashlib.sha256(OWN_CONFIG.read_bytes()).hexdigest() == original["owned_config_sha256"]
+        require_status(OWN, True, True)
+        require_status(VENDOR, False, False)
+        assert native._own_service_observation(active=True)["main_pid_observed"] > 1
+        loopback_response()
         again = native.activate_authenticated_native_nginx(assets, **pins)
-        assert again["status"] == "AUTHENTICATED_NATIVE_NGINX_ALREADY_ACTIVE"
-        assert completion.read_bytes() == original
-        print("PASS: operational NGINX survives native kernel reboot with enabled vendor service; no duplicate install", flush=True)
-        print("NOT VERIFIED: unmodified stock HTTP exposure, managed TLS bootstrap or final publisher-signed release", flush=True)
+        assert again["status"] == "AUTHENTICATED_REPOCACHE_NGINX_ALREADY_ACTIVE"
+        assert inspect_stock_nginx_package_file_integrity()[
+            "native_package_file_integrity_verified"] is True
+        print("PASS: separate REPOCACHE service survives real reboot with vendor service disabled and package integrity intact", flush=True)
+        print("NOT VERIFIED: managed HTTPS/v2, full deployment, final publisher-signed release", flush=True)
     else:
-        raise AssertionError("unsupported phase")
+        raise AssertionError("invalid test phase")
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3 or sys.argv[1] not in ("debian", "almalinux") or sys.argv[2] not in ("activate", "after"):
+    if (len(sys.argv) != 3 or sys.argv[1] not in ("debian", "almalinux")
+            or sys.argv[2] not in ("activate", "after")):
         raise SystemExit("Usage: ci_native_nginx_activate_guest.py debian|almalinux activate|after")
-    verify_guest(sys.argv[1])
+    verify_guest(sys.argv[1], sys.argv[2])
