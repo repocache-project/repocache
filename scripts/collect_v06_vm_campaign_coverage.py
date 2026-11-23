@@ -49,7 +49,7 @@ SCENARIOS = {
             "native-install-after-reboot.txt", "installer-reboot-ids.txt",
             "synthetic-installed-worker.txt", "native-v2-repository-lifecycle.txt",
         ),
-        "criteria": ("95.02", "95.03", "95.04", "95.05", "95.06", "28.04", "28.05"),
+        "criteria": ("95.02", "95.03", "95.04", "95.06", "28.05"),
     },
     "native-package-interruption": {
         "files": (
