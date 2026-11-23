@@ -40,7 +40,7 @@ def require_status(unit: str, active: bool, enabled: bool) -> None:
 
 
 def loopback_response() -> None:
-    with socket.create_connection(("127.0.0.1", 8080), timeout=5) as client:
+    with socket.create_connection(("127.0.0.1", 8008), timeout=5) as client:
         client.settimeout(5)
         client.sendall(
             b"GET /__repocache/private HTTP/1.1\r\n"
