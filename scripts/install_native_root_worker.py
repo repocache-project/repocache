@@ -229,8 +229,20 @@ def _reject_conflicting_units(root: Path, unit_paths: tuple[str, ...]) -> None:
             if entry.name.endswith((".wants", ".requires", ".upholds")):
                 for unit in stage.UNITS:
                     try:
-                        (entry / unit).lstat()
+                        link = (entry / unit).lstat()
                     except FileNotFoundError:
+                        continue
+                    if (unit == "repocache-nginx.service"
+                            and path == "/etc/systemd/system"
+                            and entry.name == "multi-user.target.wants"
+                            and stat.S_ISLNK(link.st_mode)
+                            and link.st_uid == 0 and link.st_gid == 0
+                            and os.readlink(entry / unit) == "../repocache-nginx.service"
+                            and (directory / unit).is_file()
+                            and (not (directory / unit).is_symlink())):
+                        # Our signed service's normal enablement is not a
+                        # foreign dependency. The installed unit bytes are
+                        # separately reauthenticated under the placement lock.
                         continue
                     _reject("FOREIGN_UNIT_DEPENDENCY")
             if entry.name not in stage.UNITS and entry.is_symlink():
