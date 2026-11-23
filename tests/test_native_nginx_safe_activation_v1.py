@@ -16,7 +16,7 @@ from scripts import stage_native_root_worker as stage
 def _setup(monkeypatch):
     state = {
         "active": False, "enabled": False, "vendor_queries": 0,
-        "commands": [], "package_audits": 0, "config_checks": 0,
+        "commands": [], "package_audits": 0, "config_checks": 0, "runtime_preps": 0,
     }
     def audit(*args, **kwargs):
         state["package_audits"] += 1
@@ -37,6 +37,12 @@ def _setup(monkeypatch):
     monkeypatch.setattr(host, "_require_private_nginx_listeners",
                         lambda: state.__setitem__(
                             "config_checks", state["config_checks"] + 1))
+    monkeypatch.setattr(host, "_private_config_present",
+                        lambda: state.__setitem__(
+                            "config_checks", state["config_checks"] + 1))
+    monkeypatch.setattr(host, "_prepare_own_runtime_directory",
+                        lambda: state.__setitem__(
+                            "runtime_preps", state["runtime_preps"] + 1))
     def own_status(command):
         return ((0, b"enabled\n") if state["enabled"] else
                 (1, b"disabled\n")) if command == "is-enabled" else (
@@ -68,7 +74,8 @@ def test_explicit_signed_own_service_is_idempotent(monkeypatch):
         11, "debian", host._BOOTSTRAP_CONFIG)
     assert first["status"] == "AUTHENTICATED_REPOCACHE_NGINX_ACTIVE"
     assert state["commands"] == ["daemon-reload", "start", "enable"]
-    assert state["config_checks"] == 3
+    assert state["config_checks"] == 4
+    assert state["runtime_preps"] == 1
     again = host._activate_audited_native_nginx_under_lock(
         11, "debian", host._BOOTSTRAP_CONFIG)
     assert again["status"] == "AUTHENTICATED_REPOCACHE_NGINX_ALREADY_ACTIVE"
@@ -173,6 +180,32 @@ def test_unknown_master_on_failed_start_is_never_killed(monkeypatch):
         host._activate_audited_native_nginx_under_lock(
             11, "debian", host._BOOTSTRAP_CONFIG)
     assert state["commands"] == ["daemon-reload", "start"]
+
+
+def test_pid_cleanup_refuses_symlink_without_unlink(tmp_path):
+    import os
+    (tmp_path / "nginx.pid").symlink_to("/etc/passwd")
+    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(stage.WorkerStageError,
+                           match="NATIVE_RUNTIME_PID_FOREIGN"):
+            host._unlink_inert_nginx_syntax_pid(fd)
+        assert (tmp_path / "nginx.pid").is_symlink()
+    finally:
+        os.close(fd)
+
+
+def test_pid_cleanup_refuses_nonempty_foreign_file(tmp_path):
+    import os
+    (tmp_path / "nginx.pid").write_text("1234")
+    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(stage.WorkerStageError,
+                           match="NATIVE_RUNTIME_PID_FOREIGN"):
+            host._unlink_inert_nginx_syntax_pid(fd)
+        assert (tmp_path / "nginx.pid").read_text() == "1234"
+    finally:
+        os.close(fd)
 
 
 def test_fixed_service_command_never_touches_vendor(monkeypatch):
