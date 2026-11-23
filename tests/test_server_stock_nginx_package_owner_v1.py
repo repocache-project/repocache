@@ -123,3 +123,140 @@ def test_unsafe_binary_metadata_refused(mode, uid, links, size):
     with mock.patch.object(p.os, "lstat", return_value=info):
         with pytest.raises(p.StockNginxPackageOwnerError):
             p._safe_binary()
+
+@pytest.mark.parametrize("platform,command", [
+    ("debian13", ["/usr/bin/dpkg", "--verify", "nginx", "nginx-common"]),
+    ("almalinux10", ["/usr/bin/rpm", "-V", "nginx", "nginx-core"]),
+])
+def test_fixed_installed_file_integrity_is_read_only_and_never_authorizes_reentry(
+    platform, command,
+):
+    info = SimpleNamespace(st_dev=2, st_ino=19, st_mode=stat.S_IFREG | 0o755,
+        st_uid=0, st_gid=0, st_nlink=1, st_size=345678,
+        st_mtime_ns=5, st_ctime_ns=5)
+    release = ("ID=debian\nVERSION_ID=13\n" if platform == "debian13"
+               else "ID=almalinux\nVERSION_ID=10\n")
+    with mock.patch.object(Path, "read_text", return_value=release), \
+         mock.patch.object(p.os, "lstat", return_value=info) as identity, \
+         mock.patch.object(p.subprocess, "run",
+                           return_value=subprocess.CompletedProcess([], 0, "", "")) as run:
+        report = p.inspect_stock_nginx_package_file_integrity()
+    assert report["native_package_file_integrity_verified"] is True
+    assert report["native_package_signature_verified"] is False
+    assert report["authorizes_native_marker_removal"] is False
+    assert report["authorizes_nginx_activation"] is False
+    assert identity.call_count == 2
+    assert run.call_args.args[0] == command
+    assert run.call_args.kwargs["timeout"] == 20
+    assert "shell" not in run.call_args.kwargs
+
+
+@pytest.mark.parametrize("failure", ["returncode", "stdout", "changed-binary"])
+def test_installed_file_integrity_failure_cannot_be_reconciled(failure):
+    info = SimpleNamespace(st_dev=2, st_ino=19, st_mode=stat.S_IFREG | 0o755,
+        st_uid=0, st_gid=0, st_nlink=1, st_size=345678,
+        st_mtime_ns=5, st_ctime_ns=5)
+    changed = SimpleNamespace(**{**vars(info), "st_ino": 20})
+    result = subprocess.CompletedProcess([], 1 if failure == "returncode" else 0,
+        "S.5....T /usr/sbin/nginx" if failure == "stdout" else "", "")
+    with mock.patch.object(Path, "read_text", return_value="ID=debian\nVERSION_ID=13\n"), \
+         mock.patch.object(p.os, "lstat",
+                           side_effect=[info, changed] if failure == "changed-binary"
+                           else [info, info]), \
+         mock.patch.object(p.subprocess, "run", return_value=result):
+        with pytest.raises(p.StockNginxPackageOwnerError):
+            p.inspect_stock_nginx_package_file_integrity()
+
+@pytest.mark.parametrize("line,ok", [
+    ("missing     /usr/share/doc/nginx/changelog.gz", True),
+    ("missing     /usr/share/doc/nginx-common/changelog.Debian.gz", True),
+    ("missing     /usr/share/man/man8/nginx.8.gz", True),
+    ("missing     /usr/share/licenses/nginx/COPYING", True),
+    ("missing     /usr/sbin/nginx", False),
+    ("S.5....T /etc/nginx/nginx.conf", False),
+    ("missing     /usr/share/doc/nginx/..", False),
+    ("missing     /usr/share/doc/nginx/../../../etc/shadow", False),
+])
+def test_minimal_image_documentation_omission_is_bounded_not_host_proof(line, ok):
+    if ok:
+        assert p._ignored_minimal_image_documentation(line + "\n") == 1
+    else:
+        with pytest.raises(p.StockNginxPackageOwnerError):
+            p._ignored_minimal_image_documentation(line + "\n")
+
+
+def test_native_file_audit_never_claims_stripped_documentation_is_intact():
+    info = SimpleNamespace(st_dev=2, st_ino=19, st_mode=stat.S_IFREG | 0o755,
+        st_uid=0, st_gid=0, st_nlink=1, st_size=345678,
+        st_mtime_ns=5, st_ctime_ns=5)
+    missing = ("missing     /usr/share/doc/nginx/changelog.gz\n"
+               "missing     /usr/share/man/man8/nginx.8.gz\n")
+    with mock.patch.object(Path, "read_text", return_value="ID=debian\nVERSION_ID=13\n"), \
+         mock.patch.object(p.os, "lstat", return_value=info), \
+         mock.patch.object(p.subprocess, "run",
+             return_value=subprocess.CompletedProcess([], 0, missing, "")):
+        report = p.inspect_stock_nginx_package_file_integrity()
+    assert report["native_package_file_integrity_verified"] is True
+    assert report["native_package_documentation_omissions"] == 2
+    assert report["all_native_package_bytes_verified"] is False
+    assert report["native_package_signature_verified"] is False
+    assert report["authorizes_native_marker_removal"] is False
+
+@pytest.mark.parametrize("variation", [
+    ".M...U...  g /var/log/nginx/access.log",
+    ".M...U...  g /var/log/nginx/error.log",
+])
+def test_expected_native_rpm_ghost_log_variation_requires_safe_fixed_inodes(
+    variation,
+):
+    root = SimpleNamespace(st_mode=stat.S_IFDIR | 0o755,
+                           st_uid=0, st_dev=2)
+    logfile = SimpleNamespace(st_mode=stat.S_IFREG | 0o640,
+                              st_uid=979, st_nlink=1, st_dev=2)
+    with mock.patch.object(p.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=979)), \
+         mock.patch.object(p.os, "lstat", side_effect=[root, logfile]):
+        assert p._ignored_native_rpm_ghost_log_variations(variation) == ("", 1)
+
+
+@pytest.mark.parametrize("mode,uid,links", [
+    (stat.S_IFLNK | 0o777, 979, 1),
+    (stat.S_IFREG | 0o666, 979, 1),
+    (stat.S_IFREG | 0o640, 500, 1),
+    (stat.S_IFREG | 0o640, 979, 2),
+])
+def test_native_rpm_log_variation_refuses_foreign_ownership_or_inode(mode, uid, links):
+    root = SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0, st_dev=2)
+    logfile = SimpleNamespace(st_mode=mode, st_uid=uid, st_nlink=links, st_dev=2)
+    with mock.patch.object(p.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=979)), \
+         mock.patch.object(p.os, "lstat", side_effect=[root, logfile]):
+        with pytest.raises(p.StockNginxPackageOwnerError):
+            p._ignored_native_rpm_ghost_log_variations(
+                ".M...U...  g /var/log/nginx/access.log"
+            )
+
+
+@pytest.mark.parametrize("raw", [
+    ".M...U...  g /var/log/nginx/foreign.log",
+    ".M...U...  g /usr/sbin/nginx",
+])
+def test_native_rpm_unknown_variations_never_bypass_distro_verifier(raw):
+    root = SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0, st_dev=2)
+    logfile = SimpleNamespace(st_mode=stat.S_IFREG | 0o640,
+                              st_uid=979, st_nlink=1, st_dev=2)
+    with mock.patch.object(p.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=979)), \
+         mock.patch.object(p.os, "lstat", side_effect=[root, logfile]):
+        remainder, count = p._ignored_native_rpm_ghost_log_variations(raw)
+        assert remainder == raw
+        assert count == 0
+
+def test_native_rpm_duplicate_expected_log_is_refused():
+    root = SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0, st_dev=2)
+    logfile = SimpleNamespace(st_mode=stat.S_IFREG | 0o640,
+                              st_uid=979, st_nlink=1, st_dev=2)
+    with mock.patch.object(p.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=979)), \
+         mock.patch.object(p.os, "lstat", side_effect=[root, logfile]):
+        with pytest.raises(p.StockNginxPackageOwnerError):
+            p._ignored_native_rpm_ghost_log_variations(
+                ".M...U...  g /var/log/nginx/access.log\n"
+                ".M...U...  g /var/log/nginx/access.log"
+            )

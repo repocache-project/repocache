@@ -1,0 +1,133 @@
+name: PR237 Experimental Native QEMU VMs (non-required)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '.github/workflows/pr237-booted-native-vm.yml'
+      - 'scripts/ci_pr237_booted_vm.sh'
+      - 'scripts/ci_pr237_guest.sh'
+      - 'scripts/ci_pr237_native_host_integration.py'
+      - 'scripts/ci_pr237_native_journal_reboot.py'
+      - 'scripts/ci_pr237_synthetic_worker_guest.py'
+      - 'scripts/ci_pr237_native_package_guest.py'
+      - 'scripts/ci_pr237_native_socket_guest.py'
+      - 'scripts/ci_pr237_native_package_interrupt_guest.py'
+      - 'docs/testing/PR237_BOOTED_VM.md'
+      - 'docs/testing/V060_NATIVE_VM_COVERAGE_MATRIX.md'
+      - 'scripts/collect_v06_vm_campaign_coverage.py'
+      - 'scripts/ci_v06_vm_nginx_cache_guest.py'
+      - 'scripts/ci_v06_vm_client_cli_guest.py'
+      - 'tests/test_v06_vm_campaign_coverage.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  booted-native:
+    if: github.event_name != 'pull_request' || github.event.pull_request.number == 237
+    name: Native VM (${{ matrix.platform }}, ${{ matrix.scenario }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - scenario: smoke
+            platform: debian13
+            image_url: https://cloud.debian.org/images/cloud/trixie/20261001-2618/debian-13-genericcloud-amd64-20261001-2618.qcow2
+            image_sha512: f46f0671a6e5bdec5291ab8972bae2f10e5408c2f64a74078f11efc2f06a436a9d0313ed50e0472542eeabf780e9f7c792ac0a314c6c20507fcd9fd81b468c3d
+            image_sha256: ''
+          - scenario: smoke
+            platform: almalinux10
+            image_url: https://repo.almalinux.org/almalinux/10/cloud/x86_64/images/AlmaLinux-10-GenericCloud-10.3-20261116.0.x86_64.qcow2
+            image_sha512: ''
+            image_sha256: 845d3a4e41fde973bdbf9763b62a88538c1a1fadc2332a89f6ea01e2c17c78ee
+          - scenario: native-installer
+            platform: debian13
+            image_url: https://cloud.debian.org/images/cloud/trixie/20261001-2618/debian-13-genericcloud-amd64-20261001-2618.qcow2
+            image_sha512: f46f0671a6e5bdec5291ab8972bae2f10e5408c2f64a74078f11efc2f06a436a9d0313ed50e0472542eeabf780e9f7c792ac0a314c6c20507fcd9fd81b468c3d
+            image_sha256: ''
+          - scenario: native-installer
+            platform: almalinux10
+            image_url: https://repo.almalinux.org/almalinux/10/cloud/x86_64/images/AlmaLinux-10-GenericCloud-10.3-20261116.0.x86_64.qcow2
+            image_sha512: ''
+            image_sha256: 845d3a4e41fde973bdbf9763b62a88538c1a1fadc2332a89f6ea01e2c17c78ee
+          - scenario: native-package-interruption
+            platform: debian13
+            image_url: https://cloud.debian.org/images/cloud/trixie/20261001-2618/debian-13-genericcloud-amd64-20261001-2618.qcow2
+            image_sha512: f46f0671a6e5bdec5291ab8972bae2f10e5408c2f64a74078f11efc2f06a436a9d0313ed50e0472542eeabf780e9f7c792ac0a314c6c20507fcd9fd81b468c3d
+            image_sha256: ''
+          - scenario: native-package-interruption
+            platform: almalinux10
+            image_url: https://repo.almalinux.org/almalinux/10/cloud/x86_64/images/AlmaLinux-10-GenericCloud-10.3-20261116.0.x86_64.qcow2
+            image_sha512: ''
+            image_sha256: 845d3a4e41fde973bdbf9763b62a88538c1a1fadc2332a89f6ea01e2c17c78ee
+    steps:
+      - name: Checkout exact PR branch source without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Prepare QEMU and NoCloud tooling on disposable runner
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git rev-parse HEAD
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends qemu-system-x86 qemu-utils cloud-image-utils openssh-client
+      - name: Run isolated boot and native system validation
+        shell: bash
+        env:
+          PR237_PLATFORM: ${{ matrix.platform }}
+          PR237_IMAGE_URL: ${{ matrix.image_url }}
+          PR237_IMAGE_SHA512: ${{ matrix.image_sha512 }}
+          PR237_IMAGE_SHA256: ${{ matrix.image_sha256 }}
+          PR237_SCENARIO: ${{ matrix.scenario }}
+        run: bash scripts/ci_pr237_booted_vm.sh
+      - name: Index partial cross-issue campaign evidence (never original acceptance)
+        if: always()
+        shell: bash
+        env:
+          VM_PLATFORM: ${{ matrix.platform }}
+          VM_SCENARIO: ${{ matrix.scenario }}
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          python3 -B scripts/collect_v06_vm_campaign_coverage.py \
+            --evidence-dir pr237-vm-evidence \
+            --platform "$VM_PLATFORM" \
+            --scenario "$VM_SCENARIO" \
+            --expected-head "$EXPECTED_HEAD"
+      - name: Publish summary even when experiment fails
+        if: always()
+        shell: bash
+        run: |
+          if test -f pr237-vm-evidence/summary.md; then
+            cat pr237-vm-evidence/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'PR237 VM NOT VERIFIED: failed before evidence initialization.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if test -f pr237-vm-evidence/v06-campaign-coverage.json; then
+            python3 -B - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+          data = json.loads(Path("pr237-vm-evidence/v06-campaign-coverage.json").read_text(encoding="utf-8"))
+          print("### Cross-issue campaign coverage (experimental)")
+          print("| Campaign | Observed scenario coverage |")
+          print("| --- | --- |")
+          print("| P0-1 | " + data["scenario_status"] + " (partial native exercise) |")
+          for key in ("P0-2", "P0-3", "P0-4", "P1-1", "P1-2"):
+              print("| " + key + " | " + data["other_campaigns"][key] + " |")
+          print("**Original issue acceptance: NOT VERIFIED** (no owner-signed publication claim).")
+          PY
+          fi
+      - name: Upload bounded VM evidence (no guest secrets or disk images)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pr237-native-vm-${{ matrix.platform }}-${{ matrix.scenario }}
+          path: pr237-vm-evidence/
+          if-no-files-found: warn
+          retention-days: 7

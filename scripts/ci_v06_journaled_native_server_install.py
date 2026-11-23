@@ -32,14 +32,16 @@ from repocache.server_native_package_effects_observe_v1 import (
     inspect_current_namespace_native_postpackage_candidate,
 )
 from repocache.server_native_nginx_package_journal_v1 import (
-    NATIVE_PENDING_NAME, NATIVE_TMP_NAME, NativePackageJournalError,
+    NATIVE_PENDING_NAME, NATIVE_TMP_NAME, NATIVE_COMPLETE_NAME,
+    NativePackageJournalError, _read_completed_native_install_under_lock,
     _prepare_native_journal_under_root,
     _retain_native_package_journal_lock_under_root,
 )
 from repocache.server_protected_namespace_bootstrap_v1 import (
     bootstrap_protected_namespace_under_root,
 )
-from repocache.server_protected_state_store_v1 import LOCK_NAME
+from repocache.server_protected_state_store_v1 import LOCK_NAME, _locked
+from repocache.server_proposed_state_v2_store import _legacy_refusal
 
 from smoke_server_native_nginx_container_install import (
     ContainerInstallRehearsalError, run_rehearsal,
@@ -259,6 +261,10 @@ def run() -> dict[str, Any]:
     global _STAGE
     _STAGE = "CONTEXT"
     distribution, os_release = _require_disposable_context()
+    completion_setting = os.environ.get("REPOCACHE_NATIVE_COMPLETION_TEST", "0")
+    if completion_setting not in ("0", "1"):
+        _deny("NATIVE_COMPLETION_MODE_INVALID")
+    completion_test = completion_setting == "1"
     _STAGE = "DOCUMENT"
     doc = json.loads(
         (_ROOT / "docs/examples/server-install-v1.json").read_text(encoding="utf-8")
@@ -303,6 +309,7 @@ def run() -> dict[str, Any]:
             # the fixed lock. Its inode/owner/mode security boundary remains
             # strict; only shared-ancestor timestamps/link counts can drift.
             allow_native_package_parent_changes=True,
+            expose_audited_completion=completion_test,
         ) as prepared:
             if (prepared["status"] != "NATIVE_PACKAGE_EFFECTS_JOURNAL_DURABLE"
                     or prepared["authorizes_package_installation"]):
@@ -334,6 +341,78 @@ def run() -> dict[str, Any]:
                           "AttributeError", "AssertionError", "KeyError",
                           "NameError", "RuntimeError", "ImportError",
                       } else "UNVERIFIED"))
+            if completion_test:
+                _STAGE = "AUDITED_NATIVE_COMPLETION"
+                # This is the disposable source-only demonstration: actual
+                # official signed-source APT/DNF returned success while the
+                # very same root-owned lock stayed held across ALL commands.
+                # Never treat the package postcheck itself as root authority.
+                if (len(seen) < 4 or any(item != "CONTENDED" for item in seen)
+                        or result.get("status") !=
+                           "CONTAINER_NATIVE_NGINX_INSTALLED_SYNTAX_OK"
+                        or result.get("authenticated_native_source_used") is not True
+                        or result.get("native_transaction_executed_in_disposable_container") is not True
+                        or result.get("nginx_syntax_test_passed_in_container") is not True
+                        or result.get("host_package_transaction_authorized") is not False):
+                    _deny("AUDITED_NATIVE_MANAGER_EFFECTS_UNVERIFIED")
+                try:
+                    completion = prepared["_complete_under_lock"]()
+                except (NativePackageJournalError, OSError, ValueError, TypeError):
+                    _deny("AUDITED_NATIVE_COMPLETION_UNVERIFIED")
+                if (completion.get("status") !=
+                        "NATIVE_PACKAGE_EFFECTS_COMPLETED_AFTER_LOCKED_INSTALL"
+                        or completion.get("native_package_effects_reconciled") is not True
+                        or completion.get("publisher_artifact_verified") is not False
+                        or completion.get("authorizes_service_activation") is not False):
+                    _deny("AUDITED_NATIVE_COMPLETION_UNVERIFIED")
+        if completion_test:
+            _STAGE = "COMPLETION_PERSISTENCE"
+            if ((_STATE / NATIVE_PENDING_NAME).exists()
+                    or (_STATE / NATIVE_TMP_NAME).exists()
+                    or not (_STATE / NATIVE_COMPLETE_NAME).is_file()):
+                _deny("NATIVE_COMPLETION_DURABILITY_UNVERIFIED")
+            try:
+                with _locked(root_fd, 0, allow_native_package_parent_changes=True) as state:
+                    receipt = _read_completed_native_install_under_lock(
+                        state, owner_uid=0, distribution=distribution,
+                    )
+                    _legacy_refusal(state, 0)
+                if (receipt is None
+                        or receipt["publisher_artifact_verified"] is not False
+                        or receipt["booted_native_service_verified"] is not False):
+                    _deny("NATIVE_COMPLETION_RECEIPT_UNVERIFIED")
+                # A second FRESH native transaction must refuse to adopt the
+                # audited package as a new install, even after the pending
+                # marker was correctly retired.
+                try:
+                    _prepare_native_journal_under_root(
+                        root_fd, owner_uid=0, distribution=distribution,
+                    )
+                except NativePackageJournalError as exc:
+                    if str(exc) != "NATIVE_PACKAGE_EFFECTS_RECONCILIATION_REQUIRED":
+                        _deny("NATIVE_COMPLETED_REENTRY_UNVERIFIED")
+                else:
+                    _deny("NATIVE_COMPLETED_REENTRY_ADMITTED")
+            except NativeIntegrationError:
+                raise
+            except (NativePackageJournalError, OSError, ValueError, TypeError):
+                _deny("NATIVE_COMPLETION_RECEIPT_UNVERIFIED")
+            _STAGE = "COMPLETE"
+            return {
+                "schema_version": 1,
+                "status": "DISPOSABLE_AUDITED_NATIVE_COMPLETION_PASS",
+                "distribution": distribution,
+                "actual_native_package_transaction_under_single_lock": True,
+                "durable_completed_receipt_verified": True,
+                "prior_pending_marker_retired_after_audit": True,
+                "fresh_reentry_still_refused": True,
+                "host_root_provenance_verified": False,
+                "publisher_artifact_verified": False,
+                "systemd_pid1_verified": False,
+                "selinux_enforcing_verified": False,
+                "authorizes_host_installation": False,
+                "authorizes_nginx_reload": False,
+            }
         _STAGE = "POST_TRANSACTION"
         if (len(seen) < 4 or any(item != "CONTENDED" for item in seen)
                 or not result["native_transaction_executed_in_disposable_container"]

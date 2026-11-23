@@ -19,6 +19,7 @@ from typing import Any
 _ALLOWED = {
     b"apply-v2\n": "APPLY_V2",
     b"recover-v2\n": "RECOVER_V2",
+    b"reload-v2\n": "RELOAD_V2",
 }
 _MAX_PACKET = 32
 _MAX_GROUP_BYTES = 1024

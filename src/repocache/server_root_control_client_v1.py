@@ -19,6 +19,7 @@ _PARENT = "/run/repocache"
 _REQUESTS = {
     "APPLY_V2": b"apply-v2\n",
     "RECOVER_V2": b"recover-v2\n",
+    "RELOAD_V2": b"reload-v2\n",
 }
 _RESPONSE_LIMIT = 1024
 

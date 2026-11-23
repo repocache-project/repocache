@@ -35,11 +35,11 @@ def test_fixed_systemd_socket_reference_never_grants_directory_write():
     assert not any(key.startswith("ListenDatagram") for key in unit["Socket"])
 
 
-def test_systemd_worker_reference_is_inert_and_has_no_write_exemption():
+def test_systemd_worker_reference_allows_only_fixed_native_write_domains():
     unit = parse("repocache-control.service")
     assert list(unit) == ["DEFAULT", "Unit", "Service"]
     assert dict(unit["Unit"]) == {
-        "Description": "REPOCACHE inert root-control worker (non-installed reference)",
+        "Description": "REPOCACHE fixed native v2 transaction worker (non-installed reference)",
         "Requires": "repocache-control.socket",
         "After": "repocache-control.socket",
         "ConditionPathIsExecutable": "/usr/libexec/repocache/server-control-worker",
@@ -57,12 +57,15 @@ def test_systemd_worker_reference_is_inert_and_has_no_write_exemption():
         "ProtectKernelTunables": "yes",
         "ProtectKernelModules": "yes",
         "ProtectControlGroups": "yes",
-        "RestrictAddressFamilies": "AF_UNIX",
+        "RestrictAddressFamilies": "AF_UNIX AF_INET AF_INET6",
+        "ReadWritePaths": "/etc/nginx/conf.d /var/lib/repocache/server /var/lib/repocache/public /var/log/nginx /var/cache/nginx",
+        "RestrictNamespaces": "yes",
+        "RestrictSUIDSGID": "yes",
         "LockPersonality": "yes",
         "MemoryDenyWriteExecute": "yes",
         "SystemCallArchitectures": "native",
         "UMask": "0077",
-        "TimeoutStartSec": "10s",
+        "TimeoutStartSec": "240s",
         "StandardInput": "null",
         "StandardOutput": "journal",
         "StandardError": "journal",

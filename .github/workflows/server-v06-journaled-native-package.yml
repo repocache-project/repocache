@@ -107,6 +107,35 @@ jobs:
               echo "PASS: same disposable Debian/Alma image completed journaled native install and rootless generated HTTPS cache HIT/MISS; no VM GO"
             '
 
+      - name: Prove audited completion from actual APT/DNF in same protected lock
+        shell: bash
+        env:
+          DISTRO_IMAGE: ${{ matrix.image }}
+        run: |
+          set -Eeuo pipefail
+          # A second fresh disposable image exercises the success branch;
+          # the earlier job still proves interrupted effects remain pending.
+          docker run --rm --network bridge \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace,readonly" \
+            --workdir /workspace "$DISTRO_IMAGE" sh -ec '
+              set -eu
+              if command -v apt-get >/dev/null 2>&1; then
+                apt-get update -qq
+                DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends python3 ca-certificates openssl systemd >/dev/null
+              else
+                dnf -y -q install python3 ca-certificates openssl systemd >/dev/null
+              fi
+              export PYTHONPATH=/workspace/src
+              export REPOCACHE_NATIVE_TEST_CONTAINER=CONFIRMED_DISPOSABLE_DOCKER_ONLY
+              export REPOCACHE_NATIVE_COMPLETION_TEST=1
+              python3 -B scripts/ci_v06_journaled_native_server_install.py > /tmp/audited-native-completion.json
+              grep -Fq DISPOSABLE_AUDITED_NATIVE_COMPLETION_PASS /tmp/audited-native-completion.json
+              grep -Fq "\"durable_completed_receipt_verified\": true" /tmp/audited-native-completion.json
+              grep -Fq "\"authorizes_host_installation\": false" /tmp/audited-native-completion.json
+              cat /tmp/audited-native-completion.json
+              echo "PASS: real APT/DNF completed with same-lock durable audit; native host/release NOT VERIFIED"
+            '
+
       - name: Refuse foreign NGINX footprints before native package effects
         shell: bash
         env:

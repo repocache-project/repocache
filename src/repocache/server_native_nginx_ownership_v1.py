@@ -131,7 +131,10 @@ def _scan_nginx_process_footprint(*, proc_root: str = "/proc") -> str:
                     return "PROCESS_SCAN_UNVERIFIED"
                 finally:
                     os.close(fd)
-                if overflow or not value or len(value) > 32:
+                # Booted Debian 13 kernel 6.12.111 exposed a 43-byte
+                # kernel comm record in the real /proc PID inventory.
+                # Allow bounded longer task names, never overflow.
+                if overflow or not value or len(value) > 64:
                     return "PROCESS_SCAN_UNVERIFIED"
                 name_bytes = value.removesuffix(b"\n")
                 if name_bytes == b"nginx" or name_bytes.startswith(b"nginx:"):

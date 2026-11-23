@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import pwd
 import re
 import stat
 import subprocess
@@ -20,6 +21,13 @@ _MANAGERS = {
 }
 _ENV = {"PATH": "/usr/bin:/bin", "LC_ALL": "C", "LANG": "C"}
 _MAX_RESULT = 2048
+# Optional stricter *read-only* installed-file integrity for the post-APT/DNF
+# effects audit. These checks compare installed files with the native package
+# database, not with an independently signed payload.
+_VERIFY = {
+    "debian13": ["/usr/bin/dpkg", "--verify", "nginx", "nginx-common"],
+    "almalinux10": ["/usr/bin/rpm", "-V", "nginx", "nginx-core"],
+}
 
 
 class StockNginxPackageOwnerError(ValueError):
@@ -155,3 +163,125 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+def _ignored_minimal_image_documentation(raw: str) -> int:
+    """Count only missing distro-stripped docs; reject any runtime drift."""
+    if type(raw) is not str or len(raw) > _MAX_RESULT:
+        _deny("PACKAGE_FILE_INTEGRITY_UNVERIFIED")
+    if not raw:
+        return 0
+    omitted = 0
+    for line in raw.splitlines():
+        match = re.fullmatch(
+            r"missing[ \t]+(/usr/share/(?:doc/(?:nginx|nginx-common|nginx-core)/"
+            r"[A-Za-z0-9._+-]+|man/man8/nginx\.8\.gz|"
+            r"licenses/(?:nginx|nginx-core)/[A-Za-z0-9._+-]+))",
+            line, re.ASCII,
+        )
+        if match is None or any(part in (".", "..") for part in match.group(1).split("/")):
+            _deny("PACKAGE_FILE_INTEGRITY_UNVERIFIED")
+        omitted += 1
+    return omitted
+
+
+_RPM_GHOST_LOGS = frozenset({
+    ".M...U...  g /var/log/nginx/access.log",
+    ".M...U...  g /var/log/nginx/error.log",
+})
+
+
+def _ignored_native_rpm_ghost_log_variations(raw: str) -> tuple[str, int]:
+    """Ignore only stock log metadata changes after validating fixed inodes.
+
+    NGINX/packaging may adjust these two ghost log ownership/modes at
+    installation; the executable, vendor unit, and other package files
+    remain mandatory RPM integrity checks. No arbitrary path is accepted.
+    """
+    if type(raw) is not str or len(raw) > _MAX_RESULT:
+        _deny("PACKAGE_FILE_INTEGRITY_UNVERIFIED")
+    try:
+        uid = pwd.getpwnam("nginx").pw_uid
+        directory = os.lstat("/var/log/nginx")
+    except (KeyError, OSError, ValueError, TypeError):
+        _deny("PACKAGE_LOG_IDENTITY_UNVERIFIED")
+    if (type(uid) is not int or uid < 0
+            or not stat.S_ISDIR(directory.st_mode) or directory.st_uid != 0
+            or directory.st_mode & 0o022):
+        _deny("PACKAGE_LOG_IDENTITY_UNVERIFIED")
+    selected: set[str] = set()
+    remaining: list[str] = []
+    for line in raw.splitlines():
+        if line not in _RPM_GHOST_LOGS:
+            remaining.append(line)
+            continue
+        if line in selected:
+            _deny("PACKAGE_LOG_IDENTITY_UNVERIFIED")
+        selected.add(line)
+        filename = line.rsplit(" ", 1)[1]
+        try:
+            info = os.lstat(filename)
+        except OSError:
+            _deny("PACKAGE_LOG_IDENTITY_UNVERIFIED")
+        if (not stat.S_ISREG(info.st_mode)
+                or info.st_uid not in (0, uid) or info.st_nlink != 1
+                or info.st_dev != directory.st_dev
+                or info.st_mode & 0o022):
+            _deny("PACKAGE_LOG_IDENTITY_UNVERIFIED")
+    return "\n".join(remaining), len(selected)
+
+
+def inspect_stock_nginx_package_file_integrity() -> dict[str, Any]:
+    """Verify installed stock NGINX file bytes against native package metadata.
+
+    This is a read-only reconciliation prerequisite, never an approval to
+    retire an APT/DNF effects marker: a compromised local package database,
+    changed repository signatures or failed native install are NOT excluded.
+    It deliberately accepts no package name, executable or path from a peer.
+    """
+    try:
+        platform = _platform(Path("/etc/os-release").read_text(encoding="utf-8"))
+        before = _safe_binary()
+        result = subprocess.run(
+            _VERIFY[platform], stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            check=False, timeout=20, env=_ENV, cwd="/",
+        )
+        if (type(result.returncode) is not int
+                or type(result.stderr) is not str or result.stderr != ""
+                or type(result.stdout) is not str
+                or len(result.stdout) > _MAX_RESULT):
+            _deny("PACKAGE_FILE_INTEGRITY_UNVERIFIED")
+        log_omissions = 0
+        remaining = result.stdout
+        if platform == "almalinux10" and result.stdout:
+            remaining, log_omissions = _ignored_native_rpm_ghost_log_variations(
+                result.stdout,
+            )
+        # Distro images may strip strictly bounded docs; the RPM may also
+        # report stock ghost-log metadata drift from the official package.
+        missing_docs = _ignored_minimal_image_documentation(remaining)
+        expected_return = (0,) if platform == "debian13" else (0, 1)
+        if (result.returncode not in expected_return
+                or (result.returncode != 0
+                    and not (log_omissions or missing_docs))):
+            _deny("PACKAGE_FILE_INTEGRITY_UNVERIFIED")
+        if _safe_binary() != before:
+            _deny("BINARY_CHANGED")
+    except StockNginxPackageOwnerError:
+        raise
+    except (OSError, ValueError, TypeError, UnicodeError,
+            subprocess.SubprocessError):
+        _deny("PACKAGE_FILE_INTEGRITY_UNVERIFIED")
+    return {
+        "schema_version": 1,
+        "status": "READ_ONLY_STOCK_NGINX_PACKAGE_FILE_INTEGRITY_OBSERVED",
+        "platform": platform,
+        "native_package_file_integrity_verified": True,
+        "native_package_documentation_omissions": missing_docs,
+        "native_package_ghost_log_variations": log_omissions,
+        "all_native_package_bytes_verified": missing_docs == 0 and log_omissions == 0,
+        "native_package_signature_verified": False,
+        "installed_host_root_authenticated": False,
+        "authorizes_native_marker_removal": False,
+        "authorizes_nginx_activation": False,
+    }

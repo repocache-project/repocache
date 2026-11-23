@@ -123,6 +123,7 @@ def test_unapproved_messages_are_rejected_before_effects(monkeypatch, raw):
 @pytest.mark.parametrize("message,operation", [
     (b"apply-v2\n", "APPLY_V2"),
     (b"recover-v2\n", "RECOVER_V2"),
+    (b"reload-v2\n", "RELOAD_V2"),
 ])
 def test_fixed_command_selection_never_confers_host_authority(
     monkeypatch, message, operation,
