@@ -604,10 +604,8 @@ def _activate_audited_native_nginx_under_lock(state_fd: int, distribution: str) 
         _reject("NATIVE_ACTIVATION_FOREIGN_SERVICE_STATE")
     _nginx_inactive_vendor_service(distribution)
     _require_private_nginx_listeners()
-    started = False
     try:
         _nginx_activation_command("start")
-        started = True
         observed = inspect_effective_native_nginx_unit(distribution)
         if (observed.get("status") != "NATIVE_NGINX_EFFECTIVE_READ_ONLY_OBSERVATION"
                 or type(observed.get("main_pid_observed")) is not int
@@ -624,12 +622,20 @@ def _activate_audited_native_nginx_under_lock(state_fd: int, distribution: str) 
         return {"status": "AUTHENTICATED_NATIVE_NGINX_ACTIVE",
                 "nginx_active_verified": True, "nginx_enabled_verified": True}
     except Exception:
-        # Only stop a positively identified vendor master we started. If
-        # identity drifted, require explicit recovery; never kill foreign PID.
+        # The start command can report a timeout/failure AFTER systemd has
+        # already launched the vendor master. Inspect the real active state
+        # even when start raised; never leave a partially started listener.
+        # Stop only a verified vendor unit, never an unknown/foreign process.
         try:
-            if started:
-                inspect_effective_native_nginx_unit(distribution)
+            current = _nginx_systemctl("is-active")
+            if current == (0, b"active\n"):
+                observed = inspect_effective_native_nginx_unit(distribution)
+                if (observed.get("status") != "NATIVE_NGINX_EFFECTIVE_READ_ONLY_OBSERVATION"
+                        or observed.get("authorizes_systemctl") is not False):
+                    _reject("NATIVE_ACTIVATION_RECOVERY_REQUIRED")
                 _nginx_activation_command("stop")
+            elif current != (3, b"inactive\n"):
+                _reject("NATIVE_ACTIVATION_RECOVERY_REQUIRED")
             _nginx_activation_command("disable")
             _nginx_inactive_vendor_service(distribution)
             if (_nginx_systemctl("is-enabled") != (1, b"disabled\n")
