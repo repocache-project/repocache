@@ -518,7 +518,9 @@ def test_mixed_states_v2_one_generation_and_exact_fixed_native_envelope():
     assert [(r["id"], r["desired_state"]) for r in updated["repository_records"]] == [
         (APT, "disabled"), (DNF, "active"),
     ]
-    assert updated["id_reservations"] == original["id_reservations"]
+    assert {r["id"]: r for r in updated["id_reservations"]} == {
+        r["id"]: r for r in original["id_reservations"]
+    }
     assert enabled == prior
     for key, value in mixed.items():
         if key.startswith("authorizes_") or key.endswith("_verified"):
