@@ -516,6 +516,37 @@ def _place_signed_private_config(raw: bytes) -> None:
         _reject("NATIVE_PRIVATE_CONFIG_PLACEMENT_REFUSED")
 
 
+def _prepare_own_runtime_directory() -> None:
+    """Make a bounded empty /run directory before pre-start nginx -t.
+
+    PID1 will independently own and clean RuntimeDirectory at service startup.
+    Never adopt a foreign/linked directory or a leftover master PID file.
+    """
+    try:
+        with ExitStack() as stack:
+            root = os.open("/", stage._DIRECTORY)
+            stack.callback(os.close, root)
+            run = _open_directory(root, "run", stack)
+            try:
+                os.mkdir("repocache-nginx", mode=0o700, dir_fd=run)
+            except FileExistsError:
+                pass
+            own = _open_directory(run, "repocache-nginx", stack)
+            if (os.fstat(own).st_dev != os.fstat(run).st_dev
+                    or os.fstat(own).st_uid != 0
+                    or os.fstat(own).st_gid != 0
+                    or stat.S_IMODE(os.fstat(own).st_mode) not in (0o700, 0o755)
+                    or os.listdir(own)):
+                _reject("NATIVE_RUNTIME_DIRECTORY_UNSAFE")
+            if stat.S_IMODE(os.fstat(own).st_mode) == 0o700:
+                os.fchmod(own, 0o755)
+            os.fsync(run)
+    except stage.WorkerStageError:
+        raise
+    except (OSError, ValueError, TypeError):
+        _reject("NATIVE_RUNTIME_DIRECTORY_UNVERIFIED")
+
+
 def _require_private_nginx_listeners() -> None:
     """Fixed known-good loopback config, real native syntax check, no -T leaks."""
     _private_config_present()
@@ -693,15 +724,17 @@ def _activate_audited_native_nginx_under_lock(
             or _nginx_systemctl("is-active") != (3, b"inactive\n")):
         _reject("NATIVE_ACTIVATION_VENDOR_SERVICE_STATE")
     _place_signed_private_config(config)
-    _require_private_nginx_listeners()
     current_enabled = _own_systemctl("is-enabled")
     current_active = _own_systemctl("is-active")
     if current_enabled == (0, b"enabled\n") and current_active == (0, b"active\n"):
+        _require_private_nginx_listeners()
         _own_service_observation(active=True)
         return {"status": "AUTHENTICATED_REPOCACHE_NGINX_ALREADY_ACTIVE",
                 "nginx_active_verified": True, "nginx_enabled_verified": True}
     if current_enabled != (1, b"disabled\n") or current_active != (3, b"inactive\n"):
         _reject("NATIVE_ACTIVATION_FOREIGN_SERVICE_STATE")
+    _prepare_own_runtime_directory()
+    _require_private_nginx_listeners()
     # The signed unit may have been placed before the distro NGINX package;
     # never start until systemd has loaded exactly our file, without drop-ins.
     _nginx_activation_command("daemon-reload")
