@@ -1,7 +1,7 @@
-"""Fixed signed-worker NGINX activation guards (#27).
+"""Contract tests for the REPOCACHE-owned native NGINX service (#27).
 
-These are no-host-effect unit tests. Native PID1/systemd/SELinux acceptance
-requires actual disposable booted Debian 13 and AlmaLinux 10 VMs.
+Host operations are mocked here: native booted Debian/AlmaLinux and SELinux
+require separately executed QEMU evidence.
 """
 from __future__ import annotations
 
@@ -9,107 +9,45 @@ from types import SimpleNamespace
 
 import pytest
 
-from scripts import install_native_root_worker as native
+from scripts import install_native_root_worker as host
 from scripts import stage_native_root_worker as stage
 
 
-def _private_dump() -> bytes:
-    return (b"# configuration file /etc/nginx/nginx.conf:\n"
-            b"http {\n"
-            b"    server {\n"
-            b"        listen 127.0.0.1:8080;\n"
-            b"        location / { return 204; }\n"
-            b"    }\n"
-            b"}\n")
-
-
-def test_private_loopback_listener_candidate_only(monkeypatch):
-    checked = []
-    monkeypatch.setattr(native, "_native_syntax_check",
-                        lambda: checked.append("syntax"))
-    monkeypatch.setattr(native, "_capture_default_nginx_dump_private",
-                        _private_dump)
-    native._require_private_nginx_listeners()
-    assert checked == ["syntax"]
-
-
-@pytest.mark.parametrize("dump", [
-    b"http { server { listen 127.0.0.1:8080; } }\n",
-    b"http {\n server {\n listen 80;\n }\n}\n",
-    b"http {\n server {\n listen 0.0.0.0:80;\n }\n}\n",
-    b"http {\n server {\n listen [::]:443 ssl;\n }\n}\n",
-    b"http {\n server {\n listen 127.0.0.1:0;\n }\n}\n",
-    b"http {\n server {\n listen 127.0.0.1:65536;\n }\n}\n",
-    b"http {\n server {\n }\n}\n",
-    b"http {\n server { listen 127.0.0.1:8080;\n }\n}\n",
-    b"http {\n server {\n listen 127.0.0.1:8080; listen 80;\n }\n}\n",
-    b"",
-    b"\xff",
-])
-def test_public_implicit_or_ambiguous_listeners_refused(monkeypatch, dump):
-    monkeypatch.setattr(native, "_native_syntax_check", lambda: None)
-    monkeypatch.setattr(native, "_capture_default_nginx_dump_private",
-                        lambda: dump)
-    with pytest.raises(stage.WorkerStageError,
-                       match="^WORKER_PLACEMENT_NATIVE_LISTENERS_UNVERIFIED$"):
-        native._require_private_nginx_listeners()
-
-
-def test_inactive_vendor_systemd_shape_requires_exact_match(monkeypatch):
-    monkeypatch.setattr(native, "_observe_systemd_pid1", lambda: None)
-    monkeypatch.setattr(native, "_safe_native_systemctl", lambda: None)
-    monkeypatch.setattr(native, "inspect_native_nginx_unit",
-                        lambda _d: SimpleNamespace(to_dict=lambda: {
-                            "code": "VENDOR_NGINX_UNIT_OBSERVED",
-                            "vendor_unit_bounded_and_owned": True,
-                            "vendor_unit_sha256": "a" * 64,
-                        }))
-    fixed = {
-        "Id": "nginx.service", "Names": "nginx.service",
-        "FragmentPath": "/usr/lib/systemd/system/nginx.service",
-        "DropInPaths": "", "LoadState": "loaded", "ActiveState": "inactive",
-        "SubState": "dead", "MainPID": "0", "CanReload": "yes",
-        "NeedDaemonReload": "no",
+def _setup(monkeypatch):
+    state = {
+        "active": False, "enabled": False, "vendor_queries": 0,
+        "commands": [], "package_audits": 0, "config_checks": 0,
     }
-    seen = []
-    def run(argv, **kwargs):
-        seen.append((argv, kwargs))
-        assert argv == native._EFFECTIVE_SYSTEMCTL_ARGS
-        assert kwargs["shell"] is False
-        assert kwargs["timeout"] == 5
-        assert kwargs["stdin"] == native.subprocess.DEVNULL
-        return SimpleNamespace(returncode=0, stdout="".join(
-            f"{k}={v}\n" for k, v in fixed.items()
-        ), stderr="")
-    monkeypatch.setattr(native.subprocess, "run", run)
-    native._nginx_inactive_vendor_service("debian")
-    assert len(seen) == 1
-    fixed["FragmentPath"] = "/etc/systemd/system/nginx.service"
-    with pytest.raises(stage.WorkerStageError,
-                       match="NATIVE_INACTIVE_UNIT_UNVERIFIED"):
-        native._nginx_inactive_vendor_service("debian")
-
-
-def _setup_activation(monkeypatch):
-    state = {"active": False, "enabled": False, "commands": [],
-             "integrity_checked": 0, "preflight_checked": 0}
-    def verified(*_args, **_kwargs):
-        state["integrity_checked"] += 1
-    monkeypatch.setattr(native, "_require_audited_native_package_for_activation",
-                        verified)
-    monkeypatch.setattr(native, "_no_conflicting_pending", lambda _fd: None)
-    monkeypatch.setattr(native, "_read_v2", lambda _fd, _owner: (None, None))
-    def systemctl(action):
-        return ((0, b"enabled\n") if state["enabled"] else
-                (1, b"disabled\n")) if action == "is-enabled" else (
-                (0, b"active\n") if state["active"] else (3, b"inactive\n"))
-    monkeypatch.setattr(native, "_nginx_systemctl", systemctl)
-    def preflight(_distribution):
-        state["preflight_checked"] += 1
-    monkeypatch.setattr(native, "_nginx_inactive_vendor_service", preflight)
-    monkeypatch.setattr(native, "_require_private_nginx_listeners",
+    def audit(*args, **kwargs):
+        state["package_audits"] += 1
+    monkeypatch.setattr(host, "_require_audited_native_package_for_activation", audit)
+    monkeypatch.setattr(host, "_no_conflicting_pending", lambda _fd: None)
+    monkeypatch.setattr(host, "_read_v2", lambda _fd, _owner: (None, None))
+    monkeypatch.setattr(host, "_nginx_inactive_vendor_service",
+                        lambda _d: None)
+    def vendor_status(command):
+        state["vendor_queries"] += 1
+        return (1, b"disabled\n") if command == "is-enabled" else (
+            3, b"inactive\n"
+        )
+    monkeypatch.setattr(host, "_nginx_systemctl", vendor_status)
+    monkeypatch.setattr(host, "_place_signed_private_config",
+                        lambda _bytes: state.__setitem__(
+                            "config_checks", state["config_checks"] + 1))
+    monkeypatch.setattr(host, "_require_private_nginx_listeners",
                         lambda: state.__setitem__(
-                            "preflight_checked", state["preflight_checked"] + 1))
+                            "config_checks", state["config_checks"] + 1))
+    def own_status(command):
+        return ((0, b"enabled\n") if state["enabled"] else
+                (1, b"disabled\n")) if command == "is-enabled" else (
+                (0, b"active\n") if state["active"] else (3, b"inactive\n"))
+    monkeypatch.setattr(host, "_own_systemctl", own_status)
+    def effective(*, active):
+        assert active == state["active"]
+        return {"status": "NATIVE_REPOCACHE_NGINX_SERVICE_VERIFIED",
+                "unit_name": "repocache-nginx.service",
+                "main_pid_observed": 1234 if active else 0}
+    monkeypatch.setattr(host, "_own_service_observation", effective)
     def command(action):
         state["commands"].append(action)
         if action == "start":
@@ -120,158 +58,195 @@ def _setup_activation(monkeypatch):
             state["active"] = False
         if action == "disable":
             state["enabled"] = False
-    monkeypatch.setattr(native, "_nginx_activation_command", command)
-    monkeypatch.setattr(native, "inspect_effective_native_nginx_unit",
-                        lambda _d: {
-                            "status": "NATIVE_NGINX_EFFECTIVE_READ_ONLY_OBSERVATION",
-                            "vendor_unit_sha256": "a" * 64,
-                            "main_pid_observed": 1234,
-                            "authorizes_systemctl": False,
-                        })
+    monkeypatch.setattr(host, "_nginx_activation_command", command)
     return state
 
 
-def test_explicit_activation_is_idempotent_and_does_not_reinstall(monkeypatch):
-    state = _setup_activation(monkeypatch)
-    result = native._activate_audited_native_nginx_under_lock(11, "debian")
-    assert result["status"] == "AUTHENTICATED_NATIVE_NGINX_ACTIVE"
-    assert state["commands"] == ["start", "enable"]
-    assert state["integrity_checked"] == 2
-    assert state["preflight_checked"] == 2
-    again = native._activate_audited_native_nginx_under_lock(11, "debian")
-    assert again["status"] == "AUTHENTICATED_NATIVE_NGINX_ALREADY_ACTIVE"
-    assert state["commands"] == ["start", "enable"]
+def test_explicit_signed_own_service_is_idempotent(monkeypatch):
+    state = _setup(monkeypatch)
+    first = host._activate_audited_native_nginx_under_lock(
+        11, "debian", host._BOOTSTRAP_CONFIG)
+    assert first["status"] == "AUTHENTICATED_REPOCACHE_NGINX_ACTIVE"
+    assert state["commands"] == ["daemon-reload", "start", "enable"]
+    assert state["config_checks"] == 3
+    again = host._activate_audited_native_nginx_under_lock(
+        11, "debian", host._BOOTSTRAP_CONFIG)
+    assert again["status"] == "AUTHENTICATED_REPOCACHE_NGINX_ALREADY_ACTIVE"
+    assert state["commands"] == ["daemon-reload", "start", "enable"]
+    assert state["package_audits"] == 3
 
 
-
-def test_idempotent_request_never_certifies_existing_public_http(monkeypatch):
-    state = _setup_activation(monkeypatch)
-    state["active"] = True
-    state["enabled"] = True
-    def public():
-        raise stage.WorkerStageError("WORKER_PLACEMENT_NATIVE_LISTENERS_UNVERIFIED")
-    monkeypatch.setattr(native, "_require_private_nginx_listeners", public)
-    with pytest.raises(stage.WorkerStageError,
-                       match="NATIVE_LISTENERS_UNVERIFIED"):
-        native._activate_audited_native_nginx_under_lock(11, "debian")
+def test_explicit_activation_refuses_vendor_active(monkeypatch):
+    state = _setup(monkeypatch)
+    monkeypatch.setattr(host, "_nginx_systemctl", lambda action: (
+        (0, b"active\n") if action == "is-active" else
+        (1, b"disabled\n")))
+    with pytest.raises(stage.WorkerStageError, match="NATIVE_ACTIVATION_VENDOR_SERVICE_STATE"):
+        host._activate_audited_native_nginx_under_lock(
+            11, "debian", host._BOOTSTRAP_CONFIG)
     assert state["commands"] == []
-    assert state["integrity_checked"] == 1
 
 
-def test_existing_managed_generation_blocks_first_service_start(monkeypatch):
-    state = _setup_activation(monkeypatch)
-    monkeypatch.setattr(native, "_read_v2",
-                        lambda _fd, _owner: ({"state_generation": 1}, b"raw"))
+def test_stale_managed_generation_refuses_before_install(monkeypatch):
+    state = _setup(monkeypatch)
+    monkeypatch.setattr(host, "_read_v2",
+                        lambda *_: ({"state_generation": 1}, b"owned"))
     with pytest.raises(stage.WorkerStageError,
                        match="NATIVE_ACTIVATION_MANAGED_STATE_REFUSED"):
-        native._activate_audited_native_nginx_under_lock(11, "almalinux")
+        host._activate_audited_native_nginx_under_lock(
+            11, "almalinux", host._BOOTSTRAP_CONFIG)
     assert state["commands"] == []
 
 
-def test_stopped_but_enabled_or_foreign_service_refused(monkeypatch):
-    state = _setup_activation(monkeypatch)
+def test_foreign_state_of_own_service_refuses(monkeypatch):
+    state = _setup(monkeypatch)
     state["enabled"] = True
     with pytest.raises(stage.WorkerStageError,
                        match="NATIVE_ACTIVATION_FOREIGN_SERVICE_STATE"):
-        native._activate_audited_native_nginx_under_lock(11, "debian")
+        host._activate_audited_native_nginx_under_lock(
+            11, "debian", host._BOOTSTRAP_CONFIG)
     assert state["commands"] == []
 
 
-def test_prestart_listener_refusal_performs_no_systemctl_write(monkeypatch):
-    state = _setup_activation(monkeypatch)
-    def refuse():
-        raise stage.WorkerStageError("WORKER_PLACEMENT_NATIVE_LISTENERS_UNVERIFIED")
-    monkeypatch.setattr(native, "_require_private_nginx_listeners", refuse)
+def test_unexpected_signed_config_bytes_refused_without_writes(monkeypatch):
+    def forbidden(*_a, **_kw):
+        pytest.fail("host touched for unexpected configuration")
+    monkeypatch.setattr(host.os, "open", forbidden)
     with pytest.raises(stage.WorkerStageError,
-                       match="NATIVE_LISTENERS_UNVERIFIED"):
-        native._activate_audited_native_nginx_under_lock(11, "debian")
-    assert state["commands"] == []
+                       match="NATIVE_SIGNED_CONFIG_UNEXPECTED"):
+        host._place_signed_private_config(b"http { listen 80; }")
 
 
-def test_poststart_failed_enable_stops_own_unit_and_disables(monkeypatch):
-    state = _setup_activation(monkeypatch)
-    def failed_enable(action):
+def test_failed_enable_stops_only_own_service(monkeypatch):
+    state = _setup(monkeypatch)
+    def fault(action):
         state["commands"].append(action)
         if action == "start":
             state["active"] = True
         if action == "enable":
-            raise stage.WorkerStageError("WORKER_PLACEMENT_NGINX_ENABLE_FAILED")
+            raise stage.WorkerStageError("WORKER_PLACEMENT_INJECTED_FAILURE")
         if action == "stop":
             state["active"] = False
         if action == "disable":
             state["enabled"] = False
-    monkeypatch.setattr(native, "_nginx_activation_command", failed_enable)
+    monkeypatch.setattr(host, "_nginx_activation_command", fault)
     with pytest.raises(stage.WorkerStageError,
                        match="NATIVE_ACTIVATION_FAILED_ROLLED_BACK"):
-        native._activate_audited_native_nginx_under_lock(11, "debian")
-    assert state["commands"] == ["start", "enable", "stop", "disable"]
-    assert state["active"] is False and state["enabled"] is False
-
-
-
-def test_systemctl_start_error_after_service_started_is_compensated(monkeypatch):
-    state = _setup_activation(monkeypatch)
-    def partial_start(action):
-        state["commands"].append(action)
-        if action == "start":
-            state["active"] = True
-            raise stage.WorkerStageError(
-                "WORKER_PLACEMENT_NATIVE_ACTIVATION_COMMAND_FAILED"
-            )
-        if action == "stop":
-            state["active"] = False
-        if action == "disable":
-            state["enabled"] = False
-    monkeypatch.setattr(native, "_nginx_activation_command", partial_start)
-    with pytest.raises(stage.WorkerStageError,
-                       match="NATIVE_ACTIVATION_FAILED_ROLLED_BACK"):
-        native._activate_audited_native_nginx_under_lock(11, "debian")
-    assert state["commands"] == ["start", "stop", "disable"]
+        host._activate_audited_native_nginx_under_lock(
+            11, "almalinux", host._BOOTSTRAP_CONFIG)
+    assert state["commands"] == ["daemon-reload", "start", "enable", "stop", "disable"]
     assert not state["active"] and not state["enabled"]
 
 
-def test_start_error_with_unknown_runtime_does_not_kill_foreign_service(monkeypatch):
-    state = _setup_activation(monkeypatch)
-    def ambiguous_start(action):
+def test_failed_start_after_spawning_is_stopped(monkeypatch):
+    state = _setup(monkeypatch)
+    def fault(action):
         state["commands"].append(action)
         if action == "start":
             state["active"] = True
-            raise stage.WorkerStageError("WORKER_PLACEMENT_START_AMBIGUOUS")
-    monkeypatch.setattr(native, "_nginx_activation_command", ambiguous_start)
-    def foreign(_distribution):
-        raise ValueError("foreign runtime")
-    monkeypatch.setattr(native, "inspect_effective_native_nginx_unit", foreign)
+            raise stage.WorkerStageError("WORKER_PLACEMENT_START_TIMEOUT")
+        if action == "stop":
+            state["active"] = False
+        if action == "disable":
+            state["enabled"] = False
+    monkeypatch.setattr(host, "_nginx_activation_command", fault)
+    with pytest.raises(stage.WorkerStageError,
+                       match="NATIVE_ACTIVATION_FAILED_ROLLED_BACK"):
+        host._activate_audited_native_nginx_under_lock(
+            11, "debian", host._BOOTSTRAP_CONFIG)
+    assert state["commands"] == ["daemon-reload", "start", "stop", "disable"]
+
+
+def test_unknown_master_on_failed_start_is_never_killed(monkeypatch):
+    state = _setup(monkeypatch)
+    def fault(action):
+        state["commands"].append(action)
+        if action == "start":
+            state["active"] = True
+            raise stage.WorkerStageError("WORKER_PLACEMENT_START_UNCERTAIN")
+    monkeypatch.setattr(host, "_nginx_activation_command", fault)
+    monkeypatch.setattr(host, "_own_service_observation",
+                        lambda **_kw: (_ for _ in ()).throw(
+                            stage.WorkerStageError("WORKER_PLACEMENT_FOREIGN_RUNTIME")))
     with pytest.raises(stage.WorkerStageError,
                        match="NATIVE_ACTIVATION_RECOVERY_REQUIRED"):
-        native._activate_audited_native_nginx_under_lock(11, "almalinux")
-    assert state["commands"] == ["start"]
+        host._activate_audited_native_nginx_under_lock(
+            11, "debian", host._BOOTSTRAP_CONFIG)
+    assert state["commands"] == ["daemon-reload", "start"]
 
 
-def test_foreign_replacement_after_start_not_stopped(monkeypatch):
-    state = _setup_activation(monkeypatch)
-    observed = 0
-    def foreign(_distribution):
-        nonlocal observed
-        observed += 1
-        raise ValueError("foreign systemd runtime " + "/private/path")
-    monkeypatch.setattr(native, "inspect_effective_native_nginx_unit", foreign)
-    with pytest.raises(stage.WorkerStageError) as exc:
-        native._activate_audited_native_nginx_under_lock(11, "debian")
-    assert str(exc.value) == "WORKER_PLACEMENT_NATIVE_ACTIVATION_RECOVERY_REQUIRED"
-    assert "/private/path" not in str(exc.value)
-    assert state["commands"] == ["start"]
-    assert observed == 2
+def test_fixed_service_command_never_touches_vendor(monkeypatch):
+    monkeypatch.setattr(host, "_safe_native_systemctl", lambda: None)
+    calls = []
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setattr(host.subprocess, "run", run)
+    for action in ("daemon-reload", "start", "enable", "stop", "disable"):
+        host._nginx_activation_command(action)
+    assert calls[0][0][-1] == "daemon-reload"
+    for argv, kwargs in calls[1:]:
+        assert argv[-1] == "repocache-nginx.service"
+        assert "nginx.service" not in argv
+        assert kwargs["timeout"] == 30 and kwargs["stdin"] == host.subprocess.DEVNULL
 
 
-def test_no_signed_worker_refuses_before_root_or_service_access(monkeypatch, tmp_path):
-    monkeypatch.setattr(native, "_native_distro", lambda: "debian")
-    monkeypatch.setattr(native, "require_native_host_preconditions", lambda: None)
-    def untrusted(*_args, **_kwargs):
-        raise stage.WorkerStageError("WORKER_STAGE_INVALID_SIGNED_WORKER")
-    monkeypatch.setattr(stage, "verify_installed_worker", untrusted)
-    def forbidden(*_args, **_kwargs):
-        pytest.fail("must not open protected root or contact systemctl")
-    monkeypatch.setattr(native.os, "open", forbidden)
-    with pytest.raises(stage.WorkerStageError, match="INVALID_SIGNED_WORKER"):
-        native.activate_authenticated_native_nginx(
+@pytest.mark.parametrize("value", ["", "not found", "/etc/systemd/system/nginx.service", "foreign"])
+def test_own_service_observation_refuses_foreign_unit(monkeypatch, value):
+    from repocache import server_native_nginx_effective_unit_v1 as effective
+    monkeypatch.setattr(host, "_observe_systemd_pid1", lambda: None)
+    monkeypatch.setattr(host, "_safe_native_systemctl", lambda: None)
+    monkeypatch.setattr(effective, "_observe_nginx_master_kernel", lambda _pid: None)
+    keys = {
+        "Id": "repocache-nginx.service", "Names": "repocache-nginx.service",
+        "FragmentPath": value, "DropInPaths": "", "LoadState": "loaded",
+        "ActiveState": "active", "SubState": "running", "MainPID": "1234",
+        "CanReload": "yes", "NeedDaemonReload": "no",
+    }
+    monkeypatch.setattr(host.subprocess, "run",
+                        lambda *_a, **_kw: SimpleNamespace(
+                            returncode=0, stdout="".join(
+                                f"{k}={v}\n" for k, v in keys.items()), stderr=""))
+    with pytest.raises(stage.WorkerStageError, match="NATIVE_OWN_UNIT_UNVERIFIED"):
+        host._own_service_observation(active=True)
+
+
+def test_own_service_observation_accepts_exact_unit(monkeypatch):
+    from repocache import server_native_nginx_effective_unit_v1 as effective
+    seen = []
+    monkeypatch.setattr(host, "_observe_systemd_pid1", lambda: None)
+    monkeypatch.setattr(host, "_safe_native_systemctl", lambda: None)
+    monkeypatch.setattr(effective, "_observe_nginx_master_kernel",
+                        lambda pid: seen.append(pid))
+    keys = {
+        "Id": "repocache-nginx.service", "Names": "repocache-nginx.service",
+        "FragmentPath": "/etc/systemd/system/repocache-nginx.service",
+        "DropInPaths": "", "LoadState": "loaded",
+        "ActiveState": "active", "SubState": "running", "MainPID": "1234",
+        "CanReload": "yes", "NeedDaemonReload": "no",
+    }
+    monkeypatch.setattr(host.subprocess, "run",
+                        lambda argv, **_kw: (
+                            SimpleNamespace(returncode=0,
+                                stdout="".join(f"{k}={v}\n" for k, v in keys.items()),
+                                stderr="")))
+    assert host._own_service_observation(active=True)[
+        "unit_name"] == "repocache-nginx.service"
+    assert seen == [1234, 1234]
+
+
+def test_no_signed_worker_refuses_before_root(monkeypatch, tmp_path):
+    monkeypatch.setattr(host, "_native_distro", lambda: "debian")
+    monkeypatch.setattr(host, "require_native_host_preconditions", lambda: None)
+    monkeypatch.setattr(stage, "verify_installed_worker", lambda *_a, **_kw: {
+        "status": "AUTHENTICATED_WORKER_FILES_MATCH",
+        "source_sha": "a" * 40, "archive_sha256": "b" * 64,
+        "authorizes_host_installation": False,
+        "authorizes_service_activation": True,
+    })
+    monkeypatch.setattr(host.os, "open", lambda *_a, **_kw: pytest.fail(
+        "root opened before signed-worker identity verification"))
+    with pytest.raises(stage.WorkerStageError,
+                       match="NATIVE_SIGNED_WORKER_AUDIT_UNVERIFIED"):
+        host.activate_authenticated_native_nginx(
             tmp_path, commit="a" * 40, archive_sha256="b" * 64)
