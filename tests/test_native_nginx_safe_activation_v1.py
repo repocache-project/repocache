@@ -143,6 +143,21 @@ def test_explicit_activation_is_idempotent_and_does_not_reinstall(monkeypatch):
     assert state["commands"] == ["start", "enable"]
 
 
+
+def test_idempotent_request_never_certifies_existing_public_http(monkeypatch):
+    state = _setup_activation(monkeypatch)
+    state["active"] = True
+    state["enabled"] = True
+    def public():
+        raise stage.WorkerStageError("WORKER_PLACEMENT_NATIVE_LISTENERS_UNVERIFIED")
+    monkeypatch.setattr(native, "_require_private_nginx_listeners", public)
+    with pytest.raises(stage.WorkerStageError,
+                       match="NATIVE_LISTENERS_UNVERIFIED"):
+        native._activate_audited_native_nginx_under_lock(11, "debian")
+    assert state["commands"] == []
+    assert state["integrity_checked"] == 1
+
+
 def test_existing_managed_generation_blocks_first_service_start(monkeypatch):
     state = _setup_activation(monkeypatch)
     monkeypatch.setattr(native, "_read_v2",
