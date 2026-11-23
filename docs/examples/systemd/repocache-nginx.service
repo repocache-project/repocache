@@ -3,11 +3,12 @@
 [Unit]
 Description=REPOCACHE isolated native NGINX service
 After=network.target
-ConditionPathIsExecutable=/usr/sbin/nginx
 
 [Service]
 Type=forking
-PIDFile=/run/repocache-nginx.pid
+RuntimeDirectory=repocache-nginx
+RuntimeDirectoryMode=0755
+PIDFile=/run/repocache-nginx/nginx.pid
 ExecStartPre=/usr/sbin/nginx -t -q -c /etc/nginx/repocache.conf
 ExecStart=/usr/sbin/nginx -c /etc/nginx/repocache.conf
 ExecReload=/usr/sbin/nginx -s reload -c /etc/nginx/repocache.conf
@@ -19,7 +20,7 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=strict
-ReadWritePaths=/run /var/cache/nginx /var/log/nginx
+ReadWritePaths=/run/repocache-nginx
 UMask=0027
 
 [Install]
