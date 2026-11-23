@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from repocache.server_repository_state_batch_v1 import (
-    BatchRepositoryStateError, plan_batch_repository_states,
+    MixedRepositoryStateError, plan_mixed_repository_states,
 )
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "docs/examples/server-install-v1.json"
@@ -21,7 +21,7 @@ def document():
 
 
 def preview(doc, changes, generation=0):
-    return plan_batch_repository_states(doc, current_generation=generation, changes=changes)
+    return plan_mixed_repository_states(doc, current_generation=generation, changes=changes)
 
 
 def test_two_repository_changes_are_ordered_inert_and_atomic():
@@ -48,6 +48,23 @@ def test_two_repository_changes_are_ordered_inert_and_atomic():
         assert result[key] is False
 
 
+
+def test_mixed_enable_and_disable_are_one_all_or_nothing_candidate():
+    doc = document()
+    doc["repositories"][0]["desired_state"] = "active"
+    result = preview(doc, (
+        ("debian-trixie-main", "disabled"), ("almalinux-baseos", "active"),
+    ))
+    assert result["changed"] is True
+    assert [row["desired_state"] for row in result["candidate_document"]["repositories"]] == [
+        "disabled", "active",
+    ]
+    assert all(item["result"] == "STATE_CHANGE_CANDIDATE"
+               for item in result["per_repository"])
+    assert doc["repositories"][0]["desired_state"] == "active"
+    assert doc["repositories"][1]["desired_state"] == "disabled"
+
+
 def test_idempotence_of_existing_and_repeated_states():
     doc = document()
     assert preview(doc, (("debian-trixie-main", "disabled"),))["changed"] is False
@@ -68,32 +85,32 @@ def test_idempotence_of_existing_and_repeated_states():
 def test_invalid_selection_refuses_without_partial_output(changes):
     doc = document()
     before = copy.deepcopy(doc)
-    with pytest.raises(BatchRepositoryStateError, match=r"^BATCH_STATE_"):
+    with pytest.raises(MixedRepositoryStateError, match=r"^BATCH_STATE_"):
         preview(doc, changes)
     assert doc == before
 
 
 def test_late_invalid_target_refuses_whole_batch():
     doc = document()
-    with pytest.raises(BatchRepositoryStateError, match="TARGET_INVALID"):
+    with pytest.raises(MixedRepositoryStateError, match="TARGET_INVALID"):
         preview(doc, (("debian-trixie-main", "active"), ("absent", "disabled")))
     assert doc["repositories"][0]["desired_state"] == "disabled"
 
 
 @pytest.mark.parametrize("generation", [True, -1, 1, "0"])
 def test_invalid_or_stale_generation(generation):
-    with pytest.raises(BatchRepositoryStateError):
+    with pytest.raises(MixedRepositoryStateError):
         preview(document(), (("debian-trixie-main", "active"),), generation)
 
 
 def test_unallocated_ids_and_invalid_base_refuse():
     doc = document()
     del doc["repositories"][1]["id"]
-    with pytest.raises(BatchRepositoryStateError, match="UNALLOCATED_ID"):
+    with pytest.raises(MixedRepositoryStateError, match="UNALLOCATED_ID"):
         preview(doc, (("debian-trixie-main", "active"),))
     doc = document()
     doc["repositories"][0]["upstream"]["base_url"] = "http://127.0.0.1/"
-    with pytest.raises(BatchRepositoryStateError, match="DOCUMENT_INVALID"):
+    with pytest.raises(MixedRepositoryStateError, match="DOCUMENT_INVALID"):
         preview(doc, (("debian-trixie-main", "active"),))
 
 
