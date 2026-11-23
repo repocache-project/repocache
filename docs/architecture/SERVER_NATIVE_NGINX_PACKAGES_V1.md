@@ -454,46 +454,64 @@ evidence of booted Debian 13 / AlmaLinux 10 systemd/SELinux acceptance or
 full #27 first-operational-service completion; those retain separate native
 and release acceptance requirements.
 
-### Explicit native NGINX service activation (#27)
+### Dedicated REPOCACHE-owned native NGINX service (issue #27)
 
-The existing authenticated package installation intentionally leaves nginx.service
-disabled and inactive. Fresh native NGINX from Debian 13 and AlmaLinux 10
-can otherwise bind all interfaces on plaintext HTTP port 80. The operator
-must never mistake mere signed package installation for authorization to
-open this listener.
+The approved new-managed-only contract has a narrower safe implementation than
+modifying or shadowing the distributor's existing `nginx.service`. In this
+implementation, the vendor service and its `/etc/nginx/nginx.conf` remain
+unmodified, disabled and inactive. A **different** fixed service,
+`repocache-nginx.service`, runs the authenticated distro `/usr/sbin/nginx`
+binary with `-c /etc/nginx/repocache.conf`. REPOCACHE neither creates a
+drop-in for `nginx.service` nor bypasses package file-integrity verification.
 
-The separate and explicitly selected invocation is:
+The isolated unit and its deterministic bootstrap configuration are members of
+the same authenticated release archive as the fixed root-control worker. The
+existing installation verifies signed source/manifest and installs the
+root-owned `repocache-nginx.service` unit through the same exclusive
+placement lock and collision/alias refusal as the other REPOCACHE units.
+The bootstrap config is independently checked against exact reviewed bytes
+from that archive and securely placed at the **new**, initially absent
+`/etc/nginx/repocache.conf` leaf only during separately requested activation,
+not during the APT/DNF package transaction. A foreign file, link, unexpected
+existing content, untrusted ancestry or changed signed source is refused.
+The stock package-owned `/etc/nginx/nginx.conf` stays byte-for-byte intact.
 
-    python3 scripts/install_native_root_worker.py --assets ASSETS --commit SHA \
-      --archive-sha256 ARCHIVE_SHA256 --activate-native-nginx
+The only bootstrap NGINX listener is the signed, closed fixed configuration:
+IPv4 loopback `127.0.0.1:8080` with a constant private test endpoint returning
+204 and all other routes returning 404. There is **no public HTTP/HTTPS
+listener**, no repository catalog, no managed TLS, no managed include, and no
+open firewall rule. The installer independently checks `nginx -t -q -c
+/etc/nginx/repocache.conf` and rechecks the signed config bytes before start.
+Full managed HTTPS routing remains a separate atomic, reviewable deployment
+stage; this private bootstrap is not production service completion.
 
-This verifies native OS and authenticated installed release-worker identity,
-retains the protected state lock, reads the durable completed package receipt,
-rechecks native package files and the exact vendor service, and rejects
-pending WAL/recovery or an existing v2 state. It verifies the inactive systemd
-unit has no foreign overrides, then verifies installed NGINX syntax and the
-bounded effective -T dump. Only explicitly bound IPv4/IPv6 loopback listeners
-are accepted. Wildcard/public HTTP, default implicit port 80 listeners and
-ambiguous syntax are refused before any systemctl start or enable.
+An explicitly invoked signed-worker `--activate-native-nginx` action shares
+the protected package/state lock and checks (a) durable completed native package
+receipt, vendor unit and native APT/DNF file integrity, (b) vendor nginx.service
+disabled/inactive, (c) installed signed REPOCACHE worker and exact service-unit
+bytes, (d) no conflicting WAL or managed state, (e) exact effective PID1
+`repocache-nginx.service` identity with no overrides, (f) root-owned
+fixed private configuration and successful native syntax validation. Only then
+does it perform fixed daemon-reload/start/enable operations *on the owned unit*.
+Positive operation rechecks systemd properties, real NGINX master executable
+inode, listener bootstrap bytes and vendor package provenance. On failure it
+attempts a stop **only of the verified REPOCACHE-owned master**, disables its
+unit, then verifies the inactive/disabled state. Ambiguous compensation refuses
+with a redacted RECOVERY_REQUIRED diagnostic. A repeated healthy invocation
+remains a no-op.
 
-When every gate passes, the fixed service command starts nginx.service,
-checks PID1 and the actual kernel NGINX master executable identity, enables
-the unit for boot and rechecks the same identity and package completion.
-Repeated authenticated activation of the already healthy enabled vendor unit
-is a read-only successful no-op. Failed enable or post-start verification
-compensates by stopping only a positively verified vendor master, disabling
-the unit and verifying its inactive/disabled state. An ambiguous or failed
-compensation refuses with a fixed RECOVERY_REQUIRED code rather than risking
-a stop of a foreign process. The operation does not modify nginx.conf,
-packages, firewall rules, signed trust anchors or repository state.
+The new `Server native NGINX activation in booted VMs` workflow reuses the
+test-only signed source, real distro-native package installation and QEMU
+Debian 13 / AlmaLinux 10 with enforcing SELinux. It asserts refusal of a foreign
+config symlink, injected enable failure and safe service rollback, activation of
+the independently owned unit, live loopback HTTP 204, disabled vendor service,
+unchanged package/vendor config hashes, idempotence and a genuine kernel reboot.
+Never substitute these signatures for the maintainer's later Stage-C
+publisher-signed candidate acceptance.
 
-The optional booted-QEMU activation workflow uses test-only signed assets,
-real APT/DNF packages and systemd in Debian 13 and AlmaLinux 10 guests. It
-first proves that unmodified stock public/plaintext HTTP is refused; it then
-uses a disposable **VM-only** root-owned loopback NGINX config fixture to
-test actual start, enable, rollback after injected enable failure, HTTP 204,
-idempotence and post-kernel-reboot activation. This fixture is not a
-production configuration writer and does not prove original AC1/AC2 for an
-entire initial REPOCACHE deployment. A safe authorized managed HTTPS bootstrap
-still needs implementation and end-to-end acceptance; publisher signing and
-live production activation are separate gates.
+**Deferred separately:** current `APPLY_V2`/`RELOAD_V2` still operate with
+their original strict fixed vendor-unit verification. They must **not** be
+redirected to the new service without a separate atomic and recoverable managed
+configuration/TLS upgrade, verified process/config/unit identity and explicit
+security tests. Original issue #27 complete initial deployment and dependent
+#28/#30/#31 end-to-end acceptance remain NOT VERIFIED until that integration.
