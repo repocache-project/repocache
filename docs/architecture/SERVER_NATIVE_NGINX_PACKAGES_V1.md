@@ -477,7 +477,7 @@ existing content, untrusted ancestry or changed signed source is refused.
 The stock package-owned `/etc/nginx/nginx.conf` stays byte-for-byte intact.
 
 The only bootstrap NGINX listener is the signed, closed fixed configuration:
-IPv4 loopback `127.0.0.1:8080` with a constant private test endpoint returning
+IPv4 loopback `127.0.0.1:8008` with a constant private test endpoint returning
 204 and all other routes returning 404. There is **no public HTTP/HTTPS
 listener**, no repository catalog, no managed TLS, no managed include, and no
 open firewall rule. The installer independently checks `nginx -t -q -c
