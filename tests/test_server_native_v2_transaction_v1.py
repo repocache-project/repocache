@@ -547,11 +547,12 @@ def test_live_inactive_nginx_refused_before_any_persistent_wal_or_include(
         lambda *_args, **_kwargs: None,
     )
     def inactive(_distribution):
-        raise native.NativeV2TransactionError("NGINX_NOT_ACTIVE_BEFORE_WAL")
+        native._deny("NGINX_NOT_ACTIVE_BEFORE_WAL")
     monkeypatch.setattr(native, "_require_active_nginx_before_wal", inactive)
 
     with pytest.raises(
-        native.NativeV2TransactionError, match="^NGINX_NOT_ACTIVE_BEFORE_WAL$",
+        native.NativeV2TransactionError,
+        match="^NATIVE_V2_NGINX_NOT_ACTIVE_BEFORE_WAL$",
     ):
         native._operation_under_root(
             fd, distribution="debian", operation="APPLY_V2", fixture=False,
