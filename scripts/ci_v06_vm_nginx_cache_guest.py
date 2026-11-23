@@ -112,6 +112,7 @@ def main(platform: str) -> None:
             )
             ctx = ssl.create_default_context(cafile=str(cert))
             base = f"https://127.0.0.1:{frontend}/__repocache/repos/"
+            warmed: list[tuple[str, bytes, str]] = []
             for _ in range(200):
                 if process.poll() is not None:
                     raise AssertionError("private NGINX process exited unexpectedly")
@@ -142,6 +143,7 @@ def main(platform: str) -> None:
                     with lock:
                         calls = counts[f"/{prefix}/{target}"]
                     require(calls == 1, "no repeat upstream fetch")
+                    warmed.append((url, expected, f"/{prefix}/{target}"))
             require(request(base + "unapproved/repo", ctx)[0] == 404,
                     "unapproved repository is not exposed")
             require(
@@ -151,6 +153,55 @@ def main(platform: str) -> None:
             )
             require(request(base + "debian-trixie-main/redirect", ctx)[0] == 502,
                     "untrusted redirect not followed")
+
+            # Genuine booted-host NGINX negative-path rehearsal, isolated to
+            # this nonroot throwaway configuration. The syntax check must
+            # reject a malformed candidate BEFORE any master reload. The
+            # still-running old master must serve every previously warmed
+            # APT/DNF metadata and package object, with no upstream refetch.
+            original = conf.read_bytes()
+            assert len(warmed) == 4
+            try:
+                conf.write_bytes(b"repocache_invalid_candidate on;\\n" + original)
+                invalid = subprocess.run(
+                    [nginx, "-t", "-e", str(root / "failed-candidate.log"),
+                     "-p", str(root), "-c", str(conf)],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL, check=False, timeout=12,
+                )
+                require(invalid.returncode != 0,
+                        "native nginx -t rejects malformed staged candidate")
+                require(process.poll() is None,
+                        "invalid uncommitted candidate never stops old master")
+                for url, expected, upstream in warmed:
+                    require(request(url, ctx)[:3] == (200, expected, "HIT"),
+                            "rejected candidate preserves warm APT/DNF HTTPS cache")
+                    with lock:
+                        calls = counts[upstream]
+                    require(calls == 1,
+                            "invalid candidate cannot force upstream refetch")
+            finally:
+                # Only restore bytes in our own private, known test fixture.
+                conf.write_bytes(original)
+            run(nginx, "-t", "-e", str(root / "restored-syntax.log"),
+                "-p", str(root), "-c", str(conf))
+            run(nginx, "-s", "reload", "-e", str(root / "restored-reload.log"),
+                "-p", str(root), "-c", str(conf))
+            time.sleep(0.4)
+            require(process.poll() is None,
+                    "stock NGINX master survived validated restore and reload")
+            for url, expected, upstream in warmed:
+                require(request(url, ctx)[:3] == (200, expected, "HIT"),
+                        "validated reload preserves cached package and metadata bytes")
+                with lock:
+                    calls = counts[upstream]
+                require(calls == 1,
+                        "validated reload keeps old cache without upstream replay")
+            print(
+                "PASS: booted native VM malformed NGINX candidate refused before "
+                "reload; old APT/DNF HTTPS HITs survived and validated restore reloaded",
+                flush=True,
+            )
         finally:
             if process is not None:
                 process.terminate()
