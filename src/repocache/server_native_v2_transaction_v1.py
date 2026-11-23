@@ -37,7 +37,7 @@ from repocache.server_locked_manifest_reconcile_v1 import (
     _verify_current_root_fd,
 )
 from repocache.server_native_nginx_effective_unit_v1 import (
-    inspect_effective_native_nginx_unit,
+    EffectiveNginxUnitError, inspect_effective_native_nginx_unit,
 )
 from repocache.server_native_nginx_package_journal_v1 import (
     _read_completed_native_install_under_lock, NativePackageJournalError,
@@ -480,6 +480,34 @@ def _fixed_command(argv: tuple[str, ...], *, timeout: int) -> None:
         _deny("COMMAND_FAILED")
 
 
+def _require_active_nginx_before_wal(distribution: str) -> None:
+    """Refuse an inactive or foreign NGINX service before persistent changes.
+
+    A clean native package install deliberately leaves nginx.service stopped
+    and disabled. APPLY_V2 must not write a WAL or a managed include and only
+    *then* discover that reload is impossible. This read-only observation
+    never starts/unmasks/enables a service; later reload rechecks the unit.
+    """
+    try:
+        observed = inspect_effective_native_nginx_unit(distribution)
+    except (EffectiveNginxUnitError, NginxServiceUnitInspectionError,
+            OSError, ValueError, TypeError):
+        _deny("NGINX_NOT_ACTIVE_BEFORE_WAL")
+    if (type(observed) is not dict
+            or observed.get("status")
+                != "NATIVE_NGINX_EFFECTIVE_READ_ONLY_OBSERVATION"
+            or observed.get("unit_name") != _UNIT
+            or type(observed.get("main_pid_observed")) is not int
+            or observed["main_pid_observed"] <= 0
+            or observed.get("kernel_nginx_master_executable_inode_observed") is not True
+            or observed.get("effective_unit_shape_observed") is not True
+            or type(observed.get("vendor_unit_sha256")) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", observed["vendor_unit_sha256"]) is None
+            or observed.get("authorizes_systemctl") is not False
+            or observed.get("authorizes_nginx_reload") is not False):
+        _deny("NGINX_NOT_ACTIVE_BEFORE_WAL")
+
+
 def _reload_native(distribution: str) -> None:
     # Both observations must prove the same intended vendor unit, active
     # master identity and immutable fixed command across the reload.
@@ -812,6 +840,12 @@ def _apply_locked(root_fd: int, state_fd: int,
         _deny("CANDIDATE_CHANGED")
     if _read_all(state_fd, include_fd, public_fd) != old:
         _deny("PREPARE_DRIFT")
+
+    # The authenticated native installer intentionally leaves nginx.service
+    # inactive. Reject an unsafe early APPLY before writing any durable WAL,
+    # include, state or catalog. Fixture tests supply a synthetic reload.
+    if not fixture:
+        _require_active_nginx_before_wal(distribution)
 
     wal = _wal_record(old, new)
     _write_exclusive(state_fd, _WAL_TMP, wal, 0, _MAX_WAL)

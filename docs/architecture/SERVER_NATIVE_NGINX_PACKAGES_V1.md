@@ -426,3 +426,30 @@ These are scratch-only fault injections with real package-manager responses,
 not deployed-host trust, native-effects
 reconciliation, booted systemd/SELinux or full #26/#27 issue acceptance.
 
+
+
+### Fail-closed live-service pre-WAL gate (#27)
+
+A successful authenticated native APT/DNF installation intentionally leaves
+the vendor `nginx.service` **disabled and inactive**. It does not authorize
+service activation, opening listeners, firewall changes or NGINX takeover.
+A separate deliberate, reviewed systemd activation remains necessary before
+an administrator can apply an active managed repository generation.
+
+The live fixed-root `APPLY_V2` path now observes the effective running
+vendor NGINX unit **before publishing its durable v2 WAL or modifying** the
+managed include, state, manifest or discovery catalog. It requires the exact
+vendor unit identity, a real nonzero main PID, kernel-observed NGINX executable
+identity and a bounded vendor unit digest. Inactive, unreadable, foreign or
+ambiguous unit observations fail closed with the fixed redacted
+`NATIVE_V2_NGINX_NOT_ACTIVE_BEFORE_WAL` diagnostic. The later native reload still
+rechecks the effective unit, and a concurrent service failure after the
+pre-WAL observation remains subject to normal WAL-held compensation and
+explicit recovery.
+
+This guard does **not** start, unmask or enable services and does not turn
+read-only observations into privileged authority. Disposable root-FD tests
+prove absence of persistent changes on the early refusal. They are not
+evidence of booted Debian 13 / AlmaLinux 10 systemd/SELinux acceptance or
+full #27 first-operational-service completion; those retain separate native
+and release acceptance requirements.
