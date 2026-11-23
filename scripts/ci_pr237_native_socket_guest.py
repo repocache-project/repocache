@@ -828,6 +828,69 @@ def recover_after_reboot(distribution: str) -> None:
     assert snapshot() == after
     assert fixed("RELOAD_V2")["status"] == "RELOADED"
     assert snapshot() == after
+
+    # Repeat the same-version deployment sequence AFTER a real kernel reboot.
+    # Re-place only authenticated fixed worker/unit bytes; the native NGINX
+    # package installer must still refuse on managed v2 before any APT/DNF.
+    from scripts import install_native_root_worker, stage_native_root_worker
+    assets = FIXTURE / "assets"
+    worker_files = (
+        Path("/usr/libexec/repocache/server-control-worker"),
+        Path("/etc/systemd/system/repocache-control.service"),
+        Path("/etc/systemd/system/repocache-control.socket"),
+    )
+
+    def owned_identity(path: Path) -> tuple:
+        info = path.lstat()
+        assert stat.S_ISREG(info.st_mode) and info.st_uid == 0
+        return (
+            hashlib.sha256(path.read_bytes()).hexdigest(),
+            info.st_dev, info.st_ino, info.st_mtime_ns,
+            info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode),
+        )
+
+    previous_workers = {str(path): owned_identity(path) for path in worker_files}
+    completed_receipt = STATE / ".native-nginx-v1.completed"
+    receipt_before = owned_identity(completed_receipt)
+    assert stage_native_root_worker.verify_installed_worker(
+        assets, **pins,
+    )["status"] == "AUTHENTICATED_WORKER_FILES_MATCH"
+    placed = install_native_root_worker.install_authenticated_worker(
+        assets, **pins,
+    )
+    assert placed["status"] == "AUTHENTICATED_WORKER_FILES_PLACED"
+    assert all(owned_identity(path) == previous_workers[str(path)]
+               for path in worker_files)
+    assert owned_identity(completed_receipt) == receipt_before
+    assert fixed("APPLY_V2")["status"] == "UNCHANGED"
+    assert snapshot() == after
+
+    reviewed = FIXTURE / "reviewed-install.json"
+    try:
+        install_native_root_worker.install_authenticated_native_nginx(
+            assets, reviewed,
+            hashlib.sha256(reviewed.read_bytes()).hexdigest(), **pins,
+        )
+    except ValueError as error:
+        assert str(error) == "WORKER_PLACEMENT_NATIVE_PREPACKAGE_BOUNDARY_UNVERIFIED"
+    else:
+        raise AssertionError("Native APT/DNF installer re-entered managed v2")
+    assert owned_identity(completed_receipt) == receipt_before
+    assert not (STATE / ".native-nginx-v1.pending").exists()
+    assert not (STATE / ".native-nginx-v1.pending-tmp").exists()
+    assert all(owned_identity(path) == previous_workers[str(path)]
+               for path in worker_files)
+    assert snapshot() == after
+    assert b"x-repocache-generation: 2" in https_response("/__repocache/healthz").lower()
+    for path, digest in proof["tls_sha256"].items():
+        assert hashlib.sha256(Path(path).read_bytes()).hexdigest() == digest
+    for entry in proof["preserved"].values():
+        assert hashlib.sha256(Path(entry["path"]).read_bytes()).hexdigest() == entry["sha256"]
+    print(
+        "PASS: post-reboot identical worker/units preserved byte/inode/mtime; "
+        "v2 apply unchanged; fresh-only APT/DNF re-entry refused without "
+        "native journal or TLS/cache/log/metrics mutation", flush=True,
+    )
     command("/usr/bin/systemctl", "stop", "repocache-control.socket")
     command("/usr/bin/systemctl", "stop", "nginx.service")
     assert_static_socket()
