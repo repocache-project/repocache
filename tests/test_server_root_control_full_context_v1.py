@@ -169,7 +169,7 @@ def test_owned_context_bootstrap_refuses_even_dangling_include(monkeypatch):
                                st_size=32, st_mtime_ns=1, st_ctime_ns=2)
 
     paths = {path: meta(stat.S_IFDIR | 0o755, i)
-             for i, path in enumerate(observed._PARENTS, 1)}
+             for i, path in enumerate((*observed._PARENTS, "/etc/nginx/repocache.d"), 1)}
     paths[observed._NGINX] = meta(stat.S_IFREG | 0o755, 101)
     paths[observed._OWNED_MAIN_PATH] = meta(stat.S_IFREG | 0o644, 102)
 

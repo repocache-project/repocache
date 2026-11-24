@@ -2616,7 +2616,7 @@ def test_owned_socket_claim_never_dispatches_vendor(filesystem, monkeypatch, ope
                                      operation=operation, socket_dispatch=True)
 
 
-def test_owned_socket_new_candidate_refused_before_wal(filesystem, monkeypatch):
+def test_owned_socket_active_candidate_refused_before_wal(filesystem, monkeypatch):
     from contextlib import contextmanager
     fd, state, _, _, _ = filesystem
     @contextmanager
@@ -2627,11 +2627,12 @@ def test_owned_socket_new_candidate_refused_before_wal(filesystem, monkeypatch):
     monkeypatch.setattr(native, "_read_owned_resources",
                         lambda *_: {native.V2_STATE: None})
     monkeypatch.setattr(native, "_validate_owned_resources", lambda *_: None)
+    candidate = _owned_generation(active=True)[V2_STATE]
     monkeypatch.setattr(native, "_load_private_under_root",
-                        lambda *_a, **_kw: ({"expected_generation": 0}, b"new"))
-    monkeypatch.setattr(native, "_apply_prepared_owned_live_locked",
-                        lambda *_: pytest.fail("new candidate reached live apply"))
+                        lambda *_a, **_kw: ({"expected_generation": 0}, candidate))
+    monkeypatch.setattr(native, "_prepare_owned_live_candidate_locked",
+                        lambda *_: pytest.fail("active candidate reached preparation"))
     with pytest.raises(native.NativeV2TransactionError,
-                       match="OWNED_SOCKET_ATOMIC_WRITE_NAMESPACE_REQUIRED"):
+                       match="OWNED_SOCKET_ACTIVE_STORAGE_UNVERIFIED"):
         native._owned_socket_operation_locked(fd, 1, "debian", "APPLY_V2")
     assert not (state / native._OWNED_WAL).exists()

@@ -242,8 +242,8 @@ def live_wal_resource_hashes() -> dict[str, str]:
 def verify_dedicated_socket(*, bootstrap: bool = False, pending: bool = False) -> None:
     """Exercise the actual installed broker through its kernel-authenticated socket.
 
-    The shared NGINX parent remains read-only in the service. Test only
-    scoped clean/reload/replay and explicit refusal of mutating requests.
+    The shared NGINX parent remains read-only in the service. Test
+    scoped apply/recover/reload and credential/receipt refusal.
     """
     import grp
     import pwd
@@ -275,26 +275,27 @@ def verify_dedicated_socket(*, bootstrap: bool = False, pending: bool = False) -
                 raise
             assert result["status"] == expected, result["status"]
             assert result["transaction_completed"] is True
-            if expected in ("RELOADED", "UNCHANGED"):
+            if expected in ("APPLIED", "RELOADED", "UNCHANGED"):
                 assert result["state_generation"] == 1
 
     try:
         if pending:
             wal = STATE / ".state-v2-owned-nginx.pending"
             before = wal.read_bytes()
-            call("RECOVER_V2", "DENIED")
-            assert wal.read_bytes() == before
-            print("PASS: confined socket refused pending WAL without isolated atomic parent", flush=True)
+            assert before
+            call("RECOVER_V2", "RECOVERED")
+            assert not wal.exists()
+            print("PASS: confined socket recovered pending WAL after reboot", flush=True)
             return
         if bootstrap:
             before = OWN_CONFIG.read_bytes()
             call("RECOVER_V2", "CLEAN")
-            call("APPLY_V2", "DENIED")
             assert OWN_CONFIG.read_bytes() == before
-            assert not (STATE / "state-v2.json").exists()
-            assert not (STATE / ".state-v2-owned-nginx.pending").exists()
             loopback_response()
-            print("PASS: authenticated dedicated socket verified bootstrap and refused new generation before WAL", flush=True)
+            call("APPLY_V2", "APPLIED")
+            assert (STATE / "state-v2.json").is_file()
+            assert not (STATE / ".state-v2-owned-nginx.pending").exists()
+            print("PASS: authenticated dedicated socket applied first generation through live WAL", flush=True)
             return
 
         before = live_wal_resource_hashes()
@@ -385,7 +386,6 @@ def prepare_and_interrupt_live_wal(distribution: str, native, assets, pins) -> N
     )
     assert staged["expected_generation"] == 0
     bootstrap = OWN_CONFIG.read_bytes()
-    verify_dedicated_socket(bootstrap=True)
     run_live_wal(distribution, "fail-reload")
     assert OWN_CONFIG.read_bytes() == bootstrap
     assert not (STATE / "state-v2.json").exists()
@@ -393,7 +393,7 @@ def prepare_and_interrupt_live_wal(distribution: str, native, assets, pins) -> N
     loopback_response()
     print("PASS: actual dedicated WAL failure compensation restores private bootstrap", flush=True)
 
-    run_live_wal(distribution, "apply")
+    verify_dedicated_socket(bootstrap=True)
     old = live_wal_resource_hashes()
     run_live_wal(distribution, "repeat")
     run_live_wal(distribution, "reload")
@@ -440,7 +440,6 @@ def recover_live_wal_after_reboot(distribution: str) -> None:
     assert not Path("/var/lib/repocache/public/catalog.json").exists()
     old = json.loads((ROOT / "owned-live-prior-hashes.json").read_text())
     verify_dedicated_socket(pending=True)
-    run_live_wal(distribution, "recover")
     assert live_wal_resource_hashes() == old
     assert not (STATE / ".state-v2-owned-nginx.pending").exists()
     assert b"x-repocache-generation: 1" in https_response("/__repocache/healthz").lower()
@@ -481,6 +480,7 @@ def verify_guest(distribution: str, phase: str) -> None:
         assert not OWN_CONFIG.exists() and not OWN_CONFIG.is_symlink()
 
         # An untrusted pre-existing path must never be adopted or overwritten.
+        OWN_CONFIG.parent.mkdir(mode=0o755)
         OWN_CONFIG.symlink_to(VENDOR_CONFIG)
         try:
             try:
@@ -503,6 +503,7 @@ def verify_guest(distribution: str, phase: str) -> None:
                 raise AssertionError("byte-identical pre-existing config adopted")
         finally:
             OWN_CONFIG.unlink()
+            OWN_CONFIG.parent.rmdir()
         require_status(OWN, False, False)
         require_status(VENDOR, False, False)
         print("PASS: foreign NGINX configuration symlink and matching file both refused before activation", flush=True)
@@ -599,7 +600,7 @@ def verify_guest(distribution: str, phase: str) -> None:
         assert inspect_stock_nginx_package_file_integrity()[
             "native_package_file_integrity_verified"] is True
         print("PASS: separate REPOCACHE service survives real reboot with vendor service disabled and package integrity intact", flush=True)
-        print("NOT VERIFIED: confined socket mutating apply/recover, active repository routes/storage, managed installer repair, final publisher-signed release", flush=True)
+        print("NOT VERIFIED: active repository routes/storage, managed installer repair, final publisher-signed release", flush=True)
     else:
         raise AssertionError("invalid test phase")
 
