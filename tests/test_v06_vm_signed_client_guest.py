@@ -41,7 +41,7 @@ def test_native_manager_selection_preserves_sources_and_packages(
     if platform == "almalinux10":
         monkeypatch.setattr(
             guest, "command",
-            lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="Enforcing\\n"),
+            lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="Enforcing"),
         )
     monkeypatch.setitem(sys.modules, "ci_client_native_fallback",
                         SimpleNamespace(
