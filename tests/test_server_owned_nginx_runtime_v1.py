@@ -78,6 +78,7 @@ def test_signed_observer_requires_same_unit_identity(monkeypatch, drift):
     else:
         report = unit.inspect_signed_owned_nginx_unit()
         assert report["signed_worker_unit_bytes_match"] is True
+        assert report["private_unit_identity"] == (1, 2)
         assert report["authorizes_nginx_reload"] is False
         assert report["authorizes_systemctl"] is False
 

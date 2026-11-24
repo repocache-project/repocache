@@ -419,7 +419,8 @@ def inspect_signed_owned_nginx_unit() -> dict[str, Any]:
                                              owner_uid=0, owner_gid=0)
             if before != after:
                 _deny("SIGNED_OWN_UNIT_CHANGED")
-            return {**observed, "signed_worker_unit_bytes_match": True}
+            return {**observed, "signed_worker_unit_bytes_match": True,
+                    "private_unit_identity": before}
     except EffectiveNginxUnitError:
         raise
     except (OSError, ValueError, TypeError):
@@ -433,14 +434,14 @@ def _require_bootstrap_response(raw: bytes) -> None:
     head, separator, body = raw.partition(b"\r\n\r\n")
     lines = head.split(b"\r\n")
     if (not separator or body or not lines[0].startswith(b"HTTP/1.1 204 ")
-            or b"\r" in lines[0] or b"\n" in lines[0]):
+            or any(byte < 32 or byte == 127 for byte in lines[0])):
         _deny("BOOTSTRAP_HEALTH_UNVERIFIED")
     lengths = []
     for line in lines[1:]:
         key, colon, value = line.partition(b":")
         if (not colon or not key or any(
                 byte not in b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-" for byte in key)
-                or any(byte < 32 and byte != 9 or byte == 127 for byte in value)):
+                or any((byte < 32 and byte != 9) or byte == 127 for byte in value)):
             _deny("BOOTSTRAP_HEALTH_UNVERIFIED")
         key = key.lower()
         if key in (b"transfer-encoding", b"content-encoding"):
