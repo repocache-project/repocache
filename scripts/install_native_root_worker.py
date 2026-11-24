@@ -476,9 +476,13 @@ def _ensure_fixed_nginx_cache_parent_under_root(root_fd: int, *, owner_uid: int 
 
 _OWN_UNIT = "repocache-nginx.service"
 _OWN_CONFIG = "/etc/nginx/repocache.conf"
+# Activation ownership marker is intentionally separate from the signed worker
+# receipt: no unrelated root-owned file is implicitly adopted on first use.
+_CONFIG_MARKER_PREFIX = ".native-nginx-config-owner-v1-"
 # A fixed, reviewed immutable bootstrap; the source archive must contain
 # precisely these signed bytes. Managed TLS deployment is a different step.
 _BOOTSTRAP_CONFIG = "# Authenticated bootstrap only. Never include the vendor's nginx.conf.\n# The fixed local endpoint has no repository routes, TLS or external listener.\n# Full managed TLS/route activation remains a separate guarded transaction.\npid /run/repocache-nginx/nginx.pid;\nerror_log stderr warn;\nworker_processes 1;\nevents {\n    worker_connections 128;\n}\nhttp {\n    access_log off;\n    server {\n        listen 127.0.0.1:8008;\n        server_name localhost;\n        location = /__repocache/private {\n            return 204;\n        }\n        location / {\n            return 404;\n        }\n    }\n}\n".encode("ascii")
+_CONFIG_MARKER = _CONFIG_MARKER_PREFIX + hashlib.sha256(_BOOTSTRAP_CONFIG).hexdigest()
 _OWN_PROPERTIES = (
     "Id", "Names", "FragmentPath", "DropInPaths", "LoadState",
     "ActiveState", "SubState", "MainPID", "CanReload", "NeedDaemonReload",
@@ -502,8 +506,36 @@ def _private_config_present() -> None:
         _reject("NATIVE_PRIVATE_CONFIG_UNVERIFIED")
 
 
-def _place_signed_private_config(raw: bytes) -> None:
-    """Exactly one trusted file; no existing vendor config is modified."""
+def _require_owned_private_config_intent(state_fd: int, nginx_fd: int) -> None:
+    """Persist first-use intent; refuse even byte-identical foreign config.
+
+    A marker written and fsynced before file placement permits recovery after
+    a process interruption. Under the same protected lock, subsequent attempts
+    can only recheck our originally claimed exact signed configuration.
+    This marker does not grant arbitrary overwrite, service or TLS authority.
+    """
+    try:
+        markers = [
+            name for name in os.listdir(state_fd)
+            if name.startswith(_CONFIG_MARKER_PREFIX)
+        ]
+        if any(name != _CONFIG_MARKER for name in markers):
+            _reject("NATIVE_PRIVATE_CONFIG_MARKER_CONFLICT")
+        existing_marker = _named(state_fd, _CONFIG_MARKER)
+        if existing_marker is None:
+            if _named(nginx_fd, stage.CONFIG) is not None:
+                _reject("NATIVE_PRIVATE_CONFIG_FOREIGN_COLLISION")
+            _create_marker(state_fd, _CONFIG_MARKER)
+        else:
+            _check_marker(existing_marker)
+    except stage.WorkerStageError:
+        raise
+    except (OSError, ValueError, TypeError):
+        _reject("NATIVE_PRIVATE_CONFIG_INTENT_UNVERIFIED")
+
+
+def _place_signed_private_config(raw: bytes, state_fd: int) -> None:
+    """Stage only an owned signed bootstrap; never adopt third-party files."""
     if type(raw) is not bytes or raw != _BOOTSTRAP_CONFIG:
         _reject("NATIVE_SIGNED_CONFIG_UNEXPECTED")
     try:
@@ -512,6 +544,7 @@ def _place_signed_private_config(raw: bytes) -> None:
             stack.callback(os.close, root)
             etc = _open_directory(root, "etc", stack)
             nginx = _open_directory(etc, "nginx", stack)
+            _require_owned_private_config_intent(state_fd, nginx)
             _place_file(nginx, stage.CONFIG, raw, 0o644)
         _private_config_present()
     except stage.WorkerStageError:
@@ -766,7 +799,7 @@ def _activate_audited_native_nginx_under_lock(
     if (_nginx_systemctl("is-enabled") != (1, b"disabled\n")
             or _nginx_systemctl("is-active") != (3, b"inactive\n")):
         _reject("NATIVE_ACTIVATION_VENDOR_SERVICE_STATE")
-    _place_signed_private_config(config)
+    _place_signed_private_config(config, state_fd)
     current_enabled = _own_systemctl("is-enabled")
     current_active = _own_systemctl("is-active")
     if current_enabled == (0, b"enabled\n") and current_active == (0, b"active\n"):
