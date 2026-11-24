@@ -134,7 +134,7 @@ def verify_guest(distribution: str, phase: str) -> None:
         known_good = OWN_CONFIG.read_bytes()
         working_pid = native._own_service_observation(active=True)["main_pid_observed"]
         try:
-            OWN_CONFIG.write_bytes(b"events { repocache_invalid_directive on; }\\n")
+            OWN_CONFIG.write_bytes(b"events { repocache_invalid_directive on; }\n")
             try:
                 native.activate_authenticated_native_nginx(assets, **pins)
             except stage.WorkerStageError as exc:
