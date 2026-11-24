@@ -19,6 +19,8 @@ on:
       - 'docs/testing/V060_NATIVE_VM_COVERAGE_MATRIX.md'
       - 'scripts/collect_v06_vm_campaign_coverage.py'
       - 'scripts/ci_v06_vm_nginx_cache_guest.py'
+      - 'scripts/ci_v06_vm_cache_eviction.py'
+      - 'docs/testing/SERVER_VM_NATIVE_CACHE_EVICTION.md'
       - 'scripts/ci_v06_vm_client_cli_guest.py'
       - 'scripts/ci_v06_vm_signed_client_guest.py'
       - 'tests/test_v06_vm_campaign_coverage.py'

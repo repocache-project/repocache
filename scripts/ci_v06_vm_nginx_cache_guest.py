@@ -20,6 +20,8 @@ import threading
 import time
 from http.server import ThreadingHTTPServer
 
+from ci_v06_vm_cache_eviction import observe_native_capacity
+
 from ci_native_nginx_cache_smoke import (
     FIXTURES, check_candidate_syntax, config, free_port, make_backend,
     request, require, run,
@@ -217,6 +219,7 @@ def main(platform: str) -> None:
         ["/usr/bin/systemctl", "is-active", "--quiet", "nginx.service"],
         check=False, timeout=5,
     ).returncode != 0
+    observe_native_capacity(nginx)
     print("PASS: booted native VM stock NGINX disposable HTTPS APT/DNF MISS/HIT")
     print("NOT VERIFIED: authentic APT/DNF signatures, native package manager, "
           "managed route/SELinux context, persistent cache, client fallback")
