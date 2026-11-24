@@ -1644,3 +1644,140 @@ def test_owned_context_native_probe_requires_exact_files_and_claim(
     finally:
         os.close(sfd)
         os.close(rfd)
+
+def _owned_bootstrap_resources():
+    return {
+        V2_STATE: None, native._OWNED_MAIN: native._OWNED_BOOTSTRAP_CONFIG,
+        native._INCLUDE: None, native._CATALOG: None,
+        native._OWNED_MANIFEST: None,
+    }
+
+
+def _owned_generation(generation=1, previous=None):
+    cfg = document(1, generation=generation)
+    cfg["deployment"]["paths"]["generated_include"] = native._OWNED_INCLUDE_PATH
+    cfg["repositories"][0]["desired_state"] = "active"
+    state = _canon(snapshot(generation=generation, previous=previous, doc=cfg))
+    main, include, catalog = native._render_owned_managed_candidate(
+        cfg, generation, "debian",
+        {"repo-0": {"mirror0.example.invalid": ["8.8.8.8"]}},
+    )
+    return {
+        V2_STATE: state, native._OWNED_MAIN: main, native._INCLUDE: include,
+        native._CATALOG: catalog, native._OWNED_MANIFEST:
+            native._owned_manifest_for(state, main, include, catalog),
+    }
+
+
+@pytest.mark.parametrize("initial", [True, False])
+def test_owned_wal_round_trip_pins_exact_main_and_previous_generation(initial):
+    old = _owned_bootstrap_resources() if initial else _owned_generation()
+    previous = None if initial else json.loads(old[V2_STATE])
+    new = _owned_generation(1 if initial else 2, previous=previous)
+    raw = native._owned_wal_record(old, new)
+    assert native._decode_owned_wal(raw) == (
+        old, {name: native._hash(new[name]) for name in native._OWNED_ORDER},
+    )
+    parsed = json.loads(raw)
+    assert parsed["service_domain"] == "repocache-nginx.service"
+    assert parsed["old_sha256"][native._OWNED_MAIN] == native._hash(
+        native._OWNED_BOOTSTRAP_CONFIG if initial else native._OWNED_MANAGED_CONFIG
+    )
+    for name in native._OWNED_ORDER:
+        mixed = dict(old)
+        mixed[name] = new[name]
+        native._owned_wal_resource_drift(
+            old, parsed["new_sha256"], mixed, unpublished=False,
+        )
+        if mixed != old:
+            with pytest.raises(native.NativeV2TransactionError,
+                               match="OWNED_WAL_UNPUBLISHED_DRIFT"):
+                native._owned_wal_resource_drift(
+                    old, parsed["new_sha256"], mixed, unpublished=True,
+                )
+        mixed[name] = b"foreign bytes"
+        with pytest.raises(native.NativeV2TransactionError,
+                           match="OWNED_WAL_FOREIGN_DRIFT"):
+            native._owned_wal_resource_drift(
+                old, parsed["new_sha256"], mixed, unpublished=False,
+            )
+
+
+@pytest.mark.parametrize("fault", ["version", "service", "old-main",
+                                  "new-main", "missing-key", "extra-key"])
+def test_owned_wal_refuses_wrong_domain_and_corrupt_records(fault):
+    old = _owned_bootstrap_resources()
+    record = json.loads(native._owned_wal_record(old, _owned_generation()))
+    if fault == "version":
+        record["version"] = 1
+    elif fault == "service":
+        record["service_domain"] = "nginx.service"
+    elif fault == "old-main":
+        record["old_base64"][native._OWNED_MAIN] = native._encode(b"foreign")
+        record["old_sha256"][native._OWNED_MAIN] = native._hash(b"foreign")
+    elif fault == "new-main":
+        record["new_sha256"][native._OWNED_MAIN] = "a" * 64
+    elif fault == "missing-key":
+        del record["old_sha256"][native._OWNED_MAIN]
+    else:
+        record["new_sha256"]["nginx.conf"] = "a" * 64
+    with pytest.raises(native.NativeV2TransactionError, match="OWNED_WAL_"):
+        native._decode_owned_wal(_canon(record))
+
+
+def test_owned_wal_rejects_rehashed_legacy_manifest_and_stale_generation():
+    new = _owned_generation()
+    foreign = dict(new)
+    foreign[native._OWNED_MANIFEST] = native._manifest_for(
+        new[V2_STATE], new[native._INCLUDE], new[native._CATALOG],
+    )
+    with pytest.raises(native.NativeV2TransactionError, match="OWNED_WAL_MANIFEST_DRIFT"):
+        native._owned_wal_record(_owned_bootstrap_resources(), foreign)
+    with pytest.raises(native.NativeV2TransactionError, match="OWNED_WAL_GENERATION_INVALID"):
+        native._owned_wal_record(new, new)
+
+
+def test_owned_wal_fixture_publication_preserves_all_previous_resources(filesystem):
+    fd, state, vendor, catalog, events = filesystem
+    marker = state / installer._CONFIG_MARKER
+    marker.touch(mode=0o600)
+    main = vendor.parent.parent / native._OWNED_MAIN
+    main.write_bytes(native._OWNED_BOOTSTRAP_CONFIG)
+    main.chmod(0o644)
+    journal = native._publish_owned_wal_fixture(fd, _owned_generation())
+    assert (state / native._OWNED_WAL).read_bytes() == journal
+    assert not (state / native._OWNED_WAL_TMP).exists()
+    assert (state / native._OWNED_WAL).stat().st_mode & 0o777 == 0o600
+    assert native._decode_owned_wal(journal)[0] == _owned_bootstrap_resources()
+    assert main.read_bytes() == native._OWNED_BOOTSTRAP_CONFIG
+    assert not vendor.exists() and not catalog.exists() and not events
+    assert not (main.parent / native._INCLUDE).exists()
+    assert not (state / V2_STATE).exists()
+    assert not (state / native._OWNED_MANIFEST).exists()
+    with pytest.raises(native.NativeV2TransactionError, match="OWNED_WAL_DOMAIN_REQUIRED"):
+        native._publish_owned_wal_fixture(fd, _owned_generation())
+
+
+@pytest.mark.parametrize("name", [native._OWNED_WAL, native._OWNED_WAL_TMP,
+                                  native._OWNED_MANIFEST])
+@pytest.mark.parametrize("operation", ["APPLY_V2", "RELOAD_V2", "RECOVER_V2"])
+def test_owned_wal_artifacts_refuse_legacy_even_without_bootstrap_claim(
+    filesystem, name, operation,
+):
+    fd, state, vendor, catalog, events = filesystem
+    artifact = state / name
+    artifact.symlink_to("missing")
+    with pytest.raises(native.NativeV2TransactionError, match="OWNED_WAL_DOMAIN_REQUIRED"):
+        native._operation_under_root(fd, distribution="debian",
+                                     operation=operation, fixture=True)
+    assert artifact.is_symlink()
+    assert not vendor.exists() and not catalog.exists() and not events
+
+
+def test_owned_wal_fixture_refuses_actual_root_before_io():
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(ValueError, match="CURRENT_NAMESPACE_ROOT_WRITES_REFUSED"):
+            native._publish_owned_wal_fixture(fd, {})
+    finally:
+        os.close(fd)

@@ -105,6 +105,17 @@ _LIMIT = {V2_STATE: MAX_V2_STATE_BYTES, _INCLUDE: 1024 * 1024,
           _CATALOG: 512000, _MANIFEST: 8192}
 _ORDER = (V2_STATE, _INCLUDE, _CATALOG, _MANIFEST)
 _MAX_WAL = 8 * 1024 * 1024
+# Separate on-disk domain: the legacy reader must never interpret a
+# dedicated main-config rollback as a vendor include-only rollback.
+_OWNED_MAIN = "repocache.conf"
+_OWNED_MANIFEST = ".state-v2-owned-nginx.manifest"
+_OWNED_WAL = ".state-v2-owned-nginx.pending"
+_OWNED_WAL_TMP = ".state-v2-owned-nginx.pending-tmp"
+_OWNED_ORDER = (V2_STATE, _OWNED_MAIN, _INCLUDE, _CATALOG, _OWNED_MANIFEST)
+_OWNED_LIMIT = {V2_STATE: _LIMIT[V2_STATE], _OWNED_MAIN: 4096,
+                _INCLUDE: _LIMIT[_INCLUDE], _CATALOG: _LIMIT[_CATALOG],
+                _OWNED_MANIFEST: _LIMIT[_MANIFEST]}
+_OWNED_WAL_DOMAIN = "repocache-nginx.service"
 _NGINX = "/usr/sbin/nginx"
 _SYSTEMCTL = "/usr/bin/systemctl"
 _UNIT = "nginx.service"
@@ -396,7 +407,20 @@ def _read_wal(state_fd: int, name: str) -> tuple[dict, dict, bytes] | None:
         _deny("WAL_INVALID")
 
 
+def _refuse_owned_nginx_transaction_artifacts(state_fd: int) -> None:
+    """No legacy or bootstrap operation may consume an owned-domain WAL."""
+    for name in (_OWNED_WAL, _OWNED_WAL_TMP, _OWNED_MANIFEST):
+        try:
+            os.stat(name, dir_fd=state_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            _deny("OWNED_WAL_DOMAIN_UNVERIFIED")
+        _deny("OWNED_WAL_DOMAIN_REQUIRED")
+
+
 def _no_conflicting_pending(state_fd: int) -> None:
+    _refuse_owned_nginx_transaction_artifacts(state_fd)
     _legacy_refusal(state_fd, 0)
     # Existing v2-only and shadow WALs cannot coexist with this domain.
     if _pending(state_fd, 0):
@@ -1096,6 +1120,211 @@ def _probe_owned_context_locked(
         _deny("OWNED_CONTEXT_PROBE_REFUSED")
 
 
+def _owned_manifest_for(state: bytes, main: bytes, include: bytes,
+                        catalog: bytes) -> bytes:
+    """Bind the separate main context and service domain to a generation."""
+    return _canonical({
+        "manifest_schema_version": 2,
+        "status": "NATIVE_V2_OWNED_NGINX_RESOURCES",
+        "service_domain": _OWNED_WAL_DOMAIN,
+        "state_sha256": _hash(state),
+        "main_sha256": _hash(main),
+        "include_sha256": _hash(include),
+        "catalog_sha256": _hash(catalog),
+    }, limit=_OWNED_LIMIT[_OWNED_MANIFEST])
+
+
+def _validate_owned_resources(resources: dict[str, bytes | None]) -> dict | None:
+    """Validate closed bootstrap/managed snapshot without claiming runtime."""
+    try:
+        if type(resources) is not dict or set(resources) != set(_OWNED_ORDER):
+            _deny("OWNED_WAL_RESOURCES_INVALID")
+        for name in _OWNED_ORDER:
+            raw = resources[name]
+            if raw is not None and (
+                    type(raw) is not bytes or not 1 <= len(raw) <= _OWNED_LIMIT[name]):
+                _deny("OWNED_WAL_RESOURCES_INVALID")
+        state = resources[V2_STATE]
+        main = resources[_OWNED_MAIN]
+        include = resources[_INCLUDE]
+        catalog = resources[_CATALOG]
+        manifest = resources[_OWNED_MANIFEST]
+        if state is None:
+            if (main != _OWNED_BOOTSTRAP_CONFIG or include is not None
+                    or catalog is not None or manifest is not None):
+                _deny("OWNED_WAL_BOOTSTRAP_DRIFT")
+            return None
+        if (main != _OWNED_MANAGED_CONFIG or include is None or catalog is None
+                or manifest != _owned_manifest_for(state, main, include, catalog)):
+            _deny("OWNED_WAL_MANIFEST_DRIFT")
+        # Reuse closed state and active-only catalog semantics without
+        # accepting a vendor manifest as ownership of the private context.
+        _verify_owned({
+            V2_STATE: state, _INCLUDE: include, _CATALOG: catalog,
+            _MANIFEST: _manifest_for(state, include, catalog),
+        })
+        snapshot = _json(state, limit=_LIMIT[V2_STATE])
+        doc = parse_install_bytes(
+            base64.b64decode(snapshot["configuration_base64"], validate=True),
+            for_apply=True,
+        )
+        if (doc["deployment"]["paths"]["generated_include"] != _OWNED_INCLUDE_PATH
+                or doc["deployment"]["paths"]["state_root"]
+                   != "/var/lib/repocache/server"):
+            _deny("OWNED_WAL_LAYOUT_UNSUPPORTED")
+        # A manifest pins already verified bytes, not arbitrary directives.
+        # This checks the closed dump section shape; deterministic rendering
+        # and authentic native exposure are still separate runtime gates.
+        dump = (b"# configuration file " + _OWNED_MAIN_PATH.encode("ascii")
+                + b":\n" + main + b"\n# configuration file "
+                + _OWNED_INCLUDE_PATH.encode("ascii") + b":\n" + include)
+        _verify_owned_context_dump(dump, include)
+        return snapshot
+    except NativeV2TransactionError:
+        raise
+    except (ValueError, TypeError, KeyError, OverflowError, RecursionError):
+        _deny("OWNED_WAL_RESOURCES_INVALID")
+
+
+def _owned_wal_record(old: dict[str, bytes | None],
+                      new: dict[str, bytes | None]) -> bytes:
+    """Versioned five-resource journal, with exact rollback bytes."""
+    previous = _validate_owned_resources(old)
+    candidate = _validate_owned_resources(new)
+    if candidate is None:
+        _deny("OWNED_WAL_CANDIDATE_REQUIRED")
+    generation = 0 if previous is None else previous["state_generation"]
+    try:
+        transition = preview_proposed_v2_state_transition(
+            candidate, expected_generation=generation, previous_snapshot=previous,
+        )
+        if transition["proposed_generation"] != generation + 1:
+            _deny("OWNED_WAL_GENERATION_INVALID")
+        return _canonical({
+            "version": 2,
+            "service_domain": _OWNED_WAL_DOMAIN,
+            "old_base64": {name: _encode(old[name]) for name in _OWNED_ORDER},
+            "old_sha256": {name: _hash(old[name]) for name in _OWNED_ORDER},
+            "new_sha256": {name: _hash(new[name]) for name in _OWNED_ORDER},
+        }, limit=_MAX_WAL)
+    except NativeV2TransactionError:
+        raise
+    except (ValueError, TypeError, KeyError, OverflowError, RecursionError):
+        _deny("OWNED_WAL_GENERATION_INVALID")
+
+
+def _decode_owned_wal(raw: bytes) -> tuple[dict, dict]:
+    """Never interpret an old vendor journal as a private main-config WAL."""
+    try:
+        if type(raw) is not bytes:
+            _deny("OWNED_WAL_INVALID")
+        data = _json(raw, limit=_MAX_WAL)
+        if (type(data) is not dict
+                or set(data) != {"version", "service_domain", "old_base64",
+                                 "old_sha256", "new_sha256"}
+                or type(data["version"]) is not int or data["version"] != 2
+                or data["service_domain"] != _OWNED_WAL_DOMAIN):
+            _deny("OWNED_WAL_INVALID")
+        for field in ("old_base64", "old_sha256", "new_sha256"):
+            if type(data[field]) is not dict or set(data[field]) != set(_OWNED_ORDER):
+                _deny("OWNED_WAL_INVALID")
+        old = {name: _decode(data["old_base64"][name], _OWNED_LIMIT[name])
+               for name in _OWNED_ORDER}
+        if (any(data["old_sha256"][name] != _hash(old[name])
+                or not _valid_sha(data["new_sha256"][name])
+                for name in _OWNED_ORDER)
+                or data["new_sha256"][_OWNED_MAIN] != _hash(_OWNED_MANAGED_CONFIG)):
+            _deny("OWNED_WAL_INVALID")
+        _validate_owned_resources(old)
+        return old, data["new_sha256"]
+    except NativeV2TransactionError:
+        raise
+    except (ValueError, TypeError, KeyError, OverflowError, RecursionError):
+        _deny("OWNED_WAL_INVALID")
+
+
+def _owned_wal_resource_drift(old: dict, new_sha: dict, current: dict,
+                              *, unpublished: bool) -> None:
+    """Only old or candidate bytes may be reconciled after WAL publication."""
+    if (type(unpublished) is not bool or type(current) is not dict
+            or set(current) != set(_OWNED_ORDER)):
+        _deny("OWNED_WAL_RESOURCES_INVALID")
+    for name in _OWNED_ORDER:
+        raw = current[name]
+        if raw is not None and (
+                type(raw) is not bytes or not 1 <= len(raw) <= _OWNED_LIMIT[name]):
+            _deny("OWNED_WAL_RESOURCES_INVALID")
+        if unpublished:
+            if raw != old[name]:
+                _deny("OWNED_WAL_UNPUBLISHED_DRIFT")
+        elif _hash(raw) not in (_hash(old[name]), new_sha[name]):
+            _deny("OWNED_WAL_FOREIGN_DRIFT")
+
+
+def _read_owned_resources(state_fd: int, nginx_fd: int,
+                          public_fd: int) -> dict[str, bytes | None]:
+    return {
+        V2_STATE: _read_file(state_fd, V2_STATE, 0, _LIMIT[V2_STATE]),
+        _OWNED_MAIN: _read_public(nginx_fd, _OWNED_MAIN, _OWNED_LIMIT[_OWNED_MAIN]),
+        _INCLUDE: _read_public(nginx_fd, _INCLUDE, _LIMIT[_INCLUDE]),
+        _CATALOG: _read_public(public_fd, _CATALOG, _LIMIT[_CATALOG]),
+        _OWNED_MANIFEST: _read_file(state_fd, _OWNED_MANIFEST, 0,
+                                    _OWNED_LIMIT[_OWNED_MANIFEST]),
+    }
+
+
+def _publish_owned_wal_fixture(root_fd: int, new: dict[str, bytes | None]) -> bytes:
+    """Durable fixture-only publication, before any configuration mutation.
+
+    This is NOT reachable from the native dispatcher. The actual root is
+    expressly refused. The future authenticated transaction must retain the
+    lock across the remaining effects and prove signed unit/runtime identity.
+    """
+    _refuse_actual_root_fixture_write(root_fd)
+    with ExitStack() as stack:
+        with _locked(root_fd, 0) as state_fd:
+            _no_conflicting_pending(state_fd)
+            marker = _owned_config_marker_identity(state_fd)
+            nginx_fd, nginx_chain = _walk(root_fd, ("etc", "nginx"), stack, 0)
+            vendor_fd, vendor_chain = _walk(root_fd, _INCLUDE_DIR, stack, 0)
+            public_fd, public_chain = _walk(root_fd, _PUBLIC_DIR, stack, 0)
+            if stat.S_IMODE(os.fstat(public_fd).st_mode) != 0o755:
+                _deny("PUBLIC_DIRECTORY_MODE_UNSAFE")
+            # No old vendor ownership or stage can be adopted as dedicated.
+            if (_read_file(state_fd, _MANIFEST, 0, _LIMIT[_MANIFEST]) is not None
+                    or _read_public(vendor_fd, _INCLUDE, _LIMIT[_INCLUDE]) is not None):
+                _deny("OWNED_WAL_VENDOR_DOMAIN_CONFLICT")
+            for fd in (nginx_fd, vendor_fd, public_fd):
+                try:
+                    os.stat(_STAGE, dir_fd=fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                _deny("ORPHAN_STAGE")
+            old = _read_owned_resources(state_fd, nginx_fd, public_fd)
+            wal = _owned_wal_record(old, new)
+            # Fixture-only writer leaves the real fsynced journal for tests;
+            # no target byte, service, catalog, or manifest is changed.
+            _write_exclusive(state_fd, _OWNED_WAL_TMP, wal, 0, _MAX_WAL)
+            _owned_wal_resource_drift(
+                old, _decode_owned_wal(wal)[1],
+                _read_owned_resources(state_fd, nginx_fd, public_fd),
+                unpublished=True,
+            )
+            if _owned_config_marker_identity(state_fd) != marker:
+                _deny("OWNED_CONTEXT_CLAIM_CHANGED")
+            _recheck(nginx_chain, 0)
+            _recheck(vendor_chain, 0)
+            _recheck(public_chain, 0)
+            if _read_file(state_fd, _OWNED_WAL, 0, _MAX_WAL) is not None:
+                _deny("OWNED_WAL_DOMAIN_REQUIRED")
+            os.replace(_OWNED_WAL_TMP, _OWNED_WAL,
+                       src_dir_fd=state_fd, dst_dir_fd=state_fd)
+            os.fsync(state_fd)
+            if _read_file(state_fd, _OWNED_WAL, 0, _MAX_WAL) != wal:
+                _deny("OWNED_WAL_INVALID")
+            return wal
+
+
 def _recover_locked(state_fd: int, include_fd: int,
                     public_fd: int, distribution: str) -> dict:
     journal = _read_wal(state_fd, _WAL)
@@ -1270,6 +1499,7 @@ def _operation_under_root(root_fd: int, *, distribution: str,
         _refuse_actual_root_fixture_write(root_fd)
     with ExitStack() as stack:
         with _locked(root_fd, 0) as state_fd:
+            _refuse_owned_nginx_transaction_artifacts(state_fd)
             if not fixture:
                 _refuse_legacy_vendor_mode_after_owned_claim(state_fd)
             include_fd, include_chain = _walk(root_fd, _INCLUDE_DIR, stack, 0)

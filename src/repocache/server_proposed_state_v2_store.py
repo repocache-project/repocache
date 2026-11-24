@@ -233,6 +233,9 @@ def _multi_resource_pending(directory: int, uid: int) -> bool:
             (".fixture-managed-nginx.conf", 1024 * 1024),
             (".fixture-derived-catalog.json", 512 * 1024),
             (".fixture-active-manifest.json", 4096),
+            (".state-v2-owned-nginx.pending", 8 * 1024 * 1024),
+            (".state-v2-owned-nginx.pending-tmp", 8 * 1024 * 1024),
+            (".state-v2-owned-nginx.manifest", 8192),
         )
     )
 

@@ -599,3 +599,30 @@ runtime identity and the remaining host prerequisites. The new tests mock
 native execution for drift/refusal cases, in addition to the disposable
 real-parser test above. No activation, reload, catalog publication or
 privileged operation is exposed by this increment.
+
+### Dedicated versioned WAL domain (fixture prerequisite)
+
+The private NGINX transaction requires a separate five-resource WAL
+(domain `repocache-nginx.service`, schema version 2): state-v2, exact main
+configuration, dedicated route include, public catalog and a distinct
+ownership manifest. The manifest pins the main configuration as well as the
+other resources. A first-generation WAL preserves the immutable signed
+loopback bootstrap bytes, not an absent/default vendor configuration.
+A managed previous generation must match the dedicated manifest, fixed
+layout and active-only catalog semantics. Candidate generation must pass the
+existing state-transition rules. Unknown domains, wrong versions, changed
+hashes, ambiguous or foreign resource states fail closed.
+
+The protected private fixture-only publisher exercises exclusive temp
+creation, fsync, exact pre-publication drift checks, atomic WAL rename and
+directory fsync. It refuses the actual root namespace and never changes any
+target resource, starts or reloads NGINX, or publishes a catalog. An
+unpublished journal may describe only unchanged previous bytes; after
+publication each resource may be exactly old or candidate, never foreign.
+Existing legacy v1/v2 state-only and vendor transaction entry points refuse
+the new journal/manifest namespace (including dangling artifacts).
+
+This is not the authenticated live transaction. Wiring the protected lock
+through the actual five-resource writes, distinct stage names, runtime
+reload, verified TLS/catalog exposure and first/managed rollback is still
+required. No recovery-complete or native activation result is claimed.
