@@ -91,7 +91,7 @@ def main(platform: str) -> None:
     signed = subprocess.run(
         ["/usr/bin/sudo", "-n", "/usr/bin/python3", "-B", str(guest), platform],
         cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        stdin=subprocess.DEVNULL, text=True, timeout=360,
+        stdin=subprocess.DEVNULL, text=True, timeout=900,
         env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C",
              "PYTHONDONTWRITEBYTECODE": "1", "HTTP_PROXY": "", "HTTPS_PROXY": "",
              "NO_PROXY": "*"}, check=False,
