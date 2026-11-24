@@ -133,6 +133,72 @@ def test_invalid_statvfs_does_not_invent_zero(cache_tree, monkeypatch, bad_capac
     assert report["free_inodes_observed"] is None
 
 
+@pytest.mark.parametrize("counter,value", [
+    ("f_blocks", 9),
+    ("f_bfree", 9),
+    ("f_files", 7),
+    ("f_ffree", 7),
+    ("f_blocks", True),
+    ("f_bfree", -1),
+    ("f_files", "100"),
+    ("f_ffree", 2**63),
+])
+def test_contradictory_or_malformed_optional_statvfs_totals_fail_closed(
+    cache_tree, monkeypatch, counter, value,
+):
+    fd, _, _ = cache_tree
+    counters = dict(
+        f_frsize=4096, f_blocks=100, f_bfree=50, f_bavail=10,
+        f_files=100, f_ffree=50, f_favail=8, f_flag=0,
+    )
+    counters[counter] = value
+    monkeypatch.setattr(obs.os, "fstatvfs",
+                        lambda _fd: SimpleNamespace(**counters))
+    report = sample(fd)
+    assert report["observation_code"] == "CACHE_ROOT_OR_CAPACITY_UNVERIFIED"
+    assert report["pressure_level"] == "unknown"
+    assert report["free_bytes_observed"] is None
+    assert report["free_inodes_observed"] is None
+    assert report["cache_root_ownership_observed"] is False
+    assert report["disk_writable_observed"] is None
+    assert not report["authorizes_cache_cleanup"]
+
+
+@pytest.mark.parametrize("override", [
+    {"f_bfree": 101}, {"f_ffree": 101},
+])
+def test_free_totals_cannot_exceed_reported_capacity(
+    cache_tree, monkeypatch, override,
+):
+    fd, _, _ = cache_tree
+    counters = dict(
+        f_frsize=4096, f_blocks=100, f_bfree=50, f_bavail=10,
+        f_files=100, f_ffree=50, f_favail=8, f_flag=0,
+    )
+    counters.update(override)
+    monkeypatch.setattr(obs.os, "fstatvfs",
+                        lambda _fd: SimpleNamespace(**counters))
+    assert sample(fd)["observation_code"] == "CACHE_ROOT_OR_CAPACITY_UNVERIFIED"
+
+
+def test_coherent_linux_statvfs_totals_remain_a_partial_observation(
+    cache_tree, monkeypatch,
+):
+    fd, _, _ = cache_tree
+    monkeypatch.setattr(obs.os, "fstatvfs", lambda _fd: SimpleNamespace(
+        f_frsize=4096, f_blocks=100, f_bfree=50, f_bavail=10,
+        f_files=100, f_ffree=50, f_favail=8, f_flag=0,
+    ))
+    result = sample(fd)
+    assert result["free_bytes_observed"] == 40960
+    assert result["free_inodes_observed"] == 8
+    assert result["cache_root_ownership_observed"] is True
+    assert result["pressure_level"] == "unknown"
+    assert result["measurements_complete"] is False
+    assert result["disk_writable_observed"] is None
+    assert not result["authorizes_cache_cleanup"]
+
+
 def test_invalid_thresholds_refuse_before_host_observation(cache_tree, monkeypatch):
     fd, _, _ = cache_tree
     monkeypatch.setattr(obs, "_observe_under_root",
