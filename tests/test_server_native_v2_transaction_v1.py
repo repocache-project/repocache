@@ -2245,6 +2245,7 @@ def owned_live_simulation(monkeypatch):
     """Actual fixture bytes/WAL, simulated private native observations only."""
     events = []
     monkeypatch.setattr(native, "_owned_live_observe", lambda fd: (123, (1, 2)))
+    monkeypatch.setattr(native, "_owned_live_verify_listener", lambda *args: 999)
     def validate(root, state, resources):
         snapshot = native._validate_owned_resources(resources)
         generation = None if snapshot is None else snapshot["state_generation"]
@@ -2435,6 +2436,7 @@ def test_owned_live_generation_wait_is_bounded_and_rechecks_unit(monkeypatch):
     observations = iter([identity, identity, (124, (1, 2))])
     monkeypatch.setattr(native, "_owned_live_observe", lambda fd: next(observations))
     monkeypatch.setattr(native.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(native, "_owned_live_verify_listener", lambda *args: 999)
     calls = []
     def stale(*args, **kwargs):
         calls.append(1)
@@ -2504,3 +2506,49 @@ def test_owned_live_prepare_fixed_intake_cas(
                 fd, *layout[:3], "debian") == (old, new, report)
     assert _fixture_resource_bytes(paths) == old
     _assert_owned_fixture_clean(filesystem, paths)
+
+
+def _listener_table(*rows):
+    return ("sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode\n"
+            + "\n".join(rows) + "\n").encode("ascii")
+
+
+@pytest.mark.parametrize("address,ipv6,expected", [
+    ("0100007F", False, "127.0.0.1"),
+    ("00000000", False, "0.0.0.0"),
+    ("00000000000000000000000001000000", True, "::1"),
+    ("00000000000000000000000000000000", True, "::"),
+])
+def test_owned_listener_parses_kernel_address_and_only_listen(address, ipv6, expected):
+    table = _listener_table(
+        f"0: {address}:1F48 {address}:0000 0A 0:0 0:0 0 0 0 123",
+        f"1: {address}:1F48 {address}:0000 01 0:0 0:0 0 0 0 456",
+        f"2: {address}:1F49 {address}:0000 0A 0:0 0:0 0 0 0 789",
+    )
+    assert native._owned_listener_rows(table, ipv6=ipv6, port=8008) == [(expected, 123)]
+
+
+@pytest.mark.parametrize("rows,sockets", [
+    ([], {123}),
+    ([("127.0.0.1", 123)], {456}),
+    ([("0.0.0.0", 123)], {123}),
+    ([("127.0.0.1", 123), ("::", 456)], {123, 456}),
+    ([("127.0.0.1", 123), ("127.0.0.1", 456)], {123, 456}),
+])
+def test_owned_listener_refuses_foreign_or_ambiguous_binding(rows, sockets):
+    with pytest.raises(native.NativeV2TransactionError, match="OWNED_LIVE_LISTENER_UNVERIFIED"):
+        native._owned_require_listener(rows, sockets, "127.0.0.1")
+
+
+def test_owned_listener_matches_unique_master_inode():
+    assert native._owned_require_listener([("127.0.0.1", 123)], {123, 456},
+                                          "127.0.0.1") == 123
+
+
+def test_owned_live_health_refuses_listener_replacement(monkeypatch):
+    inodes = iter([123, 456])
+    monkeypatch.setattr(native, "_owned_live_verify_listener", lambda *args: next(inodes))
+    monkeypatch.setattr(native, "_owned_live_health", lambda *args, **kwargs: None)
+    with pytest.raises(native.NativeV2TransactionError, match="OWNED_LIVE_LISTENER_CHANGED"):
+        native._owned_live_health_bound(0, (123, (1, 2)), (None, None, None), None,
+                                        publish=False)

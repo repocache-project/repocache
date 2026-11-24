@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -1691,6 +1692,146 @@ def _owned_live_health(context: tuple, catalog: bytes | None, *, publish: bool) 
             _deny("OWNED_LIVE_CATALOG_UNVERIFIED")
 
 
+def _owned_listener_rows(raw: bytes, *, ipv6: bool, port: int) -> list[tuple[str, int]]:
+    """Bounded Linux x86_64 TCP LISTEN table, not established connections."""
+    if (type(raw) is not bytes or not 1 <= len(raw) <= 4 * 1024 * 1024
+            or type(ipv6) is not bool or type(port) is not int
+            or not 1 <= port <= 65535):
+        _deny("OWNED_LIVE_LISTENER_TABLE_INVALID")
+    try:
+        lines = raw.decode("ascii", "strict").splitlines()
+        if len(lines) > 32768 or lines[0].split()[:4] not in (
+                ["sl", "local_address", "rem_address", "st"],
+                ["sl", "local_address", "remote_address", "st"]):
+            _deny("OWNED_LIVE_LISTENER_TABLE_INVALID")
+        result = []
+        for line in lines[1:]:
+            fields = line.split()
+            if len(fields) < 10 or not re.fullmatch(r"[0-9A-Fa-f]{2}", fields[3]):
+                _deny("OWNED_LIVE_LISTENER_TABLE_INVALID")
+            address, separator, hex_port = fields[1].partition(":")
+            if (not separator or len(address) != (32 if ipv6 else 8)
+                    or not re.fullmatch(r"[0-9A-Fa-f]+", address)
+                    or not re.fullmatch(r"[0-9A-Fa-f]{4}", hex_port)):
+                _deny("OWNED_LIVE_LISTENER_TABLE_INVALID")
+            if fields[3].upper() != "0A" or int(hex_port, 16) != port:
+                continue
+            inode = fields[9]
+            if not re.fullmatch(r"[0-9]{1,20}", inode) or int(inode) <= 0:
+                _deny("OWNED_LIVE_LISTENER_TABLE_INVALID")
+            packed = bytes.fromhex(address)
+            network = b"".join(packed[i:i + 4][::-1] for i in range(0, len(packed), 4))
+            result.append((str(ipaddress.ip_address(network)), int(inode)))
+        return result
+    except NativeV2TransactionError:
+        raise
+    except (ValueError, TypeError, IndexError, UnicodeError, OverflowError):
+        _deny("OWNED_LIVE_LISTENER_TABLE_INVALID")
+
+
+def _owned_read_proc_table(directory: int, name: str) -> bytes:
+    if name not in ("tcp", "tcp6"):
+        _deny("OWNED_LIVE_LISTENER_TABLE_INVALID")
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                 dir_fd=directory)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0:
+            _deny("OWNED_LIVE_LISTENER_TABLE_INVALID")
+        data = bytearray()
+        while len(data) <= 4 * 1024 * 1024:
+            block = os.read(fd, min(32768, 4 * 1024 * 1024 + 1 - len(data)))
+            if not block:
+                break
+            data.extend(block)
+        if not data or len(data) > 4 * 1024 * 1024:
+            _deny("OWNED_LIVE_LISTENER_TABLE_INVALID")
+        return bytes(data)
+    finally:
+        os.close(fd)
+
+
+def _owned_require_listener(rows: list[tuple[str, int]], sockets: set[int],
+                            address: str) -> int:
+    # Refuse every other listener on the same port, including another
+    # interface, address family or SO_REUSEPORT group.
+    if len(rows) != 1 or rows[0][0] != address or rows[0][1] not in sockets:
+        _deny("OWNED_LIVE_LISTENER_UNVERIFIED")
+    return rows[0][1]
+
+
+def _owned_live_verify_listener(root_fd: int, identity: tuple, context: tuple) -> int:
+    """Bind the fixed endpoint to the observed signed-unit master socket."""
+    if _owned_live_observe(root_fd) != identity:
+        _deny("OWNED_LIVE_UNIT_CHANGED")
+    pid = identity[0]
+    document = context[0]
+    if document is None:
+        address, port = "127.0.0.1", 8008
+    else:
+        listen = document["deployment"]["listen"]
+        address, port = listen["bind_address"], listen["https_port"]
+    try:
+        if str(ipaddress.ip_address(address)) != address or type(port) is not int:
+            _deny("OWNED_LIVE_LISTENER_UNVERIFIED")
+        with ExitStack() as stack:
+            proc = os.open("/proc", _DIRECTORY_FLAGS)
+            stack.callback(os.close, proc)
+            master = os.open(str(pid), _DIRECTORY_FLAGS, dir_fd=proc)
+            stack.callback(os.close, master)
+            info = os.fstat(master)
+            if info.st_uid != 0 or info.st_mode & 0o022:
+                _deny("OWNED_LIVE_LISTENER_UNVERIFIED")
+            master_id = (info.st_dev, info.st_ino)
+            fds = os.open("fd", _DIRECTORY_FLAGS, dir_fd=master)
+            stack.callback(os.close, fds)
+            net = os.open("net", _DIRECTORY_FLAGS, dir_fd=master)
+            stack.callback(os.close, net)
+
+            def sample():
+                local_ns = os.stat("/proc/self/ns/net")
+                master_ns = os.stat("ns/net", dir_fd=master)
+                if (local_ns.st_dev, local_ns.st_ino) != (master_ns.st_dev, master_ns.st_ino):
+                    _deny("OWNED_LIVE_LISTENER_NAMESPACE_CHANGED")
+                current = os.stat(str(pid), dir_fd=proc, follow_symlinks=False)
+                if (current.st_dev, current.st_ino) != master_id:
+                    _deny("OWNED_LIVE_LISTENER_PROCESS_CHANGED")
+                names = os.listdir(fds)
+                if len(names) > 4096:
+                    _deny("OWNED_LIVE_LISTENER_FD_LIMIT")
+                sockets = set()
+                for name in names:
+                    if not re.fullmatch(r"[0-9]{1,10}", name):
+                        _deny("OWNED_LIVE_LISTENER_FD_INVALID")
+                    target = os.readlink(name, dir_fd=fds)
+                    match = re.fullmatch(r"socket:\[([0-9]{1,20})\]", target)
+                    if match:
+                        sockets.add(int(match[1]))
+                rows = _owned_listener_rows(
+                    _owned_read_proc_table(net, "tcp"), ipv6=False, port=port,
+                ) + _owned_listener_rows(
+                    _owned_read_proc_table(net, "tcp6"), ipv6=True, port=port,
+                )
+                return _owned_require_listener(rows, sockets, address), (local_ns.st_dev, local_ns.st_ino)
+
+            first = sample()
+            if _owned_live_observe(root_fd) != identity or sample() != first:
+                _deny("OWNED_LIVE_LISTENER_CHANGED")
+            return first[0]
+    except NativeV2TransactionError:
+        raise
+    except (OSError, TypeError, ValueError, KeyError, OverflowError):
+        _deny("OWNED_LIVE_LISTENER_UNVERIFIED")
+
+
+def _owned_live_health_bound(root_fd: int, identity: tuple, context: tuple,
+                             catalog: bytes | None, *, publish: bool) -> None:
+    before = _owned_live_verify_listener(root_fd, identity, context)
+    _owned_live_health(context, catalog, publish=publish)
+    if _owned_live_verify_listener(root_fd, identity, context) != before:
+        _deny("OWNED_LIVE_LISTENER_CHANGED")
+
+
 def _owned_live_wait_generation(root_fd: int, identity: tuple, context: tuple) -> None:
     """A graceful reload is asynchronous; bounded retries cannot change authority."""
     deadline = time.monotonic() + 12
@@ -1698,7 +1839,7 @@ def _owned_live_wait_generation(root_fd: int, identity: tuple, context: tuple) -
         if _owned_live_observe(root_fd) != identity:
             _deny("OWNED_LIVE_UNIT_CHANGED")
         try:
-            _owned_live_health(context, None, publish=False)
+            _owned_live_health_bound(root_fd, identity, context, None, publish=False)
             return
         except (NativeV2TransactionError, EffectiveNginxUnitError):
             if attempt == 2 or time.monotonic() >= deadline:
@@ -1757,7 +1898,7 @@ def _recover_owned_live_locked(root_fd: int, state_fd: int, nginx_fd: int,
         _owned_check_stages_absent(state_fd, nginx_fd, public_fd)
         identity = _owned_live_observe(root_fd)
         context = _owned_live_validate(root_fd, state_fd, current)
-        _owned_live_health(context, current[_CATALOG], publish=True)
+        _owned_live_health_bound(root_fd, identity, context, current[_CATALOG], publish=True)
         check_layout()
         if (_owned_live_observe(root_fd) != identity
                 or _read_owned_resources(state_fd, nginx_fd, public_fd) != current
@@ -1795,7 +1936,7 @@ def _recover_owned_live_locked(root_fd: int, state_fd: int, nginx_fd: int,
     _owned_live_write(state_fd, nginx_fd, public_fd, check_layout, wal,
                       expected, _CATALOG, old[_CATALOG])
     try:
-        _owned_live_health(context, old[_CATALOG], publish=True)
+        _owned_live_health_bound(root_fd, identity, context, old[_CATALOG], publish=True)
         _owned_live_write(state_fd, nginx_fd, public_fd, check_layout, wal,
                           expected, _OWNED_MANIFEST, old[_OWNED_MANIFEST])
         if (expected != old or _owned_live_observe(root_fd) != identity
@@ -1826,7 +1967,7 @@ def _apply_owned_live_locked(root_fd: int, state_fd: int, nginx_fd: int,
     _validate_owned_resources(new)
     identity = _owned_live_observe(root_fd)
     context = _owned_live_validate(root_fd, state_fd, old)
-    _owned_live_health(context, old[_CATALOG], publish=True)
+    _owned_live_health_bound(root_fd, identity, context, old[_CATALOG], publish=True)
     if _owned_live_observe(root_fd) != identity:
         _deny("OWNED_LIVE_UNIT_CHANGED")
     wal = _publish_owned_wal_locked(state_fd, nginx_fd, public_fd,
@@ -1846,7 +1987,7 @@ def _apply_owned_live_locked(root_fd: int, state_fd: int, nginx_fd: int,
             _deny("OWNED_LIVE_COMMIT_DRIFT")
         _owned_live_write(state_fd, nginx_fd, public_fd, check_layout, wal,
                           expected, _CATALOG, new[_CATALOG])
-        _owned_live_health(context, new[_CATALOG], publish=True)
+        _owned_live_health_bound(root_fd, identity, context, new[_CATALOG], publish=True)
         _owned_live_write(state_fd, nginx_fd, public_fd, check_layout, wal,
                           expected, _OWNED_MANIFEST, new[_OWNED_MANIFEST])
         if (expected != new or _owned_live_observe(root_fd) != identity
@@ -1937,7 +2078,7 @@ def _reload_owned_live_committed_locked(root_fd: int, state_fd: int, nginx_fd: i
         _deny("MANAGED_GENERATION_REQUIRED")
     identity = _owned_live_observe(root_fd)
     context = _owned_live_validate(root_fd, state_fd, old)
-    _owned_live_health(context, old[_CATALOG], publish=True)
+    _owned_live_health_bound(root_fd, identity, context, old[_CATALOG], publish=True)
     clean()
     if (_read_owned_resources(state_fd, nginx_fd, public_fd) != old
             or _owned_live_observe(root_fd) != identity):
@@ -1947,7 +2088,7 @@ def _reload_owned_live_committed_locked(root_fd: int, state_fd: int, nginx_fd: i
         _owned_live_wait_generation(root_fd, identity, context)
     if _owned_live_validate(root_fd, state_fd, old) != context:
         _deny("OWNED_LIVE_POST_RELOAD_DRIFT")
-    _owned_live_health(context, old[_CATALOG], publish=True)
+    _owned_live_health_bound(root_fd, identity, context, old[_CATALOG], publish=True)
     clean()
     if (_read_owned_resources(state_fd, nginx_fd, public_fd) != old
             or _owned_live_observe(root_fd) != identity):
