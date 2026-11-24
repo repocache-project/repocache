@@ -514,7 +514,15 @@ def test_authenticated_placement_recovers_interrupted_atomic_publish(candidate, 
     assert not tuple(state.glob(".native-worker-placement.pending-*"))
     assert len(tuple(state.glob(".native-worker-placement.complete-*"))) == 1
     before = worker.stat()
+    local_receipt = state / install._RUNTIME_RECEIPT
+    raw = stage._json_line(receipt)
+    assert local_receipt.read_bytes() == raw
+    assert stat.S_IMODE(local_receipt.stat().st_mode) == 0o600
+    assert (state / (install._MARKER + "complete-" + hashlib.sha256(raw).hexdigest())).is_file()
+    receipt_before = local_receipt.stat()
     install._place_worker_files(root, payloads, receipt, unit_paths=_UNIT_PATHS)
+    assert local_receipt.stat().st_ino == receipt_before.st_ino
+    assert local_receipt.stat().st_mtime_ns == receipt_before.st_mtime_ns
     assert worker.stat().st_ino == before.st_ino
     assert worker.stat().st_mtime_ns == before.st_mtime_ns
 

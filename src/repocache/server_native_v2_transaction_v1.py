@@ -687,6 +687,12 @@ def _verify_tls_pair(root_fd: int, document: dict[str, Any], *,
             stack.callback(os.close, fd)
             opened.append(fd)
             _recheck(chain, 0)
+            if verify_identity:
+                # Mode bits alone do not exclude POSIX ACLs on the key or
+                # writable/default ACLs on its root-owned ancestors.
+                for _, _, ancestor, _ in chain:
+                    _metadata_no_acl(ancestor, directory=True)
+                _metadata_no_acl(fd)
             pinned_paths.append((parent_fd, segments[-1], fd, chain, _identity(os.fstat(fd))))
         try:
             report = _inspect_pinned_tls_pair_for_future_transaction(
@@ -2374,6 +2380,13 @@ def _owned_socket_host_boundary(root_fd: int, state_fd: int,
                     continue
                 stack.callback(os.close, fd)
                 _metadata_no_acl(fd)
+                if parent == nginx_fd:
+                    reference = _path_snapshot(host, "/etc/nginx/" + name,
+                                               leaf_type=stat.S_IFREG)
+                    if (_path_snapshot(root_fd, "/etc/nginx/" + name,
+                                       leaf_type=stat.S_IFREG) != reference
+                            or not os.fstatvfs(fd).f_flag & os.ST_RDONLY):
+                        _deny("OWNED_SOCKET_MOUNT_VIEW_CHANGED")
     except NativeV2TransactionError:
         raise
     except (RootControlWorkerError, OSError, ValueError, TypeError,
@@ -2407,10 +2420,19 @@ def _owned_socket_operation_locked(root_fd: int, state_fd: int,
             if any(row["desired_state"] == "active" for row in document["repositories"]):
                 _deny("OWNED_SOCKET_ACTIVE_STORAGE_UNVERIFIED")
         if operation == "RECOVER_V2":
+            # No code path to WAL cleanup or compensation exists while the
+            # shared parent is read-only. A clean observation is not recovery.
             for name in (_OWNED_WAL, _OWNED_WAL_TMP):
                 _owned_require_absent(state_fd, name)
-            result = _recover_owned_live_locked(root_fd, *layout)
-            if result != {"status": "OWNED_LIVE_CLEAN_OBSERVED", "recovery_required": False}:
+            identity = _owned_live_observe(root_fd)
+            context = _owned_live_validate(root_fd, state_fd, current)
+            _owned_live_health_bound(root_fd, identity, context, current[_CATALOG], publish=True)
+            check_layout()
+            for name in (_OWNED_WAL, _OWNED_WAL_TMP):
+                _owned_require_absent(state_fd, name)
+            _owned_check_stages_absent(state_fd, nginx_fd, public_fd)
+            if (_read_owned_resources(state_fd, nginx_fd, public_fd) != current
+                    or _owned_live_observe(root_fd) != identity):
                 _deny("OWNED_SOCKET_RECOVERY_UNVERIFIED")
             return {"status": "NATIVE_V2_CLEAN"}
         if operation == "APPLY_V2":
@@ -2418,7 +2440,15 @@ def _owned_socket_operation_locked(root_fd: int, state_fd: int,
             if (snapshot is None or candidate != current[V2_STATE]
                     or report["expected_generation"] != snapshot["state_generation"] - 1):
                 _deny("OWNED_SOCKET_ATOMIC_WRITE_NAMESPACE_REQUIRED")
-            result = _apply_prepared_owned_live_locked(root_fd, *layout, distribution)
+            # Never re-enter the general apply helper: a changed intake
+            # must not turn a read-only replay into a mutating operation.
+            again, raw = _load_private_under_root(root_fd, owner_uid=0, owner_gid=0)
+            if again != report or raw != candidate:
+                _deny("CANDIDATE_CHANGED")
+            result = _reload_owned_live_committed_locked(root_fd, *layout, reload=False)
+            again, raw = _load_private_under_root(root_fd, owner_uid=0, owner_gid=0)
+            if again != report or raw != candidate:
+                _deny("CANDIDATE_CHANGED")
             expected = "OWNED_LIVE_NO_CHANGE"
             status = "NATIVE_V2_NO_CHANGE"
         elif operation == "RELOAD_V2":

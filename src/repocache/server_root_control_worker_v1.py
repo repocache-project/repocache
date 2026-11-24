@@ -257,6 +257,15 @@ def require_installed_control_receipt(root_fd: int, state_fd: int) -> None:
             _deny("PLACEMENT_RECEIPT_REQUIRED")
         receipt = _placement_receipt(raw)
         complete = _PLACEMENT_PREFIX + "complete-" + hashlib.sha256(raw).hexdigest()
+        for name in (_RUNTIME_RECEIPT, complete):
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                         | os.O_CLOEXEC, dir_fd=state_fd)
+            try:
+                info = _metadata_no_acl(fd)
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600:
+                    _deny("PLACEMENT_METADATA_UNSAFE")
+            finally:
+                os.close(fd)
         if ({x for x in os.listdir(state_fd) if x.startswith(_PLACEMENT_PREFIX)} != {complete}
                 or _read_file(state_fd, complete, 0, 0) != b""):
             _deny("PLACEMENT_MARKER_UNVERIFIED")
