@@ -519,3 +519,12 @@ on both guests, including AlmaLinux enforcing. This scenario exercises the
 currently integrated vendor-mode worker; dedicated `repocache-nginx.service`
 live WAL/TLS dispatch and its own corresponding operator tests remain
 separate mandatory #27/#64 acceptance.
+
+The same guest also introduces one real managed-include metadata violation
+at a time (additional hardlink, foreign service ownership, world-writable
+mode). It requires a denied fixed reload, no pending WAL, unchanged
+resource snapshot and vendor configuration, and continuing authenticated
+TLS generation/catalog. It restores the original metadata and requires a
+normal subsequent reload. These mutations exist only on the ephemeral
+guest; they are never part of the installer or operator runbook. Each
+native negative remains NOT VERIFIED until both exact-HEAD guest runs pass.

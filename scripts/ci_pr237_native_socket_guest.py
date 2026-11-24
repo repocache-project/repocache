@@ -553,6 +553,62 @@ def main(distribution: str) -> None:
     assert snapshot() == before
     print("PASS: installed root worker refused foreign managed include symlink without changing vendor NGINX, TLS, catalog or active generation", flush=True)
 
+    # Actual root-owned resource metadata, not mock stat results. Introduce
+    # one violation at a time, restore only our own change and prove the
+    # installed worker never committed a reload or WAL for the unsafe inode.
+    def expect_unsafe_include_refusal() -> None:
+        try:
+            authenticated_native_operation("RELOAD_V2")
+        except NativeRootControlClientError as error:
+            assert str(error) == "NATIVE_ROOT_CLIENT_OPERATION_REFUSED"
+        else:
+            raise AssertionError("Installed worker accepted unsafe managed include")
+        assert not (STATE / ".state-v2-native.pending").exists()
+        assert not (STATE / ".state-v2-native.pending-tmp").exists()
+        assert snapshot() == before
+        assert unmanaged_nginx_snapshot() == unmanaged_before
+        assert b"x-repocache-generation: 1" in https_response("/__repocache/healthz").lower()
+        assert https_response("/.well-known/repocache/catalog.json").endswith(catalog_raw)
+
+    extra_link = owned_include.with_name(".pr237-disposable-hardlink")
+    assert not os.path.lexists(extra_link)
+    os.link(owned_include, extra_link, follow_symlinks=False)
+    try:
+        assert owned_include.lstat().st_nlink == 2
+        expect_unsafe_include_refusal()
+    finally:
+        linked = extra_link.lstat()
+        assert (linked.st_dev, linked.st_ino) == (
+            previous_include.st_dev, previous_include.st_ino,
+        )
+        extra_link.unlink()
+    assert owned_include.lstat().st_nlink == 1
+    print("PASS: installed worker refused managed include hardlink without changing live TLS or catalog", flush=True)
+
+    try:
+        os.chown(owned_include, service.pw_uid, service.pw_gid, follow_symlinks=False)
+        assert owned_include.lstat().st_uid == service.pw_uid
+        expect_unsafe_include_refusal()
+    finally:
+        assert owned_include.lstat().st_ino == previous_include.st_ino
+        os.chown(owned_include, previous_include.st_uid, previous_include.st_gid,
+                 follow_symlinks=False)
+    assert owned_include.lstat().st_uid == previous_include.st_uid
+    assert owned_include.lstat().st_gid == previous_include.st_gid
+    print("PASS: installed worker refused foreign managed include ownership", flush=True)
+
+    try:
+        owned_include.chmod(0o666)
+        expect_unsafe_include_refusal()
+    finally:
+        assert owned_include.lstat().st_ino == previous_include.st_ino
+        owned_include.chmod(stat.S_IMODE(previous_include.st_mode))
+    assert stat.S_IMODE(owned_include.lstat().st_mode) == 0o644
+    assert snapshot() == before
+    assert authenticated_native_operation("RELOAD_V2")["status"] == "RELOADED"
+    assert snapshot() == before
+    print("PASS: installed worker refused writable include and reloaded normally after exact metadata restoration", flush=True)
+
     # Prepare a genuine generation-two partial repair on the already live
     # v0.6 deployment. The operator proposal is synthetic but staged via
     # the signed-fixture authenticated installer, not a direct state writer.
