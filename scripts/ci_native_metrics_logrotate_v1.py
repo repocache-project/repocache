@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Stock distro logrotate end-to-end on *disposable* root-only files (#29).
 
-Only the candidate's fixed file token and the systemd reopen hook are
-replaced in this test harness: no NGINX signal, host log or source is touched.
+Only the candidate's fixed file token is replaced in this test harness:
+no NGINX signal, host log or source is touched.
 """
 from __future__ import annotations
 
@@ -19,7 +19,6 @@ from repocache.server_native_metrics_logrotate_candidate_v1 import (
 )
 
 _MANAGED="/var/log/nginx/repocache-managed/metrics.jsonl"
-_REOPEN="/usr/bin/systemctl kill --kill-who=main --signal=USR1 nginx.service"
 _ROUTE="/__repocache/repos/debian-trixie-main/"
 
 
@@ -30,7 +29,9 @@ def main() -> None:
     doc["deployment"]["logging"]["metrics_opt_in"]=True
     doc["deployment"]["logging"]["retention_days"]=3
     candidate=render_native_metrics_rotation_candidate(doc)
-    assert candidate["requires_exact_vendor_nginx_unit"]
+    assert candidate["required_owned_nginx_unit"] == "repocache-nginx.service"
+    assert candidate["requires_locked_rotation_transaction"]
+    assert not candidate["authorizes_standalone_scheduled_rotation"]
     assert not candidate["authorizes_logrotate_installation"]
     with tempfile.TemporaryDirectory(prefix="repocache-logrotate-v06-") as tmp:
         root=Path(tmp)
@@ -38,10 +39,10 @@ def main() -> None:
         conf=root/"logrotate.conf"
         state=root/"logrotate.state"
         source=candidate["rotation_candidate"]
-        assert source.count(_MANAGED)==1 and source.count(_REOPEN)==1
+        assert source.count(_MANAGED)==1 and "postrotate" not in source
         # Explicitly *test-only* substitutions; never deploy or invoke
         # production systemd from a disposable CI rotation exercise.
-        private=source.replace(_MANAGED,str(log)).replace(_REOPEN,"/bin/true")
+        private=source.replace(_MANAGED,str(log))
         conf.write_text(private)
         def write_one(status):
             record={
