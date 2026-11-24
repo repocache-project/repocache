@@ -111,7 +111,8 @@ def _constant(_value: str) -> None:
 
 
 def _request(raw: bytes) -> tuple[str, tuple[dict[str, Any], ...],
-                                  tuple[str, ...], bool]:
+                                  tuple[str, ...], bool,
+                                  tuple[tuple[str, str], ...]]:
     try:
         parsed = json.loads(
             raw.decode("utf-8", "strict"), object_pairs_hook=_unique_pairs,
@@ -119,20 +120,33 @@ def _request(raw: bytes) -> tuple[str, tuple[dict[str, Any], ...],
         )
         if type(parsed) is not dict or not set(parsed) <= {
             "operation", "proposed_repositories", "repository_ids",
-            "all_repositories",
+            "all_repositories", "state_changes",
         } or "operation" not in parsed:
             _deny()
         operation = parsed["operation"]
-        if operation not in ("add", "update", "enable", "disable", "remove"):
+        if operation not in ("add", "update", "enable", "disable", "remove", "set-states"):
             _deny()
         proposed = parsed.get("proposed_repositories", [])
         identifiers = parsed.get("repository_ids", [])
         all_repositories = parsed.get("all_repositories", False)
+        mixed = parsed.get("state_changes", [])
         if (type(proposed) is not list
                 or any(type(x) is not dict for x in proposed)
                 or type(identifiers) is not list
                 or any(type(x) is not str for x in identifiers)
-                or type(all_repositories) is not bool):
+                or type(all_repositories) is not bool
+                or type(mixed) is not list
+                or len(mixed) > 64):
+            _deny()
+        if operation == "set-states":
+            if (not mixed or proposed or identifiers or all_repositories
+                    or any(type(change) is not dict
+                           or set(change) != {"repository_id", "desired_state"}
+                           or type(change["repository_id"]) is not str
+                           or type(change["desired_state"]) is not str
+                           for change in mixed)):
+                _deny()
+        elif "state_changes" in parsed:
             _deny()
         if operation in ("add", "update"):
             if not proposed or identifiers or all_repositories:
@@ -140,11 +154,16 @@ def _request(raw: bytes) -> tuple[str, tuple[dict[str, Any], ...],
         elif operation in ("enable", "disable"):
             if proposed or not identifiers or all_repositories:
                 _deny()
-        elif proposed or (not identifiers and not all_repositories) or (
-            all_repositories and identifiers
+        elif operation == "remove" and (
+            proposed or (not identifiers and not all_repositories)
+            or (all_repositories and identifiers)
         ):
             _deny()
-        return operation, tuple(proposed), tuple(identifiers), all_repositories
+        return (
+            operation, tuple(proposed), tuple(identifiers), all_repositories,
+            tuple((change["repository_id"], change["desired_state"])
+                  for change in mixed),
+        )
     except (ValueError, TypeError, OverflowError, UnicodeError, RecursionError):
         _deny()
 
@@ -228,7 +247,7 @@ def prepare_offline_lifecycle(
     old = _read_owned(previous, _MAX_PREVIOUS)
     if hashlib.sha256(old).hexdigest() != expected_state_sha256:
         _deny()
-    operation, proposed, ids, all_ids = _request(
+    operation, proposed, ids, all_ids, mixed = _request(
         _read_owned(request, _MAX_REQUEST),
     )
     candidate = render_fixed_native_repository_batch_envelope(
@@ -236,7 +255,7 @@ def prepare_offline_lifecycle(
         expected_previous_state_sha256=expected_state_sha256,
         decision_sha256=decision_sha256, operation=operation,
         proposed_repositories=proposed, repository_ids=ids,
-        all_repositories=all_ids,
+        all_repositories=all_ids, state_changes=mixed,
     )
     if (candidate["operator_approval_verified"] is not False
             or candidate["authorizes_state_write"] is not False

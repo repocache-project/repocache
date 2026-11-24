@@ -490,3 +490,117 @@ def test_batch_native_envelope_and_builder_never_contact_os_or_modify_input(
     )
     assert result["envelope_bytes"]
     assert before == previous
+
+
+def test_mixed_states_v2_one_generation_and_exact_fixed_native_envelope():
+    original = initial()
+    enabled = plan(
+        original, operation="enable", repository_ids=(APT,),
+    )["proposed_snapshot"]
+    assert enabled["state_generation"] == 2
+    assert [r["desired_state"] for r in enabled["repository_records"]] == [
+        "active", "disabled",
+    ]
+    prior = copy.deepcopy(enabled)
+    changes = ((APT, "disabled"), (DNF, "active"))
+    mixed = plan(
+        enabled, operation="set-states", state_changes=changes,
+    )
+    assert mixed["status"] == "V2_ATOMIC_BATCH_REPOSITORY_CANDIDATE_ONLY"
+    assert mixed["operation"] == "set-states"
+    assert mixed["proposed_state_generation"] == 3
+    assert mixed["retired_ids_proposed"] == []
+    assert [x["result"] for x in mixed["per_repository"]] == [
+        "STATE_CHANGE_CANDIDATE", "STATE_CHANGE_CANDIDATE",
+    ]
+    updated = mixed["proposed_snapshot"]
+    assert updated["state_generation"] == 3
+    assert [(r["id"], r["desired_state"]) for r in updated["repository_records"]] == [
+        (APT, "disabled"), (DNF, "active"),
+    ]
+    assert {r["id"]: r for r in updated["id_reservations"]} == {
+        r["id"]: r for r in original["id_reservations"]
+    }
+    assert enabled == prior
+    for key, value in mixed.items():
+        if key.startswith("authorizes_") or key.endswith("_verified"):
+            assert value is False
+    raw = canonical(enabled)
+    envelope = render_fixed_native_repository_batch_envelope(
+        raw, expected_generation=2,
+        expected_previous_state_sha256=hashlib.sha256(raw).hexdigest(),
+        decision_sha256=DECISION, operation="set-states",
+        state_changes=changes,
+    )
+    wire = json.loads(envelope["envelope_bytes"])
+    assert envelope["changed"] is True
+    assert envelope["operator_approval_verified"] is False
+    assert envelope["authorizes_state_write"] is False
+    assert envelope["authorizes_nginx_reload"] is False
+    assert envelope["authorizes_catalog_publication"] is False
+    assert wire["expected_generation"] == 2
+    assert wire["expected_state_sha256"] == hashlib.sha256(raw).hexdigest()
+    assert base64.b64decode(wire["next_state_base64"], validate=True) == canonical(updated)
+    assert wire["next_state_sha256"] == hashlib.sha256(canonical(updated)).hexdigest()
+    assert plan(updated, operation="set-states", state_changes=changes)[
+        "proposed_snapshot"
+    ] is None
+    no_op = render_fixed_native_repository_batch_envelope(
+        canonical(updated), expected_generation=3,
+        expected_previous_state_sha256=hashlib.sha256(canonical(updated)).hexdigest(),
+        decision_sha256=DECISION, operation="set-states", state_changes=changes,
+    )
+    assert no_op["changed"] is False and no_op["envelope_bytes"] is None
+    assert no_op["authorizes_state_write"] is False
+
+
+@pytest.mark.parametrize("changes", [
+    (),
+    [],
+    ((APT, "active"), (APT, "disabled")),
+    ((APT, "active"), ("unknown-repository", "disabled")),
+    ((APT, "active"), ("../etc/passwd", "disabled")),
+    ((APT, "approved"),),
+    ((APT, True),),
+    ((APT, "active", "unexpected"),),
+    ([APT, "active"],),
+    ((APT, "active"),) * 65,
+])
+def test_mixed_states_v2_refuses_invalid_selectors_atomically(changes):
+    before = initial()
+    original = copy.deepcopy(before)
+    with pytest.raises(RepositoryV2TransitionError, match="REPOSITORY_V2_TRANSITION_"):
+        plan(before, operation="set-states", state_changes=changes)
+    assert before == original
+
+
+@pytest.mark.parametrize("unexpected", [
+    {"repository_ids": (APT,)},
+    {"proposed_repositories": ({},)},
+    {"all_repositories": True},
+])
+def test_mixed_states_v2_refuses_cross_operation_selectors(unexpected):
+    with pytest.raises(RepositoryV2TransitionError, match="BATCH_SELECTORS_INVALID"):
+        plan(initial(), operation="set-states",
+             state_changes=((APT, "active"),), **unexpected)
+
+
+def test_mixed_states_v2_rejects_stale_digest_before_proposing_next_state():
+    old = initial()
+    with pytest.raises(RepositoryV2TransitionError, match="BATCH_PREDECESSOR_MISMATCH"):
+        plan_repository_v2_batch_transition(
+            old, expected_generation=1,
+            expected_previous_state_sha256="0" * 64,
+            decision_sha256=DECISION, operation="set-states",
+            state_changes=((APT, "active"),),
+        )
+    with pytest.raises(RepositoryV2TransitionError, match="BATCH_PREDECESSOR_MISMATCH"):
+        plan(old, generation=2, operation="set-states",
+             state_changes=((APT, "active"),))
+    with pytest.raises(ReconciliationPlanError, match="fixed batch:"):
+        render_fixed_native_repository_batch_envelope(
+            canonical(old), expected_generation=1,
+            expected_previous_state_sha256="0" * 64,
+            decision_sha256=DECISION, operation="set-states",
+            state_changes=((APT, "active"),),
+        )

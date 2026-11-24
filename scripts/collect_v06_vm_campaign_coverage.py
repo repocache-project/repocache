@@ -105,6 +105,11 @@ def collect(path: Path, platform: str, scenario: str, expected_head: str) -> dic
             native_text = native_log.read_text(encoding="utf-8")
             if "PASS: booted native VM stock NGINX disposable HTTPS APT/DNF MISS/HIT" in native_text:
                 secondary = ("28.01", "28.02", "28.03", "30.01")
+                if (
+                    "PASS: booted native VM malformed NGINX candidate refused before "
+                    "reload; old APT/DNF HTTPS HITs survived and validated restore reloaded"
+                ) in native_text:
+                    secondary += ("28.04",)
     client_criteria = ()
     if scenario == "smoke":
         client_log = path / "native-client-cli-source-guard.txt"

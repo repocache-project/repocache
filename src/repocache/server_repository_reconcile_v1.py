@@ -966,6 +966,7 @@ def render_fixed_native_repository_batch_envelope(
     proposed_repositories: tuple[dict[str, Any], ...] = (),
     repository_ids: tuple[str, ...] = (),
     all_repositories: bool = False,
+    state_changes: tuple[tuple[str, str], ...] = (),
 ) -> dict[str, Any]:
     """Prepare ONE fixed native v2 intake for an all-or-nothing #95 batch.
 
@@ -989,6 +990,7 @@ def render_fixed_native_repository_batch_envelope(
             proposed_repositories=proposed_repositories,
             repository_ids=repository_ids,
             all_repositories=all_repositories,
+            state_changes=state_changes,
         )
         if (plan["authorizes_state_write"] is not False
                 or plan["authorizes_nginx_activation"] is not False
