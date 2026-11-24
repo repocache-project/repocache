@@ -238,6 +238,132 @@ def live_wal_resource_hashes() -> dict[str, str]:
     return {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
 
 
+
+def verify_dedicated_socket(*, bootstrap: bool = False, pending: bool = False) -> None:
+    """Exercise the actual installed broker through its kernel-authenticated socket.
+
+    The shared NGINX parent remains read-only in the service. Test only
+    scoped clean/reload/replay and explicit refusal of mutating requests.
+    """
+    import grp
+    import pwd
+    import time
+    from scripts.ci_pr237_native_socket_guest import accounts, command
+    from repocache.server_native_root_control_client_v1 import (
+        NativeRootControlClientError, request_native_fixed_v2,
+    )
+
+    accounts()
+    command("/usr/bin/systemctl", "start", "repocache-control.socket")
+    def call(operation, expected):
+        time.sleep(3)
+        if expected == "DENIED":
+            try:
+                request_native_fixed_v2(operation)
+            except NativeRootControlClientError as exc:
+                assert str(exc) == "NATIVE_ROOT_CLIENT_OPERATION_REFUSED", str(exc)
+            else:
+                raise AssertionError("Unapproved mutating operation succeeded")
+        else:
+            try:
+                result = request_native_fixed_v2(operation)
+            except NativeRootControlClientError:
+                status = run("/usr/bin/systemctl", "show", "repocache-control.service",
+                             "-p", "ActiveState", "-p", "SubState", "-p", "Result",
+                             "-p", "ExecMainStatus")
+                print("DEDICATED_SOCKET_DIAGNOSTIC: " + status.stdout, flush=True)
+                raise
+            assert result["status"] == expected, result["status"]
+            assert result["transaction_completed"] is True
+            if expected in ("RELOADED", "UNCHANGED"):
+                assert result["state_generation"] == 1
+
+    try:
+        if pending:
+            wal = STATE / ".state-v2-owned-nginx.pending"
+            before = wal.read_bytes()
+            call("RECOVER_V2", "DENIED")
+            assert wal.read_bytes() == before
+            print("PASS: confined socket refused pending WAL without isolated atomic parent", flush=True)
+            return
+        if bootstrap:
+            before = OWN_CONFIG.read_bytes()
+            call("RECOVER_V2", "CLEAN")
+            call("APPLY_V2", "DENIED")
+            assert OWN_CONFIG.read_bytes() == before
+            assert not (STATE / "state-v2.json").exists()
+            assert not (STATE / ".state-v2-owned-nginx.pending").exists()
+            loopback_response()
+            print("PASS: authenticated dedicated socket verified bootstrap and refused new generation before WAL", flush=True)
+            return
+
+        before = live_wal_resource_hashes()
+        call("RECOVER_V2", "CLEAN")
+        call("APPLY_V2", "UNCHANGED")
+        call("RELOAD_V2", "RELOADED")
+        assert live_wal_resource_hashes() == before
+
+        # A real non-root operator may request only the fixed managed reload.
+        # Do not grant the service identity administrative authority.
+        operator = "repocache-vm-operator"
+        command("/usr/sbin/useradd", "--system", "--no-create-home",
+                "--groups", "repocache-admin", "--shell", "/usr/sbin/nologin", operator)
+        try:
+            entry = pwd.getpwnam(operator)
+            time.sleep(3)
+            child = os.fork()
+            if child == 0:
+                try:
+                    os.initgroups(operator, entry.pw_gid)
+                    os.setgid(entry.pw_gid)
+                    os.setuid(entry.pw_uid)
+                    response = request_native_fixed_v2("RELOAD_V2")
+                    os._exit(0 if response["status"] == "RELOADED"
+                             and response["state_generation"] == 1 else 4)
+                except Exception:
+                    os._exit(3)
+            assert os.waitstatus_to_exitcode(os.waitpid(child, 0)[1]) == 0
+        finally:
+            command("/usr/sbin/userdel", operator)
+        service = pwd.getpwnam("repocache")
+        admin = grp.getgrnam("repocache-admin").gr_gid
+        time.sleep(3)
+        child = os.fork()
+        if child == 0:
+            try:
+                os.setgroups([admin])
+                os.setgid(service.pw_gid)
+                os.setuid(service.pw_uid)
+                with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as conn:
+                    conn.settimeout(8)
+                    conn.connect("/run/repocache/server-control.sock")
+                    conn.sendall(b"reload-v2\n")
+                    try:
+                        reply = conn.recv(1025)
+                    except ConnectionResetError:
+                        reply = b""
+                    os._exit(0 if reply == b"" else 4)
+            except Exception:
+                os._exit(3)
+        assert os.waitstatus_to_exitcode(os.waitpid(child, 0)[1]) == 0
+
+        # Modify only the local receipt in the disposable guest. The actual
+        # broker must not trust a receipt whose marker/hash no longer matches.
+        receipt = STATE / ".native-worker-receipt-v1.json"
+        raw = receipt.read_bytes()
+        try:
+            receipt.write_bytes(raw.replace(b'"source_sha":"', b'"source_sha":"0', 1))
+            assert receipt.read_bytes() != raw
+            call("RELOAD_V2", "DENIED")
+        finally:
+            receipt.write_bytes(raw)
+        call("RELOAD_V2", "RELOADED")
+        assert live_wal_resource_hashes() == before
+        print("PASS: actual confined dedicated socket clean/replay/reload, non-root operator, service UID and placement receipt refusal", flush=True)
+    finally:
+        command("/usr/bin/systemctl", "stop", "repocache-control.socket")
+
+
 def prepare_and_interrupt_live_wal(distribution: str, native, assets, pins) -> None:
     import base64
     from scripts.ci_pr237_native_socket_guest import synthetic_local_tls, https_response
@@ -259,6 +385,7 @@ def prepare_and_interrupt_live_wal(distribution: str, native, assets, pins) -> N
     )
     assert staged["expected_generation"] == 0
     bootstrap = OWN_CONFIG.read_bytes()
+    verify_dedicated_socket(bootstrap=True)
     run_live_wal(distribution, "fail-reload")
     assert OWN_CONFIG.read_bytes() == bootstrap
     assert not (STATE / "state-v2.json").exists()
@@ -276,6 +403,8 @@ def prepare_and_interrupt_live_wal(distribution: str, native, assets, pins) -> N
     assert https_response("/.well-known/repocache/catalog.json").endswith(catalog)
     assert not (STATE / ".state-v2-owned-nginx.pending").exists()
     print("PASS: actual installed signed-test dedicated WAL commits TLS generation and exact catalog, repeat and reload preserve resources", flush=True)
+    verify_dedicated_socket()
+    assert live_wal_resource_hashes() == old
     prior = STATE / "state-v2.json"
     prior_raw = prior.read_bytes()
     repair = json.loads(base64.b64decode(json.loads(prior_raw)["configuration_base64"], validate=True))
@@ -310,6 +439,7 @@ def recover_live_wal_after_reboot(distribution: str) -> None:
     assert (STATE / ".state-v2-owned-nginx.pending").is_file()
     assert not Path("/var/lib/repocache/public/catalog.json").exists()
     old = json.loads((ROOT / "owned-live-prior-hashes.json").read_text())
+    verify_dedicated_socket(pending=True)
     run_live_wal(distribution, "recover")
     assert live_wal_resource_hashes() == old
     assert not (STATE / ".state-v2-owned-nginx.pending").exists()
@@ -469,7 +599,7 @@ def verify_guest(distribution: str, phase: str) -> None:
         assert inspect_stock_nginx_package_file_integrity()[
             "native_package_file_integrity_verified"] is True
         print("PASS: separate REPOCACHE service survives real reboot with vendor service disabled and package integrity intact", flush=True)
-        print("NOT VERIFIED: confined socket dispatch, active repository routes/storage, managed installer repair, final publisher-signed release", flush=True)
+        print("NOT VERIFIED: confined socket mutating apply/recover, active repository routes/storage, managed installer repair, final publisher-signed release", flush=True)
     else:
         raise AssertionError("invalid test phase")
 

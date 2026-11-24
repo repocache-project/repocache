@@ -718,3 +718,44 @@ certificate alone as service identity. The existing signed-test activation
 guest exercises the real bootstrap listener and refusal of a disposable
 foreign listener, including after reboot. Managed TLS listener acceptance
 and access from the confined installed socket worker remain native gates.
+
+
+### Confined dedicated broker: nonmutating operations and outstanding write boundary
+
+The existing socket protocol and kernel peer credential checks remain unchanged.
+The authenticated installer persists its canonical local placement receipt, with
+the original digest-bound completion marker, before completing fresh placement.
+An exact re-authenticated repeat can fill an absent receipt without adopting a
+foreign file. For the dedicated domain, the broker rechecks that receipt,
+fixed worker/unit hashes, root ownership, modes, ACL/xattrs, the loaded
+systemd unit identities and its own MainPID under the original state lock.
+This is installation-local provenance, not an independent publisher signature.
+Any entry in the reserved dedicated claim namespace selects only the dedicated
+domain; malformed claims never fall back to the distributor's NGINX.
+
+The socket may observe clean state, verify an exact already-committed intake
+(no change), or validate/reload the exact committed generation with disabled
+repositories, subject to current host/package/receipt/mount/TLS checks. It
+requires the existing shared /etc/nginx parent and owned configuration files
+to remain read-only in the broker's mount namespace. It grants no new
+write authority there. A new candidate or pending WAL is refused before
+mutation; clean observation and replay cannot invoke the mutating engine.
+Active routes remain gated on installed storage and actual service access.
+The optional dedicated runtime-directory write exception is limited to the
+existing fixed /run/repocache-nginx leaf for native syntax inspection.
+
+The current fixed managed files are siblings of distributor files directly
+under /etc/nginx. Atomic replacement requires write access to their parent;
+a read-write bind of individual files does not permit atomic replacement
+of their directory entries. Broadening the socket's write exception to
+/etc/nginx would therefore weaken the isolation boundary. A dedicated
+root-owned config directory (for example /etc/nginx/repocache.d), with only
+that exact directory writable, is the proposed resolution. Its path contract
+and signed-unit/bootstrap migration need an explicit maintainer decision
+before adoption. No path contract, legacy fallback, or permission waiver is
+adopted by this increment. Complete mutating socket APPLY/RECOVER and
+managed installer repair remain blocked until this boundary is resolved.
+The booted activation guest tests the restricted socket operations and
+refusals through the installed broker, in addition to the separate root-only
+live WAL fault/reboot rehearsal. New test results are not inferred from
+earlier green runs.
