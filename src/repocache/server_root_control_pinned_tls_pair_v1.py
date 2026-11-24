@@ -3,13 +3,13 @@
 A future installed root broker MUST obtain pinned FDs from its *own*
 authenticated, root-owned state-v2/NGINX transaction. This module is NOT
 connected to the socket worker, takes no path or administrator request,
-never grants a service reload, and does not establish TLS trust/expiry,
-ownership of path ancestors, ACLs, labels or live HTTPS exposure.
+never grants a service reload. The optional in-memory handshake verifies
+TLS trust/name/expiry without opening a listener; neither mode proves ownership of path ancestors, ACLs, labels or live HTTPS exposure.
 
 Stock AlmaLinux 10 nginx -t has been observed accepting a missing or
 mismatched TLS key. A real independent load of the exact cert/key pair is
-required before any future NGINX reload. This prerequisite validates only
-an already-opened descriptor pair with OpenSSL through Python ssl.
+required before any future NGINX reload. This prerequisite validates an already-opened descriptor pair with
+OpenSSL through Python ssl, optionally including its trusted server identity.
 """
 from __future__ import annotations
 
@@ -73,8 +73,74 @@ def _digest_fd(fd: int) -> bytes:
         _deny("FD_UNAVAILABLE")
 
 
+def _verify_tls_identity_in_memory(server_context: ssl.SSLContext,
+                                   hostname: str) -> str:
+    """Verify the actual cert chain, name and validity without a listener.
+
+    The client uses the same OS default trust as the future live HTTPS
+    probe. The caller must supply the name from independently validated
+    root-owned configuration, not from the socket peer. No test CA or
+    caller-provided TLS context is accepted in the production API.
+    """
+    if (type(hostname) is not str or not 1 <= len(hostname) <= 253
+            or not hostname.isascii()
+            or any(ord(ch) <= 32 or ord(ch) == 127 for ch in hostname)):
+        _deny("HOSTNAME_REFUSED")
+    try:
+        client_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+        if (client_context.verify_mode != ssl.CERT_REQUIRED
+                or not client_context.check_hostname):
+            _deny("CLIENT_TRUST_REFUSED")
+        client_in, client_out = ssl.MemoryBIO(), ssl.MemoryBIO()
+        server_in, server_out = ssl.MemoryBIO(), ssl.MemoryBIO()
+        client = client_context.wrap_bio(
+            client_in, client_out, server_hostname=hostname,
+        )
+        server = server_context.wrap_bio(
+            server_in, server_out, server_side=True,
+        )
+        client_done = server_done = False
+        transmitted = 0
+        # MemoryBIO handshakes never access the network. Bound both the
+        # number of steps and transferred TLS records for defensive limits.
+        for _ in range(32):
+            if not client_done:
+                try:
+                    client.do_handshake()
+                    client_done = True
+                except ssl.SSLWantReadError:
+                    pass
+            if client_out.pending:
+                transmitted += client_out.pending
+                if transmitted > 1024 * 1024:
+                    _deny("TLS_IDENTITY_HANDSHAKE_LIMIT")
+                server_in.write(client_out.read())
+            if not server_done:
+                try:
+                    server.do_handshake()
+                    server_done = True
+                except ssl.SSLWantReadError:
+                    pass
+            if server_out.pending:
+                transmitted += server_out.pending
+                if transmitted > 1024 * 1024:
+                    _deny("TLS_IDENTITY_HANDSHAKE_LIMIT")
+                client_in.write(server_out.read())
+            if client_done and server_done:
+                leaf = client.getpeercert(binary_form=True)
+                if type(leaf) is not bytes or not leaf:
+                    _deny("TLS_IDENTITY_PEER_MISSING")
+                return hashlib.sha256(leaf).hexdigest()
+        _deny("TLS_IDENTITY_HANDSHAKE_LIMIT")
+    except PinnedTLSPairError:
+        raise
+    except (ssl.SSLError, OSError, ValueError, TypeError):
+        _deny("TLS_IDENTITY_UNVERIFIED")
+
+
 def _inspect_pinned_tls_pair_for_future_transaction(
     certificate_fd: int, private_key_fd: int, *, expected_owner_uid: int,
+    expected_hostname: str | None = None,
 ) -> dict[str, Any]:
     """PRIVATE test seam; NOT a standalone trusted-root file reader.
 
@@ -113,6 +179,8 @@ def _inspect_pinned_tls_pair_for_future_transaction(
         )
     except (ssl.SSLError, OSError, ValueError, TypeError):
         _deny("CERT_KEY_LOAD_FAILED")
+    peer_sha = (None if expected_hostname is None
+                else _verify_tls_identity_in_memory(context, expected_hostname))
     if (_metadata(certificate_fd, uid=expected_owner_uid, private=False)
             != cert_before
             or _metadata(private_key_fd, uid=expected_owner_uid, private=True)
@@ -127,7 +195,8 @@ def _inspect_pinned_tls_pair_for_future_transaction(
         "pinned_opened_file_descriptions_observed": True,
         "trusted_path_ancestry_verified": False,
         "acl_mount_selinux_labels_verified": False,
-        "certificate_issuer_hostname_expiry_verified": False,
+        "certificate_issuer_hostname_expiry_verified": peer_sha is not None,
+        "private_verified_leaf_der_sha256": peer_sha,
         "installed_signed_code_verified": False,
         "operator_authorization_verified": False,
         "host_root_provenance_verified": False,
