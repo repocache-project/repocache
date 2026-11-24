@@ -116,10 +116,14 @@ def _get_journal(fd: int, ident: str) -> dict | None:
         "original", "proposed", "mirror", "original_id",
         "proposed_id", "mirror_id", "restore_id", "mode", "gid",
         "original_digest", "proposed_digest", "mirror_digest",
+        "approval", "approval_sha256",
     }
     if (type(j) is not dict or set(j) != required
-            or type(j["schema"]) is not int or j["schema"] != 1
+            or type(j["schema"]) is not int or j["schema"] != 2
             or type(j["id"]) is not str or j["id"] != ident
+            or type(j["approval"]) is not dict
+            or type(j["approval_sha256"]) is not str
+            or not boundary.DIGEST.fullmatch(j["approval_sha256"])
             or j["phase"] not in ("armed", "installed", "restore-armed", "restored")
             or type(j["source"]) is not str or
             not pre.SOURCE_PATH.fullmatch(j["source"])
@@ -155,6 +159,35 @@ def _get_journal(fd: int, ident: str) -> dict | None:
         if (j["companion"] !=
                 "etc/apt/mirrors/repocache-" + ident + ".list"):
             raise PairRefused("Journal companion path mismatches managed ID")
+    # A protected snapshot binds recovery to the exact authorized compiler
+    # inputs. Local rollback never depends on a reachable catalog or the
+    # continued existence of an approval file, and never grants a new apply.
+    try:
+        snapshot = _pack(j["approval"])
+        approval = boundary._decode_manifest(snapshot, ident)
+        if (_hash(snapshot) != j["approval_sha256"]
+                or approval["source"] != j["source"]
+                or approval["source_sha256"] != j["original_digest"]
+                or _hash(approval["cache"].encode("ascii")) != approval["route_sha256"]):
+            raise PairRefused("Journal approval identity mismatch")
+        if approval["schema"] == 2:
+            identity = approval["source_identity"]
+            if ([identity["device"], identity["inode"]] != j["original_id"]
+                    or identity["uid"] != 0 or identity["gid"] != j["gid"]
+                    or identity["mode"] != j["mode"]
+                    or identity["size"] != len(original)):
+                raise PairRefused("Journal source identity mismatch")
+        compiled = compiler.compile_fallback(
+            source=j["source"], original=original,
+            expected_source_sha256=approval["source_sha256"],
+            selected_entry_sha256=approval["entry_sha256"],
+            managed_id=ident, upstream=approval["upstream"], cache=approval["cache"])
+        expected_companion = (j["companion"], mirror) if j["companion"] else None
+        if compiled.proposed != proposed or compiled.companion != expected_companion:
+            raise PairRefused("Journal differs from exact approved proposal")
+    except (boundary.BoundaryRefused, compiler.FallbackRefused,
+            UnicodeError, ValueError, RecursionError) as exc:
+        raise PairRefused("Protected journal approval refused") from exc
     return j
 
 
@@ -177,9 +210,12 @@ def _put_journal(fd: int, ident: str, j: dict) -> None:
                 os.fsync(out)
         finally:
             os.close(out)
-        # Any existing journal must be a known, valid, pinned inode.
-        _get_journal(fd, ident)
-        os.replace(temp, name, src_dir_fd=fd, dst_dir_fd=fd)
+        # A first journal must not overwrite an unexpected destination.
+        # Updating an existing journal remains a private sandbox operation.
+        if _get_journal(fd, ident) is None:
+            boundary._rename_noreplace(fd, temp, name)
+        else:
+            os.replace(temp, name, src_dir_fd=fd, dst_dir_fd=fd)
         os.fsync(fd)
     except BaseException:
         # Unknown partial state stays on disk for manual inspection.
@@ -239,20 +275,9 @@ def _metadata(current: dict, journal: dict) -> None:
 
 def _fixture_approval(statefd: int, root: Path, ident: str):
     approval = boundary._manifest(statefd, ident)
-    if _hash(approval["cache"].encode("ascii")) != approval["route_sha256"]:
-        raise PairRefused("Stale route approval")
-    before = pre.inspect_source(approval["source"], root=root)
-    if before["sha256"] != approval["source_sha256"]:
-        raise PairRefused("Source baseline changed")
-    raw = boundary._source_bytes(root, approval["source"], before)
-    compiled = compiler.compile_fallback(
-        source=approval["source"], original=raw,
-        expected_source_sha256=approval["source_sha256"],
-        selected_entry_sha256=approval["entry_sha256"],
-        managed_id=ident, upstream=approval["upstream"], cache=approval["cache"])
-    if pre.inspect_source(approval["source"], root=root) != before:
-        raise PairRefused("Source drift during proposal validation")
+    compiled, _ = boundary._validate_record(root, statefd, ident, approval)
     return approval, compiled
+
 
 
 def _paths(root: Path, j: dict):
@@ -282,39 +307,39 @@ def apply_sandbox(root: Path, ident: str, *, crash: str | None = None) -> dict:
                     if journal["phase"] != "installed":
                         raise PairRefused("Interrupted or restored transaction needs review")
                     approval = boundary._manifest(statefd, ident)
-                    if (approval["source"] != journal["source"]
-                            or approval["source_sha256"] != journal["original_digest"]
-                            or _hash(approval["cache"].encode("ascii"))
-                               != approval["route_sha256"]
-                            or (journal["companion"] is not None and
-                                journal["companion"] !=
-                                "etc/apt/mirrors/repocache-" + ident + ".list")):
+                    if (approval != journal["approval"]
+                            or _hash(_pack(approval)) != journal["approval_sha256"]):
                         raise PairRefused("Installed approval identity changed")
                     with _paths(root, journal) as (fd, leaf):
                         curr = _read_named(fd, leaf)
                         if not _matches(curr, _decode(journal["proposed"]),
                                         journal["proposed_id"]):
                             raise PairRefused("Installed source externally modified")
+                        _metadata(curr[1], journal)
                     if journal["companion"] is not None:
                         with atom._source_directory(root, journal["companion"]) as (fd, leaf):
-                            if not _matches(_read_named(fd, leaf),
-                                            _decode(journal["mirror"]),
+                            observed_mirror = _read_named(fd, leaf)
+                            if not _matches(observed_mirror, _decode(journal["mirror"]),
                                             journal["mirror_id"]):
                                 raise PairRefused("Installed mirror externally modified")
+                            _metadata(observed_mirror[1], journal)
                     return {"status": "unchanged", "write_eligible": False}
                 approval, proposal = _fixture_approval(statefd, root, ident)
                 with atom._source_directory(root, proposal.source) as (fd, leaf):
                     source = _read_named(fd, leaf)
                     if source is None or source[0] != proposal.original:
                         raise PairRefused("Source changed before stage")
+                    if approval["schema"] == 2 and approval["source_identity"] != {
+                            **{key: source[1][key] for key in boundary.SOURCE_IDENTITY_FIELDS
+                               if key != "size"}, "size": len(source[0])}:
+                        raise PairRefused("Approved source inode identity changed before stage")
                     mode, gid = source[1]["mode"], source[1]["gid"]
                     if source[1]["uid"] != 0 or mode not in (0o600, 0o640, 0o644):
                         raise PairRefused("Unsafe source ownership or mode")
                     source_temp, new_id = atom._write_new(
                         fd, leaf, ident, proposal.proposed, source[1])
                     # All current permissions and metadata must still match.
-                    if not _matches(_read_named(fd, leaf),
-                                    proposal.original, _identity(source[1])):
+                    if _read_named(fd, leaf) != source:
                         raise PairRefused("Source replaced during staging")
                 companion = None
                 companion_id = None
@@ -328,7 +353,8 @@ def apply_sandbox(root: Path, ident: str, *, crash: str | None = None) -> dict:
                         companion = path
                         companion_id = list(c_id)
                 j = {
-                    "schema": 1, "id": ident, "phase": "armed",
+                    "schema": 2, "id": ident, "phase": "armed",
+                    "approval": approval, "approval_sha256": _hash(_pack(approval)),
                     "source": proposal.source, "companion": companion,
                     "original": _blob(proposal.original),
                     "proposed": _blob(proposal.proposed),
@@ -351,10 +377,14 @@ def apply_sandbox(root: Path, ident: str, *, crash: str | None = None) -> dict:
                         _stat_required(fd, temp, companion_id)
                         if _read_named(fd, leaf) is not None:
                             raise PairRefused("Mirror destination appeared during commit")
-                        os.rename(temp, leaf, src_dir_fd=fd, dst_dir_fd=fd)
+                        boundary._rename_noreplace(fd, temp, leaf)
                         os.fsync(fd)
                     _crash(crash, "companion")
                 with atom._source_directory(root, proposal.source) as (fd, leaf):
+                    if _read_named(fd, leaf) != source:
+                        raise PairRefused("Source changed before transaction commit")
+                    if boundary._manifest(statefd, ident) != approval:
+                        raise PairRefused("Approval changed before transaction commit")
                     atom._replace(fd, source_temp, leaf, tuple(_identity(source[1])))
                 _crash(crash, "source")
                 j["phase"] = "installed"
@@ -386,6 +416,8 @@ def _restore_locked(root: Path, fdstate: int, ident: str, j: dict,
             if (mirror_state is not None and
                     not _matches(mirror_state, mirror, j["mirror_id"])):
                 raise PairRefused("Foreign mirror during transaction recovery")
+            if mirror_state is not None:
+                _metadata(mirror_state[1], j)
     else:
         mirror_state = None
 

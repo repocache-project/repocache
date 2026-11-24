@@ -224,9 +224,17 @@ def _manifest(state_fd: int, ident: str, *, pending: bool = False) -> dict:
         raise BoundaryRefused("Invalid protected candidate identifier")
     name = ("pending-" if pending else "candidate-") + ident + ".json"
     raw = _read_pinned(state_fd, name, MAX_MANIFEST)
+    return _decode_manifest(raw, ident, pending=pending)
+
+
+def _decode_manifest(raw: bytes, ident: str, *, pending: bool = False) -> dict:
+    """Strictly decode either the pinned file or a protected journal snapshot."""
+    if (type(raw) is not bytes or not 0 < len(raw) <= MAX_MANIFEST
+            or type(ident) is not str or not IDENT.fullmatch(ident)):
+        raise BoundaryRefused("Invalid protected manifest input")
     try:
         obj = json.loads(raw.decode("utf-8"), object_pairs_hook=_no_duplicate_fields)
-    except (UnicodeError, ValueError) as exc:
+    except (UnicodeError, ValueError, RecursionError) as exc:
         raise BoundaryRefused("Malformed protected approval") from exc
     if type(obj) is not dict or type(obj.get("schema")) is not int:
         raise BoundaryRefused("Protected approval schema refused")

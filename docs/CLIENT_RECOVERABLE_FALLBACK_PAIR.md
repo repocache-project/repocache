@@ -76,3 +76,19 @@ readiness. Ordinary Linux `rename` is not compare-and-swap.
 
 The original #24 issue remains OPEN; none of these production tasks is
 passed by a sandbox, even with green GitHub CI.
+
+
+## Exact approval binding and local recovery
+
+New test-root journals use schema 2 and retain a private strict approval
+snapshot and its canonical digest. Loading a journal re-compiles the
+original source and verifies the exact proposed bytes, mirror and bound
+schema-2 source inode identity. A changed approval (even one with a
+recomputed route digest) cannot authorize an installed no-op replay.
+An unavailable, withdrawn or deleted approval/catalog does not block
+restoration of exact journal-owned resources to the prior direct upstream;
+it does not authorize new source writes. The first journal and APT mirror
+publication use atomic no-replace, and replay checks metadata. Old
+experimental schema-1 journals are refused, not silently migrated.
+This remains a disposable test-root transaction; no native writer is
+enabled and same-privilege source replacement races remain a separate gate.

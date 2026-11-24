@@ -200,7 +200,20 @@ def hostile(manager):
         manifest.write_text(json.dumps(approval))
         refuses(lambda: pair.apply_sandbox(root, IDENT),
                 "Stale route must not be idempotently accepted")
-        print(f"{manager}: no-op replay requires authentic route binding PASS",
+        # A completely self-consistent changed cache and digest must also
+        # fail; the original protected journal binds exact consent.
+        approval["cache"] = "https://cache.example.org/__repocache/repos/changed/"
+        approval["route_sha256"] = sha(approval["cache"].encode("ascii"))
+        manifest.write_text(json.dumps(approval))
+        refuses(lambda: pair.apply_sandbox(root, IDENT),
+                "A different self-consistent approval cannot authorize replay")
+        # Recovery is local and may restore exact original resources even
+        # when current approval is gone or no longer published.
+        manifest.unlink()
+        assert pair.restore_sandbox(root, IDENT)["status"] == "restored"
+        assert src.read_bytes() == (APT if manager == "apt" else DNF)
+        assert not mirror.exists()
+        print(f"{manager}: exact approval replay refusal and independent restore PASS",
               flush=True)
 
     if manager == "apt":
@@ -230,6 +243,24 @@ def hostile(manager):
                     "Foreign mirror with equal bytes must not be removed")
             assert src.read_bytes() == proposed and mirror.exists()
             print("apt: foreign equal-content mirror inode refused PASS", flush=True)
+
+    with tempfile.TemporaryDirectory(prefix="repocache-pair-v2-ci-") as place:
+        root = Path(place)
+        src, mirror, lock, state = build(root, manager)
+        original = src.read_bytes()
+        manifest = state / ("candidate-" + IDENT + ".json")
+        approval = json.loads(manifest.read_text())
+        snapshot = boundary.pre.inspect_source(approval["source"], root=root)
+        approval["schema"] = 2
+        approval["source_identity"] = {
+            key: snapshot[key] for key in boundary.SOURCE_IDENTITY_FIELDS
+        }
+        manifest.write_text(json.dumps(approval))
+        assert pair.apply_sandbox(root, IDENT)["status"] == "installed-sandbox"
+        assert pair.apply_sandbox(root, IDENT)["status"] == "unchanged"
+        assert pair.restore_sandbox(root, IDENT)["status"] == "restored"
+        assert src.read_bytes() == original and not mirror.exists()
+        print(f"{manager}: schema-2 approved plan bound to journal/restore PASS", flush=True)
 
     with tempfile.TemporaryDirectory(prefix="repocache-pair-lock-ci-") as place:
         root = Path(place)

@@ -71,7 +71,8 @@ def test_corrupt_journal_missing_required_inode_identity_is_refused(
     ident = "a" * 32
     current, proposed = b"upstream", b"compiled-fallback"
     journal = {
-        "schema": 1, "id": ident, "phase": "armed",
+        "schema": 2, "id": ident, "phase": "armed",
+        "approval": {}, "approval_sha256": "a" * 64,
         "source": "etc/yum.repos.d/approved.repo", "companion": None,
         "original": lab._blob(current), "proposed": lab._blob(proposed),
         "mirror": lab._blob(b""), "original_id": [8, 12],
@@ -93,6 +94,52 @@ def test_corrupt_journal_missing_required_inode_identity_is_refused(
     fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
     try:
         with pytest.raises(lab.PairRefused, match="journal schema"):
+            lab._get_journal(fd, ident)
+    finally:
+        os.close(fd)
+
+
+def test_journal_rejects_recomputed_digests_for_unapproved_proposal(tmp_path, monkeypatch):
+    import json
+
+    ident = "b" * 32
+    source = "etc/yum.repos.d/approved.repo"
+    original = (b"[approved]\nname=Approved\n"
+                b"baseurl=https://mirror.example.org/alma/\nenabled=1\n"
+                b"gpgcheck=1\nrepo_gpgcheck=1\n"
+                b"gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-AlmaLinux-10\n")
+    cache = "https://cache.example.org/__repocache/repos/approved/"
+    approval = {"schema": 1, "id": ident, "source": source,
+                "source_sha256": lab._hash(original), "entry_sha256": lab._hash(original),
+                "upstream": "https://mirror.example.org/alma/", "cache": cache,
+                "route_sha256": lab._hash(cache.encode("ascii"))}
+    proposal = lab.compiler.compile_fallback(
+        source=source, original=original, expected_source_sha256=lab._hash(original),
+        selected_entry_sha256=lab._hash(original), managed_id=ident,
+        upstream=approval["upstream"], cache=cache)
+    journal = {
+        "schema": 2, "id": ident, "phase": "armed",
+        "source": source, "companion": None,
+        "approval": approval, "approval_sha256": lab._hash(lab._pack(approval)),
+        "original": lab._blob(original), "proposed": lab._blob(proposal.proposed),
+        "mirror": lab._blob(b""), "original_id": [8, 12],
+        "proposed_id": [8, 13], "mirror_id": None, "restore_id": None,
+        "mode": 0o644, "gid": 0,
+        "original_digest": lab._hash(original),
+        "proposed_digest": lab._hash(proposal.proposed),
+        "mirror_digest": lab._hash(b""),
+    }
+    (tmp_path / lab._journal_name(ident)).write_bytes(b"fixture")
+    monkeypatch.setattr(lab.boundary, "_read_pinned",
+                        lambda *_args, **_kwargs: json.dumps(journal).encode("ascii"))
+    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        assert lab._get_journal(fd, ident) == journal
+        modified = proposal.proposed.replace(cache.encode("ascii"),
+                                             b"https://other.example.org/repo/")
+        journal["proposed"] = lab._blob(modified)
+        journal["proposed_digest"] = lab._hash(modified)
+        with pytest.raises(lab.PairRefused, match="exact approved proposal"):
             lab._get_journal(fd, ident)
     finally:
         os.close(fd)
