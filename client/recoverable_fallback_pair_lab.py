@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import contextlib
 import hashlib
 import json
 import os
@@ -21,6 +22,7 @@ import stat
 from pathlib import Path
 
 import native_fallback_plan as compiler
+import native_package_lock_observation as locks
 import root_source_boundary as boundary
 import source_preflight as pre
 import source_metadata_lab as security_metadata
@@ -328,6 +330,12 @@ def _paths(root: Path, j: dict):
     return atom._source_directory(root, j["source"])
 
 
+def _manager(source: str) -> str:
+    if not pre.SOURCE_PATH.fullmatch(source) or source.startswith("etc/apt/mirrors/"):
+        raise PairRefused("Unsupported transaction source family")
+    return "dnf5" if source.startswith("etc/yum.repos.d/") else "apt"
+
+
 def _crash(where: str | None, phase: str) -> None:
     if where == phase:
         raise InjectedCrash("Injected transaction interruption: " + phase)
@@ -344,13 +352,17 @@ def apply_sandbox(root: Path, ident: str, *, crash: str | None = None) -> dict:
     try:
         with boundary._state(root) as (statefd, owner):
             _sandbox(root, statefd)
-            with boundary._exclusive_lock(statefd, owner):
+            with boundary._exclusive_lock(statefd, owner), contextlib.ExitStack() as scope:
                 journal = _get_journal(statefd, ident)
+                approved = boundary._manifest(statefd, ident)
+                source = journal["source"] if journal is not None else approved["source"]
+                recheck = scope.enter_context(
+                    locks.hold_existing_native_package_locks(_manager(source), root=root))
                 if journal is not None:
                     if journal["phase"] != "installed":
                         raise PairRefused("Interrupted or restored transaction needs review")
                     approval = boundary._manifest(statefd, ident)
-                    if (approval != journal["approval"]
+                    if (approved != approval or approval != journal["approval"]
                             or _hash(_pack(approval)) != journal["approval_sha256"]):
                         raise PairRefused("Installed approval identity changed")
                     with _paths(root, journal) as (fd, leaf):
@@ -368,6 +380,9 @@ def apply_sandbox(root: Path, ident: str, *, crash: str | None = None) -> dict:
                             _metadata(observed_mirror[1], journal)
                     return {"status": "unchanged", "write_eligible": False}
                 approval, proposal, attrs = _fixture_approval(statefd, root, ident)
+                if approved != approval:
+                    raise PairRefused("Approval changed during lock acquisition")
+                recheck()
                 # Label-aware APT companion placement needs its own policy
                 # context; current supported enforcing platform uses DNF.
                 if proposal.companion and any(name == "security.selinux" for name, _ in attrs):
@@ -420,6 +435,7 @@ def apply_sandbox(root: Path, ident: str, *, crash: str | None = None) -> dict:
                 if approval["schema"] == 3:
                     j["schema"] = 3
                     j["source_attributes"] = [[name, _blob(value)] for name, value in attrs]
+                recheck()
                 _put_journal(statefd, ident, j)
                 _crash(crash, "armed")
                 if companion is not None:
@@ -428,6 +444,7 @@ def apply_sandbox(root: Path, ident: str, *, crash: str | None = None) -> dict:
                         _stat_required(fd, temp, companion_id)
                         if _read_named(fd, leaf) is not None:
                             raise PairRefused("Mirror destination appeared during commit")
+                        recheck()
                         boundary._rename_noreplace(fd, temp, leaf)
                         os.fsync(fd)
                     _crash(crash, "companion")
@@ -440,6 +457,7 @@ def apply_sandbox(root: Path, ident: str, *, crash: str | None = None) -> dict:
                     _metadata(staged[1], j)
                     if boundary._manifest(statefd, ident) != approval:
                         raise PairRefused("Approval changed before transaction commit")
+                    recheck()
                     atom._replace(fd, source_temp, leaf, tuple(_identity(source[1])))
                 _crash(crash, "source")
                 with atom._source_directory(root, proposal.source) as (fd, leaf):
@@ -448,6 +466,7 @@ def apply_sandbox(root: Path, ident: str, *, crash: str | None = None) -> dict:
                         raise PairRefused("Installed source readback mismatch")
                     _metadata(installed[1], j)
                 j["phase"] = "installed"
+                recheck()
                 _put_journal(statefd, ident, j)
                 return {"status": "installed-sandbox", "write_eligible": False}
     except (OSError, ValueError, compiler.FallbackRefused,
@@ -456,7 +475,8 @@ def apply_sandbox(root: Path, ident: str, *, crash: str | None = None) -> dict:
 
 
 def _restore_locked(root: Path, fdstate: int, ident: str, j: dict,
-                    *, crash: str | None = None) -> dict:
+                    *, recheck, crash: str | None = None) -> dict:
+    recheck()
     original, proposed, mirror = (
         _decode(j["original"]), _decode(j["proposed"]), _decode(j["mirror"]))
     attrs = _source_attrs(j)
@@ -505,6 +525,7 @@ def _restore_locked(root: Path, fdstate: int, ident: str, j: dict,
                 temp, new_id = atom._write_new(fd, leaf, ident, original, current[1], attrs)
                 j["restore_id"] = list(new_id)
                 j["phase"] = "restore-armed"
+                recheck()
                 _put_journal(fdstate, ident, j)
                 _crash(crash, "restore-armed")
             else:
@@ -519,6 +540,7 @@ def _restore_locked(root: Path, fdstate: int, ident: str, j: dict,
             if not _matches(staged, original, j["restore_id"]):
                 raise PairRefused("Staged rollback source changed")
             _metadata(staged[1], j)
+            recheck()
             atom._replace(fd, temp, leaf, tuple(j["proposed_id"]))
             restored = _read_named(fd, leaf, attrs)
             if not _matches(restored, original, j["restore_id"]):
@@ -529,18 +551,22 @@ def _restore_locked(root: Path, fdstate: int, ident: str, j: dict,
         raise PairRefused("Unrecognized restore state")
     if j["companion"] is not None:
         with atom._source_directory(root, j["companion"]) as (fd, leaf):
+            recheck()
             _remove_known(fd, leaf, mirror, j["mirror_id"])
     _crash(crash, "companion-removed")
     if from_original:
         # No source replacement happened: only a journalled temp can go.
         with atom._source_directory(root, j["source"]) as (fd, _):
+            recheck()
             _remove_known(fd, ".repocache-atomic-" + ident,
                           proposed, j["proposed_id"], attrs)
     if j["companion"] is not None:
         with atom._source_directory(root, j["companion"]) as (fd, _):
+            recheck()
             _remove_known(fd, ".repocache-atomic-" + ident,
                           mirror, j["mirror_id"])
     j["phase"] = "restored"
+    recheck()
     _put_journal(fdstate, ident, j)
     return {"status": "restored", "write_eligible": False}
 
@@ -557,7 +583,11 @@ def restore_sandbox(root: Path, ident: str, *,
             j = _get_journal(fd, ident)
             if j is None or j["phase"] not in ("installed", "restore-armed"):
                 raise PairRefused("No committed sandbox transaction to restore")
-            return _restore_locked(root, fd, ident, j, crash=crash or "manual")
+            try:
+                with locks.hold_existing_native_package_locks(_manager(j["source"]), root=root) as recheck:
+                    return _restore_locked(root, fd, ident, j, recheck=recheck, crash=crash or "manual")
+            except locks.LockInspectionRefused as exc:
+                raise PairRefused("Native lock scope refused rollback") from exc
 
 
 def recover_sandbox(root: Path, ident: str) -> dict:
@@ -571,8 +601,10 @@ def recover_sandbox(root: Path, ident: str) -> dict:
             j = _get_journal(fd, ident)
             if j is None:
                 return {"status": "no-intent", "write_eligible": False}
-            if j["phase"] == "installed":
-                return _restore_locked(root, fd, ident, j)
-            if j["phase"] == "restored":
-                return _restore_locked(root, fd, ident, j)
-            return _restore_locked(root, fd, ident, j, crash="recover")
+            try:
+                with locks.hold_existing_native_package_locks(_manager(j["source"]), root=root) as recheck:
+                    if j["phase"] in ("installed", "restored"):
+                        return _restore_locked(root, fd, ident, j, recheck=recheck)
+                    return _restore_locked(root, fd, ident, j, recheck=recheck, crash="recover")
+            except locks.LockInspectionRefused as exc:
+                raise PairRefused("Native lock scope refused recovery") from exc

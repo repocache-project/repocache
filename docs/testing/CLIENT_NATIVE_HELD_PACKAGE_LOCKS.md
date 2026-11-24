@@ -53,3 +53,15 @@ modify host sources. No second descriptor on the held file is opened
 during the recheck, avoiding POSIX lock release on close. The actual
 privileged commit and its native package-manager exclusion remain
 separate mandatory acceptance gates.
+
+
+The paired transaction fixture now obtains all fixed package-manager
+lock inodes in its private tree under the client transaction lock, and
+revalidates the complete set before durable journal, source/mirror
+publication, rollback and cleanup transitions. Busy locks refuse
+apply and restore before staging. The Debian booted guest invokes real
+apt-get update with empty isolated sources and private lists/cache paths
+and requires a lock-specific denial. This demonstrates one actual APT
+lock-family interaction, not proof of the entire installed APT/DNF lock
+graph or all possible concurrent administrators. The real host writer
+and DNF process exclusion remain unaccepted.

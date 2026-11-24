@@ -261,7 +261,9 @@ def hold_existing_native_package_locks(
         # Do not return an eternal write_eligible token. The only proof
         # of locks is their lifetime inside this context manager. Keep
         # caller exceptions untouched; only acquisition errors are mapped.
-        yield
+        # The transaction can revalidate all pinned identities immediately
+        # before each durable transition, without reopening any lock inode.
+        yield recheck_all
         # Successful scope completion must not hide a replaced inode or
         # unsafe parent. This detects drift, not a race-free commit lease.
         recheck_all()

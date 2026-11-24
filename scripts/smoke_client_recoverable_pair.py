@@ -72,6 +72,13 @@ def build(root: Path, manager: str):
     item = state / ("candidate-" + IDENT + ".json")
     item.write_text(json.dumps(approval, sort_keys=True))
     item.chmod(0o600)
+    # Fixed private native lock paths; never create host lock files.
+    native_locks = pair.locks.APT if manager == "apt" else pair.locks.DNF5
+    for name in native_locks:
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"")
+        path.chmod(0o600)
     mirror = root / ("etc/apt/mirrors/repocache-" + IDENT + ".list")
     return source, mirror, lock, state
 
@@ -288,6 +295,31 @@ def hostile(manager):
         assert pair.restore_sandbox(root, IDENT)["status"] == "restored"
         assert src.read_bytes() == original and not mirror.exists()
         print(f"{manager}: schema-2 approved plan bound to journal/restore PASS", flush=True)
+
+    with tempfile.TemporaryDirectory(prefix="repocache-pair-native-lock-ci-") as place:
+        root = Path(place)
+        src, mirror, lock, state = build(root, manager)
+        name = (pair.locks.APT if manager == "apt" else pair.locks.DNF5)[0]
+        before = src.stat()
+        # flock and POSIX locks are independent: another process holds the
+        # former; the transaction cannot stage or publish anything.
+        with (root / name).open("r+b") as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            refuses(lambda: pair.apply_sandbox(root, IDENT),
+                    "Competing native lock must refuse source transaction")
+            fcntl.flock(held, fcntl.LOCK_UN)
+        assert src.stat().st_ino == before.st_ino
+        assert not list(state.glob("pair-*.json")) and not mirror.exists()
+        pair.apply_sandbox(root, IDENT)
+        installed = src.read_bytes()
+        with (root / name).open("r+b") as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            refuses(lambda: pair.restore_sandbox(root, IDENT),
+                    "Competing native lock must refuse rollback")
+            fcntl.flock(held, fcntl.LOCK_UN)
+        assert src.read_bytes() == installed
+        assert pair.restore_sandbox(root, IDENT)["status"] == "restored"
+        print(f"{manager}: native lock interlock across apply/restore PASS", flush=True)
 
     with tempfile.TemporaryDirectory(prefix="repocache-pair-lock-ci-") as place:
         root = Path(place)

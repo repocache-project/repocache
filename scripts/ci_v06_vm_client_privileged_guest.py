@@ -81,6 +81,33 @@ def _debian_fixture(root: Path) -> None:
     finally:
         boundary._native_tls_context = original_context
         backend.close()
+    # Native apt-get must observe the same POSIX lists lock that the
+    # transaction holds. Use no configured repositories and private dirs;
+    # no host cache/source changes or package operations are permitted.
+    lists = root / "var/lib/apt/lists"
+    (lists / "partial").mkdir(mode=0o700, exist_ok=True)
+    empty = root / "etc/apt/empty.list"
+    empty.write_text("")
+    empty_parts = root / "etc/apt/empty-parts"
+    empty_parts.mkdir()
+    with pair.locks.hold_existing_native_package_locks("apt", root=root):
+        command = [
+            "/usr/bin/apt-get",
+            "-o", "Dir::State::lists=" + str(lists),
+            "-o", "Dir::State::status=/var/lib/dpkg/status",
+            "-o", "Dir::Cache=" + str(root / "var/cache/apt"),
+            "-o", "Dir::Etc::sourcelist=" + str(empty),
+            "-o", "Dir::Etc::sourceparts=" + str(empty_parts),
+            "-o", "Dir::Etc::parts=-", "-o", "Dir::Etc::main=/dev/null",
+            "-o", "APT::Update::Error-Mode=any",
+            "-o", "Acquire::Retries=0", "update",
+        ]
+        refused = subprocess.run(command, check=False, capture_output=True,
+                                 text=True, timeout=30, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
+        assert refused.returncode != 0 and "Could not get lock" in refused.stderr
+        assert str(lists / "lock") in refused.stderr
+    print("PASS: native apt-get respects held transaction lists lock")
+
     # The catalog is offline. All changes are in the marked private lab root.
     mirror = root / ("etc/apt/mirrors/repocache-" + ident + ".list")
     pid = os.fork()
