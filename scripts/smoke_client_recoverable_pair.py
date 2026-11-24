@@ -169,6 +169,33 @@ def sigkill_recovery(manager):
             print(f"{manager}: real SIGKILL at {point} recovered PASS", flush=True)
 
 
+def sigkill_restore(manager):
+    for point in ("restore-armed", "source-restored", "companion-removed"):
+        with tempfile.TemporaryDirectory(prefix="repocache-restore-kill-ci-") as place:
+            root = Path(place)
+            src, mirror, lock, state = build(root, manager)
+            before = src.read_bytes()
+            metadata = src.stat()
+            pair.apply_sandbox(root, IDENT)
+            pid = os.fork()
+            if pid == 0:
+                def kill_at(active, current):
+                    if active == current:
+                        os.kill(os.getpid(), signal.SIGKILL)
+                pair._crash = kill_at
+                pair.restore_sandbox(root, IDENT, crash=point)
+                os._exit(77)
+            _, status = os.waitpid(pid, 0)
+            assert os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGKILL
+            assert pair.recover_sandbox(root, IDENT)["status"] == "restored"
+            assert src.read_bytes() == before and not mirror.exists()
+            after = src.stat()
+            assert (after.st_uid, after.st_gid, after.st_mode) == (
+                metadata.st_uid, metadata.st_gid, metadata.st_mode)
+            print(f"{manager}: real SIGKILL during rollback {point} recovered PASS",
+                  flush=True)
+
+
 def hostile(manager):
     with tempfile.TemporaryDirectory(prefix="repocache-pair-foreign-ci-") as place:
         root = Path(place)
@@ -286,6 +313,7 @@ if __name__ == "__main__":
         exercise(manager, Path(p))
     recovery_matrix(manager)
     sigkill_recovery(manager)
+    sigkill_restore(manager)
     hostile(manager)
     print(f"{manager}: paired transaction full disposable-native matrix PASS",
           flush=True)

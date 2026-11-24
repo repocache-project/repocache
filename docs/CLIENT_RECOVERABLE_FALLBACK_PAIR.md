@@ -92,3 +92,15 @@ publication use atomic no-replace, and replay checks metadata. Old
 experimental schema-1 journals are refused, not silently migrated.
 This remains a disposable test-root transaction; no native writer is
 enabled and same-privilege source replacement races remain a separate gate.
+
+
+The booted QEMU smoke also exercises the new privileged fixture: Debian 13
+uses actual loopback HTTPS catalog verification (wrong fixture CA refused),
+distinct root-only pending preparation/consent and real SIGKILL between
+source commit and journal completion, then offline rollback in a marked
+private root. AlmaLinux 10 must remain SELinux Enforcing and refuse its
+genuinely labelled source/state fixture while preserving identities, bytes
+and labels. Both compare actual host source and installed package inventories
+before/after. These are not installed native writer acceptance or positive
+SELinux label preservation. The disposable distro smoke additionally covers
+real SIGKILL at each rollback phase.
