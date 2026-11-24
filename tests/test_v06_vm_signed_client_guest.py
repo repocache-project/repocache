@@ -38,6 +38,11 @@ def test_native_manager_selection_preserves_sources_and_packages(
     monkeypatch.setattr(guest, "guarded_native_guest", lambda _: None)
     monkeypatch.setattr(guest, "installed_sources", lambda _: ("unchanged",))
     monkeypatch.setattr(guest, "installed_packages", lambda _: ("unchanged",))
+    if platform == "almalinux10":
+        monkeypatch.setattr(
+            guest, "command",
+            lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="Enforcing\\n"),
+        )
     monkeypatch.setitem(sys.modules, "ci_client_native_fallback",
                         SimpleNamespace(
                             probe=lambda manager, **k: calls.append((
