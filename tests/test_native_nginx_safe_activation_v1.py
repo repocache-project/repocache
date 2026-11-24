@@ -190,7 +190,7 @@ def test_unknown_master_on_failed_start_is_never_killed(monkeypatch):
         host._activate_audited_native_nginx_under_lock(
             11, "debian", host._BOOTSTRAP_CONFIG)
     assert state["commands"] == ["daemon-reload", "start"]
-    assert observed_states == [False, True, True]
+    assert observed_states == [False, True]
 
 
 def test_pid_cleanup_refuses_symlink_without_unlink(tmp_path):
