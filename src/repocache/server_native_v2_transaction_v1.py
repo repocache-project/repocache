@@ -661,6 +661,7 @@ def _verify_tls_pair(root_fd: int, document: dict[str, Any], *,
     tls = document["deployment"]["tls"]
     paths = (tls["certificate_file"], tls["private_key_file"])
     opened: list[int] = []
+    pinned_paths = []
     with ExitStack() as stack:
         for path in paths:
             if (type(path) is not str or not path.startswith("/")
@@ -673,7 +674,7 @@ def _verify_tls_pair(root_fd: int, document: dict[str, Any], *,
             )
             try:
                 fd = os.open(
-                    segments[-1], os.O_RDONLY | os.O_NOFOLLOW
+                    segments[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
                     | getattr(os, "O_CLOEXEC", 0), dir_fd=parent_fd,
                 )
             except OSError:
@@ -681,6 +682,7 @@ def _verify_tls_pair(root_fd: int, document: dict[str, Any], *,
             stack.callback(os.close, fd)
             opened.append(fd)
             _recheck(chain, 0)
+            pinned_paths.append((parent_fd, segments[-1], fd, chain, _identity(os.fstat(fd))))
         try:
             report = _inspect_pinned_tls_pair_for_future_transaction(
                 opened[0], opened[1], expected_owner_uid=0,
@@ -694,6 +696,11 @@ def _verify_tls_pair(root_fd: int, document: dict[str, Any], *,
                 or report.get("authorizes_nginx_reload") is not False):
             _deny("TLS_PAIR_INVALID")
         if verify_identity:
+            for parent, name, fd, chain, before in pinned_paths:
+                if (_identity(os.fstat(fd)) != before or
+                        _identity(os.stat(name, dir_fd=parent, follow_symlinks=False)) != before):
+                    _deny("TLS_PATH_CHANGED")
+                _recheck(chain, 0)
             leaf = report.get("private_verified_leaf_der_sha256")
             if (report.get("certificate_issuer_hostname_expiry_verified") is not True
                     or not _valid_sha(leaf)):
@@ -1684,6 +1691,21 @@ def _owned_live_health(context: tuple, catalog: bytes | None, *, publish: bool) 
             _deny("OWNED_LIVE_CATALOG_UNVERIFIED")
 
 
+def _owned_live_wait_generation(root_fd: int, identity: tuple, context: tuple) -> None:
+    """A graceful reload is asynchronous; bounded retries cannot change authority."""
+    deadline = time.monotonic() + 12
+    for attempt in range(3):
+        if _owned_live_observe(root_fd) != identity:
+            _deny("OWNED_LIVE_UNIT_CHANGED")
+        try:
+            _owned_live_health(context, None, publish=False)
+            return
+        except (NativeV2TransactionError, EffectiveNginxUnitError):
+            if attempt == 2 or time.monotonic() >= deadline:
+                raise
+            time.sleep(min(0.2, max(0, deadline - time.monotonic())))
+
+
 def _owned_live_guard(state_fd: int, nginx_fd: int, public_fd: int,
                       check_layout, wal: bytes, expected: dict) -> None:
     check_layout()
@@ -1722,8 +1744,31 @@ def _recover_owned_live_locked(root_fd: int, state_fd: int, nginx_fd: int,
     """
     check_layout()
     wal = _read_file(state_fd, _OWNED_WAL, 0, _MAX_WAL)
-    if wal is None or (expected_wal is not None and wal != expected_wal):
+    temporary = _read_file(state_fd, _OWNED_WAL_TMP, 0, _MAX_WAL)
+    if expected_wal is not None and (wal != expected_wal or temporary is not None):
         _deny("OWNED_LIVE_WAL_REQUIRED")
+    if wal is None:
+        current = _read_owned_resources(state_fd, nginx_fd, public_fd)
+        if temporary is not None:
+            old, hashes = _decode_owned_wal(temporary)
+            if _json(temporary, limit=_MAX_WAL)["version"] != 3:
+                _deny("OWNED_LIVE_WAL_REQUIRED")
+            _owned_wal_resource_drift(old, hashes, current, unpublished=True)
+        _owned_check_stages_absent(state_fd, nginx_fd, public_fd)
+        identity = _owned_live_observe(root_fd)
+        context = _owned_live_validate(root_fd, state_fd, current)
+        _owned_live_health(context, current[_CATALOG], publish=True)
+        check_layout()
+        if (_owned_live_observe(root_fd) != identity
+                or _read_owned_resources(state_fd, nginx_fd, public_fd) != current
+                or _read_file(state_fd, _OWNED_WAL, 0, _MAX_WAL) is not None
+                or _read_file(state_fd, _OWNED_WAL_TMP, 0, _MAX_WAL) != temporary):
+            _deny("OWNED_LIVE_RECOVERY_DRIFT")
+        _owned_check_stages_absent(state_fd, nginx_fd, public_fd)
+        if temporary is not None:
+            _unlink_known(state_fd, _OWNED_WAL_TMP, temporary, 0, _MAX_WAL)
+        return {"status": ("OWNED_LIVE_UNPUBLISHED_WAL_DISCARDED" if temporary is not None
+                           else "OWNED_LIVE_CLEAN_OBSERVED"), "recovery_required": False}
     _owned_require_exact_wal(state_fd, wal)
     old, new_sha = _decode_owned_wal(wal)
     if _json(wal, limit=_MAX_WAL)["version"] != 3:
@@ -1743,18 +1788,27 @@ def _recover_owned_live_locked(root_fd: int, state_fd: int, nginx_fd: int,
     context = _owned_live_validate(root_fd, state_fd, old)
     _owned_live_guard(state_fd, nginx_fd, public_fd, check_layout, wal, expected)
     _owned_live_reload(root_fd, identity)
-    _owned_live_health(context, None, publish=False)
+    _owned_live_wait_generation(root_fd, identity, context)
     if (_owned_live_observe(root_fd) != identity
             or _owned_live_validate(root_fd, state_fd, old) != context):
         _deny("OWNED_LIVE_RECOVERY_DRIFT")
     _owned_live_write(state_fd, nginx_fd, public_fd, check_layout, wal,
                       expected, _CATALOG, old[_CATALOG])
-    _owned_live_health(context, old[_CATALOG], publish=True)
-    _owned_live_write(state_fd, nginx_fd, public_fd, check_layout, wal,
-                      expected, _OWNED_MANIFEST, old[_OWNED_MANIFEST])
-    if expected != old or _owned_live_observe(root_fd) != identity:
-        _deny("OWNED_LIVE_RECOVERY_DRIFT")
-    _owned_live_finish(state_fd, nginx_fd, public_fd, check_layout, wal, expected)
+    try:
+        _owned_live_health(context, old[_CATALOG], publish=True)
+        _owned_live_write(state_fd, nginx_fd, public_fd, check_layout, wal,
+                          expected, _OWNED_MANIFEST, old[_OWNED_MANIFEST])
+        if (expected != old or _owned_live_observe(root_fd) != identity
+                or _owned_live_validate(root_fd, state_fd, old) != context):
+            _deny("OWNED_LIVE_RECOVERY_DRIFT")
+        _owned_live_finish(state_fd, nginx_fd, public_fd, check_layout, wal, expected)
+    except Exception:
+        # Only withdraw our own still-exact catalog while the same WAL
+        # remains durable. A changed resource or missing WAL is not ours
+        # to compensate; retain uncertainty, never certify rollback.
+        _owned_live_write(state_fd, nginx_fd, public_fd, check_layout, wal,
+                          expected, _CATALOG, None)
+        raise
     return {"status": "OWNED_LIVE_ROLLBACK_OBSERVED", "recovery_required": False}
 
 
@@ -1786,7 +1840,7 @@ def _apply_owned_live_locked(root_fd: int, state_fd: int, nginx_fd: int,
         context = _owned_live_validate(root_fd, state_fd, new)
         _owned_live_guard(state_fd, nginx_fd, public_fd, check_layout, wal, expected)
         _owned_live_reload(root_fd, identity)
-        _owned_live_health(context, None, publish=False)
+        _owned_live_wait_generation(root_fd, identity, context)
         if (_owned_live_observe(root_fd) != identity
                 or _owned_live_validate(root_fd, state_fd, new) != context):
             _deny("OWNED_LIVE_COMMIT_DRIFT")
@@ -1795,7 +1849,8 @@ def _apply_owned_live_locked(root_fd: int, state_fd: int, nginx_fd: int,
         _owned_live_health(context, new[_CATALOG], publish=True)
         _owned_live_write(state_fd, nginx_fd, public_fd, check_layout, wal,
                           expected, _OWNED_MANIFEST, new[_OWNED_MANIFEST])
-        if expected != new or _owned_live_observe(root_fd) != identity:
+        if (expected != new or _owned_live_observe(root_fd) != identity
+                or _owned_live_validate(root_fd, state_fd, new) != context):
             _deny("OWNED_LIVE_COMMIT_DRIFT")
         _owned_live_finish(state_fd, nginx_fd, public_fd, check_layout, wal, expected)
         return {"status": "OWNED_LIVE_COMMIT_OBSERVED",

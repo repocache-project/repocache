@@ -2359,3 +2359,87 @@ def test_owned_live_wal_never_accepts_v2_catalog_gap():
     with pytest.raises(native.NativeV2TransactionError, match="OWNED_WAL_UNPUBLISHED_DRIFT"):
         native._owned_wal_resource_drift(old, hashes, current, unpublished=True,
                                           catalog_withdrawal=True)
+
+def test_owned_live_unpublished_wal_requires_prior_runtime_proof(
+    filesystem, monkeypatch, owned_live_simulation,
+):
+    old = _owned_generation()
+    new = _owned_generation(2, previous=json.loads(old[V2_STATE]), active=False)
+    paths = _owned_fixture_paths(filesystem, old)
+    fd, state, _, _, _ = filesystem
+    temporary = state / native._OWNED_WAL_TMP
+    temporary.write_bytes(native._owned_wal_record(old, new, live=True))
+    temporary.chmod(0o600)
+    def fail(*args, **kwargs):
+        raise native.NativeV2TransactionError("injected prior health fault")
+    prior_health = native._owned_live_health
+    monkeypatch.setattr(native, "_owned_live_health", fail)
+    with native._owned_fixture_layout(fd, recovering=True) as layout:
+        with pytest.raises(native.NativeV2TransactionError, match="prior health fault"):
+            native._recover_owned_live_locked(fd, *layout)
+    assert temporary.exists()
+    assert _fixture_resource_bytes(paths) == old
+    monkeypatch.setattr(native, "_owned_live_health", prior_health)
+    with native._owned_fixture_layout(fd, recovering=True) as layout:
+        result = native._recover_owned_live_locked(fd, *layout)
+    assert result["status"] == "OWNED_LIVE_UNPUBLISHED_WAL_DISCARDED"
+    _assert_owned_fixture_clean(filesystem, paths)
+
+
+def test_owned_live_catalog_rewithdrawn_after_failed_prior_exposure(
+    filesystem, monkeypatch, owned_live_simulation,
+):
+    old = _owned_generation()
+    new = _owned_generation(2, previous=json.loads(old[V2_STATE]), active=False)
+    paths = _owned_fixture_paths(filesystem, old)
+    fd, state, _, _, _ = filesystem
+    with native._owned_fixture_layout(fd, recovering=False) as layout:
+        native._publish_owned_wal_locked(*layout[:3], old, new, layout[3], live=True)
+    def health(context, catalog, *, publish):
+        if publish:
+            raise native.NativeV2TransactionError("injected prior catalog exposure fault")
+    monkeypatch.setattr(native, "_owned_live_health", health)
+    with native._owned_fixture_layout(fd, recovering=True) as layout:
+        with pytest.raises(native.NativeV2TransactionError, match="prior catalog exposure fault"):
+            native._recover_owned_live_locked(fd, *layout)
+    assert not paths[native._CATALOG].exists()
+    assert (state / native._OWNED_WAL).exists()
+    monkeypatch.setattr(native, "_owned_live_health", lambda *a, **kw: None)
+    with native._owned_fixture_layout(fd, recovering=True) as layout:
+        native._recover_owned_live_locked(fd, *layout)
+    assert _fixture_resource_bytes(paths) == old
+    _assert_owned_fixture_clean(filesystem, paths)
+
+
+def test_owned_live_reload_fixed_arguments_and_changed_unit_refusal(monkeypatch):
+    from types import SimpleNamespace
+    identity = (123, (1, 2))
+    observations = iter([identity, (124, (1, 2))])
+    monkeypatch.setattr(native, "_owned_live_observe", lambda fd: next(observations))
+    calls = []
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setattr(native.subprocess, "run", run)
+    with pytest.raises(native.NativeV2TransactionError, match="OWNED_LIVE_UNIT_CHANGED"):
+        native._owned_live_reload(0, identity)
+    assert len(calls) == 1
+    argv, kwargs = calls[0]
+    assert argv == ("/usr/bin/systemctl", "reload", "repocache-nginx.service")
+    assert kwargs["shell"] is False and kwargs["timeout"] == 10
+    assert kwargs["cwd"] == "/" and kwargs["env"] == native._ENV
+
+
+def test_owned_live_generation_wait_is_bounded_and_rechecks_unit(monkeypatch):
+    identity = (123, (1, 2))
+    observations = iter([identity, identity, (124, (1, 2))])
+    monkeypatch.setattr(native, "_owned_live_observe", lambda fd: next(observations))
+    monkeypatch.setattr(native.time, "sleep", lambda seconds: None)
+    calls = []
+    def stale(*args, **kwargs):
+        calls.append(1)
+        raise native.NativeV2TransactionError("stale generation")
+    monkeypatch.setattr(native, "_owned_live_health", stale)
+    with pytest.raises(native.NativeV2TransactionError, match="OWNED_LIVE_UNIT_CHANGED"):
+        native._owned_live_wait_generation(0, identity, ({}, 2, "a" * 64))
+    assert len(calls) == 2
