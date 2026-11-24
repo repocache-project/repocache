@@ -226,6 +226,8 @@ stage=after-reboot-nginx
 sshguest "sudo bash /home/pr237ci/source/scripts/ci_pr237_guest.sh '$PR237_PLATFORM' after" > "$out/after-reboot.txt" 2>&1 || { cat "$out/after-reboot.txt"; exit 1; }
 stage=p02-native-cache-https
 sshguest "cd /home/pr237ci/source && PYTHONPATH=/home/pr237ci/source/src /usr/bin/python3 -B scripts/ci_v06_vm_nginx_cache_guest.py '$PR237_PLATFORM'" > "$out/native-cache-data-plane.txt" 2>&1 || { cat "$out/native-cache-data-plane.txt"; exit 1; }
+stage=p0-2-native-owned-storage-metrics
+sshguest "cd /home/pr237ci/source && sudo /usr/bin/env PYTHONPATH=/home/pr237ci/source/src /usr/bin/python3 -B scripts/ci_v06_vm_owned_storage_guest.py '$PR237_PLATFORM'" > "$out/native-owned-storage-metrics.txt" 2>&1 || { cat "$out/native-owned-storage-metrics.txt"; exit 1; }
 stage=p03-native-client-cli
 sshguest "cd /home/pr237ci/source && PYTHONPATH=/home/pr237ci/source/src /usr/bin/python3 -B scripts/ci_v06_vm_client_cli_guest.py '$PR237_PLATFORM'" > "$out/native-client-cli-source-guard.txt" 2>&1 || { cat "$out/native-client-cli-source-guard.txt"; exit 1; }
 prepare_pinned_synthetic_source
