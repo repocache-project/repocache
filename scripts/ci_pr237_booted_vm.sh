@@ -12,7 +12,7 @@ mkdir -p "$out"
 tmp="$(mktemp -d)"
 stage=initial
 scenario="${PR237_SCENARIO:-smoke}"
-case "$scenario" in smoke|native-installer|native-package-interruption|native-lifecycle) ;; *) echo 'Invalid VM scenario' >&2; exit 2;; esac
+case "$scenario" in smoke|native-installer|native-package-interruption|native-lifecycle|native-activation) ;; *) echo 'Invalid VM scenario' >&2; exit 2;; esac
 accel=unknown
 sha="$(git rev-parse HEAD)"
 finish() {
@@ -145,7 +145,7 @@ scp -i "$tmp/id_ed25519" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-n
   -o "UserKnownHostsFile=$tmp/known_hosts" -o LogLevel=ERROR \
   -P 2222 "$tmp/source.tar.gz" pr237ci@127.0.0.1:source.tar.gz
 sshguest 'mkdir -p ~/source && tar -xf ~/source.tar.gz -C ~/source'
-if test "$scenario" = native-installer || test "$scenario" = native-package-interruption || test "$scenario" = native-lifecycle; then
+if test "$scenario" = native-installer || test "$scenario" = native-package-interruption || test "$scenario" = native-lifecycle || test "$scenario" = native-activation; then
   stage=prepare-fresh-native-installer-guest
   sshguest "sudo bash /home/pr237ci/source/scripts/ci_pr237_guest.sh '$PR237_PLATFORM' prepare-installer" > "$out/installer-prerequisites.txt" 2>&1 || { cat "$out/installer-prerequisites.txt"; exit 1; }
   prepare_pinned_synthetic_source
@@ -168,6 +168,21 @@ if test "$scenario" = native-installer || test "$scenario" = native-package-inte
   fi
   stage=real-native-package-install-through-signed-worker
   sshguest "sudo /usr/bin/python3 -B /home/pr237ci/source/scripts/ci_pr237_native_package_guest.py '$PR237_PLATFORM_ID' install" > "$out/native-install.txt" 2>&1 || { cat "$out/native-install.txt"; exit 1; }
+  if test "$scenario" = native-activation; then
+    stage=signed-repocache-own-nginx-service
+    sshguest "sudo /usr/bin/python3 -B /home/pr237ci/source/scripts/ci_native_nginx_activate_guest.py '$PR237_PLATFORM_ID' activate" > "$out/native-activation.txt" 2>&1 || { cat "$out/native-activation.txt"; exit 1; }
+    stage=activated-own-nginx-kernel-reboot
+    sshguest 'sudo systemctl reboot' >/dev/null 2>&1 || true
+    sleep 8
+    waitssh
+    boot_after="$(sshguest 'cat /proc/sys/kernel/random/boot_id')"
+    test "$boot_after" != "$boot_before"
+    printf 'before=%s\nafter=%s\n' "$boot_before" "$boot_after" > "$out/activation-reboot-ids.txt"
+    stage=owned-service-post-reboot
+    sshguest "sudo /usr/bin/python3 -B /home/pr237ci/source/scripts/ci_native_nginx_activate_guest.py '$PR237_PLATFORM_ID' after" > "$out/native-activation-after-reboot.txt" 2>&1 || { cat "$out/native-activation-after-reboot.txt"; exit 1; }
+    stage=complete
+    exit 0
+  fi
   stage=native-installer-kernel-reboot
   sshguest 'sudo systemctl reboot' >/dev/null 2>&1 || true
   sleep 8

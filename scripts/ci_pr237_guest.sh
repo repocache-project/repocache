@@ -40,9 +40,9 @@ case "$phase" in
   prepare)
     if test "$platform" = debian13; then
       apt-get update -qq
-      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends python3-cryptography python3-pytest openssl curl
+      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends python3-cryptography python3-pytest openssl curl gnupg
     else
-      dnf -y -q install python3-cryptography python3-pytest openssl curl
+      dnf -y -q install python3-cryptography python3-pytest openssl curl gnupg2 createrepo_c
     fi
     cd /home/pr237ci/source
     export PYTHONPATH=/home/pr237ci/source/src

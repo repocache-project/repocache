@@ -80,8 +80,35 @@ def main(platform: str) -> None:
     after = source_snapshot(platform)
     if before != after:
         raise AssertionError("native APT/DNF sources changed during read-only CLI probe")
+    # Explicit privileged test-only real-manager probe in this disposable VM.
+    # The probe uses isolated /tmp APT/DNF source+cache paths and independently
+    # test-signed metadata through the native package manager, never --apply
+    # or the production server service. The root guest probe itself performs
+    # exact before/after host source and installed package inventories.
+    guest = ROOT / "scripts/ci_v06_vm_signed_client_guest.py"
+    if not guest.is_file() or guest.is_symlink():
+        raise AssertionError("signed native client guest probe absent")
+    signed = subprocess.run(
+        ["/usr/bin/sudo", "-n", "/usr/bin/python3", "-B", str(guest), platform],
+        cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        stdin=subprocess.DEVNULL, text=True, timeout=900,
+        env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C",
+             "PYTHONDONTWRITEBYTECODE": "1", "HTTP_PROXY": "", "HTTPS_PROXY": "",
+             "NO_PROXY": "*"}, check=False,
+    )
+    if (signed.returncode != 0 or
+            "PASS: booted-native-real-manager-signed-fallback-and-host-sources-intact " +
+            platform not in signed.stdout):
+        raise AssertionError(
+            "booted-native signed package-manager integrity probe failed: "
+            + signed.stdout[-3000:] + signed.stderr[-1500:]
+        )
+    print(signed.stdout[-10000:], flush=True)
+    if source_snapshot(platform) != before:
+        raise AssertionError("native sources modified by real package-manager probe")
     print("PASS: booted native VM client CLI --apply refusal and APT/DNF source integrity")
-    print("NOT VERIFIED: approved source writer, real catalog/dry-run, repeated native apply, signed metadata, outage fallback")
+    print("NOT VERIFIED: approved host source writer, production catalog, "
+          "installed REPOCACHE cache route, actual repos sync --apply")
 
 
 if __name__ == "__main__":

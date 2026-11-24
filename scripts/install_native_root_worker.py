@@ -38,7 +38,16 @@ from repocache.server_locked_manifest_reconcile_v1 import (
     _validate_proposed_v2_snapshot, preview_proposed_v2_state_transition,
 )
 from repocache.server_repository_reconcile_v1 import plan_declarative_reconciliation
-from repocache.server_native_v2_transaction_v1 import _no_conflicting_pending, _write_private
+from repocache.server_native_v2_transaction_v1 import (
+    _no_conflicting_pending, _write_private,
+    _require_audited_native_package_for_activation,
+    _native_syntax_check,
+)
+from repocache.server_native_nginx_effective_unit_v1 import (
+    inspect_effective_native_nginx_unit, _observe_systemd_pid1,
+    _safe_native_systemctl, _FIXED_ARGS as _EFFECTIVE_SYSTEMCTL_ARGS,
+)
+from repocache.server_root_control_full_context_v1 import _capture_default_nginx_dump_private
 from repocache.server_proposed_state_v2_store import _read_v2
 from repocache.server_protected_state_store_v1 import _canonical, _locked, _unlink_known
 from repocache.server_root_control_fixed_candidate_v1 import (
@@ -220,8 +229,24 @@ def _reject_conflicting_units(root: Path, unit_paths: tuple[str, ...]) -> None:
             if entry.name.endswith((".wants", ".requires", ".upholds")):
                 for unit in stage.UNITS:
                     try:
-                        (entry / unit).lstat()
+                        link = (entry / unit).lstat()
                     except FileNotFoundError:
+                        continue
+                    if (unit == "repocache-nginx.service"
+                            and path == "/etc/systemd/system"
+                            and entry.name == "multi-user.target.wants"
+                            and stat.S_ISLNK(link.st_mode)
+                            and link.st_uid == 0 and link.st_gid == 0
+                            and stat.S_ISDIR(entry.lstat().st_mode)
+                            and entry.lstat().st_uid == 0
+                            and entry.lstat().st_gid == 0
+                            and not (stat.S_IMODE(entry.lstat().st_mode) & 0o022)
+                            and os.readlink(entry / unit) == "../repocache-nginx.service"
+                            and (directory / unit).is_file()
+                            and (not (directory / unit).is_symlink())):
+                        # Our signed service's normal enablement is not a
+                        # foreign dependency. The installed unit bytes are
+                        # separately reauthenticated under the placement lock.
                         continue
                     _reject("FOREIGN_UNIT_DEPENDENCY")
             if entry.name not in stage.UNITS and entry.is_symlink():
@@ -446,6 +471,416 @@ def _ensure_fixed_nginx_cache_parent_under_root(root_fd: int, *, owner_uid: int 
         raise
     except (OSError, ValueError, TypeError):
         _reject("NATIVE_CACHE_PARENT_UNVERIFIED")
+
+
+
+_OWN_UNIT = "repocache-nginx.service"
+_OWN_CONFIG = "/etc/nginx/repocache.conf"
+# Activation ownership marker is intentionally separate from the signed worker
+# receipt: no unrelated root-owned file is implicitly adopted on first use.
+_CONFIG_MARKER_PREFIX = ".native-nginx-config-owner-v1-"
+# A fixed, reviewed immutable bootstrap; the source archive must contain
+# precisely these signed bytes. Managed TLS deployment is a different step.
+_BOOTSTRAP_CONFIG = "# Authenticated bootstrap only. Never include the vendor's nginx.conf.\n# The fixed local endpoint has no repository routes, TLS or external listener.\n# Full managed TLS/route activation remains a separate guarded transaction.\npid /run/repocache-nginx/nginx.pid;\nerror_log stderr warn;\nworker_processes 1;\nevents {\n    worker_connections 128;\n}\nhttp {\n    access_log off;\n    server {\n        listen 127.0.0.1:8008;\n        server_name localhost;\n        location = /__repocache/private {\n            return 204;\n        }\n        location / {\n            return 404;\n        }\n    }\n}\n".encode("ascii")
+_CONFIG_MARKER = _CONFIG_MARKER_PREFIX + hashlib.sha256(_BOOTSTRAP_CONFIG).hexdigest()
+_OWN_PROPERTIES = (
+    "Id", "Names", "FragmentPath", "DropInPaths", "LoadState",
+    "ActiveState", "SubState", "MainPID", "CanReload", "NeedDaemonReload",
+)
+_OWN_SHOW = ("/usr/bin/systemctl", "show", "--no-pager",
+             *(f"--property={name}" for name in _OWN_PROPERTIES), _OWN_UNIT)
+
+
+def _private_config_present() -> None:
+    """Check installed signed bootstrap exactly, without altering vendor files."""
+    try:
+        with ExitStack() as stack:
+            root = os.open("/", stage._DIRECTORY)
+            stack.callback(os.close, root)
+            etc = _open_directory(root, "etc", stack)
+            nginx = _open_directory(etc, "nginx", stack)
+            _exact_file(nginx, stage.CONFIG, _BOOTSTRAP_CONFIG, 0o644)
+    except stage.WorkerStageError:
+        raise
+    except (OSError, ValueError, TypeError):
+        _reject("NATIVE_PRIVATE_CONFIG_UNVERIFIED")
+
+
+def _require_owned_private_config_intent(state_fd: int, nginx_fd: int) -> None:
+    """Persist first-use intent; refuse even byte-identical foreign config.
+
+    A marker written and fsynced before file placement permits recovery after
+    a process interruption. Under the same protected lock, subsequent attempts
+    can only recheck our originally claimed exact signed configuration.
+    This marker does not grant arbitrary overwrite, service or TLS authority.
+    """
+    try:
+        markers = [
+            name for name in os.listdir(state_fd)
+            if name.startswith(_CONFIG_MARKER_PREFIX)
+        ]
+        if any(name != _CONFIG_MARKER for name in markers):
+            _reject("NATIVE_PRIVATE_CONFIG_MARKER_CONFLICT")
+        existing_marker = _named(state_fd, _CONFIG_MARKER)
+        if existing_marker is None:
+            if _named(nginx_fd, stage.CONFIG) is not None:
+                _reject("NATIVE_PRIVATE_CONFIG_FOREIGN_COLLISION")
+            _create_marker(state_fd, _CONFIG_MARKER)
+        else:
+            _check_marker(existing_marker)
+    except stage.WorkerStageError:
+        raise
+    except (OSError, ValueError, TypeError):
+        _reject("NATIVE_PRIVATE_CONFIG_INTENT_UNVERIFIED")
+
+
+def _place_signed_private_config(raw: bytes, state_fd: int) -> None:
+    """Stage only an owned signed bootstrap; never adopt third-party files."""
+    if type(raw) is not bytes or raw != _BOOTSTRAP_CONFIG:
+        _reject("NATIVE_SIGNED_CONFIG_UNEXPECTED")
+    try:
+        with ExitStack() as stack:
+            root = os.open("/", stage._DIRECTORY)
+            stack.callback(os.close, root)
+            etc = _open_directory(root, "etc", stack)
+            nginx = _open_directory(etc, "nginx", stack)
+            _require_owned_private_config_intent(state_fd, nginx)
+            _place_file(nginx, stage.CONFIG, raw, 0o644)
+        _private_config_present()
+    except stage.WorkerStageError:
+        raise
+    except (OSError, ValueError, TypeError):
+        _reject("NATIVE_PRIVATE_CONFIG_PLACEMENT_REFUSED")
+
+
+def _unlink_inert_nginx_syntax_pid(directory: int) -> None:
+    """Remove only the empty file created by nginx -t before activation.
+
+    Never use this helper for a running service. A nonempty/foreign PID
+    remains untouched and blocks the pre-start operation.
+    """
+    info = _named(directory, "nginx.pid")
+    if info is None:
+        return
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
+            or info.st_gid != 0 or info.st_nlink != 1 or info.st_size != 0
+            or stat.S_IMODE(info.st_mode) & 0o022):
+        _reject("NATIVE_RUNTIME_PID_FOREIGN")
+    again = os.stat("nginx.pid", dir_fd=directory, follow_symlinks=False)
+    if _identity(again) != _identity(info) or again.st_ctime_ns != info.st_ctime_ns:
+        _reject("NATIVE_RUNTIME_PID_CHANGED")
+    os.unlink("nginx.pid", dir_fd=directory)
+    os.fsync(directory)
+
+
+def _cleanup_own_nginx_syntax_pid() -> None:
+    try:
+        with ExitStack() as stack:
+            root = os.open("/", stage._DIRECTORY)
+            stack.callback(os.close, root)
+            run = _open_directory(root, "run", stack)
+            own = _open_directory(run, "repocache-nginx", stack)
+            _unlink_inert_nginx_syntax_pid(own)
+    except stage.WorkerStageError:
+        raise
+    except (OSError, ValueError, TypeError):
+        _reject("NATIVE_RUNTIME_PID_UNVERIFIED")
+
+
+def _prepare_own_runtime_directory() -> None:
+    """Make a bounded empty /run directory before pre-start nginx -t.
+
+    PID1 will independently own and clean RuntimeDirectory at service startup.
+    Never adopt a foreign/linked directory or a leftover master PID file.
+    """
+    try:
+        with ExitStack() as stack:
+            root = os.open("/", stage._DIRECTORY)
+            stack.callback(os.close, root)
+            run = _open_directory(root, "run", stack)
+            try:
+                os.mkdir("repocache-nginx", mode=0o700, dir_fd=run)
+            except FileExistsError:
+                pass
+            own = _open_directory(run, "repocache-nginx", stack)
+            if (os.fstat(own).st_dev != os.fstat(run).st_dev
+                    or os.fstat(own).st_uid != 0
+                    or os.fstat(own).st_gid != 0
+                    or stat.S_IMODE(os.fstat(own).st_mode) not in (0o700, 0o755)):
+                _reject("NATIVE_RUNTIME_DIRECTORY_UNSAFE")
+            _unlink_inert_nginx_syntax_pid(own)
+            if os.listdir(own):
+                _reject("NATIVE_RUNTIME_DIRECTORY_UNSAFE")
+            if stat.S_IMODE(os.fstat(own).st_mode) == 0o700:
+                os.fchmod(own, 0o755)
+            os.fsync(run)
+    except stage.WorkerStageError:
+        raise
+    except (OSError, ValueError, TypeError):
+        _reject("NATIVE_RUNTIME_DIRECTORY_UNVERIFIED")
+
+
+def _require_private_nginx_listeners() -> None:
+    """Fixed known-good loopback config, real native syntax check, no -T leaks."""
+    _private_config_present()
+    try:
+        proc = subprocess.run(
+            ("/usr/sbin/nginx", "-t", "-q", "-c", _OWN_CONFIG),
+            shell=False, check=False, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            cwd="/", env={"PATH": "/usr/sbin:/usr/bin:/bin", "LC_ALL": "C"},
+            timeout=15, close_fds=True, start_new_session=True,
+        )
+        if type(proc.returncode) is not int or proc.returncode != 0:
+            _reject("NATIVE_LISTENERS_UNVERIFIED")
+        # NGINX -t creates an empty PID file even in syntax-only mode.
+        # Clean exactly that inert inode; do not truncate a live master PID.
+        _cleanup_own_nginx_syntax_pid()
+        _private_config_present()
+    except stage.WorkerStageError:
+        raise
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        _reject("NATIVE_LISTENERS_UNVERIFIED")
+
+
+def _own_systemctl(action: str) -> tuple[int, bytes]:
+    if action not in ("is-enabled", "is-active"):
+        _reject("NATIVE_OWN_SYSTEMCTL_REFUSED")
+    _safe_native_systemctl()
+    try:
+        result = subprocess.run(
+            [*_SYSTEMCTL, action, _OWN_UNIT], shell=False,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, cwd="/", timeout=10, check=False,
+            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+            close_fds=True, start_new_session=True,
+        )
+        if type(result.returncode) is not int or type(result.stdout) is not bytes or len(result.stdout) > 128:
+            _reject("NATIVE_OWN_SYSTEMCTL_UNVERIFIED")
+        return result.returncode, result.stdout
+    except stage.WorkerStageError:
+        raise
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        _reject("NATIVE_OWN_SYSTEMCTL_UNVERIFIED")
+
+
+def _own_service_observation(*, active: bool) -> dict:
+    """Observe the independently installed REPOCACHE service, not vendor unit."""
+    from repocache.server_native_nginx_effective_unit_v1 import _observe_nginx_master_kernel
+    try:
+        _observe_systemd_pid1()
+        _safe_native_systemctl()
+        observed = []
+        for sample in range(2):
+            proc = subprocess.run(
+                _OWN_SHOW, shell=False, check=False, capture_output=True,
+                text=True, stdin=subprocess.DEVNULL, cwd="/", timeout=5,
+                env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+                close_fds=True, start_new_session=True,
+            )
+            if (proc.returncode != 0 or type(proc.stdout) is not str
+                    or not 1 <= len(proc.stdout) <= 8192 or
+                    type(proc.stderr) is not str or len(proc.stderr) > 4096 or
+                    "\x00" in proc.stdout or "\r" in proc.stdout):
+                _reject("NATIVE_OWN_UNIT_UNVERIFIED")
+            fields = {}
+            for line in proc.stdout.splitlines():
+                if "=" not in line:
+                    _reject("NATIVE_OWN_UNIT_UNVERIFIED")
+                key, value = line.split("=", 1)
+                if key not in _OWN_PROPERTIES or key in fields:
+                    _reject("NATIVE_OWN_UNIT_UNVERIFIED")
+                fields[key] = value
+            if set(fields) != set(_OWN_PROPERTIES):
+                _reject("NATIVE_OWN_UNIT_UNVERIFIED")
+            expected = {
+                "Id": _OWN_UNIT, "Names": _OWN_UNIT,
+                "FragmentPath": "/etc/systemd/system/" + _OWN_UNIT,
+                "DropInPaths": "", "LoadState": "loaded",
+                "ActiveState": "active" if active else "inactive",
+                "SubState": "running" if active else "dead",
+                "CanReload": "yes", "NeedDaemonReload": "no",
+            }
+            if any(fields[k] != v for k, v in expected.items()):
+                _reject("NATIVE_OWN_UNIT_UNVERIFIED")
+            pid = fields["MainPID"]
+            if active:
+                if (not pid.isascii() or not pid.isdecimal()
+                        or not 2 <= int(pid) <= 2**31 - 1):
+                    _reject("NATIVE_OWN_UNIT_UNVERIFIED")
+                _observe_nginx_master_kernel(int(pid))
+            elif pid != "0":
+                _reject("NATIVE_OWN_UNIT_UNVERIFIED")
+            observed.append(fields)
+        if observed[0] != observed[1]:
+            _reject("NATIVE_OWN_UNIT_CHANGED")
+        return {"status": "NATIVE_REPOCACHE_NGINX_SERVICE_VERIFIED",
+                "main_pid_observed": int(observed[0]["MainPID"]),
+                "unit_name": _OWN_UNIT}
+    except stage.WorkerStageError:
+        raise
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        _reject("NATIVE_OWN_UNIT_UNVERIFIED")
+
+
+def _nginx_inactive_vendor_service(distribution: str) -> None:
+    """Verify the effective PID1 unit while inactive, before starting it."""
+    try:
+        _observe_systemd_pid1()
+        _safe_native_systemctl()
+        vendor = inspect_native_nginx_unit(distribution).to_dict()
+        if (vendor.get("code") != "VENDOR_NGINX_UNIT_OBSERVED"
+                or vendor.get("vendor_unit_bounded_and_owned") is not True
+                or not re.fullmatch(r"[0-9a-f]{64}", vendor.get("vendor_unit_sha256", ""))):
+            _reject("NATIVE_INACTIVE_UNIT_UNVERIFIED")
+        result = subprocess.run(
+            _EFFECTIVE_SYSTEMCTL_ARGS, shell=False, check=False, capture_output=True,
+            text=True, timeout=5, cwd="/", stdin=subprocess.DEVNULL,
+            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"}, start_new_session=True,
+        )
+        if (result.returncode != 0 or type(result.stdout) is not str
+                or not 1 <= len(result.stdout) <= 8192
+                or type(result.stderr) is not str or len(result.stderr) > 4096):
+            _reject("NATIVE_INACTIVE_UNIT_UNVERIFIED")
+        fields = {}
+        for line in result.stdout.splitlines():
+            if "=" not in line:
+                _reject("NATIVE_INACTIVE_UNIT_UNVERIFIED")
+            k, v = line.split("=", 1)
+            if k in fields:
+                _reject("NATIVE_INACTIVE_UNIT_UNVERIFIED")
+            fields[k] = v
+        expected = {
+            "Id": "nginx.service", "Names": "nginx.service",
+            "FragmentPath": "/usr/lib/systemd/system/nginx.service",
+            "DropInPaths": "", "LoadState": "loaded",
+            "ActiveState": "inactive", "SubState": "dead",
+            "MainPID": "0", "CanReload": "yes", "NeedDaemonReload": "no",
+        }
+        if fields != expected:
+            _reject("NATIVE_INACTIVE_UNIT_UNVERIFIED")
+    except stage.WorkerStageError:
+        raise
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        _reject("NATIVE_INACTIVE_UNIT_UNVERIFIED")
+
+
+def _nginx_activation_command(action: str) -> None:
+    if action not in ("start", "enable", "stop", "disable", "daemon-reload"):
+        _reject("NATIVE_ACTIVATION_COMMAND_REFUSED")
+    _safe_native_systemctl()
+    try:
+        proc = subprocess.run(
+            [*_SYSTEMCTL, action, _OWN_UNIT] if action != "daemon-reload" else [*_SYSTEMCTL, action],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, cwd="/", timeout=30, check=False,
+            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C", "LANG": "C"},
+            start_new_session=True,
+        )
+        if type(proc.returncode) is not int or proc.returncode != 0:
+            _reject("NATIVE_ACTIVATION_COMMAND_FAILED")
+    except stage.WorkerStageError:
+        raise
+    except (OSError, subprocess.SubprocessError, TypeError, ValueError):
+        _reject("NATIVE_ACTIVATION_COMMAND_FAILED")
+
+
+def _activate_audited_native_nginx_under_lock(
+    state_fd: int, distribution: str, config: bytes,
+) -> dict:
+    """Start only signed REPOCACHE unit; never start or override vendor NGINX."""
+    _require_audited_native_package_for_activation(state_fd, distribution=distribution)
+    _no_conflicting_pending(state_fd)
+    if _read_v2(state_fd, 0)[0] is not None:
+        _reject("NATIVE_ACTIVATION_MANAGED_STATE_REFUSED")
+    # The native distro service is separately verified but MUST stay disabled.
+    # An active or enabled foreign daemon is never adopted or stopped.
+    _nginx_inactive_vendor_service(distribution)
+    if (_nginx_systemctl("is-enabled") != (1, b"disabled\n")
+            or _nginx_systemctl("is-active") != (3, b"inactive\n")):
+        _reject("NATIVE_ACTIVATION_VENDOR_SERVICE_STATE")
+    _place_signed_private_config(config, state_fd)
+    current_enabled = _own_systemctl("is-enabled")
+    current_active = _own_systemctl("is-active")
+    if current_enabled == (0, b"enabled\n") and current_active == (0, b"active\n"):
+        _private_config_present()
+        _own_service_observation(active=True)
+        return {"status": "AUTHENTICATED_REPOCACHE_NGINX_ALREADY_ACTIVE",
+                "nginx_active_verified": True, "nginx_enabled_verified": True}
+    if current_enabled != (1, b"disabled\n") or current_active != (3, b"inactive\n"):
+        _reject("NATIVE_ACTIVATION_FOREIGN_SERVICE_STATE")
+    _prepare_own_runtime_directory()
+    _require_private_nginx_listeners()
+    # The signed unit may have been placed before the distro NGINX package;
+    # never start until systemd has loaded exactly our file, without drop-ins.
+    _nginx_activation_command("daemon-reload")
+    _own_service_observation(active=False)
+    try:
+        _nginx_activation_command("start")
+        before = _own_service_observation(active=True)
+        _private_config_present()
+        _nginx_activation_command("enable")
+        after = _own_service_observation(active=True)
+        if (after["main_pid_observed"] != before["main_pid_observed"]
+                or _own_systemctl("is-enabled") != (0, b"enabled\n")
+                or _own_systemctl("is-active") != (0, b"active\n")):
+            _reject("NATIVE_ACTIVATION_POSTCHECK_FAILED")
+        _private_config_present()
+        _require_audited_native_package_for_activation(state_fd, distribution=distribution)
+        _nginx_inactive_vendor_service(distribution)
+        return {"status": "AUTHENTICATED_REPOCACHE_NGINX_ACTIVE",
+                "nginx_active_verified": True, "nginx_enabled_verified": True}
+    except Exception:
+        # systemctl start may time out after spawning a process. Never kill
+        # an unknown master; only stop our exactly authenticated active unit.
+        try:
+            current = _own_systemctl("is-active")
+            if current == (0, b"active\n"):
+                _own_service_observation(active=True)
+                _nginx_activation_command("stop")
+            elif current != (3, b"inactive\n"):
+                _reject("NATIVE_ACTIVATION_RECOVERY_REQUIRED")
+            _nginx_activation_command("disable")
+            _own_service_observation(active=False)
+            if (_own_systemctl("is-enabled") != (1, b"disabled\n")
+                    or _own_systemctl("is-active") != (3, b"inactive\n")):
+                _reject("NATIVE_ACTIVATION_RECOVERY_REQUIRED")
+        except Exception:
+            _reject("NATIVE_ACTIVATION_RECOVERY_REQUIRED")
+        _reject("NATIVE_ACTIVATION_FAILED_ROLLED_BACK")
+
+
+def activate_authenticated_native_nginx(
+    assets: Path, *, commit: str, archive_sha256: str,
+) -> dict:
+    """Explicit signed-release activation of REPOCACHE's independent unit."""
+    distribution = _native_distro()
+    require_native_host_preconditions()
+    attested = stage.verify_installed_worker(
+        assets, commit=commit, archive_sha256=archive_sha256,
+    )
+    if (type(attested) is not dict
+            or attested.get("status") != "AUTHENTICATED_WORKER_FILES_MATCH"
+            or attested.get("source_sha") != commit
+            or attested.get("archive_sha256") != archive_sha256
+            or attested.get("authorizes_host_installation") is not False
+            or attested.get("authorizes_service_activation") is not False):
+        _reject("NATIVE_SIGNED_WORKER_AUDIT_UNVERIFIED")
+    payloads, _receipt = stage._authenticated_payloads(
+        assets, commit=commit, archive_sha256=archive_sha256, system=None,
+    )
+    if payloads.get(stage.CONFIG) != _BOOTSTRAP_CONFIG:
+        _reject("NATIVE_SIGNED_CONFIG_UNEXPECTED")
+    root = os.open("/", stage._DIRECTORY)
+    try:
+        with _locked(root, 0) as state:
+            # Recheck installed source identity after acquiring shared lock.
+            stage._audit_worker_files(Path("/"), payloads)
+            return _activate_audited_native_nginx_under_lock(
+                state, distribution, payloads[stage.CONFIG],
+            )
+    finally:
+        os.close(root)
 
 
 def _execute_native_nginx_install_locked(
@@ -822,6 +1257,7 @@ def main() -> int:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--stage-v2-proposal", type=Path)
     mode.add_argument("--install-native-nginx", type=Path)
+    mode.add_argument("--activate-native-nginx", action="store_true")
     mode.add_argument("--prepare-initial-v2-proposal", type=Path)
     mode.add_argument("--prepare-v2-repair", type=Path)
     parser.add_argument("--proposal-sha256")
@@ -852,6 +1288,8 @@ def main() -> int:
                 args.proposal_output, decision_sha256=args.decision_sha256,
                 previous=args.previous_v2_state, previous_sha256=args.previous_state_sha256, **pins,
             )
+        elif args.activate_native_nginx:
+            result = activate_authenticated_native_nginx(args.assets, **pins)
         elif args.install_native_nginx is not None:
             result = install_authenticated_native_nginx(
                 args.assets, args.install_native_nginx, args.document_sha256, **pins,
@@ -870,6 +1308,8 @@ def main() -> int:
             refused = "AUTHENTICATED_V2_PROPOSAL_REFUSED"
         elif args.install_native_nginx is not None:
             refused = "AUTHENTICATED_NATIVE_NGINX_INSTALL_REFUSED"
+        elif args.activate_native_nginx:
+            refused = "AUTHENTICATED_NATIVE_NGINX_ACTIVATION_REFUSED"
         result = {"status": refused}
         status = 1
     else:
