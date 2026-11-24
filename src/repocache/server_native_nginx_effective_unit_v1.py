@@ -319,4 +319,3 @@ def inspect_effective_owned_nginx_unit(*, active: bool) -> dict[str, Any]:
         raise
     except (OSError, ValueError, TypeError, subprocess.SubprocessError):
         _deny("OWN_UNIT_UNVERIFIED")
-
