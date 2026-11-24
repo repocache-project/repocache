@@ -2034,3 +2034,87 @@ def test_owned_files_fixture_refuses_live_root(operation):
                 native._recover_owned_files_fixture(fd)
     finally:
         os.close(fd)
+
+def test_owned_files_fixture_never_claims_rollback_after_wal_unlink_fault(
+    filesystem, monkeypatch,
+):
+    old = _owned_bootstrap_resources()
+    new = _owned_generation()
+    paths = _owned_fixture_paths(filesystem, old)
+    fd, state, _, _, _ = filesystem
+    actual = native._unlink_known
+
+    def unlink_then_fail(directory, name, *args):
+        actual(directory, name, *args)
+        if name == native._OWNED_WAL:
+            raise OSError("injected uncertainty after unlink")
+
+    monkeypatch.setattr(native, "_unlink_known", unlink_then_fail)
+    with pytest.raises(native.NativeV2TransactionError, match="OWNED_WAL_APPLY_RECOVERY_REQUIRED"):
+        native._apply_owned_files_fixture(fd, new)
+    assert _fixture_resource_bytes(paths) == new
+    assert not (state / native._OWNED_WAL).exists()
+
+
+def test_owned_files_fixture_rejects_changed_wal_before_next_write(filesystem, monkeypatch):
+    old = _owned_bootstrap_resources()
+    paths = _owned_fixture_paths(filesystem, old)
+    fd, state, _, _, _ = filesystem
+    new = _owned_generation()
+    actual = native._owned_write_resource
+
+    def change_wal(*args):
+        actual(*args)
+        if args[3] == native._INCLUDE:
+            (state / native._OWNED_WAL).write_bytes(b"foreign WAL")
+
+    monkeypatch.setattr(native, "_owned_write_resource", change_wal)
+    with pytest.raises(native.NativeV2TransactionError, match="OWNED_WAL_APPLY_RECOVERY_REQUIRED"):
+        native._apply_owned_files_fixture(fd, new)
+    expected = dict(old)
+    expected[native._INCLUDE] = new[native._INCLUDE]
+    assert _fixture_resource_bytes(paths) == expected
+    assert (state / native._OWNED_WAL).read_bytes() == b"foreign WAL"
+
+
+@pytest.mark.parametrize("initial", [True, False])
+def test_owned_files_fixture_real_sigkill_then_interrupted_recovery_retries(
+    filesystem, monkeypatch, initial,
+):
+    import signal
+
+    old = _owned_bootstrap_resources() if initial else _owned_generation()
+    new = _owned_generation(1 if initial else 2,
+                            previous=None if initial else json.loads(old[V2_STATE]))
+    paths = _owned_fixture_paths(filesystem, old)
+    fd, state, _, _, _ = filesystem
+    actual = native._owned_write_resource
+    pid = os.fork()
+    if pid == 0:
+        try:
+            def kill_after_catalog(*args):
+                actual(*args)
+                if args[3] == native._CATALOG:
+                    os.kill(os.getpid(), signal.SIGKILL)
+
+            native._owned_write_resource = kill_after_catalog
+            native._apply_owned_files_fixture(fd, new)
+        finally:
+            os._exit(77)
+    _, status = os.waitpid(pid, 0)
+    assert os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGKILL
+    assert (state / native._OWNED_WAL).is_file()
+
+    def fail_recovery_once(*args):
+        actual(*args)
+        if args[3] == native._OWNED_MAIN:
+            raise _OwnedFixturePowerLoss()
+
+    monkeypatch.setattr(native, "_owned_write_resource", fail_recovery_once)
+    with pytest.raises(_OwnedFixturePowerLoss):
+        native._recover_owned_files_fixture(fd)
+    assert (state / native._OWNED_WAL).is_file()
+    monkeypatch.setattr(native, "_owned_write_resource", actual)
+    assert native._recover_owned_files_fixture(fd)["status"] == "OWNED_FIXTURE_FILES_RESTORED"
+    assert _fixture_resource_bytes(paths) == old
+    _assert_owned_fixture_clean(filesystem, paths)

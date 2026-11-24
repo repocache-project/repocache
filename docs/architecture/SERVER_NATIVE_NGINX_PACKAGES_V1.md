@@ -656,3 +656,12 @@ refuse the real root namespace and never invoke NGINX, systemd or network
 commands. The result is filesystem-only fixture evidence: the live
 transaction must still bind authenticated reload, TLS generation and
 catalog exposure, cache permissions and SELinux to WAL completion.
+
+Every target mutation now rechecks the exact published WAL and absence of a
+competing temporary WAL. Apply additionally checks the entire expected
+intermediate resource set, not only the resource about to be written.
+Compensation requires the original WAL and byte-exact old resources;
+an unlink/fsync uncertainty or changed WAL cannot be reported as a
+successful rollback. A real child-process SIGKILL regression at the catalog
+boundary, followed by interrupted recovery and retry, exercises lock release
+and both first-generation and previously managed recovery in fixtures.

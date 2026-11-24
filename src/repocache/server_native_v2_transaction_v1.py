@@ -1440,13 +1440,22 @@ def _owned_cleanup_stages(state_fd: int, nginx_fd: int, public_fd: int,
                            stage=_OWNED_STAGES[name])
 
 
+def _owned_require_exact_wal(state_fd: int, expected: bytes) -> None:
+    """A different or missing WAL cannot authorize further target effects."""
+    if (_read_file(state_fd, _OWNED_WAL, 0, _MAX_WAL) != expected
+            or _read_file(state_fd, _OWNED_WAL_TMP, 0, _MAX_WAL) is not None):
+        _deny("OWNED_WAL_CHANGED")
+
+
 def _owned_restore_files_locked(state_fd: int, nginx_fd: int, public_fd: int,
-                                check_layout) -> dict:
+                                check_layout, *, expected_wal: bytes | None = None) -> dict:
     """Restore bytes only; this is not live service compensation."""
     check_layout()
     wal = _read_file(state_fd, _OWNED_WAL, 0, _MAX_WAL)
     tmp = _read_file(state_fd, _OWNED_WAL_TMP, 0, _MAX_WAL)
     current = _read_owned_resources(state_fd, nginx_fd, public_fd)
+    if expected_wal is not None and (wal != expected_wal or tmp is not None):
+        _deny("OWNED_WAL_CHANGED")
     if wal is not None and tmp is not None:
         _deny("OWNED_WAL_CONFLICTING_RECORDS")
     if wal is None and tmp is None:
@@ -1466,12 +1475,14 @@ def _owned_restore_files_locked(state_fd: int, nginx_fd: int, public_fd: int,
                 "fixture_only": True, "authorizes_nginx_reload": False}
     old, new_sha = _decode_owned_wal(wal)
     _owned_wal_resource_drift(old, new_sha, current, unpublished=False)
+    _owned_require_exact_wal(state_fd, wal)
     _owned_cleanup_stages(state_fd, nginx_fd, public_fd, old, new_sha)
     # Restore bootstrap main BEFORE removing the managed include; a
     # managed previous generation keeps its fixed main unchanged. This is
     # disk-only fixture ordering, not authorization to advertise live routes.
     for name in (_CATALOG, _OWNED_MAIN, _INCLUDE, V2_STATE, _OWNED_MANIFEST):
         check_layout()
+        _owned_require_exact_wal(state_fd, wal)
         current = _read_owned_resources(state_fd, nginx_fd, public_fd)
         _owned_wal_resource_drift(old, new_sha, current, unpublished=False)
         _owned_write_resource(state_fd, nginx_fd, public_fd, name,
@@ -1481,6 +1492,7 @@ def _owned_restore_files_locked(state_fd: int, nginx_fd: int, public_fd: int,
     _validate_owned_resources(old)
     check_layout()
     _owned_check_stages_absent(state_fd, nginx_fd, public_fd)
+    _owned_require_exact_wal(state_fd, wal)
     _unlink_known(state_fd, _OWNED_WAL, wal, 0, _MAX_WAL)
     return {"status": "OWNED_FIXTURE_FILES_RESTORED", "fixture_only": True,
             "authorizes_nginx_reload": False}
@@ -1505,35 +1517,42 @@ def _apply_owned_files_fixture(root_fd: int, new: dict[str, bytes | None]) -> di
         old = _read_owned_resources(state_fd, nginx_fd, public_fd)
         wal = _publish_owned_wal_locked(state_fd, nginx_fd, public_fd,
                                         old, new, check_layout)
-        _, new_sha = _decode_owned_wal(wal)
+        expected = dict(old)
         try:
             # First stage the include, then the main that references it.
             # The catalog and manifest are last; there is no live exposure
             # in this isolated fixture namespace.
             for name in (_INCLUDE, _OWNED_MAIN, V2_STATE, _CATALOG, _OWNED_MANIFEST):
                 check_layout()
+                _owned_require_exact_wal(state_fd, wal)
                 current = _read_owned_resources(state_fd, nginx_fd, public_fd)
-                _owned_wal_resource_drift(old, new_sha, current, unpublished=False)
-                if current[name] != old[name]:
+                if current != expected:
                     _deny("OWNED_WAL_PREPARE_DRIFT")
                 _owned_write_resource(state_fd, nginx_fd, public_fd, name,
-                                      old[name], new[name])
+                                      expected[name], new[name])
+                expected[name] = new[name]
             if _read_owned_resources(state_fd, nginx_fd, public_fd) != new:
                 _deny("OWNED_WAL_COMMIT_DRIFT")
             _validate_owned_resources(new)
             check_layout()
             _owned_check_stages_absent(state_fd, nginx_fd, public_fd)
+            _owned_require_exact_wal(state_fd, wal)
             _unlink_known(state_fd, _OWNED_WAL, wal, 0, _MAX_WAL)
             return {"status": "OWNED_FIXTURE_FILES_COMMITTED", "fixture_only": True,
                     "authorizes_nginx_reload": False,
                     "authorizes_catalog_publication": False}
         except Exception:
             try:
-                _owned_restore_files_locked(*layout)
+                result = _owned_restore_files_locked(*layout, expected_wal=wal)
+                if (result["status"] != "OWNED_FIXTURE_FILES_RESTORED"
+                        or _read_owned_resources(state_fd, nginx_fd, public_fd) != old):
+                    _deny("OWNED_WAL_RESTORE_DRIFT")
             except Exception:
+                # In particular, unlink may have succeeded before fsync
+                # failed. A missing WAL plus a valid new generation is NOT
+                # evidence of compensation. Never claim rollback in that case.
                 _deny("OWNED_WAL_APPLY_RECOVERY_REQUIRED")
             _deny("OWNED_WAL_APPLY_FILES_RESTORED")
-
 
 
 def _recover_locked(state_fd: int, include_fd: int,
