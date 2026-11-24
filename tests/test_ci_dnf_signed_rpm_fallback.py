@@ -82,3 +82,31 @@ def test_native_verification_cannot_accept_unsigned_or_untrusted_rpm(rpm_output)
 ])
 def test_native_verification_requires_real_signature_ok(signed_output):
     assert rpm_probe._rpm_signature_verified(signed_output)
+
+
+def test_booted_rpm_probe_requires_native_guard_before_fixture(monkeypatch):
+    from types import SimpleNamespace
+
+    def deny(platform):
+        assert platform == "almalinux10"
+        raise AssertionError("not a disposable enforcing VM")
+
+    monkeypatch.setitem(sys.modules, "ci_v06_vm_signed_client_guest",
+                        SimpleNamespace(guarded_native_guest=deny))
+    monkeypatch.setattr(rpm_probe, "_probe_signed_rpm",
+                        lambda: pytest.fail("fixture reached before VM guard"))
+    with pytest.raises(AssertionError, match="not a disposable enforcing VM"):
+        rpm_probe.probe_booted_vm()
+
+
+def test_booted_rpm_probe_calls_fixture_after_guard(monkeypatch):
+    from types import SimpleNamespace
+
+    calls = []
+    monkeypatch.setitem(sys.modules, "ci_v06_vm_signed_client_guest",
+                        SimpleNamespace(guarded_native_guest=lambda platform:
+                                        calls.append(platform)))
+    monkeypatch.setattr(rpm_probe, "_probe_signed_rpm",
+                        lambda: calls.append("fixture"))
+    rpm_probe.probe_booted_vm()
+    assert calls == ["almalinux10", "fixture"]

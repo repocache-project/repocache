@@ -150,6 +150,18 @@ def _download_dnf(argv: list[str], target: Path) -> subprocess.CompletedProcess:
 
 def probe() -> None:
     _only_in_disposable_root()
+    _probe_signed_rpm()
+
+
+def probe_booted_vm() -> None:
+    """Use the same fixture only inside the fixed enforcing AlmaLinux guest."""
+    from ci_v06_vm_signed_client_guest import guarded_native_guest
+
+    guarded_native_guest("almalinux10")
+    _probe_signed_rpm()
+
+
+def _probe_signed_rpm() -> None:
     with tempfile.TemporaryDirectory(prefix="repocache-dnf-signed-rpm-") as folder:
         base = Path(folder)
         (base / "www").mkdir()

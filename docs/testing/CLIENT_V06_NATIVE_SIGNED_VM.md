@@ -20,7 +20,7 @@ configuration, installed package or production signing trust is changed.
 | OS | Real package manager | Required observed checks |
 | --- | --- | --- |
 | Debian 13 | `apt-get` | Test-signed `InRelease`, real synthetic `.deb` download and exact SHA-256; preferred cache endpoint, HTTP 503 fallback, recovery, both unavailable, wrong TLS CA, modified `InRelease` and tampered `.deb` refusal |
-| AlmaLinux 10 | `dnf5` | Test-signed `repomd.xml` verified against isolated guest-local OpenPGP key; preferred endpoint, fallback/recovery, both unavailable, wrong TLS CA and tampered metadata signature refusal |
+| AlmaLinux 10 | `dnf5` | Test-signed `repomd.xml` verified against isolated guest-local OpenPGP key; preferred endpoint, fallback/recovery, both unavailable, wrong TLS CA and tampered metadata signature refusal; signed disposable RPM download, exact SHA-256 and native RPM signature verification in an isolated RPMDB, and corrupted RPM refusal |
 
 The QEMU smoke already verifies client parser help and refusal of
 `repos sync --apply` with no host source change. The extended client
@@ -37,6 +37,7 @@ QEMU jobs:
 ```sh
 PYTHONPATH=src python3 -m pytest -q \
   tests/test_v06_vm_signed_client_guest.py \
+  tests/test_ci_dnf_signed_rpm_fallback.py \
   tests/test_v06_vm_campaign_coverage.py
 ```
 
