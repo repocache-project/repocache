@@ -450,3 +450,55 @@ def test_prepare_refuses_nonroot_before_state_access(monkeypatch):
                         pytest.fail("unprivileged preparation reached state"))
     with pytest.raises(helper.BoundaryRefused, match="root authorization"):
         helper.prepare_current_candidate("a" * 64, "b" * 64)
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="Root-only bootstrap fixture")
+def test_protected_state_bootstrap_is_idempotent_and_does_not_adopt_missing_lock(tmp_path):
+    root = tmp_path
+    root.chmod(0o700)
+    marker = root / helper.MARKER
+    marker.write_bytes(helper.MAGIC)
+    marker.chmod(0o600)
+    (root / "var/lib").mkdir(parents=True, mode=0o755)
+    first = helper.bootstrap_protected_state(_test_root=root)
+    assert first == {"status": "created", "protected_state_ready": True, "write_eligible": False}
+    state = root / "var/lib/repocache-client/approved-entries"
+    lock = state / ".transaction.lock"
+    before = lock.stat()
+    assert before.st_mode & 0o777 == 0o600
+    assert lock.read_bytes() == b""
+    assert helper.bootstrap_protected_state(_test_root=root)["status"] == "unchanged"
+    after = lock.stat()
+    assert (after.st_ino, after.st_mtime_ns, after.st_ctime_ns) == (
+        before.st_ino, before.st_mtime_ns, before.st_ctime_ns)
+    lock.unlink()
+    evidence = state / "pair-evidence"
+    evidence.write_bytes(b"retain")
+    with pytest.raises(helper.BoundaryRefused, match="Missing registry lock"):
+        helper.bootstrap_protected_state(_test_root=root)
+    assert not lock.exists() and evidence.read_bytes() == b"retain"
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="Root-only bootstrap fixture")
+def test_protected_state_bootstrap_refuses_symlink_and_nonempty_lock(tmp_path):
+    root = tmp_path
+    root.chmod(0o700)
+    marker = root / helper.MARKER
+    marker.write_bytes(helper.MAGIC)
+    marker.chmod(0o600)
+    parent = root / "var/lib"
+    parent.mkdir(parents=True, mode=0o755)
+    unrelated = root / "unrelated"
+    unrelated.mkdir(mode=0o700)
+    target = parent / "repocache-client"
+    target.symlink_to(unrelated)
+    with pytest.raises(helper.BoundaryRefused):
+        helper.bootstrap_protected_state(_test_root=root)
+    assert not list(unrelated.iterdir())
+    target.unlink()
+    helper.bootstrap_protected_state(_test_root=root)
+    lock = target / "approved-entries/.transaction.lock"
+    lock.write_bytes(b"foreign")
+    with pytest.raises(helper.BoundaryRefused):
+        helper.bootstrap_protected_state(_test_root=root)
+    assert lock.read_bytes() == b"foreign"

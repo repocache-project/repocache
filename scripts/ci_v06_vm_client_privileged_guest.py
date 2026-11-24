@@ -234,6 +234,9 @@ def _signed_helper_placement(platform: str) -> None:
     from test_v06_release_source_inventory import _candidate_source
 
     target = Path("/usr/libexec/repocache-client") / stage.HELPER
+    registry = Path("/var/lib/repocache-client/approved-entries")
+    lock = registry / ".transaction.lock"
+    assert not os.path.lexists(registry.parent)
     assert not os.path.lexists(target) and not os.path.lexists(target.parent)
     with tempfile.TemporaryDirectory(prefix="repocache-client-signed-", dir="/root") as work:
         root = Path(work)
@@ -283,12 +286,25 @@ def _signed_helper_placement(platform: str) -> None:
             else:
                 raise AssertionError("Invalid signature placed a client helper")
             assert not os.path.lexists(target.parent)
+            assert not os.path.lexists(registry.parent)
             detached.write_bytes(signed)
             placed = stage.install_authenticated_fixture(archive.parent, **options)
             assert placed["placement"] == "placed" and not placed["source_writer_installed"]
+            assert placed["registry"] == "created" and placed["protected_state_ready"]
+            assert set(p.name for p in registry.iterdir()) == {".transaction.lock"}
+            for directory in (registry.parent, registry):
+                assert directory.stat().st_uid == directory.stat().st_gid == 0
+                assert directory.stat().st_mode & 0o777 == 0o700
+            lock_before = _snapshot(lock)
             before = _snapshot(target)
             repeat = stage.install_authenticated_fixture(archive.parent, **options)
             assert repeat["placement"] == "unchanged" and _snapshot(target) == before
+            assert repeat["registry"] == "unchanged" and _snapshot(lock) == lock_before
+            assert lock.stat().st_mode & 0o777 == 0o600
+            assert lock_before[0] == b""
+            if platform == "almalinux10":
+                assert os.getxattr(lock, "security.selinux")
+            print("PASS: root-private native registry and lock provisioned after signature verification")
             assert hashlib.sha256(before[0]).hexdigest() == placed["helper_sha256"]
             assert target.stat().st_uid == target.stat().st_gid == 0
             assert target.stat().st_mode & 0o777 == 0o700

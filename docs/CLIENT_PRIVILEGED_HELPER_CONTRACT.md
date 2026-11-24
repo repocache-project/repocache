@@ -173,3 +173,15 @@ Bad signature must precede placement; identical retry must preserve inode,
 bytes and timestamps; the executable must deny non-root execution.
 This placement entry is VM-guarded and not in the production installer.
 It is not installation or acceptance of the real source writer.
+
+
+The authenticated VM placement additionally provisions the fixed
+`/var/lib/repocache-client/approved-entries` registry and an empty,
+root-owned 0600 transaction lock only after signature verification and
+executable readback. Bootstrap uses nofollow dirfds, exact private modes,
+policy-checked attributes, durable directory/lock creation and repeated
+inode checks. It never replaces an existing lock or recreates a missing
+lock beside transaction evidence. Retry is idempotent; unsafe existing
+state is retained and refused. The test-only installer still grants no
+production write authority. Native application, consent handoff and
+release installation remain separate gates.

@@ -204,8 +204,16 @@ def install_authenticated_fixture(asset_directory: Path, *, platform: str,
         if _asset_bytes(parent, HELPER, len(payload), installed_mode=0o700) != payload:
             raise ClientHelperStageError("CLIENT_HELPER_INSTALL_CONTENT_MISMATCH")
         os.fsync(parent)
+    # The independently trusted fixture checkout supplies this internal
+    # bootstrap. Only after authenticated executable placement may it
+    # create the fixed root-private registry; no source writes are enabled.
+    import root_source_boundary as boundary
+
+    registry = boundary.bootstrap_protected_state()
     return {**receipt, "status": "AUTHENTICATED_CLIENT_HELPER_FIXTURE_PLACED",
-            "placement": placement, "source_writer_installed": False}
+            "placement": placement, "registry": registry["status"],
+            "protected_state_ready": registry["protected_state_ready"],
+            "source_writer_installed": False}
 
 
 def main() -> int:

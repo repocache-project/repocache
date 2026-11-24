@@ -136,6 +136,81 @@ def _root(root: Path) -> Iterator[tuple[int, int]]:
         os.close(fd)
 
 
+def bootstrap_protected_state(*, _test_root: Path | None = None) -> dict:
+    """Prepare only the fixed client registry and its non-replaceable lock.
+
+    Internal installer prerequisite, never dispatched by the public client or
+    helper parser. The authenticated installer must verify its candidate
+    before calling this. No source, config, approval or journal is written.
+    Retry after a directory-only interruption is safe; an absent lock beside
+    existing records is a conflict and is never silently recreated.
+    """
+    if os.getresuid() != (0, 0, 0):
+        raise BoundaryRefused("Root OS authorization required")
+    root = Path("/") if _test_root is None else Path(_test_root)
+    try:
+        with _native_metadata_scope(root), _root(root) as (root_fd, owner), contextlib.ExitStack() as stack:
+            current = root_fd
+            witnesses = []
+            for component, private in (("var", False), ("lib", False),
+                                       ("repocache-client", True), ("approved-entries", True)):
+                if private:
+                    try:
+                        os.mkdir(component, mode=0o700, dir_fd=current)
+                        os.fsync(current)
+                    except FileExistsError:
+                        pass
+                child = os.open(component, DIR, dir_fd=current)
+                stack.callback(os.close, child)
+                _checked_directory(child, owner, private=private)
+                if os.fstat(child).st_gid != 0:
+                    raise BoundaryRefused("Protected client directory group refused")
+                if private:
+                    metadata.private_state_attributes(child)
+                witnesses.append((current, component, child, private))
+                current = child
+
+            def recheck():
+                for parent, component, child, private in witnesses:
+                    _checked_directory(child, owner, private=private)
+                    actual = os.fstat(child)
+                    named = os.stat(component, dir_fd=parent, follow_symlinks=False)
+                    if actual.st_gid != 0 or (actual.st_dev, actual.st_ino) != (named.st_dev, named.st_ino):
+                        raise BoundaryRefused("Protected client directory identity changed")
+                    if private:
+                        metadata.private_state_attributes(child)
+
+            recheck()
+            try:
+                os.stat(".transaction.lock", dir_fd=current, follow_symlinks=False)
+            except FileNotFoundError:
+                # Do not recover a lost lock over an existing transaction.
+                with os.scandir(current) as listing:
+                    if next(listing, None) is not None:
+                        raise BoundaryRefused("Missing registry lock with existing state")
+                recheck()
+                fd = os.open(".transaction.lock", os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                             os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=current)
+                try:
+                    metadata.private_state_attributes(fd)
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+                os.fsync(current)
+                result = "created"
+            else:
+                result = "unchanged"
+            # Verify the same lock identity/ownership and that it is idle;
+            # never truncate, replace or clear an existing lock.
+            with _exclusive_lock(current, owner):
+                recheck()
+                os.fsync(current)
+            return {"status": result, "protected_state_ready": True,
+                    "write_eligible": False}
+    except (OSError, pre.PreflightError, ValueError) as exc:
+        raise BoundaryRefused("Protected client state bootstrap refused") from exc
+
+
 @contextlib.contextmanager
 def _state(root: Path) -> Iterator[tuple[int, int]]:
     """Read preprovisioned root-owned state; never mkdir/touch."""
@@ -176,6 +251,7 @@ def _exclusive_lock(state_fd: int, owner: int) -> Iterator[None]:
         named = os.stat(".transaction.lock", dir_fd=state_fd,
                         follow_symlinks=False)
         if (not stat.S_ISREG(info.st_mode) or info.st_uid != owner
+                or info.st_gid != 0 or info.st_size != 0
                 or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600
                 or (info.st_dev, info.st_ino) != (named.st_dev, named.st_ino)):
             raise BoundaryRefused("Unsafe transaction lock inode")
