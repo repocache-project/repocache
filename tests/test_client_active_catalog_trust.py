@@ -232,3 +232,40 @@ def test_explicit_catalog_tls_context_cannot_disable_verification(monkeypatch):
                         pytest.fail("Insecure TLS context reached transport"))
     with pytest.raises(client.ClientError, match="verification is required"):
         client._fetch_json(URL, max_bytes=512, context=context)
+
+
+def test_explicit_catalog_context_enforces_real_loopback_tls_despite_ambient_ca(
+        tmp_path, monkeypatch):
+    import ssl
+
+    monkeypatch.syspath_prepend(str(ROOT / "scripts"))
+    from ci_client_native_fallback import HTTPBackend, temporary_tls_identity
+
+    www = tmp_path / "www"
+    catalog_path = www / ".well-known/repocache/catalog.json"
+    catalog_path.parent.mkdir(parents=True)
+    trusted, key = temporary_tls_identity(tmp_path, "catalog-trusted")
+    wrong, _ = temporary_tls_identity(tmp_path, "catalog-wrong")
+    backend = HTTPBackend(www, certificate=trusted, key=key)
+    try:
+        server = backend.origin.removesuffix("/repo/")
+        document = {"schema": 1, "repositories": [{
+            "upstream": "https://mirror.example.invalid/debian/",
+            "cache": server + "/__repocache/repos/debian-main/",
+        }]}
+        catalog_path.write_text(json.dumps(document))
+        monkeypatch.setenv("SSL_CERT_FILE", str(trusted))
+        monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:1")
+        monkeypatch.setenv("SSLKEYLOGFILE", str(tmp_path / "ambient.keys"))
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.load_verify_locations(cafile=str(wrong))
+        with pytest.raises(client.ClientError, match="Catalog unavailable"):
+            client._catalog(server, context=context)
+        assert not backend.hits
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.load_verify_locations(cafile=str(trusted))
+        assert client._catalog(server, context=context) == document
+        assert backend.hits == ["GET /.well-known/repocache/catalog.json"]
+        assert not (tmp_path / "ambient.keys").exists()
+    finally:
+        backend.close()

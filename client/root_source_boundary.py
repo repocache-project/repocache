@@ -1,11 +1,11 @@
-"""Fixed, root-owned read-only client approval/transaction validation boundary.
+"""Fixed root-owned client approval/transaction validation boundary.
 
 This module is intentionally NOT installed or called by repocache-client.
-No commit, restore, recover, source changes, root escalation or
-installed mutation operations exist. Native validation re-fetches the active
-catalog from the root-owned installed origin using explicit system CA trust. It prepares a privileged validation
-boundary while real APT/DNF, native package-manager exclusivity, SELinux and
-durable multi-file transaction requirements remain unsatisfied (#24).
+Internal approval issuance writes only private immutable consent records.
+No commit, restore, recover, source changes or root escalation exist.
+Native validation re-fetches the active catalog from the root-owned
+installed origin using explicit system CA trust. Real APT/DNF exclusion,
+SELinux and durable multi-file source transactions remain open (#24).
 """
 from __future__ import annotations
 

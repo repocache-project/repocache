@@ -123,3 +123,12 @@ historical tests). Equal-content foreign source inodes cannot inherit
 schema-2 consent. No CLI or installer invokes issuance, no package sources
 are written, and the trusted pending-record preparer, SELinux-labelled
 state support, native commit and recovery still require implementation.
+
+
+The existing disposable Debian/Alma helper smoke additionally forks and
+kills a real root child immediately before and after approval publication,
+then retries and verifies exact record identity and unchanged source bytes,
+inode and timestamps. This state-only exercise mocks current-route
+validation; actual loopback TLS trust refusal is tested separately. It
+does not establish power-loss durability, installed helper acceptance or
+SELinux Enforcing source metadata preservation.
