@@ -124,3 +124,38 @@ def test_native_lifecycle_evidence_requires_final_guest_markers(tmp_path: Path) 
         "95.02", "95.03", "95.04", "28.05",
     }
     assert all(row["acceptance"] == "NOT_VERIFIED" for row in result["criteria"])
+
+
+def test_booted_nginx_invalid_candidate_requires_exact_recovery_marker(tmp_path: Path) -> None:
+    """A basic HIT alone must not claim staged syntax/rollback coverage."""
+    for name in SCENARIOS["smoke"]["files"]:
+        (tmp_path / name).write_text("fixture", encoding="utf-8")
+    (tmp_path / "sha.txt").write_text(HEAD, encoding="utf-8")
+    (tmp_path / "summary.md").write_text(
+        "## PR #237 — almalinux10 smoke experimental booted VM\n"
+        f"Source HEAD: {HEAD}\nLast phase: complete\nVM exercise: PASS\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "facts.txt").write_text(
+        "ID=almalinux\nsystemd\nEnforcing\n", encoding="utf-8",
+    )
+    native = tmp_path / "native-cache-data-plane.txt"
+    native.write_text(
+        "PASS: booted native VM stock NGINX disposable HTTPS APT/DNF MISS/HIT\n",
+        encoding="utf-8",
+    )
+    initial = collect(tmp_path, "almalinux10", "smoke", HEAD)
+    assert "28.04" not in {row["issue_criterion"] for row in initial["criteria"]}
+    native.write_text(
+        native.read_text(encoding="utf-8")
+        + "PASS: booted native VM malformed NGINX candidate refused before "
+        "reload; old APT/DNF HTTPS HITs survived and validated restore reloaded\n",
+        encoding="utf-8",
+    )
+    observed = collect(tmp_path, "almalinux10", "smoke", HEAD)
+    assert observed["scenario_status"] == "EXECUTED"
+    assert "28.04" in {row["issue_criterion"] for row in observed["criteria"]}
+    assert all(row["acceptance"] == "NOT_VERIFIED" for row in observed["criteria"])
+    (tmp_path / "sha.txt").write_text("f" * 40, encoding="utf-8")
+    stale = collect(tmp_path, "almalinux10", "smoke", HEAD)
+    assert "28.04" not in {row["issue_criterion"] for row in stale["criteria"]}

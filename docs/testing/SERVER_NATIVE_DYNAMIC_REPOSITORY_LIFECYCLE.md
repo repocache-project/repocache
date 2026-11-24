@@ -50,3 +50,38 @@ trusted upstream DNS, publisher signing, real package-manager integrity,
 client fallback and production NGINX activation remain **NOT VERIFIED**.
 A source-level mock of a ledger must never substitute for a protected
 native writer. No production cache or client source is altered by CI.
+
+## Native booted malformed-candidate refusal and cache retention (#28)
+
+The existing `scripts/ci_v06_vm_nginx_cache_guest.py` P0-2 scenario,
+running as an unprivileged account in the **actual booted** Debian 13 or
+AlmaLinux 10 QEMU guest (SELinux Enforcing on AlmaLinux), now exercises a
+real packaged NGINX failure-and-restore sequence **after warming both APT
+and DNF metadata/package fixtures**:
+
+1. Snapshot the exact private NGINX configuration bytes, and stage a
+   deliberately invalid directive in that same disposable file.
+2. Require the real packaged `nginx -t` to **reject** it before sending a
+   reload. Verify the pre-existing NGINX master stays alive and all four
+   previously warmed APT/DNF metadata/package URLs still return correct
+   bytes and `HIT`, without an extra upstream request.
+3. Restore only the saved private fixture bytes, require `nginx -t` to
+   pass and perform a **genuine test-only NGINX reload**. Verify that
+   every object remains a `HIT` with original bytes and upstream counts.
+4. Verify the original vendor systemd `nginx.service` remains inactive
+   throughout; never modify `/etc/nginx`, host trust anchors, APT/DNF
+   sources, publisher keys, firewall rules or production catalog files.
+
+The conservative evidence collector adds the narrow `28.04`
+**EXERCISED_PARTIAL** coverage only when a complete exact-SHA booted
+QEMU smoke includes both the existing APT/DNF HIT marker and the new
+syntax/refusal/restoration marker. An absent marker, changed SHA or failed
+guest is **NOT VERIFIED**, not acceptance PASS.
+
+This does **not** prove the installed #31/#64 root worker blocked an
+unapproved production reload, did an atomic multi-resource catalog
+rollback, verified authentic APT/DNF metadata signatures or recovered an
+interrupted privileged transaction. Full #28 and #95 acceptance remains
+OPEN until the installed signed-fixture native path and actual published
+active-only catalog are exercised with corresponding provenance and
+real native OS evidence; publisher-owned signatures are separate Stage C.
