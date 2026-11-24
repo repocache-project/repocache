@@ -107,7 +107,7 @@ def evaluate_cache_pressure(
         "critical_free_bytes": critical,
         "recovery_hysteresis_bytes": recovery_hysteresis_bytes,
         "action_advisory": advisory,
-        "cache_writes_safe_to_assert": level == "normal",
+        "no_pressure_in_sample": level == "normal",
         "native_cache_eviction_observed": False,
         "native_nginx_capability_verified": False,
         "authorizes_cache_deletion": False,
