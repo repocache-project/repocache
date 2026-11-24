@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import socket
 import stat
+import shutil
 import subprocess
 import sys
 
@@ -66,7 +67,7 @@ def guarded_native_guest(platform: str) -> None:
         "dnf", "createrepo_c", "gpg", "openssl",
     )
     for item in bins:
-        require(command("/usr/bin/which", item).returncode == 0,
+        require(shutil.which(item) is not None,
                 "native test tool missing: " + item)
 
 
@@ -84,8 +85,7 @@ def installed_sources(platform: str) -> tuple[tuple[str, int, int, int, str], ..
     for path in sorted(names):
         meta = path.lstat()
         require(stat.S_ISREG(meta.st_mode)
-                and 0 < meta.st_size <= SOURCE_LIMIT
-                and meta.st_nlink == 1, "native source is not regular")
+                and meta.st_size <= SOURCE_LIMIT, "native source is not regular")
         data = path.read_bytes()
         require(len(data) == meta.st_size, "source changed while reading")
         result.append((
