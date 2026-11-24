@@ -2178,3 +2178,64 @@ def test_owned_files_fixture_refuses_orphan_stage_without_wal(filesystem):
         native._recover_owned_files_fixture(filesystem[0])
     assert stage.read_bytes() == b"orphan"
     assert _fixture_resource_bytes(paths) == old
+
+
+def test_owned_files_fixture_refuses_competing_domain_mid_transaction(
+    filesystem, monkeypatch,
+):
+    old = _owned_bootstrap_resources()
+    new = _owned_generation()
+    paths = _owned_fixture_paths(filesystem, old)
+    fd, state, _, _, _ = filesystem
+    actual = native._owned_write_resource
+    foreign = state / native._STATE_STAGE
+
+    def inject_foreign_stage(*args):
+        actual(*args)
+        if args[3] == native._INCLUDE:
+            foreign.write_bytes(b"competing domain")
+            foreign.chmod(0o600)
+
+    monkeypatch.setattr(native, "_owned_write_resource", inject_foreign_stage)
+    with pytest.raises(native.NativeV2TransactionError,
+                       match="OWNED_WAL_APPLY_RECOVERY_REQUIRED"):
+        native._apply_owned_files_fixture(fd, new)
+    expected = dict(old)
+    expected[native._INCLUDE] = new[native._INCLUDE]
+    assert _fixture_resource_bytes(paths) == expected
+    assert foreign.read_bytes() == b"competing domain"
+    assert (state / native._OWNED_WAL).is_file()
+
+
+def test_owned_wal_refuses_changed_temporary_record_before_publication(
+    filesystem, monkeypatch,
+):
+    old = _owned_bootstrap_resources()
+    paths = _owned_fixture_paths(filesystem, old)
+    fd, state, _, _, _ = filesystem
+    actual = native._write_exclusive
+
+    def change_temporary_record(directory, name, *args):
+        actual(directory, name, *args)
+        if name == native._OWNED_WAL_TMP:
+            (state / name).write_bytes(b"changed record")
+
+    monkeypatch.setattr(native, "_write_exclusive", change_temporary_record)
+    with pytest.raises(native.NativeV2TransactionError, match="OWNED_WAL_CHANGED"):
+        native._apply_owned_files_fixture(fd, _owned_generation())
+    assert _fixture_resource_bytes(paths) == old
+    assert not (state / native._OWNED_WAL).exists()
+    assert (state / native._OWNED_WAL_TMP).read_bytes() == b"changed record"
+
+
+@pytest.mark.parametrize("name", native._OWNED_PRIVATE)
+def test_owned_files_fixture_recovers_empty_private_stage(filesystem, name):
+    old = _owned_bootstrap_resources()
+    paths = _owned_fixture_paths(filesystem, old)
+    fd = filesystem[0]
+    native._publish_owned_wal_fixture(fd, _owned_generation())
+    stage = paths[name].parent / native._OWNED_STAGES[name]
+    stage.touch(mode=0o600)
+    assert native._recover_owned_files_fixture(fd)["status"] == "OWNED_FIXTURE_FILES_RESTORED"
+    assert _fixture_resource_bytes(paths) == old
+    _assert_owned_fixture_clean(filesystem, paths)

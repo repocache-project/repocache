@@ -665,3 +665,10 @@ an unlink/fsync uncertainty or changed WAL cannot be reported as a
 successful rollback. A real child-process SIGKILL regression at the catalog
 boundary, followed by interrupted recovery and retry, exercises lock release
 and both first-generation and previously managed recovery in fixtures.
+
+
+The retained layout check also revalidates competing transaction domains
+before every target effect, including compensation. A changed unpublished
+WAL is refused before rename; no target may change on this path. Regression
+tests cover competing state-stage drift after the first resource write,
+unpublished WAL drift, and empty private stages left at exclusive creation.

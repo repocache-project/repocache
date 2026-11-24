@@ -1343,6 +1343,9 @@ def _owned_fixture_layout(root_fd: int, *, recovering: bool):
                 _deny("PUBLIC_DIRECTORY_MODE_UNSAFE")
 
             def check_layout():
+                # Recheck competing transaction domains throughout the retained
+                # lock, not just on entry. Never proceed after foreign drift.
+                _no_conflicting_owned_wal_pending(state_fd, recovering=True)
                 if (_read_file(state_fd, _MANIFEST, 0, _LIMIT[_MANIFEST]) is not None
                         or _read_public(vendor_fd, _INCLUDE, _LIMIT[_INCLUDE]) is not None):
                     _deny("OWNED_WAL_VENDOR_DOMAIN_CONFLICT")
@@ -1382,6 +1385,8 @@ def _publish_owned_wal_locked(state_fd: int, nginx_fd: int, public_fd: int,
     _owned_check_stages_absent(state_fd, nginx_fd, public_fd)
     if _read_file(state_fd, _OWNED_WAL, 0, _MAX_WAL) is not None:
         _deny("OWNED_WAL_DOMAIN_REQUIRED")
+    if _read_file(state_fd, _OWNED_WAL_TMP, 0, _MAX_WAL) != wal:
+        _deny("OWNED_WAL_CHANGED")
     os.replace(_OWNED_WAL_TMP, _OWNED_WAL,
                src_dir_fd=state_fd, dst_dir_fd=state_fd)
     os.fsync(state_fd)
