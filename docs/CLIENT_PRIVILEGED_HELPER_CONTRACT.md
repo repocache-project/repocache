@@ -117,3 +117,15 @@ catalog retrieval, network access or changes. The refusal preserves the
 existing CLI error code and JSON contract and does **not** imply that
 `--apply` is implemented. An unprivileged consent flag never grants root
 authority; the complete original #24 installed-native acceptance remains open.
+
+
+## Root-bound current catalog check
+
+The source-only root validator now independently fetches the current
+catalog from the protected installed HTTPS origin, with fixed native
+system CA trust and exact UC-45 upstream/cache equality. It rejects
+legacy or changed routes and rechecks local approval/origin/source under
+the client transaction lock. This is a non-activating validation step:
+it neither issues administrative consent nor establishes live server
+activation, native fallback, source ownership or transaction authority.
+The protected approval issuance and native writer remain outstanding.

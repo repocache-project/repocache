@@ -1,8 +1,9 @@
 """Fixed, root-owned read-only client approval/transaction validation boundary.
 
 This module is intentionally NOT installed or called by repocache-client.
-No commit, restore, recover, source changes, root escalation, network requests
-or manifest-creation operations exist. It prepares a privileged validation
+No commit, restore, recover, source changes, root escalation or
+manifest-creation operations exist. Native validation re-fetches the active
+catalog from the root-owned installed origin using explicit system CA trust. It prepares a privileged validation
 boundary while real APT/DNF, native package-manager exclusivity, SELinux and
 durable multi-file transaction requirements remain unsatisfied (#24).
 """
@@ -16,10 +17,13 @@ import json
 import os
 import re
 import stat
+import ssl
 import sys
+from urllib.parse import urlsplit
 from pathlib import Path
 from typing import Iterator
 
+import repocache_client as client
 import native_fallback_plan as fallback
 import source_preflight as pre
 import source_entry_boundaries as entries
@@ -276,6 +280,71 @@ def _source_bytes(root: Path, relative: str, observed: dict) -> bytes:
             os.close(fd)
 
 
+def _native_tls_context() -> ssl.SSLContext:
+    """Use only the target OS's CA bundle, never inherited SSL/proxy settings.
+
+    Explicit SSLContext construction avoids create_default_context's ambient
+    SSL_CERT_FILE, SSL_CERT_DIR and SSLKEYLOGFILE behavior. Private CA support
+    remains unavailable for this privileged boundary until separately proven.
+    """
+    if os.getresuid() != (0, 0, 0) or os.uname().machine != "x86_64":
+        raise BoundaryRefused("Native root authorization required")
+    distro = client._distro(Path("/"))
+    identity = (distro.get("ID"), distro.get("VERSION_ID", "").split(".")[0])
+    bundles = {
+        ("debian", "13"): "/etc/ssl/certs/ca-certificates.crt",
+        ("almalinux", "10"): "/etc/pki/tls/certs/ca-bundle.crt",
+    }
+    bundle = bundles.get(identity)
+    if bundle is None:
+        raise BoundaryRefused("Unsupported native client target")
+    # Resolve normal distro CA symlinks to a root-owned, non-writable file.
+    # Inspect every resolved parent; never load a caller-selected trust path.
+    try:
+        resolved = Path(bundle).resolve(strict=True)
+        for parent in resolved.parents:
+            info = parent.stat()
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0
+                    or info.st_mode & 0o022):
+                raise BoundaryRefused("Unsafe native CA directory")
+        info = resolved.stat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
+                or info.st_mode & 0o022 or not 0 < info.st_size <= 8 * 1024 * 1024):
+            raise BoundaryRefused("Unsafe native CA bundle")
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        context.load_verify_locations(cafile=str(resolved))
+        return context
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise BoundaryRefused("Native CA trust unavailable") from exc
+
+
+def _current_route(record: dict, root: Path) -> str:
+    """Revalidate exact UC-45 approval against a newly fetched active catalog.
+
+    Only the protected installed origin is consulted. A legacy route, prefix
+    match, changed URI, unavailable catalog or changed origin cannot satisfy
+    this check. The return value is local evidence, not a write capability.
+    """
+    if os.getresuid() != (0, 0, 0):
+        raise BoundaryRefused("Native root authorization required")
+    try:
+        server = client._server(client._installed_server_config(root))
+        cache = record["cache"]
+        path = urlsplit(cache).path
+        if (not client._NATIVE_CACHE_PATH.fullmatch(path)
+                or cache != server + path):
+            raise BoundaryRefused("Exact native route does not match installed origin")
+        catalog = client._catalog(server, context=_native_tls_context())
+        if {"upstream": record["upstream"], "cache": cache} not in catalog["repositories"]:
+            raise BoundaryRefused("Approved route is absent from current active catalog")
+        if client._server(client._installed_server_config(root)) != server:
+            raise BoundaryRefused("Installed origin changed during catalog validation")
+        return server
+    except (client.ClientError, OSError, ValueError, RecursionError) as exc:
+        raise BoundaryRefused("Current authenticated catalog validation refused") from exc
+
+
 def validate(ident: str, *, _test_root: Path | None = None) -> dict:
     """Verify one immutable local approval and source in a root-only boundary.
 
@@ -307,6 +376,15 @@ def validate(ident: str, *, _test_root: Path | None = None) -> dict:
                     selected_entry_sha256=record["entry_sha256"],
                     managed_id=ident, upstream=record["upstream"],
                     cache=record["cache"])
+                # Native inspection must not rely on a caller's catalog or
+                # on an old approval alone. Historical private fixture tests
+                # remain offline and explicitly report no current route proof.
+                route_origin = _current_route(record, root) if root == Path("/") else None
+                if _manifest(state_fd, ident) != record:
+                    raise BoundaryRefused("Protected approval changed during validation")
+                if route_origin is not None and client._server(
+                        client._installed_server_config(root)) != route_origin:
+                    raise BoundaryRefused("Installed origin changed during validation")
                 after = pre.inspect_source(record["source"], root=root)
                 if before != after:
                     raise BoundaryRefused("Source drift during protected validation")
@@ -319,6 +397,7 @@ def validate(ident: str, *, _test_root: Path | None = None) -> dict:
                 "source_digest_matched": True,
                 "entry_digest_matched": True,
                 "route_digest_matched": True,
+                "current_active_catalog_route_matched": route_origin is not None,
                 "fallback_plan_generated": True,
                 "multi_file_changes_required": proposal.companion is not None,
                 "exclusive_client_lock_observed": True,

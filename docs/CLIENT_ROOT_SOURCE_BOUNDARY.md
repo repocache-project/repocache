@@ -85,3 +85,21 @@ be used on `/` without real UID 0 and is never a production source writer.
 This PR is a non-activating **stage-A subcomponent**. It does not satisfy
 original #24 repeated installed `--apply`, real source writes, rollback,
 signed native fallback, or release native acceptance criteria.
+
+
+## Current native catalog revalidation
+
+Native root validation now requires a fresh HTTPS catalog read using the
+root-owned installed server origin and a fixed supported-distribution CA
+bundle, not a CLI URL or inherited TLS/proxy environment. The approved
+upstream and cache must occur as one exact schema-1 mapping with a native
+active-only route. Changed, withdrawn, prefix-only, legacy or foreign
+routes are refused; the local approval, origin and original source are
+rechecked under the existing exclusive client lock after retrieval.
+Private fixture validation remains offline and explicitly reports
+`current_active_catalog_route_matched=false`. A successful native
+read is only a point-in-time observation of the server's published
+mapping, not attestation of NGINX activation, package trust, fallback or
+permission to write. Private CA support and labelled state remain
+fail-closed until separately validated. No installed helper or source
+mutation is enabled.

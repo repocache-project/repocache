@@ -126,6 +126,7 @@ def test_root_fixture_accepts_only_source_level_validation(tmp_path, manager):
     assert state["source_digest_matched"]
     assert state["entry_digest_matched"]
     assert state["route_digest_matched"]
+    assert state["current_active_catalog_route_matched"] is False
     assert state["fallback_plan_generated"]
     assert not state["installed"]
     assert not state["write_eligible"]
@@ -213,3 +214,74 @@ def test_labelled_source_and_lock_xattrs_fail_closed(tmp_path):
         finally:
             os.removexattr(path, "user.repocache-ci-boundary")
         assert helper.validate(IDENT, _test_root=tmp_path)["write_eligible"] is False
+
+
+@pytest.mark.parametrize("mode", [
+    "exact", "withdrawn", "changed-path", "different-upstream",
+    "prefix-only", "foreign-origin", "legacy", "origin-drift", "offline",
+])
+def test_current_route_requires_exact_fresh_authenticated_mapping(monkeypatch, mode):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(helper.os, "getresuid", lambda: (0, 0, 0))
+    upstream = "https://deb.example.org/debian/"
+    cache = CACHE
+    if mode == "foreign-origin":
+        cache = "https://foreign.example.org/__repocache/repos/baseos/"
+    elif mode == "legacy":
+        cache = "https://cache.example.org/debian/"
+    record = {"upstream": upstream, "cache": cache}
+    reads = []
+    origin = "https://cache.example.org"
+
+    def config(root):
+        reads.append(root)
+        if mode == "origin-drift" and len(reads) > 1:
+            return "https://other.example.org"
+        return origin
+
+    context = object()
+    calls = []
+
+    def catalog(server, *, context):
+        calls.append((server, context))
+        if mode == "offline":
+            raise helper.client.ClientError("unavailable")
+        item = {"upstream": upstream, "cache": cache}
+        if mode == "changed-path":
+            item["cache"] = origin + "/__repocache/repos/new/"
+        if mode == "different-upstream":
+            item["upstream"] = "https://other.example.org/debian/"
+        if mode == "prefix-only":
+            item["upstream"] = "https://deb.example.org/"
+        return {"schema": 1, "repositories": [] if mode == "withdrawn" else [item]}
+
+    monkeypatch.setattr(helper.client, "_installed_server_config", config)
+    monkeypatch.setattr(helper.client, "_catalog", catalog)
+    monkeypatch.setattr(helper, "_native_tls_context", lambda: context)
+    if mode == "exact":
+        assert helper._current_route(record, Path("/")) == origin
+        assert calls == [(origin, context)]
+        assert reads == [Path("/"), Path("/")]
+    else:
+        with pytest.raises(helper.BoundaryRefused):
+            helper._current_route(record, Path("/"))
+        if mode in ("foreign-origin", "legacy"):
+            assert not calls
+
+
+def test_current_route_rejects_nonroot_before_origin_read(monkeypatch):
+    monkeypatch.setattr(helper.os, "getresuid", lambda: (1000, 0, 0))
+    monkeypatch.setattr(helper.client, "_installed_server_config", lambda *_:
+                        pytest.fail("untrusted process reached origin read"))
+    with pytest.raises(helper.BoundaryRefused, match="root authorization"):
+        helper._current_route({}, Path("/"))
+
+
+def test_native_tls_context_refuses_unsupported_target(monkeypatch):
+    monkeypatch.setattr(helper.os, "getresuid", lambda: (0, 0, 0))
+    monkeypatch.setattr(helper.client, "_distro", lambda _: {
+        "ID": "unsupported", "VERSION_ID": "13",
+    })
+    with pytest.raises(helper.BoundaryRefused):
+        helper._native_tls_context()
