@@ -141,6 +141,18 @@ def test_decision_is_pure_does_not_consume_cache_or_mutate_sources(monkeypatch):
     assert config == original
 
 
+@pytest.mark.parametrize("bad", [
+    {"total": None, "free": -1},
+    {"total": None, "used": True},
+    {"free": None, "used": 2**63},
+])
+def test_missing_metric_does_not_hide_other_malformed_observations(bad):
+    values = {"free": 300, "total": 1000, "used": 200}
+    values.update(bad)
+    with pytest.raises(CachePressureError, match="CACHE_PRESSURE_METRIC_INVALID"):
+        observe(**values)
+
+
 def test_fixed_redacted_output_does_not_return_filesystem_usage_or_host_paths():
     result = observe(75)
     assert "filesystem_free_bytes" not in result
