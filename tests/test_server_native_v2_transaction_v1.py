@@ -1653,14 +1653,14 @@ def _owned_bootstrap_resources():
     }
 
 
-def _owned_generation(generation=1, previous=None):
+def _owned_generation(generation=1, previous=None, *, active=True):
     cfg = document(1, generation=generation)
     cfg["deployment"]["paths"]["generated_include"] = native._OWNED_INCLUDE_PATH
-    cfg["repositories"][0]["desired_state"] = "active"
+    cfg["repositories"][0]["desired_state"] = "active" if active else "disabled"
     state = _canon(snapshot(generation=generation, previous=previous, doc=cfg))
     main, include, catalog = native._render_owned_managed_candidate(
         cfg, generation, "debian",
-        {"repo-0": {"mirror0.example.invalid": ["8.8.8.8"]}},
+        {"repo-0": {"mirror0.example.invalid": ["8.8.8.8"]}} if active else {},
     )
     return {
         V2_STATE: state, native._OWNED_MAIN: main, native._INCLUDE: include,
@@ -1759,7 +1759,9 @@ def test_owned_wal_fixture_publication_preserves_all_previous_resources(filesyst
 
 
 @pytest.mark.parametrize("name", [native._OWNED_WAL, native._OWNED_WAL_TMP,
-                                  native._OWNED_MANIFEST])
+                                  native._OWNED_MANIFEST,
+                                  native._OWNED_STAGES[V2_STATE],
+                                  native._OWNED_STAGES[native._OWNED_MANIFEST]])
 @pytest.mark.parametrize("operation", ["APPLY_V2", "RELOAD_V2", "RECOVER_V2"])
 def test_owned_wal_artifacts_refuse_legacy_even_without_bootstrap_claim(
     filesystem, name, operation,
@@ -1833,7 +1835,9 @@ def test_owned_wal_fixture_interrupted_rename_preserves_temp_and_bootstrap(
 
 
 @pytest.mark.parametrize("name", [native._OWNED_WAL, native._OWNED_WAL_TMP,
-                                  native._OWNED_MANIFEST])
+                                  native._OWNED_MANIFEST,
+                                  native._OWNED_STAGES[V2_STATE],
+                                  native._OWNED_STAGES[native._OWNED_MANIFEST]])
 def test_owned_domain_refused_by_state_only_and_legacy_v1_interlocks(
     filesystem, name,
 ):
@@ -1886,8 +1890,11 @@ def test_owned_files_fixture_commit_first_and_repeat(filesystem):
     fd = filesystem[0]
     paths = _owned_fixture_paths(filesystem, _owned_bootstrap_resources())
     first = _owned_generation()
-    second = _owned_generation(2, previous=json.loads(first[V2_STATE]))
-    for new in (first, second):
+    second = _owned_generation(2, previous=json.loads(first[V2_STATE]), active=False)
+    third = _owned_generation(3, previous=json.loads(second[V2_STATE]))
+    assert first[native._CATALOG] != second[native._CATALOG]
+    assert first[native._CATALOG] == third[native._CATALOG]
+    for new in (first, second, third):
         result = native._apply_owned_files_fixture(fd, new)
         assert result["status"] == "OWNED_FIXTURE_FILES_COMMITTED"
         assert result["fixture_only"] and not result["authorizes_nginx_reload"]
@@ -1908,7 +1915,9 @@ def test_owned_files_fixture_crash_after_each_resource_restores_exact_prior(
 ):
     old = _owned_bootstrap_resources() if initial else _owned_generation()
     new = _owned_generation(1 if initial else 2,
-                            previous=None if initial else json.loads(old[V2_STATE]))
+                            previous=None if initial else json.loads(old[V2_STATE]),
+                            active=initial)
+    assert new[native._CATALOG] != old[native._CATALOG]
     paths = _owned_fixture_paths(filesystem, old)
     fd, state, _, _, _ = filesystem
     target = {"include": native._INCLUDE, "main": native._OWNED_MAIN,
@@ -2085,7 +2094,9 @@ def test_owned_files_fixture_real_sigkill_then_interrupted_recovery_retries(
 
     old = _owned_bootstrap_resources() if initial else _owned_generation()
     new = _owned_generation(1 if initial else 2,
-                            previous=None if initial else json.loads(old[V2_STATE]))
+                            previous=None if initial else json.loads(old[V2_STATE]),
+                            active=initial)
+    assert new[native._CATALOG] != old[native._CATALOG]
     paths = _owned_fixture_paths(filesystem, old)
     fd, state, _, _, _ = filesystem
     actual = native._owned_write_resource
@@ -2118,3 +2129,52 @@ def test_owned_files_fixture_real_sigkill_then_interrupted_recovery_retries(
     assert native._recover_owned_files_fixture(fd)["status"] == "OWNED_FIXTURE_FILES_RESTORED"
     assert _fixture_resource_bytes(paths) == old
     _assert_owned_fixture_clean(filesystem, paths)
+
+@pytest.mark.parametrize("kind", ["symlink", "hardlink", "writable"])
+def test_owned_files_fixture_refuses_unsafe_stage_inode(filesystem, kind):
+    old = _owned_bootstrap_resources()
+    paths = _owned_fixture_paths(filesystem, old)
+    fd, state, _, _, _ = filesystem
+    wal = native._publish_owned_wal_fixture(fd, _owned_generation())
+    stage = paths[native._INCLUDE].parent / native._OWNED_STAGES[native._INCLUDE]
+    foreign = stage.parent / "unrelated-file"
+    foreign.write_bytes(b"unrelated")
+    foreign.chmod(0o644)
+    if kind == "symlink":
+        stage.symlink_to(foreign)
+    elif kind == "hardlink":
+        os.link(foreign, stage)
+    else:
+        stage.write_bytes(b"unsafe")
+        stage.chmod(0o666)
+    with pytest.raises(native.NativeV2TransactionError, match="FOREIGN_STAGE"):
+        native._recover_owned_files_fixture(fd)
+    assert os.path.lexists(stage)
+    assert foreign.read_bytes() == b"unrelated"
+    assert _fixture_resource_bytes(paths) == old
+    assert (state / native._OWNED_WAL).read_bytes() == wal
+
+
+def test_owned_files_fixture_refuses_malformed_unpublished_record(filesystem):
+    old = _owned_bootstrap_resources()
+    paths = _owned_fixture_paths(filesystem, old)
+    fd, state, _, _, _ = filesystem
+    temporary = state / native._OWNED_WAL_TMP
+    temporary.write_bytes(b"torn")
+    temporary.chmod(0o600)
+    with pytest.raises(native.NativeV2TransactionError, match="OWNED_WAL_INVALID"):
+        native._recover_owned_files_fixture(fd)
+    assert temporary.read_bytes() == b"torn"
+    assert _fixture_resource_bytes(paths) == old
+
+
+def test_owned_files_fixture_refuses_orphan_stage_without_wal(filesystem):
+    old = _owned_bootstrap_resources()
+    paths = _owned_fixture_paths(filesystem, old)
+    stage = paths[native._OWNED_MAIN].parent / native._OWNED_STAGES[native._OWNED_MAIN]
+    stage.write_bytes(b"orphan")
+    stage.chmod(0o600)
+    with pytest.raises(native.NativeV2TransactionError, match="ORPHAN_STAGE"):
+        native._recover_owned_files_fixture(filesystem[0])
+    assert stage.read_bytes() == b"orphan"
+    assert _fixture_resource_bytes(paths) == old
