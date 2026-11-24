@@ -219,11 +219,8 @@ def _verify_recovery_next(
         _refuse(kind + "_INVALID")
 
 
-def _multi_resource_pending(directory: int, uid: int) -> bool:
-    # The ordinary state-only v2 fixture writer cannot operate on *either*
-    # an interrupted multi-resource WAL or a successfully committed multi-
-    # resource ownership domain: either would desynchronize include/catalog
-    # from the single authoritative v2 state. This is an interlock only.
+def _shadow_multi_resource_pending(directory: int, uid: int) -> bool:
+    """Existing shadow multi-resource namespace, not the live owned domain."""
     return any(
         _read_file(directory, name, uid, maximum) is not None
         for name, maximum in (
@@ -233,6 +230,21 @@ def _multi_resource_pending(directory: int, uid: int) -> bool:
             (".fixture-managed-nginx.conf", 1024 * 1024),
             (".fixture-derived-catalog.json", 512 * 1024),
             (".fixture-active-manifest.json", 4096),
+        )
+    )
+
+
+def _multi_resource_pending(directory: int, uid: int) -> bool:
+    # The ordinary state-only fixture must refuse every multi-resource
+    # ownership domain, even if no journal remains after a commit.
+    return _shadow_multi_resource_pending(directory, uid) or any(
+        _read_file(directory, name, uid, maximum) is not None
+        for name, maximum in (
+            (".state-v2-owned-nginx.pending", 8 * 1024 * 1024),
+            (".state-v2-owned-nginx.pending-tmp", 8 * 1024 * 1024),
+            (".state-v2-owned-nginx.manifest", 8192),
+            (".state-v2-owned-nginx.state-stage", MAX_V2_STATE_BYTES),
+            (".state-v2-owned-nginx.manifest-stage", 8192),
         )
     )
 

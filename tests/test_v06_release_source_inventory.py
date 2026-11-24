@@ -107,9 +107,13 @@ def test_fixed_worker_archive_is_reproducible_from_closed_release_sources(tmp_pa
     assert payload == build_native_root_worker.build(source)
     assert payload.startswith(b"#!/usr/bin/python3 -IS\n")
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-        assert archive.namelist() == ["__main__.py", *(
-            f"repocache/{module}.py" for module in build_native_root_worker.MODULES
-        )]
+        assert archive.namelist() == [
+            "__main__.py", "repocache/_signed-owned-nginx.service",
+            *(f"repocache/{module}.py" for module in build_native_root_worker.MODULES),
+        ]
+        assert archive.read("repocache/_signed-owned-nginx.service") == (
+            source / "docs/examples/systemd/repocache-nginx.service"
+        ).read_bytes()
     target = tmp_path / "server-control-worker"
     target.write_bytes(payload)
     unrelated = tmp_path / "repocache"

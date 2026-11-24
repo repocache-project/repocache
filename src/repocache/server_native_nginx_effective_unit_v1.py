@@ -8,7 +8,11 @@ writes, and it cannot attest native host-root or SELinux enforcement.
 """
 from __future__ import annotations
 
+from contextlib import ExitStack
 import os
+import socket
+import time
+import zipimport
 import stat
 import subprocess
 from typing import Any
@@ -319,3 +323,159 @@ def inspect_effective_owned_nginx_unit(*, active: bool) -> dict[str, Any]:
         raise
     except (OSError, ValueError, TypeError, subprocess.SubprocessError):
         _deny("OWN_UNIT_UNVERIFIED")
+
+
+# Private prerequisites for a future WAL-bound reload. Neither function
+# grants service authority, and neither is exposed through socket dispatch.
+_SIGNED_WORKER = "/usr/libexec/repocache/server-control-worker"
+_SIGNED_UNIT_MEMBER = "repocache/_signed-owned-nginx.service"
+_UNIT_MAX_BYTES = 16384
+_BOOTSTRAP_ADDRESS = ("127.0.0.1", 8008)
+_BOOTSTRAP_REQUEST = (
+    b"GET /__repocache/private HTTP/1.1\r\n"
+    b"Host: localhost\r\nConnection: close\r\n\r\n"
+)
+
+
+def _signed_owned_unit_bytes() -> bytes:
+    """Read only the fixed member of the installed authenticated worker.
+
+    A development source import is deliberately insufficient. This is a
+    consistency check within the installed-worker trust boundary, not an
+    independent re-verification of the publisher's signature.
+    """
+    loader = __loader__
+    if (not isinstance(loader, zipimport.zipimporter)
+            or loader.archive != _SIGNED_WORKER):
+        _deny("SIGNED_OWN_UNIT_SOURCE_REQUIRED")
+    try:
+        raw = loader.get_data(_SIGNED_WORKER + "/" + _SIGNED_UNIT_MEMBER)
+        if type(raw) is not bytes or not 1 <= len(raw) <= _UNIT_MAX_BYTES:
+            _deny("SIGNED_OWN_UNIT_SOURCE_INVALID")
+        return raw
+    except OSError:
+        _deny("SIGNED_OWN_UNIT_SOURCE_UNAVAILABLE")
+
+
+def _read_exact_owned_unit_at(root_fd: int, expected: bytes, *,
+                              owner_uid: int, owner_gid: int) -> tuple[int, ...]:
+    """Descriptor-bound exact unit read. Test fixtures never confer authority."""
+    from repocache.server_protected_state_inspect_v1 import (
+        _FILE_FLAGS, _identity, _recheck, _walk,
+    )
+    if type(expected) is not bytes or not 1 <= len(expected) <= _UNIT_MAX_BYTES:
+        _deny("SIGNED_OWN_UNIT_SOURCE_INVALID")
+    try:
+        with ExitStack() as stack:
+            parent, chain = _walk(root_fd, ("etc", "systemd", "system"),
+                                  stack, owner_uid)
+            # Systemd's fixed local unit must be an ordinary root-owned file.
+            fd = os.open(_OWN_UNIT, _FILE_FLAGS, dir_fd=parent)
+            stack.callback(os.close, fd)
+            info = os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                    or info.st_uid != owner_uid or info.st_gid != owner_gid
+                    or stat.S_IMODE(info.st_mode) != 0o644
+                    or info.st_dev != os.fstat(parent).st_dev
+                    or info.st_size != len(expected)):
+                _deny("SIGNED_OWN_UNIT_METADATA_MISMATCH")
+            raw = bytearray()
+            while len(raw) <= len(expected):
+                block = os.read(fd, len(expected) + 1 - len(raw))
+                if not block:
+                    break
+                raw.extend(block)
+            identity = _identity(info)
+            if (bytes(raw) != expected or _identity(os.fstat(fd)) != identity
+                    or _identity(os.stat(_OWN_UNIT, dir_fd=parent,
+                                         follow_symlinks=False)) != identity):
+                _deny("SIGNED_OWN_UNIT_CONTENT_MISMATCH")
+            _recheck(chain, owner_uid)
+            return identity
+    except EffectiveNginxUnitError:
+        raise
+    except (OSError, ValueError, TypeError):
+        _deny("SIGNED_OWN_UNIT_UNVERIFIED")
+
+
+def inspect_signed_owned_nginx_unit() -> dict[str, Any]:
+    """Bind the active dedicated unit to its authenticated worker's bytes.
+
+    The caller must retain the state lock, independently establish signed
+    installed-worker and package provenance, validate the managed context
+    and prove the live listener. No command mutation is performed here.
+    """
+    from repocache.server_protected_state_inspect_v1 import _DIRECTORY_FLAGS
+
+    expected = _signed_owned_unit_bytes()
+    try:
+        with ExitStack() as stack:
+            root_fd = os.open("/", _DIRECTORY_FLAGS)
+            stack.callback(os.close, root_fd)
+            before = _read_exact_owned_unit_at(root_fd, expected,
+                                              owner_uid=0, owner_gid=0)
+            observed = inspect_effective_owned_nginx_unit(active=True)
+            after = _read_exact_owned_unit_at(root_fd, expected,
+                                             owner_uid=0, owner_gid=0)
+            if before != after:
+                _deny("SIGNED_OWN_UNIT_CHANGED")
+            return {**observed, "signed_worker_unit_bytes_match": True,
+                    "private_unit_identity": before}
+    except EffectiveNginxUnitError:
+        raise
+    except (OSError, ValueError, TypeError):
+        _deny("SIGNED_OWN_UNIT_UNVERIFIED")
+
+
+def _require_bootstrap_response(raw: bytes) -> None:
+    """Accept only a complete, empty 204 response from the fixed probe."""
+    if type(raw) is not bytes or not 1 <= len(raw) <= 8192:
+        _deny("BOOTSTRAP_HEALTH_UNVERIFIED")
+    head, separator, body = raw.partition(b"\r\n\r\n")
+    lines = head.split(b"\r\n")
+    if (not separator or body or not lines[0].startswith(b"HTTP/1.1 204 ")
+            or any(byte < 32 or byte == 127 for byte in lines[0])):
+        _deny("BOOTSTRAP_HEALTH_UNVERIFIED")
+    lengths = []
+    for line in lines[1:]:
+        key, colon, value = line.partition(b":")
+        if (not colon or not key or any(
+                byte not in b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-" for byte in key)
+                or any((byte < 32 and byte != 9) or byte == 127 for byte in value)):
+            _deny("BOOTSTRAP_HEALTH_UNVERIFIED")
+        key = key.lower()
+        if key in (b"transfer-encoding", b"content-encoding"):
+            _deny("BOOTSTRAP_HEALTH_UNVERIFIED")
+        if key == b"content-length":
+            lengths.append(value.strip())
+    if lengths not in ([], [b"0"]):
+        _deny("BOOTSTRAP_HEALTH_UNVERIFIED")
+
+
+def require_owned_bootstrap_health() -> None:
+    """Check the original signed bootstrap endpoint after a rollback.
+
+    Fixed loopback only, no proxy, DNS lookup of operator input, redirects,
+    or credentials. A successful response does not identify the process;
+    the WAL caller must also verify unit identity and exact context.
+    """
+    deadline = time.monotonic() + 10
+    try:
+        with socket.create_connection(_BOOTSTRAP_ADDRESS, timeout=4) as stream:
+            stream.settimeout(4)
+            stream.sendall(_BOOTSTRAP_REQUEST)
+            raw = bytearray()
+            while len(raw) <= 8192:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    _deny("BOOTSTRAP_HEALTH_UNVERIFIED")
+                stream.settimeout(min(4.0, remaining))
+                block = stream.recv(min(4096, 8193 - len(raw)))
+                if not block:
+                    break
+                raw.extend(block)
+            _require_bootstrap_response(bytes(raw))
+    except EffectiveNginxUnitError:
+        raise
+    except (OSError, ValueError, TypeError):
+        _deny("BOOTSTRAP_HEALTH_UNVERIFIED")
