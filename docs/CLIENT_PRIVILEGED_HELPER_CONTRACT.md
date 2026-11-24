@@ -129,3 +129,13 @@ the client transaction lock. This is a non-activating validation step:
 it neither issues administrative consent nor establishes live server
 activation, native fallback, source ownership or transaction authority.
 The protected approval issuance and native writer remain outstanding.
+
+
+The internal, uninstalled issuance primitive additionally requires an
+explicit exact-route digest and protected schema-2 pending proposal
+binding source inode and metadata. It publishes immutable consent with
+atomic no-replace semantics and durable directory fsync. It has no
+installed CLI entry point; trusted pending proposal preparation,
+labelled-state handling, native commit/recovery and full acceptance
+remain open. Legacy schema-1 lab approvals cannot satisfy native
+validation.

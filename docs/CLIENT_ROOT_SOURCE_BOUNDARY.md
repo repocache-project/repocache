@@ -103,3 +103,23 @@ mapping, not attestation of NGINX activation, package trust, fallback or
 permission to write. Private CA support and labelled state remain
 fail-closed until separately validated. No installed helper or source
 mutation is enabled.
+
+
+## Immutable approval issuance (internal, uninstalled)
+
+A protected schema-2 pending record uses the same strict mapping and
+entry/source digests, plus `source_identity` (device, inode, uid, gid,
+mode, size, mtime_ns, ctime_ns). The internal root-only issuance function
+accepts only a candidate identifier and explicit exact-route SHA-256
+consent. It reads `pending-ID.json` in the existing private registry,
+validates current catalog/source identity under the transaction lock,
+and publishes `candidate-ID.json` atomically with Linux RENAME_NOREPLACE.
+A fully revalidated identical approval is an idempotent no-op; a
+different or foreign existing record cannot be overwritten. A crash
+before publication can leave a private, unreferenced temporary file,
+never a valid approval; no automatic orphan deletion is claimed.
+Native validation rejects schema-1 approvals (retained only for private
+historical tests). Equal-content foreign source inodes cannot inherit
+schema-2 consent. No CLI or installer invokes issuance, no package sources
+are written, and the trusted pending-record preparer, SELinux-labelled
+state support, native commit and recovery still require implementation.

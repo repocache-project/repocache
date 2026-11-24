@@ -419,6 +419,9 @@ def _fetch_json(url: str, *, max_bytes: int, context: ssl.SSLContext | None = No
     # Never follow redirects or allow ambient proxy settings to redirect a
     # versioned local server catalog to an untrusted HTTP(S) destination.
     # Standard OS CA validation and hostname checking remain compulsory.
+    if context is not None and (context.verify_mode != ssl.CERT_REQUIRED
+                                or not context.check_hostname):
+        raise ClientError("Catalog TLS verification is required")
     req = Request(url, headers={"Accept": "application/json",
                                 "User-Agent": "repocache-client/0.4"})
     opener = build_opener(ProxyHandler({}), _RejectRedirects(),

@@ -2,7 +2,7 @@
 
 This module is intentionally NOT installed or called by repocache-client.
 No commit, restore, recover, source changes, root escalation or
-manifest-creation operations exist. Native validation re-fetches the active
+installed mutation operations exist. Native validation re-fetches the active
 catalog from the root-owned installed origin using explicit system CA trust. It prepares a privileged validation
 boundary while real APT/DNF, native package-manager exclusivity, SELinux and
 durable multi-file transaction requirements remain unsatisfied (#24).
@@ -11,11 +11,13 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ctypes
 import fcntl
 import hashlib
 import json
 import os
 import re
+import secrets
 import stat
 import ssl
 import sys
@@ -38,6 +40,9 @@ DIGEST = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
 MANIFEST_FIELDS = frozenset({
     "schema", "id", "source", "source_sha256", "entry_sha256",
     "upstream", "cache", "route_sha256",
+})
+SOURCE_IDENTITY_FIELDS = frozenset({
+    "device", "inode", "uid", "gid", "mode", "size", "mtime_ns", "ctime_ns",
 })
 
 
@@ -190,6 +195,15 @@ def _exclusive_lock(state_fd: int, owner: int) -> Iterator[None]:
             if (later.st_dev, later.st_ino) != (info.st_dev, info.st_ino):
                 raise BoundaryRefused("Transaction lock name changed")
             yield
+            current = os.fstat(fd)
+            named = os.stat(".transaction.lock", dir_fd=state_fd,
+                            follow_symlinks=False)
+            if ((current.st_dev, current.st_ino, current.st_mode, current.st_uid,
+                 current.st_nlink, current.st_ctime_ns) !=
+                (info.st_dev, info.st_ino, info.st_mode, info.st_uid,
+                 info.st_nlink, info.st_ctime_ns)
+                    or (named.st_dev, named.st_ino) != (info.st_dev, info.st_ino)):
+                raise BoundaryRefused("Transaction lock drift")
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
@@ -205,17 +219,21 @@ def _no_duplicate_fields(pairs: list[tuple[str, object]]) -> dict:
     return obj
 
 
-def _manifest(state_fd: int, ident: str) -> dict:
+def _manifest(state_fd: int, ident: str, *, pending: bool = False) -> dict:
     if not isinstance(ident, str) or not IDENT.fullmatch(ident):
         raise BoundaryRefused("Invalid protected candidate identifier")
-    name = "candidate-" + ident + ".json"
+    name = ("pending-" if pending else "candidate-") + ident + ".json"
     raw = _read_pinned(state_fd, name, MAX_MANIFEST)
     try:
         obj = json.loads(raw.decode("utf-8"), object_pairs_hook=_no_duplicate_fields)
     except (UnicodeError, ValueError) as exc:
         raise BoundaryRefused("Malformed protected approval") from exc
-    if (type(obj) is not dict or set(obj) != MANIFEST_FIELDS
-            or type(obj["schema"]) is not int or obj["schema"] != 1
+    if type(obj) is not dict or type(obj.get("schema")) is not int:
+        raise BoundaryRefused("Protected approval schema refused")
+    schema = obj["schema"]
+    if (schema not in (1, 2) or (pending and schema != 2)
+            or set(obj) != (MANIFEST_FIELDS if schema == 1 else
+                            MANIFEST_FIELDS | {"source_identity"})
             or type(obj["id"]) is not str or obj["id"] != ident
             or type(obj["source"]) is not str
             or not pre.SOURCE_PATH.fullmatch(obj["source"])
@@ -224,6 +242,14 @@ def _manifest(state_fd: int, ident: str) -> dict:
                    for k in ("source_sha256", "entry_sha256", "route_sha256"))
             or any(type(obj[k]) is not str for k in ("upstream", "cache"))):
         raise BoundaryRefused("Protected approval schema refused")
+    if schema == 2:
+        identity = obj["source_identity"]
+        if (type(identity) is not dict or set(identity) != SOURCE_IDENTITY_FIELDS
+                or any(type(value) is not int for value in identity.values())
+                or identity["uid"] != 0 or identity["inode"] <= 0
+                or not 0 <= identity["size"] <= pre.MAX_SOURCE_BYTES
+                or identity["mode"] not in (0o600, 0o640, 0o644)):
+            raise BoundaryRefused("Protected source identity refused")
     return obj
 
 
@@ -345,58 +371,169 @@ def _current_route(record: dict, root: Path) -> str:
         raise BoundaryRefused("Current authenticated catalog validation refused") from exc
 
 
-def validate(ident: str, *, _test_root: Path | None = None) -> dict:
-    """Verify one immutable local approval and source in a root-only boundary.
+def _validate_record(root: Path, state_fd: int, ident: str, record: dict,
+                     *, pending: bool = False, current_catalog: bool = False):
+    """Validate under the caller's protected client lock, never grant writes."""
+    if hashlib.sha256(record["cache"].encode("utf-8")).hexdigest() != record["route_sha256"]:
+        raise BoundaryRefused("Exact cache route approval is stale")
+    if current_catalog and record["schema"] != 2:
+        raise BoundaryRefused("Native approval requires bound source inode identity")
+    try:
+        before = pre.inspect_source(record["source"], root=root)
+        if before["sha256"] != record["source_sha256"]:
+            raise BoundaryRefused("Original source baseline does not match")
+        if record["schema"] == 2 and record["source_identity"] != {
+                field: before[field] for field in SOURCE_IDENTITY_FIELDS}:
+            raise BoundaryRefused("Approved source inode identity changed")
+        if before["extended_attributes_present"]:
+            raise BoundaryRefused("Unreviewed source security metadata")
+        raw = _source_bytes(root, record["source"], before)
+        chunks = entries.boundaries(record["source"], raw)
+        if len([x for x in chunks
+                if x["sha256"] == record["entry_sha256"]
+                and x["structure_subset_pass"]]) != 1:
+            raise BoundaryRefused("Approved source entry not unique")
+        proposal = fallback.compile_fallback(
+            source=record["source"], original=raw,
+            expected_source_sha256=record["source_sha256"],
+            selected_entry_sha256=record["entry_sha256"],
+            managed_id=ident, upstream=record["upstream"],
+            cache=record["cache"])
+        route_origin = _current_route(record, root) if current_catalog else None
+        if _manifest(state_fd, ident, pending=pending) != record:
+            raise BoundaryRefused("Protected approval changed during validation")
+        if route_origin is not None and client._server(
+                client._installed_server_config(root)) != route_origin:
+            raise BoundaryRefused("Installed origin changed during validation")
+        after = pre.inspect_source(record["source"], root=root)
+        if before != after:
+            raise BoundaryRefused("Source drift during protected validation")
+    except (pre.PreflightError, entries.EntryRefused,
+            fallback.FallbackRefused, OSError, ValueError) as exc:
+        raise BoundaryRefused("Protected source validation refused") from exc
+    return proposal, route_origin
 
-    No manifest value or proposed source URL becomes authority to commit.
+
+def _rename_noreplace(state_fd: int, temporary: str, target: str) -> None:
+    """Linux atomic publication without replacing an existing approval."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    try:
+        rename = libc.renameat2
+    except AttributeError as exc:
+        raise BoundaryRefused("Atomic no-replace publication unavailable") from exc
+    rename.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
+                       ctypes.c_char_p, ctypes.c_uint)
+    rename.restype = ctypes.c_int
+    if rename(state_fd, os.fsencode(temporary), state_fd,
+              os.fsencode(target), 1) != 0:  # RENAME_NOREPLACE
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+
+
+def _publish_approval(state_fd: int, ident: str, record: dict) -> str:
+    """Durably publish an immutable root-owned record, never replace consent.
+
+    A crash before rename may leave a private unreferenced temporary file.
+    Such a file is not an approval and is never automatically reused.
+    A retry after rename revalidates the entire record before idempotence.
     """
+    if not IDENT.fullmatch(ident) or record.get("id") != ident or record.get("schema") != 2:
+        raise BoundaryRefused("Invalid protected approval publication")
+    target = "candidate-" + ident + ".json"
+    payload = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    if not 0 < len(payload) <= MAX_MANIFEST:
+        raise BoundaryRefused("Protected approval exceeds size limit")
+    try:
+        existing = os.stat(target, dir_fd=state_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        existing = None
+    if existing is not None:
+        if _manifest(state_fd, ident) != record:
+            raise BoundaryRefused("Existing approval is immutable")
+        os.fsync(state_fd)
+        return "unchanged"
+
+    temporary = ".approval-" + ident + "-" + secrets.token_hex(16)
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                 os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=state_fd)
+    identity = None
+    try:
+        info = os.fstat(fd)
+        identity = (info.st_dev, info.st_ino)
+        if info.st_uid != 0 or info.st_nlink != 1 or os.listxattr(fd):
+            raise BoundaryRefused("Unsafe staged approval metadata")
+        os.fchmod(fd, 0o600)
+        offset = 0
+        while offset < len(payload):
+            written = os.write(fd, payload[offset:])
+            if written <= 0:
+                raise BoundaryRefused("Incomplete protected approval write")
+            offset += written
+        os.fsync(fd)
+        named = os.stat(temporary, dir_fd=state_fd, follow_symlinks=False)
+        if (named.st_dev, named.st_ino) != identity:
+            raise BoundaryRefused("Staged approval inode changed")
+        try:
+            _rename_noreplace(state_fd, temporary, target)
+        except FileExistsError as exc:
+            raise BoundaryRefused("Existing approval cannot be replaced") from exc
+        os.fsync(state_fd)
+        if _manifest(state_fd, ident) != record:
+            raise BoundaryRefused("Published approval readback failed")
+        return "approved"
+    finally:
+        os.close(fd)
+        try:
+            named = os.stat(temporary, dir_fd=state_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            if identity == (named.st_dev, named.st_ino):
+                os.unlink(temporary, dir_fd=state_fd)
+                os.fsync(state_fd)
+
+
+def approve_current_candidate(ident: str, route_sha256: str, *,
+                              _test_root: Path | None = None) -> dict:
+    """Internal, uninstalled administrative issuance; no package source writes.
+
+    A trusted preparer must have created a root-owned schema-2 pending record.
+    Explicit exact route consent is a digest, not an arbitrary URI or recipe.
+    The installed CLI has no entry point to this function.
+    """
+    if os.getresuid() != (0, 0, 0):
+        raise BoundaryRefused("Root OS authorization required")
+    if (type(ident) is not str or not IDENT.fullmatch(ident)
+            or type(route_sha256) is not str or not DIGEST.fullmatch(route_sha256)):
+        raise BoundaryRefused("Invalid fixed approval arguments")
+    root = Path("/") if _test_root is None else Path(_test_root)
+    with _state(root) as (state_fd, owner):
+        with _exclusive_lock(state_fd, owner):
+            record = _manifest(state_fd, ident, pending=True)
+            if record["route_sha256"] != route_sha256:
+                raise BoundaryRefused("Exact route consent does not match pending proposal")
+            _validate_record(root, state_fd, ident, record,
+                             pending=True, current_catalog=True)
+            status = _publish_approval(state_fd, ident, record)
+            return {"schema": 1, "status": status, "managed_id": ident,
+                    "installed": False, "write_eligible": False}
+
+
+def validate(ident: str, *, _test_root: Path | None = None) -> dict:
+    """Verify one immutable local approval and source in a root-only boundary."""
     root = Path("/") if _test_root is None else Path(_test_root)
     with _state(root) as (state_fd, owner):
         with _exclusive_lock(state_fd, owner):
             record = _manifest(state_fd, ident)
-            if hashlib.sha256(record["cache"].encode("utf-8")).hexdigest() != record["route_sha256"]:
-                raise BoundaryRefused("Exact cache route approval is stale")
-            try:
-                before = pre.inspect_source(record["source"], root=root)
-                if before["sha256"] != record["source_sha256"]:
-                    raise BoundaryRefused("Original source baseline does not match")
-                # Until native SELinux/ACL preservation is proven, even a
-                # read-only positive does not bless a labelled host writer.
-                if before["extended_attributes_present"]:
-                    raise BoundaryRefused("Unreviewed source security metadata")
-                raw = _source_bytes(root, record["source"], before)
-                chunks = entries.boundaries(record["source"], raw)
-                if len([x for x in chunks
-                        if x["sha256"] == record["entry_sha256"]
-                        and x["structure_subset_pass"]]) != 1:
-                    raise BoundaryRefused("Approved source entry not unique")
-                proposal = fallback.compile_fallback(
-                    source=record["source"], original=raw,
-                    expected_source_sha256=record["source_sha256"],
-                    selected_entry_sha256=record["entry_sha256"],
-                    managed_id=ident, upstream=record["upstream"],
-                    cache=record["cache"])
-                # Native inspection must not rely on a caller's catalog or
-                # on an old approval alone. Historical private fixture tests
-                # remain offline and explicitly report no current route proof.
-                route_origin = _current_route(record, root) if root == Path("/") else None
-                if _manifest(state_fd, ident) != record:
-                    raise BoundaryRefused("Protected approval changed during validation")
-                if route_origin is not None and client._server(
-                        client._installed_server_config(root)) != route_origin:
-                    raise BoundaryRefused("Installed origin changed during validation")
-                after = pre.inspect_source(record["source"], root=root)
-                if before != after:
-                    raise BoundaryRefused("Source drift during protected validation")
-            except (pre.PreflightError, entries.EntryRefused,
-                    fallback.FallbackRefused, OSError, ValueError) as exc:
-                raise BoundaryRefused("Protected source validation refused") from exc
+            proposal, route_origin = _validate_record(
+                root, state_fd, ident, record, current_catalog=root == Path("/"))
             return {
                 "schema": 1, "status": "validated-read-only",
                 "managed_id": ident,
                 "source_digest_matched": True,
                 "entry_digest_matched": True,
                 "route_digest_matched": True,
+                "source_inode_identity_matched": record["schema"] == 2,
                 "current_active_catalog_route_matched": route_origin is not None,
                 "fallback_plan_generated": True,
                 "multi_file_changes_required": proposal.companion is not None,

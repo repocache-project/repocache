@@ -220,3 +220,15 @@ def test_explicit_or_installed_client_server_origin_refuses_noncanonical_authori
 ])
 def test_canonical_origin_remains_compatible_with_existing_cli_config(good):
     assert client._server(good) == good.rstrip("/")
+
+
+def test_explicit_catalog_tls_context_cannot_disable_verification(monkeypatch):
+    import ssl
+
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    monkeypatch.setattr(client, "build_opener", lambda *_:
+                        pytest.fail("Insecure TLS context reached transport"))
+    with pytest.raises(client.ClientError, match="verification is required"):
+        client._fetch_json(URL, max_bytes=512, context=context)

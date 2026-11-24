@@ -221,8 +221,6 @@ def test_labelled_source_and_lock_xattrs_fail_closed(tmp_path):
     "prefix-only", "foreign-origin", "legacy", "origin-drift", "offline",
 ])
 def test_current_route_requires_exact_fresh_authenticated_mapping(monkeypatch, mode):
-    from types import SimpleNamespace
-
     monkeypatch.setattr(helper.os, "getresuid", lambda: (0, 0, 0))
     upstream = "https://deb.example.org/debian/"
     cache = CACHE
@@ -285,3 +283,99 @@ def test_native_tls_context_refuses_unsupported_target(monkeypatch):
     })
     with pytest.raises(helper.BoundaryRefused):
         helper._native_tls_context()
+
+
+def _pending_v2(root):
+    record, source, approval, lock = private_fixture(root)
+    snapshot = helper.pre.inspect_source(record["source"], root=root)
+    record["schema"] = 2
+    record["source_identity"] = {
+        key: snapshot[key] for key in helper.SOURCE_IDENTITY_FIELDS
+    }
+    pending = approval.with_name("pending-" + IDENT + ".json")
+    approval.rename(pending)
+    pending.write_text(json.dumps(record))
+    pending.chmod(0o600)
+    return record, source, pending, approval, lock
+
+
+def _mock_current_route(monkeypatch):
+    monkeypatch.setattr(helper, "_current_route", lambda *_: "https://cache.example.org")
+    monkeypatch.setattr(helper.client, "_installed_server_config",
+                        lambda *_: "https://cache.example.org")
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="Real root-only approval fixture")
+def test_exact_consent_issues_durable_immutable_approval_without_source_change(
+        tmp_path, monkeypatch):
+    record, source, pending, approval, lock = _pending_v2(tmp_path)
+    _mock_current_route(monkeypatch)
+    before = source.stat()
+    with pytest.raises(helper.BoundaryRefused, match="consent"):
+        helper.approve_current_candidate(IDENT, "0" * 64, _test_root=tmp_path)
+    assert not approval.exists()
+    assert helper.approve_current_candidate(
+        IDENT, record["route_sha256"], _test_root=tmp_path)["status"] == "approved"
+    assert json.loads(approval.read_text()) == record
+    assert approval.stat().st_uid == 0
+    assert stat.S_IMODE(approval.stat().st_mode) == 0o600
+    assert approval.stat().st_nlink == 1
+    inode = approval.stat().st_ino
+    assert helper.approve_current_candidate(
+        IDENT, record["route_sha256"], _test_root=tmp_path)["status"] == "unchanged"
+    assert approval.stat().st_ino == inode
+    assert helper.validate(IDENT, _test_root=tmp_path)["source_inode_identity_matched"]
+    after = source.stat()
+    assert source.read_bytes() == APT.encode()
+    assert (before.st_ino, before.st_mtime_ns, before.st_ctime_ns) == (
+        after.st_ino, after.st_mtime_ns, after.st_ctime_ns)
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="Real root-only approval fixture")
+def test_same_bytes_foreign_inode_cannot_reuse_pending_or_issued_approval(
+        tmp_path, monkeypatch):
+    record, source, pending, approval, lock = _pending_v2(tmp_path)
+    _mock_current_route(monkeypatch)
+    helper.approve_current_candidate(IDENT, record["route_sha256"], _test_root=tmp_path)
+    replacement = source.with_name("foreign.list")
+    replacement.write_bytes(source.read_bytes())
+    replacement.chmod(0o644)
+    os.replace(replacement, source)
+    with pytest.raises(helper.BoundaryRefused, match="inode identity"):
+        helper.approve_current_candidate(
+            IDENT, record["route_sha256"], _test_root=tmp_path)
+    with pytest.raises(helper.BoundaryRefused, match="inode identity"):
+        helper.validate(IDENT, _test_root=tmp_path)
+    assert json.loads(approval.read_text()) == record
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="Real root-only approval fixture")
+def test_route_failure_and_concurrent_publication_preserve_existing_state(
+        tmp_path, monkeypatch):
+    record, source, pending, approval, lock = _pending_v2(tmp_path)
+    def denied(*_):
+        raise helper.BoundaryRefused("Route unavailable")
+    monkeypatch.setattr(helper, "_current_route", denied)
+    with pytest.raises(helper.BoundaryRefused, match="Route unavailable"):
+        helper.approve_current_candidate(IDENT, record["route_sha256"], _test_root=tmp_path)
+    assert not approval.exists()
+    _mock_current_route(monkeypatch)
+    real_rename = helper._rename_noreplace
+    def race(fd, temporary, target):
+        approval.write_bytes(b"foreign")
+        approval.chmod(0o600)
+        real_rename(fd, temporary, target)
+    monkeypatch.setattr(helper, "_rename_noreplace", race)
+    with pytest.raises(helper.BoundaryRefused, match="cannot be replaced"):
+        helper.approve_current_candidate(IDENT, record["route_sha256"], _test_root=tmp_path)
+    assert approval.read_bytes() == b"foreign"
+    assert not list(approval.parent.glob(".approval-*"))
+    assert source.read_bytes() == APT.encode()
+
+
+def test_approval_issuance_refuses_nonroot_before_state_access(monkeypatch):
+    monkeypatch.setattr(helper.os, "getresuid", lambda: (1000, 0, 0))
+    monkeypatch.setattr(helper, "_state", lambda *_:
+                        pytest.fail("unprivileged approval reached state"))
+    with pytest.raises(helper.BoundaryRefused, match="Root OS authorization"):
+        helper.approve_current_candidate(IDENT, "a" * 64)
