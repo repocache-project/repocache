@@ -151,6 +151,174 @@ def verify_signed_runtime_mode_refusal(expected_pid: int) -> None:
     print("PASS: installed signed unit mode drift refused, fixed bootstrap health preserved", flush=True)
 
 
+
+def run_live_wal(distribution: str, operation: str) -> None:
+    """Actual installed signed-test archive in a disposable initial-root VM.
+
+    Deliberately not a socket dispatch test. This gives independent native
+    evidence of the WAL/reload/TLS sequence before changing broker authority.
+    Only the injected failure point is synthetic; reload and health are real.
+    """
+    code = """
+import os
+import sys
+sys.path.insert(0, "/usr/libexec/repocache/server-control-worker")
+from repocache import server_native_v2_transaction_v1 as tx
+from repocache.server_protected_state_store_v1 import _locked
+from repocache.server_protected_state_inspect_v1 import _DIRECTORY_FLAGS
+from repocache.server_root_control_host_preflight_v1 import require_native_host_preconditions
+assert require_native_host_preconditions()["initial_root_credentials_observed"] is True
+distribution, operation = sys.argv[1:]
+root = os.open("/", _DIRECTORY_FLAGS)
+try:
+    with _locked(root, 0) as state:
+        tx._require_audited_native_package_for_activation(state, distribution=distribution)
+        with tx._owned_layout_locked(root, state, recovering=operation == "recover") as layout:
+            if operation == "fail-reload":
+                actual = tx._owned_live_reload
+                calls = []
+                def fail_once(*args):
+                    calls.append(1)
+                    if len(calls) == 1:
+                        raise tx.NativeV2TransactionError("NATIVE_V2_DISPOSABLE_RELOAD_FAULT")
+                    return actual(*args)
+                tx._owned_live_reload = fail_once
+                try:
+                    tx._apply_prepared_owned_live_locked(root, *layout, distribution)
+                except tx.NativeV2TransactionError as error:
+                    assert str(error) == "NATIVE_V2_OWNED_LIVE_APPLY_ROLLED_BACK", str(error)
+                    assert len(calls) == 2
+                else:
+                    raise AssertionError("Injected reload fault committed")
+            elif operation == "interrupt":
+                actual = tx._owned_live_wait_generation
+                def interrupt(*args):
+                    actual(*args)
+                    os._exit(77)
+                tx._owned_live_wait_generation = interrupt
+                tx._apply_prepared_owned_live_locked(root, *layout, distribution)
+                raise AssertionError("Did not interrupt at confirmed new generation")
+            elif operation in ("apply", "repeat"):
+                result = tx._apply_prepared_owned_live_locked(root, *layout, distribution)
+                assert result["status"] == ("OWNED_LIVE_COMMIT_OBSERVED" if operation == "apply"
+                                            else "OWNED_LIVE_NO_CHANGE"), result["status"]
+                assert result["state_generation"] == 1
+            elif operation == "reload":
+                result = tx._reload_owned_live_committed_locked(root, *layout)
+                assert result == {"status": "OWNED_LIVE_RELOADED", "state_generation": 1}
+            elif operation == "recover":
+                result = tx._recover_owned_live_locked(root, *layout)
+                assert result["status"] == "OWNED_LIVE_ROLLBACK_OBSERVED"
+            else:
+                raise AssertionError("Unknown test operation")
+finally:
+    os.close(root)
+"""
+    outcome = subprocess.run(
+        ["/usr/bin/python3", "-IS", "-B", "-c", code, distribution, operation],
+        stdin=subprocess.DEVNULL, capture_output=True, text=True,
+        env={"PATH": "/usr/sbin:/usr/bin:/bin", "LC_ALL": "C"},
+        cwd="/", timeout=180, check=False,
+    )
+    if outcome.returncode != (77 if operation == "interrupt" else 0):
+        import re
+        for code in re.findall(
+                r"(?:NATIVE_V2|NATIVE_NGINX|NATIVE_HOST|PINNED_TLS_PAIR|FIXED_ADMIN_CANDIDATE|PROTECTED)_[A-Z0-9_]+",
+                outcome.stderr):
+            print("LIVE_WAL_DIAGNOSTIC: " + code, flush=True)
+        raise AssertionError("Actual signed-test live WAL operation failed: " + operation)
+
+
+def live_wal_resource_hashes() -> dict[str, str]:
+    paths = (
+        STATE / "state-v2.json", STATE / ".state-v2-owned-nginx.manifest",
+        OWN_CONFIG, Path("/etc/nginx/repocache-managed.conf"),
+        Path("/var/lib/repocache/public/catalog.json"),
+    )
+    return {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
+
+
+def prepare_and_interrupt_live_wal(distribution: str, native, assets, pins) -> None:
+    import base64
+    from scripts.ci_pr237_native_socket_guest import synthetic_local_tls, https_response
+
+    synthetic_local_tls(distribution)
+    document = json.loads((ROOT / "reviewed-install.json").read_bytes())
+    assert all(row["desired_state"] == "disabled" for row in document["repositories"])
+    document["deployment"]["paths"]["generated_include"] = "/etc/nginx/repocache-managed.conf"
+    reviewed = ROOT / "reviewed-owned-live.json"
+    proposal = ROOT / "reviewed-owned-proposal.json"
+    reviewed.write_text(json.dumps(document), encoding="ascii")
+    reviewed.chmod(0o600)
+    prepared = native.prepare_authenticated_proposal(
+        assets, reviewed, proposal, decision_sha256="a" * 64, **pins,
+    )
+    assert prepared["state_generation"] == 1
+    staged = native.stage_authenticated_proposal(
+        assets, proposal, proposal_sha256=prepared["proposed_state_sha256"], **pins,
+    )
+    assert staged["expected_generation"] == 0
+    bootstrap = OWN_CONFIG.read_bytes()
+    run_live_wal(distribution, "fail-reload")
+    assert OWN_CONFIG.read_bytes() == bootstrap
+    assert not (STATE / "state-v2.json").exists()
+    assert not (STATE / ".state-v2-owned-nginx.pending").exists()
+    loopback_response()
+    print("PASS: actual dedicated WAL failure compensation restores private bootstrap", flush=True)
+
+    run_live_wal(distribution, "apply")
+    old = live_wal_resource_hashes()
+    run_live_wal(distribution, "repeat")
+    run_live_wal(distribution, "reload")
+    assert live_wal_resource_hashes() == old
+    assert b"x-repocache-generation: 1" in https_response("/__repocache/healthz").lower()
+    catalog = Path("/var/lib/repocache/public/catalog.json").read_bytes()
+    assert https_response("/.well-known/repocache/catalog.json").endswith(catalog)
+    assert not (STATE / ".state-v2-owned-nginx.pending").exists()
+    print("PASS: actual installed signed-test dedicated WAL commits TLS generation and exact catalog, repeat and reload preserve resources", flush=True)
+    prior = STATE / "state-v2.json"
+    prior_raw = prior.read_bytes()
+    repair = json.loads(base64.b64decode(json.loads(prior_raw)["configuration_base64"], validate=True))
+    repair["deployment"]["logging"]["retention_days"] += 1
+    repair_file = ROOT / "reviewed-owned-repair.json"
+    repair_file.write_text(json.dumps(repair), encoding="ascii")
+    repair_file.chmod(0o600)
+    proposal2 = ROOT / "reviewed-owned-proposal2.json"
+    prepared = native.prepare_authenticated_proposal(
+        assets, repair_file, proposal2, previous=prior,
+        previous_sha256=hashlib.sha256(prior_raw).hexdigest(),
+        decision_sha256="b" * 64, **pins,
+    )
+    assert prepared["state_generation"] == 2
+    staged = native.stage_authenticated_proposal(
+        assets, proposal2, proposal_sha256=prepared["proposed_state_sha256"],
+        expected_state_sha256=hashlib.sha256(prior_raw).hexdigest(), **pins,
+    )
+    assert staged["expected_generation"] == 1
+    assert live_wal_resource_hashes() == old
+    run_live_wal(distribution, "interrupt")
+    assert (STATE / ".state-v2-owned-nginx.pending").is_file()
+    assert not Path("/var/lib/repocache/public/catalog.json").exists()
+    assert b"x-repocache-generation: 2" in https_response("/__repocache/healthz").lower()
+    (ROOT / "owned-live-prior-hashes.json").write_text(json.dumps(old, sort_keys=True))
+    print("PASS: actual dedicated generation-two reload interrupted with durable WAL and catalog withdrawn", flush=True)
+
+
+def recover_live_wal_after_reboot(distribution: str) -> None:
+    from scripts.ci_pr237_native_socket_guest import https_response
+
+    assert (STATE / ".state-v2-owned-nginx.pending").is_file()
+    assert not Path("/var/lib/repocache/public/catalog.json").exists()
+    old = json.loads((ROOT / "owned-live-prior-hashes.json").read_text())
+    run_live_wal(distribution, "recover")
+    assert live_wal_resource_hashes() == old
+    assert not (STATE / ".state-v2-owned-nginx.pending").exists()
+    assert b"x-repocache-generation: 1" in https_response("/__repocache/healthz").lower()
+    catalog = Path("/var/lib/repocache/public/catalog.json").read_bytes()
+    assert https_response("/.well-known/repocache/catalog.json").endswith(catalog)
+    print("PASS: actual dedicated WAL recovery after kernel reboot restores prior TLS generation and catalog", flush=True)
+
+
 def verify_guest(distribution: str, phase: str) -> None:
     assert os.getresuid() == (0, 0, 0)
     assert Path("/proc/1/comm").read_text().strip() == "systemd"
@@ -285,23 +453,23 @@ def verify_guest(distribution: str, phase: str) -> None:
             "owned_config_sha256": hashlib.sha256(OWN_CONFIG.read_bytes()).hexdigest(),
         }, sort_keys=True))
         print("PASS: own signed systemd unit enabled and active, vendor unchanged, real PID and loopback HTTP 204", flush=True)
+        prepare_and_interrupt_live_wal(distribution, native, assets, pins)
     elif phase == "after":
         original = json.loads((ROOT / "native-activation-integrity.json").read_text())
         assert hashlib.sha256(completion.read_bytes()).hexdigest() == original["receipt_sha256"]
         assert hashlib.sha256(VENDOR_CONFIG.read_bytes()).hexdigest() == original["vendor_config_sha256"]
-        assert hashlib.sha256(OWN_CONFIG.read_bytes()).hexdigest() == original["owned_config_sha256"]
         require_status(OWN, True, True)
         require_status(VENDOR, False, False)
         assert native._own_service_observation(active=True)["main_pid_observed"] > 1
-        loopback_response()
-        verify_signed_runtime(native._own_service_observation(active=True)["main_pid_observed"])
-        print("PASS: installed signed worker reverified exact unit and bootstrap health after reboot", flush=True)
-        again = native.activate_authenticated_native_nginx(assets, **pins)
-        assert again["status"] == "AUTHENTICATED_REPOCACHE_NGINX_ALREADY_ACTIVE"
+        recover_live_wal_after_reboot(distribution)
+        require_status(OWN, True, True)
+        require_status(VENDOR, False, False)
+        assert hashlib.sha256(VENDOR_CONFIG.read_bytes()).hexdigest() == original["vendor_config_sha256"]
+        assert hashlib.sha256(completion.read_bytes()).hexdigest() == original["receipt_sha256"]
         assert inspect_stock_nginx_package_file_integrity()[
             "native_package_file_integrity_verified"] is True
         print("PASS: separate REPOCACHE service survives real reboot with vendor service disabled and package integrity intact", flush=True)
-        print("NOT VERIFIED: managed HTTPS/v2, full deployment, final publisher-signed release", flush=True)
+        print("NOT VERIFIED: confined socket dispatch, active repository routes/storage, managed installer repair, final publisher-signed release", flush=True)
     else:
         raise AssertionError("invalid test phase")
 
