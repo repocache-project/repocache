@@ -20,6 +20,8 @@ import threading
 import time
 from http.server import ThreadingHTTPServer
 
+from ci_v06_vm_cache_eviction import observe_native_capacity
+
 from ci_native_nginx_cache_smoke import (
     FIXTURES, check_candidate_syntax, config, free_port, make_backend,
     request, require, run,
@@ -217,6 +219,16 @@ def main(platform: str) -> None:
         ["/usr/bin/systemctl", "is-active", "--quiet", "nginx.service"],
         check=False, timeout=5,
     ).returncode != 0
+    observe_native_capacity(nginx)
+    # The separate root wrapper verifies native identity and private mount
+    # propagation before creating only two disposable 4 MiB tmpfs mounts.
+    subprocess.run(
+        ["/usr/bin/sudo", "/usr/bin/unshare", "--mount", "--propagation", "private",
+         "/usr/bin/env", "PYTHONPATH=/home/pr237ci/source/src",
+         "/usr/bin/python3", "-B",
+         "/home/pr237ci/source/scripts/ci_v06_vm_cache_pressure_guest.py", platform],
+        check=True, timeout=400,
+    )
     print("PASS: booted native VM stock NGINX disposable HTTPS APT/DNF MISS/HIT")
     print("NOT VERIFIED: authentic APT/DNF signatures, native package manager, "
           "managed route/SELinux context, persistent cache, client fallback")

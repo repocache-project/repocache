@@ -26,7 +26,6 @@ from repocache.server_native_metrics_logrotate_candidate_v1 import render_native
 _GUARD = "REPOCACHE_DISPOSABLE_NGINX_ROTATION_CI"
 _ROUTE = "/__repocache/repos/debian-trixie-main/"
 _LOG = "/var/log/nginx/repocache-managed/metrics.jsonl"
-_REOPEN = "/usr/bin/systemctl kill --kill-who=main --signal=USR1 nginx.service"
 _SECRET = "opaque_private_query_must_not_log"
 
 
@@ -150,13 +149,18 @@ def main() -> None:
                success=False)
 
         profile = rotation["rotation_candidate"]
-        assert profile.count(_LOG) == profile.count(_REOPEN) == 1
-        # Only this disposable fixture substitutes the production root path,
-        # systemd signal and file UID. Never publish this as a host profile.
+        assert profile.count(_LOG) == 1 and "postrotate" not in profile
+        assert not rotation["authorizes_standalone_scheduled_rotation"]
+        # Only this disposable fixture inserts a private reopen hook and
+        # substitutes the production root path and file UID.
         profile = profile.replace(_LOG, str(log)).replace(
-            _REOPEN, f"/usr/sbin/nginx -s reopen -p {root} -c {conf}"
-        ).replace("create 0600 root root",
-                  f"create 0600 {os.geteuid()} {os.getegid()}")
+            "create 0600 root root", f"create 0600 {os.geteuid()} {os.getegid()}")
+        assert profile.endswith("}\n")
+        profile = profile[:-2] + (
+            "    postrotate\n"
+            f"        /usr/sbin/nginx -s reopen -p {root} -c {conf}\n"
+            "    endscript\n}\n"
+        )
         rotate_conf.write_text(profile, encoding="utf-8")
 
         old_umask = os.umask(0o077)

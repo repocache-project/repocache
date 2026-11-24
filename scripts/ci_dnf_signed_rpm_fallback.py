@@ -130,7 +130,18 @@ def _signed_fixture(base: Path) -> tuple[Path, Path, bytes, Path]:
     # native RPM's own signature check after each successful download.
     rpmdb = base / "rpmdb"
     rpmdb.mkdir()
-    _run(["rpm", "--dbpath", str(rpmdb), "--initdb"])
+    # Preserve a bounded native diagnostic for this disposable operation.
+    # No trust-store relaxation, SELinux change or host RPMDB fallback.
+    init = subprocess.run(
+        ["rpm", "--dbpath", str(rpmdb), "--initdb"],
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        timeout=120, check=False,
+    )
+    if init.returncode != 0:
+        raise RuntimeError(
+            "Isolated RPMDB initialization failed; exit=" + str(init.returncode)
+            + "; output=" + init.stdout[-2000:]
+        )
     _run(["rpm", "--dbpath", str(rpmdb), "--import", str(public_key)])
     check = _run(["rpm", "--dbpath", str(rpmdb), "-Kv", str(package)])
     if not _rpm_signature_verified(check):
