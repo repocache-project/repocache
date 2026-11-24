@@ -87,7 +87,33 @@ def _rpm_signature_verified(output: str) -> bool:
     )
 
 
-def _signed_fixture(base: Path) -> tuple[Path, Path, bytes, Path]:
+def _label_isolated_rpmdb(rpmdb: Path) -> None:
+    """Apply the distro's RPMDB label to the empty disposable DB only.
+
+    In an enforcing guest rpm runs in its confined domain and cannot create
+    a transaction lock in an ordinary tmp_t directory. Use the actual
+    distro RPMDB directory as a label reference, not as a database.
+    Never relabel a host path or disable enforcement.
+    """
+    if (rpmdb.parent.parent != Path("/tmp")
+            or not rpmdb.parent.name.startswith("repocache-dnf-signed-rpm-")
+            or rpmdb.name != "rpmdb" or rpmdb.resolve(strict=True) != rpmdb
+            or rpmdb.stat().st_uid != 0 or any(rpmdb.iterdir())):
+        raise RuntimeError("Unsafe isolated RPMDB label target")
+    if _run(["getenforce"]).strip() != "Enforcing":
+        raise RuntimeError("Booted RPM fixture requires SELinux Enforcing")
+    reference = Path("/usr/lib/sysimage/rpm")
+    if not reference.is_dir():
+        raise RuntimeError("Native RPMDB label reference missing")
+    expected = os.getxattr(reference, "security.selinux")
+    if expected.split(b":")[2] != b"rpm_var_lib_t":
+        raise RuntimeError("Unexpected native RPMDB label type")
+    _run(["chcon", "--reference=" + str(reference), str(rpmdb)])
+    if os.getxattr(rpmdb, "security.selinux") != expected:
+        raise RuntimeError("Isolated RPMDB label verification failed")
+
+
+def _signed_fixture(base: Path, *, booted_vm: bool = False) -> tuple[Path, Path, bytes, Path]:
     """Build no-script RPM, sign with *ephemeral CI* key, sign generated repodata."""
     public_key = native.dnf_repository(base, signed=True)
     assert public_key is not None
@@ -129,7 +155,9 @@ def _signed_fixture(base: Path) -> tuple[Path, Path, bytes, Path]:
     # No host RPMDB: only a temporary, disposable trust store is used for
     # native RPM's own signature check after each successful download.
     rpmdb = base / "rpmdb"
-    rpmdb.mkdir()
+    rpmdb.mkdir(mode=0o700)
+    if booted_vm:
+        _label_isolated_rpmdb(rpmdb)
     # Preserve a bounded native diagnostic for this disposable operation.
     # No trust-store relaxation, SELinux change or host RPMDB fallback.
     init = subprocess.run(
@@ -169,14 +197,14 @@ def probe_booted_vm() -> None:
     from ci_v06_vm_signed_client_guest import guarded_native_guest
 
     guarded_native_guest("almalinux10")
-    _probe_signed_rpm()
+    _probe_signed_rpm(booted_vm=True)
 
 
-def _probe_signed_rpm() -> None:
-    with tempfile.TemporaryDirectory(prefix="repocache-dnf-signed-rpm-") as folder:
+def _probe_signed_rpm(*, booted_vm: bool = False) -> None:
+    with tempfile.TemporaryDirectory(prefix="repocache-dnf-signed-rpm-", dir="/tmp") as folder:
         base = Path(folder)
         (base / "www").mkdir()
-        key, rpm_file, expected_bytes, rpmdb = _signed_fixture(base)
+        key, rpm_file, expected_bytes, rpmdb = _signed_fixture(base, booted_vm=booted_vm)
         certificate, private_key = native.temporary_tls_identity(base, "rpm")
         wrong_ca, _ = native.temporary_tls_identity(base, "foreign")
         primary = native.HTTPBackend(

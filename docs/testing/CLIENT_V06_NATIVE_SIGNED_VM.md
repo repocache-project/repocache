@@ -56,3 +56,11 @@ publisher Ed25519 artifact acceptance and publication are separately
 authorized Stage C (#76/#88). If a guest's signed metadata or
 rejection/provenance checks fail, its QEMU job must fail rather than
 claiming an accepted host.
+
+
+The booted AlmaLinux RPM fixture uses the native RPMDB directory solely as
+a SELinux label reference for the empty root-owned disposable RPMDB.
+It verifies Enforcing and the exact rpm_var_lib_t label before running
+rpm --initdb, with no host RPMDB fallback or policy relaxation. Container
+tests do not relabel. This addresses the observed isolated .rpm.lock
+permission error; successful execution on the new HEAD remains required.

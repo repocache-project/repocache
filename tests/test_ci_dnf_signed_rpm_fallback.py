@@ -107,6 +107,13 @@ def test_booted_rpm_probe_calls_fixture_after_guard(monkeypatch):
                         SimpleNamespace(guarded_native_guest=lambda platform:
                                         calls.append(platform)))
     monkeypatch.setattr(rpm_probe, "_probe_signed_rpm",
-                        lambda: calls.append("fixture"))
+                        lambda *, booted_vm=False: calls.append(("fixture", booted_vm)))
     rpm_probe.probe_booted_vm()
-    assert calls == ["almalinux10", "fixture"]
+    assert calls == ["almalinux10", ("fixture", True)]
+
+
+def test_isolated_rpmdb_label_refuses_host_database_before_commands(monkeypatch):
+    monkeypatch.setattr(rpm_probe, "_run", lambda *_:
+                        pytest.fail("unsafe label target reached command"))
+    with pytest.raises(RuntimeError, match="Unsafe isolated"):
+        rpm_probe._label_isolated_rpmdb(Path("/usr/lib/sysimage/rpm"))
