@@ -487,14 +487,15 @@ def _ensure_fixed_nginx_cache_parent_under_root(root_fd: int, *, owner_uid: int 
 
 
 _OWN_UNIT = "repocache-nginx.service"
-_OWN_CONFIG = "/etc/nginx/repocache.conf"
+_OWN_CONFIG = "/etc/nginx/repocache.d/repocache.conf"
 # Activation ownership marker is intentionally separate from the signed worker
 # receipt: no unrelated root-owned file is implicitly adopted on first use.
 _CONFIG_MARKER_PREFIX = OWNED_NGINX_CONFIG_MARKER_PREFIX
 # A fixed, reviewed immutable bootstrap; the source archive must contain
 # precisely these signed bytes. Managed TLS deployment is a different step.
 _BOOTSTRAP_CONFIG = _OWNED_BOOTSTRAP_CONFIG
-_CONFIG_MARKER = _CONFIG_MARKER_PREFIX + hashlib.sha256(_BOOTSTRAP_CONFIG).hexdigest()
+_CONFIG_MARKER = _CONFIG_MARKER_PREFIX + hashlib.sha256(
+    b"/etc/nginx/repocache.d/\0" + _BOOTSTRAP_CONFIG).hexdigest()
 
 
 
@@ -506,7 +507,10 @@ def _private_config_present() -> None:
             stack.callback(os.close, root)
             etc = _open_directory(root, "etc", stack)
             nginx = _open_directory(etc, "nginx", stack)
-            _exact_file(nginx, stage.CONFIG, _BOOTSTRAP_CONFIG, 0o644)
+            dedicated = _open_directory(nginx, "repocache.d", stack)
+            if stat.S_IMODE(os.fstat(dedicated).st_mode) != 0o755:
+                _reject("NATIVE_PRIVATE_DIRECTORY_UNSAFE")
+            _exact_file(dedicated, stage.CONFIG, _BOOTSTRAP_CONFIG, 0o644)
     except stage.WorkerStageError:
         raise
     except (OSError, ValueError, TypeError):
@@ -551,8 +555,29 @@ def _place_signed_private_config(raw: bytes, state_fd: int) -> None:
             stack.callback(os.close, root)
             etc = _open_directory(root, "etc", stack)
             nginx = _open_directory(etc, "nginx", stack)
+            # Refuse the previous layout, including dangling entries. No
+            # implicit migration/adoption or removal of any foreign file.
+            for name in (stage.CONFIG, "repocache-managed.conf",
+                         _TEMP + stage.CONFIG, ".repocache-owned-main.stage",
+                         ".repocache-owned-include.stage"):
+                if _named(nginx, name) is not None:
+                    _reject("NATIVE_PRIVATE_CONFIG_LEGACY_LAYOUT_REFUSED")
+            existing = _named(nginx, "repocache.d")
+            if _named(state_fd, _CONFIG_MARKER) is None and existing is not None:
+                _reject("NATIVE_PRIVATE_CONFIG_FOREIGN_COLLISION")
             _require_owned_private_config_intent(state_fd, nginx)
-            _place_file(nginx, stage.CONFIG, raw, 0o644)
+            if existing is None:
+                os.mkdir("repocache.d", mode=0o755, dir_fd=nginx)
+                os.fsync(nginx)
+            dedicated = _open_directory(nginx, "repocache.d", stack)
+            if (stat.S_IMODE(os.fstat(dedicated).st_mode) != 0o755
+                    or os.fstat(dedicated).st_dev != os.fstat(nginx).st_dev
+                    or set(os.listxattr(dedicated)) - {"security.selinux"}
+                    or set(os.listdir(dedicated)) - {stage.CONFIG, _TEMP + stage.CONFIG}):
+                _reject("NATIVE_PRIVATE_DIRECTORY_UNSAFE")
+            os.fsync(dedicated)
+            os.fsync(nginx)
+            _place_file(dedicated, stage.CONFIG, raw, 0o644)
         _private_config_present()
     except stage.WorkerStageError:
         raise

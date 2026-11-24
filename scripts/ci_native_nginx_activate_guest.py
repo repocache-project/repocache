@@ -18,7 +18,7 @@ ROOT = Path("/root/pr237-synthetic-fixture")
 STATE = Path("/var/lib/repocache/server")
 SOURCE = Path("/home/pr237ci/combined")
 VENDOR_CONFIG = Path("/etc/nginx/nginx.conf")
-OWN_CONFIG = Path("/etc/nginx/repocache.conf")
+OWN_CONFIG = Path("/etc/nginx/repocache.d/repocache.conf")
 VENDOR = "nginx.service"
 OWN = "repocache-nginx.service"
 
@@ -232,7 +232,7 @@ finally:
 def live_wal_resource_hashes() -> dict[str, str]:
     paths = (
         STATE / "state-v2.json", STATE / ".state-v2-owned-nginx.manifest",
-        OWN_CONFIG, Path("/etc/nginx/repocache-managed.conf"),
+        OWN_CONFIG, Path("/etc/nginx/repocache.d/repocache-managed.conf"),
         Path("/var/lib/repocache/public/catalog.json"),
     )
     return {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
@@ -371,7 +371,7 @@ def prepare_and_interrupt_live_wal(distribution: str, native, assets, pins) -> N
     synthetic_local_tls(distribution)
     document = json.loads((ROOT / "reviewed-install.json").read_bytes())
     assert all(row["desired_state"] == "disabled" for row in document["repositories"])
-    document["deployment"]["paths"]["generated_include"] = "/etc/nginx/repocache-managed.conf"
+    document["deployment"]["paths"]["generated_include"] = "/etc/nginx/repocache.d/repocache-managed.conf"
     reviewed = ROOT / "reviewed-owned-live.json"
     proposal = ROOT / "reviewed-owned-proposal.json"
     reviewed.write_text(json.dumps(document), encoding="ascii")

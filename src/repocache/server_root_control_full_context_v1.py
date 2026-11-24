@@ -23,8 +23,8 @@ from repocache.server_root_control_native_syntax_v1 import (
 )
 
 _COMMAND = (_NGINX, "-T", "-c", _CONF)
-_OWNED_MAIN_PATH = "/etc/nginx/repocache.conf"
-_OWNED_INCLUDE_PATH = "/etc/nginx/repocache-managed.conf"
+_OWNED_MAIN_PATH = "/etc/nginx/repocache.d/repocache.conf"
+_OWNED_INCLUDE_PATH = "/etc/nginx/repocache.d/repocache-managed.conf"
 _OWNED_COMMAND = (_NGINX, "-T", "-c", _OWNED_MAIN_PATH)
 _MAX_DUMP_BYTES = 4 * 1024 * 1024
 _TIMEOUT_SECONDS = 10
@@ -43,7 +43,7 @@ def _trusted_owned_fixed_files(managed: bool) -> tuple:
     """Pin fixed private files, never infer their ownership from metadata alone."""
     try:
         parents = []
-        for path in _PARENTS:
+        for path in (*_PARENTS, "/etc/nginx/repocache.d"):
             info = os.lstat(path)
             if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0
                     or info.st_gid != 0 or stat.S_IMODE(info.st_mode) & 0o022):

@@ -141,7 +141,7 @@ def test_owned_context_uses_only_fixed_private_command(monkeypatch, managed):
     assert observed._capture_owned_nginx_dump_private(managed=managed) == b"private-context\n"
     assert seen == [managed, managed]
     assert calls[0][0] == (
-        "/usr/sbin/nginx", "-T", "-c", "/etc/nginx/repocache.conf",
+        "/usr/sbin/nginx", "-T", "-c", "/etc/nginx/repocache.d/repocache.conf",
     )
     assert calls[0][1]["shell"] is False
     assert calls[0][1]["stderr"] == subprocess.DEVNULL

@@ -43,6 +43,7 @@ def filesystem(tmp_path, monkeypatch):
         (("var", "lib", "repocache", "server"), 0o700),
         (("var", "lib", "repocache", "public"), 0o755),
         (("etc", "nginx", "conf.d"), 0o755),
+        (("etc", "nginx", "repocache.d"), 0o755),
     ]:
         current = root
         for part in parts:
@@ -1495,9 +1496,9 @@ def test_owned_marker_scan_failure_refuses_legacy_vendor_mode(monkeypatch):
 def _owned_dump(include=None):
     main = (native._OWNED_BOOTSTRAP_CONFIG if include is None
             else native._OWNED_MANAGED_CONFIG)
-    result = b"# configuration file /etc/nginx/repocache.conf:\n" + main + b"\n"
+    result = b"# configuration file /etc/nginx/repocache.d/repocache.conf:\n" + main + b"\n"
     if include is not None:
-        result += (b"# configuration file /etc/nginx/repocache-managed.conf:\n"
+        result += (b"# configuration file /etc/nginx/repocache.d/repocache-managed.conf:\n"
                    + include + b"\n")
     return result
 
@@ -1538,7 +1539,7 @@ def test_owned_context_candidate_exact_complete_dump(active):
         cfg, 1, "debian", pins,
     )
     assert main == native._OWNED_MANAGED_CONFIG
-    assert b"include /etc/nginx/repocache-managed.conf;" in main
+    assert b"include /etc/nginx/repocache.d/repocache-managed.conf;" in main
     assert b"conf.d" not in main and b"nginx.conf" not in main
     assert b"127.0.0.1:8008" not in main
     assert b'X-Repocache-Generation "1"' in include
@@ -1554,11 +1555,11 @@ def test_owned_context_candidate_exact_complete_dump(active):
 def test_owned_context_refuses_any_foreign_or_incomplete_section(tamper):
     include = b"# REPOCACHE managed v2\nserver { listen 443 ssl; }\n"
     dump = _owned_dump(include)
-    section = b"# configuration file /etc/nginx/repocache-managed.conf:\n"
+    section = b"# configuration file /etc/nginx/repocache.d/repocache-managed.conf:\n"
     if tamper == "foreign-main":
-        dump = dump.replace(b"/etc/nginx/repocache.conf:", b"/etc/nginx/nginx.conf:")
+        dump = dump.replace(b"/etc/nginx/repocache.d/repocache.conf:", b"/etc/nginx/nginx.conf:")
     elif tamper == "foreign-include":
-        dump = dump.replace(b"/etc/nginx/repocache-managed.conf:", b"/etc/nginx/conf.d/repocache-managed.conf:")
+        dump = dump.replace(b"/etc/nginx/repocache.d/repocache-managed.conf:", b"/etc/nginx/conf.d/repocache-managed.conf:")
     elif tamper == "duplicate":
         dump += section + include + b"\n"
     elif tamper == "extra-section":
@@ -1598,7 +1599,7 @@ def test_owned_context_native_probe_requires_exact_files_and_claim(
 ):
     root = tmp_path / "root"
     root.mkdir(mode=0o755)
-    directory = root / "etc/nginx"
+    directory = root / "etc/nginx/repocache.d"
     directory.mkdir(parents=True)
     state = root / "state"
     state.mkdir(mode=0o700)
@@ -1741,7 +1742,7 @@ def test_owned_wal_fixture_publication_preserves_all_previous_resources(filesyst
     fd, state, vendor, catalog, events = filesystem
     marker = state / installer._CONFIG_MARKER
     marker.touch(mode=0o600)
-    main = vendor.parent.parent / native._OWNED_MAIN
+    main = vendor.parent.parent / "repocache.d" / native._OWNED_MAIN
     main.write_bytes(native._OWNED_BOOTSTRAP_CONFIG)
     main.chmod(0o644)
     journal = native._publish_owned_wal_fixture(fd, _owned_generation())
@@ -1788,7 +1789,7 @@ def test_owned_wal_fixture_accepts_exact_committed_generation(filesystem):
     fd, state, vendor, catalog, events = filesystem
     (state / installer._CONFIG_MARKER).touch(mode=0o600)
     old = _owned_generation()
-    main = vendor.parent.parent / native._OWNED_MAIN
+    main = vendor.parent.parent / "repocache.d" / native._OWNED_MAIN
     include = main.parent / native._INCLUDE
     paths = {
         V2_STATE: state / V2_STATE, native._OWNED_MAIN: main,
@@ -1810,7 +1811,7 @@ def test_owned_wal_fixture_interrupted_rename_preserves_temp_and_bootstrap(
 ):
     fd, state, vendor, catalog, events = filesystem
     (state / installer._CONFIG_MARKER).touch(mode=0o600)
-    main = vendor.parent.parent / native._OWNED_MAIN
+    main = vendor.parent.parent / "repocache.d" / native._OWNED_MAIN
     main.write_bytes(native._OWNED_BOOTSTRAP_CONFIG)
     main.chmod(0o644)
     actual = os.replace
@@ -1859,7 +1860,7 @@ def test_owned_domain_refused_by_state_only_and_legacy_v1_interlocks(
 def _owned_fixture_paths(filesystem, old):
     fd, state, vendor, catalog, _ = filesystem
     (state / installer._CONFIG_MARKER).touch(mode=0o600)
-    main = vendor.parent.parent / native._OWNED_MAIN
+    main = vendor.parent.parent / "repocache.d" / native._OWNED_MAIN
     paths = {
         V2_STATE: state / V2_STATE, native._OWNED_MAIN: main,
         native._INCLUDE: main.parent / native._INCLUDE, native._CATALOG: catalog,

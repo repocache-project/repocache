@@ -114,6 +114,7 @@ _ORDER = (V2_STATE, _INCLUDE, _CATALOG, _MANIFEST)
 _MAX_WAL = 8 * 1024 * 1024
 # Separate on-disk domain: the legacy reader must never interpret a
 # dedicated main-config rollback as a vendor include-only rollback.
+_OWNED_DIR = ("etc", "nginx", "repocache.d")
 _OWNED_MAIN = "repocache.conf"
 _OWNED_MANIFEST = ".state-v2-owned-nginx.manifest"
 _OWNED_WAL = ".state-v2-owned-nginx.pending"
@@ -145,7 +146,7 @@ _OWNED_MANAGED_CONFIG = (
     b"worker_processes 1;\n"
     b"events {\n    worker_connections 128;\n}\n"
     b"http {\n    access_log off;\n"
-    b"    include /etc/nginx/repocache-managed.conf;\n}\n"
+    b"    include /etc/nginx/repocache.d/repocache-managed.conf;\n}\n"
 )
 _ENV = {"PATH": "/usr/sbin:/usr/bin:/bin", "LC_ALL": "C"}
 _HEALTH = "/__repocache/healthz"
@@ -1102,7 +1103,7 @@ def _verify_owned_context_dump(dump: bytes, include: bytes | None) -> None:
 def _owned_config_marker_identity(state_fd: int) -> tuple[int, ...]:
     """Observe the exact existing installer claim, not a new/adopted marker."""
     name = (OWNED_NGINX_CONFIG_MARKER_PREFIX
-            + hashlib.sha256(_OWNED_BOOTSTRAP_CONFIG).hexdigest())
+            + hashlib.sha256(b"/etc/nginx/repocache.d/\0" + _OWNED_BOOTSTRAP_CONFIG).hexdigest())
     try:
         claims = sorted(entry for entry in os.listdir(state_fd)
                         if entry.startswith(OWNED_NGINX_CONFIG_MARKER_PREFIX))
@@ -1144,7 +1145,7 @@ def _probe_owned_context_locked(
     try:
         _verify_current_root_fd(root_fd)
         with ExitStack() as stack:
-            directory, chain = _walk(root_fd, ("etc", "nginx"), stack, 0)
+            directory, chain = _walk(root_fd, _OWNED_DIR, stack, 0)
             marker = _owned_config_marker_identity(state_fd)
 
             def verify_bytes() -> None:
@@ -1384,8 +1385,11 @@ def _owned_layout_locked(root_fd: int, state_fd: int, *, recovering: bool):
     with ExitStack() as stack:
         _no_conflicting_owned_wal_pending(state_fd, recovering=recovering)
         marker = _owned_config_marker_identity(state_fd)
-        nginx_fd, nginx_chain = _walk(root_fd, ("etc", "nginx"), stack, 0)
+        nginx_fd, nginx_chain = _walk(root_fd, _OWNED_DIR, stack, 0)
         vendor_fd, vendor_chain = _walk(root_fd, _INCLUDE_DIR, stack, 0)
+        shared_fd = nginx_chain[-1][0]
+        if stat.S_IMODE(os.fstat(nginx_fd).st_mode) != 0o755:
+            _deny("OWNED_DIRECTORY_MODE_UNSAFE")
         public_fd, public_chain = _walk(root_fd, _PUBLIC_DIR, stack, 0)
         if stat.S_IMODE(os.fstat(public_fd).st_mode) != 0o755:
             _deny("PUBLIC_DIRECTORY_MODE_UNSAFE")
@@ -1397,12 +1401,14 @@ def _owned_layout_locked(root_fd: int, state_fd: int, *, recovering: bool):
             if (_read_file(state_fd, _MANIFEST, 0, _LIMIT[_MANIFEST]) is not None
                     or _read_public(vendor_fd, _INCLUDE, _LIMIT[_INCLUDE]) is not None):
                 _deny("OWNED_WAL_VENDOR_DOMAIN_CONFLICT")
+            for name in (_OWNED_MAIN, _INCLUDE, *_OWNED_STAGES.values()):
+                _owned_require_absent(shared_fd, name)
             for fd in (nginx_fd, vendor_fd, public_fd):
                 _owned_require_absent(fd, _STAGE)
             # The dedicated nginx leaf may change directory timestamps.
             # Its vendor child must remain completely unchanged.
             _recheck_after_mutation(nginx_chain, 0)
-            _recheck(vendor_chain[-1:], 0)
+            _recheck(vendor_chain, 0)
             _recheck_after_mutation(public_chain, 0)
             if _owned_config_marker_identity(state_fd) != marker:
                 _deny("OWNED_CONTEXT_CLAIM_CHANGED")
@@ -2358,7 +2364,7 @@ def _owned_socket_host_boundary(root_fd: int, state_fd: int,
             stack.callback(os.close, host)
             for path, kind in (
                 ("/etc/nginx", stat.S_IFDIR),
-                ("/etc/nginx/repocache.conf", stat.S_IFREG),
+                ("/etc/nginx/repocache.d/repocache.conf", stat.S_IFREG),
                 ("/run/repocache-nginx", stat.S_IFDIR),
                 ("/etc/systemd/system", stat.S_IFDIR),
             ):
