@@ -379,3 +379,74 @@ def test_approval_issuance_refuses_nonroot_before_state_access(monkeypatch):
                         pytest.fail("unprivileged approval reached state"))
     with pytest.raises(helper.BoundaryRefused, match="Root OS authorization"):
         helper.approve_current_candidate(IDENT, "a" * 64)
+
+
+@pytest.mark.parametrize("manager", ["apt", "dnf"])
+@pytest.mark.skipif(os.geteuid() != 0, reason="Real root-only preparation fixture")
+def test_prepare_uses_exact_source_and_current_catalog_without_granting_consent(
+        tmp_path, monkeypatch, manager):
+    record, source, approval, lock = private_fixture(tmp_path, manager=manager)
+    approval.unlink()
+    (tmp_path / "etc/os-release").write_text(
+        'ID=debian\nVERSION_ID="13"\n' if manager == "apt"
+        else 'ID=almalinux\nVERSION_ID="10"\n')
+    origin = "https://cache.example.org"
+    monkeypatch.setattr(helper.client, "_installed_server_config", lambda _: origin)
+    monkeypatch.setattr(helper, "_native_tls_context", lambda: object())
+    active = [{"upstream": record["upstream"], "cache": record["cache"]}]
+    monkeypatch.setattr(helper.client, "_catalog", lambda *_, **kw: {
+        "schema": 1, "repositories": active})
+    before = source.stat()
+    result = helper.prepare_current_candidate(
+        record["source_sha256"], record["entry_sha256"], _test_root=tmp_path)
+    assert result["status"] == "prepared"
+    assert not result["approval_granted"] and not result["write_eligible"]
+    ident = result["managed_id"]
+    pending = approval.with_name("pending-" + ident + ".json")
+    approved = approval.with_name("candidate-" + ident + ".json")
+    assert pending.exists() and not approved.exists()
+    snapshot = json.loads(pending.read_text())
+    assert snapshot["source_identity"]["inode"] == before.st_ino
+    assert snapshot["cache"] == record["cache"]
+    repeated = helper.prepare_current_candidate(
+        record["source_sha256"], record["entry_sha256"], _test_root=tmp_path)
+    assert repeated["status"] == "unchanged"
+    assert repeated["managed_id"] == ident
+    helper.approve_current_candidate(
+        ident, result["route_sha256"], _test_root=tmp_path)
+    assert approved.exists()
+    active[0]["cache"] = origin + "/__repocache/repos/changed/"
+    changed = helper.prepare_current_candidate(
+        record["source_sha256"], record["entry_sha256"], _test_root=tmp_path)
+    assert changed["managed_id"] != ident
+    assert changed["route_sha256"] != result["route_sha256"]
+    assert not changed["approval_granted"]
+    with pytest.raises(helper.BoundaryRefused, match="absent"):
+        helper.approve_current_candidate(
+            ident, result["route_sha256"], _test_root=tmp_path)
+    assert source.read_bytes() == (APT if manager == "apt" else DNF).encode()
+    assert source.stat().st_ino == before.st_ino
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="Real root-only preparation fixture")
+def test_prepare_rejects_ambiguous_source_before_network(tmp_path, monkeypatch):
+    record, source, approval, lock = private_fixture(tmp_path)
+    approval.unlink()
+    (tmp_path / "etc/os-release").write_text('ID=debian\nVERSION_ID="13"\n')
+    duplicate = source.with_name("duplicate.list")
+    duplicate.write_bytes(source.read_bytes())
+    duplicate.chmod(0o644)
+    monkeypatch.setattr(helper.client, "_installed_server_config", lambda *_:
+                        pytest.fail("Ambiguous selection reached origin read"))
+    with pytest.raises(helper.BoundaryRefused, match="Ambiguous source"):
+        helper.prepare_current_candidate(
+            record["source_sha256"], record["entry_sha256"], _test_root=tmp_path)
+    assert not list(approval.parent.glob("pending-*"))
+
+
+def test_prepare_refuses_nonroot_before_state_access(monkeypatch):
+    monkeypatch.setattr(helper.os, "getresuid", lambda: (1000, 0, 0))
+    monkeypatch.setattr(helper, "_state", lambda *_:
+                        pytest.fail("unprivileged preparation reached state"))
+    with pytest.raises(helper.BoundaryRefused, match="root authorization"):
+        helper.prepare_current_candidate("a" * 64, "b" * 64)

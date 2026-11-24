@@ -430,7 +430,8 @@ def _rename_noreplace(state_fd: int, temporary: str, target: str) -> None:
         raise OSError(error, os.strerror(error))
 
 
-def _publish_approval(state_fd: int, ident: str, record: dict) -> str:
+def _publish_approval(state_fd: int, ident: str, record: dict, *,
+                      pending: bool = False) -> str:
     """Durably publish an immutable root-owned record, never replace consent.
 
     A crash before rename may leave a private unreferenced temporary file.
@@ -439,7 +440,7 @@ def _publish_approval(state_fd: int, ident: str, record: dict) -> str:
     """
     if not IDENT.fullmatch(ident) or record.get("id") != ident or record.get("schema") != 2:
         raise BoundaryRefused("Invalid protected approval publication")
-    target = "candidate-" + ident + ".json"
+    target = ("pending-" if pending else "candidate-") + ident + ".json"
     payload = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
     if not 0 < len(payload) <= MAX_MANIFEST:
         raise BoundaryRefused("Protected approval exceeds size limit")
@@ -448,8 +449,8 @@ def _publish_approval(state_fd: int, ident: str, record: dict) -> str:
     except FileNotFoundError:
         existing = None
     if existing is not None:
-        if _manifest(state_fd, ident) != record:
-            raise BoundaryRefused("Existing approval is immutable")
+        if _manifest(state_fd, ident, pending=pending) != record:
+            raise BoundaryRefused("Existing protected record is immutable")
         os.fsync(state_fd)
         return "unchanged"
 
@@ -478,9 +479,9 @@ def _publish_approval(state_fd: int, ident: str, record: dict) -> str:
         except FileExistsError as exc:
             raise BoundaryRefused("Existing approval cannot be replaced") from exc
         os.fsync(state_fd)
-        if _manifest(state_fd, ident) != record:
+        if _manifest(state_fd, ident, pending=pending) != record:
             raise BoundaryRefused("Published approval readback failed")
-        return "approved"
+        return "prepared" if pending else "approved"
     finally:
         os.close(fd)
         try:
@@ -493,11 +494,176 @@ def _publish_approval(state_fd: int, ident: str, record: dict) -> str:
                 os.fsync(state_fd)
 
 
+def _native_source_paths(root: Path) -> tuple[str, ...]:
+    """Enumerate only fixed, anchored package-manager directories, bounded."""
+    distro = client._distro(root)
+    identity = (distro.get("ID"), distro.get("VERSION_ID", "").split(".")[0])
+    if identity not in {("debian", "13"), ("almalinux", "10")}:
+        raise BoundaryRefused("Unsupported native client target")
+    paths = []
+    with _root(root) as (root_fd, owner), contextlib.ExitStack() as stack:
+        def directory(parent: int, part: str, *, optional: bool = False):
+            try:
+                fd = os.open(part, DIR, dir_fd=parent)
+            except FileNotFoundError:
+                if optional:
+                    return None
+                raise
+            stack.callback(os.close, fd)
+            _checked_directory(fd, owner, private=False)
+            return fd
+
+        etc = directory(root_fd, "etc")
+        if identity[0] == "debian":
+            apt = directory(etc, "apt")
+            try:
+                os.stat("sources.list", dir_fd=apt, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                paths.append("etc/apt/sources.list")
+            parent = directory(apt, "sources.list.d", optional=True)
+            prefix = "etc/apt/sources.list.d/"
+        else:
+            parent = directory(etc, "yum.repos.d")
+            prefix = "etc/yum.repos.d/"
+        if parent is not None:
+            with os.scandir(parent) as items:
+                for count, item in enumerate(items, 1):
+                    if count > 512:
+                        raise BoundaryRefused("Native source directory capacity exceeded")
+                    relative = prefix + item.name
+                    if pre.SOURCE_PATH.fullmatch(relative):
+                        paths.append(relative)
+                        if len(paths) > 128:
+                            raise BoundaryRefused("Native source inventory capacity exceeded")
+    return tuple(sorted(paths))
+
+
+def _select_source(root: Path, source_sha256: str, entry_sha256: str):
+    """Resolve exact content selection independently of caller paths or URLs."""
+    matches = []
+    paths = _native_source_paths(root)
+    for relative in paths:
+        before = pre.inspect_source(relative, root=root)
+        if before["sha256"] != source_sha256:
+            continue
+        if before["extended_attributes_present"]:
+            raise BoundaryRefused("Unreviewed source security metadata")
+        if before["mode"] not in (0o600, 0o640, 0o644):
+            raise BoundaryRefused("Unsafe source ownership or mode")
+        raw = _source_bytes(root, relative, before)
+        _, chosen, selected = fallback._strict_source(
+            relative, raw, source_sha256, entry_sha256)
+        if chosen["kind"] in ("apt-list", "apt-deb822"):
+            upstream, _, _ = fallback._apt_endpoint(selected, chosen["kind"])
+        else:
+            upstream, _ = fallback._dnf_endpoint(selected)
+        fallback._canonical_https(upstream, allow_missing_slash=True)
+        if pre.inspect_source(relative, root=root) != before:
+            raise BoundaryRefused("Source changed during candidate selection")
+        matches.append((relative, before, raw, upstream.rstrip("/") + "/"))
+        if len(matches) > 1:
+            raise BoundaryRefused("Ambiguous source content selection")
+    if len(matches) != 1:
+        raise BoundaryRefused("Selected source entry unavailable")
+    return paths, matches[0]
+
+
+def _pending_records(state_fd: int) -> list[dict]:
+    """Bound private inventory, ignore only known non-pending namespaces."""
+    records = []
+    with os.scandir(state_fd) as items:
+        for count, item in enumerate(items, 1):
+            if count > 512:
+                raise BoundaryRefused("Protected registry capacity exceeded")
+            if not item.name.startswith("pending-"):
+                continue
+            match = re.fullmatch(r"pending-([0-9a-f]{32})\.json", item.name)
+            if not match:
+                raise BoundaryRefused("Unrecognized pending record")
+            records.append(_manifest(state_fd, match[1], pending=True))
+            if len(records) > 128:
+                raise BoundaryRefused("Pending candidate capacity exceeded")
+    return records
+
+
+def prepare_current_candidate(source_sha256: str, entry_sha256: str, *,
+                              _test_root: Path | None = None) -> dict:
+    """Internal root-only preparation; never accepts a path, URL or write recipe.
+
+    A fresh authenticated exact mapping and bound source identity yield an
+    immutable pending record, not approval. No installed CLI calls this.
+    """
+    if os.getresuid() != (0, 0, 0) or os.uname().machine != "x86_64":
+        raise BoundaryRefused("Native root authorization required")
+    if any(type(value) is not str or not DIGEST.fullmatch(value)
+           for value in (source_sha256, entry_sha256)):
+        raise BoundaryRefused("Invalid fixed source selection")
+    root = Path("/") if _test_root is None else Path(_test_root)
+    try:
+        with _state(root) as (state_fd, owner):
+            with _exclusive_lock(state_fd, owner):
+                paths, selected = _select_source(root, source_sha256, entry_sha256)
+                relative, before, raw, upstream = selected
+                origin = client._server(client._installed_server_config(root))
+                catalog = client._catalog(origin, context=_native_tls_context())
+                mappings = [mapping for mapping in catalog["repositories"]
+                            if mapping["upstream"] == upstream]
+                if len(mappings) != 1:
+                    raise BoundaryRefused("Selected upstream has no exact active mapping")
+                cache = mappings[0]["cache"]
+                route = urlsplit(cache).path
+                if not client._NATIVE_CACHE_PATH.fullmatch(route) or cache != origin + route:
+                    raise BoundaryRefused("Native active-only cache route required")
+                candidate = {
+                    "schema": 2, "source": relative,
+                    "source_sha256": source_sha256, "entry_sha256": entry_sha256,
+                    "source_identity": {key: before[key] for key in SOURCE_IDENTITY_FIELDS},
+                    "upstream": upstream, "cache": cache,
+                    "route_sha256": hashlib.sha256(cache.encode("ascii")).hexdigest(),
+                }
+                existing = _pending_records(state_fd)
+                same = [record for record in existing if
+                        {k: v for k, v in record.items() if k != "id"} == candidate]
+                if len(same) > 1:
+                    raise BoundaryRefused("Duplicate pending candidate identity")
+                if not same and len(existing) >= 128:
+                    raise BoundaryRefused("Pending candidate capacity exceeded")
+                ident = same[0]["id"] if same else secrets.token_hex(16)
+                candidate["id"] = ident
+                if not same:
+                    try:
+                        os.stat("candidate-" + ident + ".json", dir_fd=state_fd,
+                                follow_symlinks=False)
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        raise BoundaryRefused("Managed candidate identifier collision")
+                fallback.compile_fallback(
+                    source=relative, original=raw,
+                    expected_source_sha256=source_sha256,
+                    selected_entry_sha256=entry_sha256,
+                    managed_id=ident, upstream=upstream, cache=cache)
+                if (client._server(client._installed_server_config(root)) != origin
+                        or _native_source_paths(root) != paths
+                        or pre.inspect_source(relative, root=root) != before):
+                    raise BoundaryRefused("Source or installed origin drift during preparation")
+                status = _publish_approval(state_fd, ident, candidate, pending=True)
+                return {"schema": 1, "status": status, "managed_id": ident,
+                        "route_sha256": candidate["route_sha256"],
+                        "approval_granted": False, "installed": False,
+                        "write_eligible": False}
+    except (pre.PreflightError, fallback.FallbackRefused, entries.EntryRefused,
+            OSError, ValueError, RecursionError) as exc:
+        raise BoundaryRefused("Protected candidate preparation refused") from exc
+
+
 def approve_current_candidate(ident: str, route_sha256: str, *,
                               _test_root: Path | None = None) -> dict:
     """Internal, uninstalled administrative issuance; no package source writes.
 
-    A trusted preparer must have created a root-owned schema-2 pending record.
+    The trusted preparer must have created a root-owned schema-2 pending record.
     Explicit exact route consent is a digest, not an arbitrary URI or recipe.
     The installed CLI has no entry point to this function.
     """

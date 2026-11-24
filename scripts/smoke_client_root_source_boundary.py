@@ -155,11 +155,34 @@ def approval_interruption_smoke(manager: str):
         raise RuntimeError("Only disposable root Docker accepts approval smoke")
     original_route = boundary._current_route
     original_config = boundary.client._installed_server_config
+    original_catalog = boundary.client._catalog
+    original_context = boundary._native_tls_context
     # This test isolates the state transaction from transport. No host trust
     # or active server route claim is made from the fixture.
     boundary._current_route = lambda *_: "https://cache.example.org"
     boundary.client._installed_server_config = lambda *_: "https://cache.example.org"
+    boundary._native_tls_context = lambda: object()
     try:
+        with tempfile.TemporaryDirectory(prefix="repocache-prepare-root-") as work:
+            root = Path(work)
+            record, source, manifest, lock = create(root, manager=manager)
+            manifest.unlink()
+            (root / "etc/os-release").write_text(
+                'ID=debian\nVERSION_ID="13"\n' if manager == "apt"
+                else 'ID=almalinux\nVERSION_ID="10"\n')
+            boundary.client._catalog = lambda *_, **kw: {
+                "schema": 1, "repositories": [{"upstream": record["upstream"],
+                                               "cache": record["cache"]}]}
+            prepared = boundary.prepare_current_candidate(
+                record["source_sha256"], record["entry_sha256"], _test_root=root)
+            ident = prepared["managed_id"]
+            assert prepared["status"] == "prepared" and not prepared["approval_granted"]
+            assert not (manifest.parent / ("candidate-" + ident + ".json")).exists()
+            approved = boundary.approve_current_candidate(
+                ident, prepared["route_sha256"], _test_root=root)
+            assert approved["status"] == "approved" and not approved["write_eligible"]
+            assert source.read_bytes() == (APT if manager == "apt" else DNF)
+            print(f"{manager}: root preparation and separate exact consent PASS", flush=True)
         for phase in ("before-rename", "after-rename"):
             with tempfile.TemporaryDirectory(prefix="repocache-approval-kill-") as work:
                 root = Path(work)
@@ -205,6 +228,8 @@ def approval_interruption_smoke(manager: str):
     finally:
         boundary._current_route = original_route
         boundary.client._installed_server_config = original_config
+        boundary.client._catalog = original_catalog
+        boundary._native_tls_context = original_context
 
 
 if __name__ == "__main__":

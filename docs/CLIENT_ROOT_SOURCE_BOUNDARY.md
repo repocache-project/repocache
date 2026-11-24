@@ -132,3 +132,21 @@ inode and timestamps. This state-only exercise mocks current-route
 validation; actual loopback TLS trust refusal is tested separately. It
 does not establish power-loss durability, installed helper acceptance or
 SELinux Enforcing source metadata preservation.
+
+
+## Independent pending proposal preparation (internal, uninstalled)
+
+The root-only preparer accepts two exact SHA-256 content selections, not
+a source path or remote URL. It enumerates only fixed native APT or DNF
+source directories through anchored descriptors, refuses ambiguous
+matches and unsupported source metadata, independently parses the
+selected entry, fetches the current catalog using the protected origin,
+and requires one exact native active mapping. It compiles a non-activating
+proposal, rechecks the source inventory/origin/inode, and publishes a
+private schema-2 pending record using the same no-replace primitive.
+Identical pending preparation reuses the random managed identifier.
+Changed routes require new pending identities and separate consent; an
+old route is refused if no longer published. No raw paths or routes are
+returned, and preparation grants no ownership or write authority.
+The installer, operator-facing selection/consent handoff, native source
+commit and recovery, and labelled-state support remain open.

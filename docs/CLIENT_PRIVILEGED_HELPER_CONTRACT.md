@@ -139,3 +139,12 @@ installed CLI entry point; trusted pending proposal preparation,
 labelled-state handling, native commit/recovery and full acceptance
 remain open. Legacy schema-1 lab approvals cannot satisfy native
 validation.
+
+
+A root-only internal preparer now builds that pending proposal from an
+exact file/entry digest selection resolved independently in fixed native
+source directories. It validates the exact active mapping, source
+identity and compiler result without accepting caller-supplied URLs or
+paths. Preparation and explicit approval are separate state transitions;
+no public command or installed writer is enabled. A route change
+requires new consent; previous records are not overwritten.
