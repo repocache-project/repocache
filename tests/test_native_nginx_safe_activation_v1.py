@@ -172,14 +172,25 @@ def test_unknown_master_on_failed_start_is_never_killed(monkeypatch):
             state["active"] = True
             raise stage.WorkerStageError("WORKER_PLACEMENT_START_UNCERTAIN")
     monkeypatch.setattr(host, "_nginx_activation_command", fault)
-    monkeypatch.setattr(host, "_own_service_observation",
-                        lambda **_kw: (_ for _ in ()).throw(
-                            stage.WorkerStageError("WORKER_PLACEMENT_FOREIGN_RUNTIME")))
+    # The first observer checks the initially inactive unit. Make only the
+    # post-start active observation foreign; otherwise the test would fail
+    # before the fault-injected start and never cover recovery safety.
+    inactive_observation = host._own_service_observation
+    observed_states = []
+
+    def foreign_only_after_start(*, active):
+        observed_states.append(active)
+        if active:
+            raise stage.WorkerStageError("WORKER_PLACEMENT_FOREIGN_RUNTIME")
+        return inactive_observation(active=active)
+
+    monkeypatch.setattr(host, "_own_service_observation", foreign_only_after_start)
     with pytest.raises(stage.WorkerStageError,
                        match="NATIVE_ACTIVATION_RECOVERY_REQUIRED"):
         host._activate_audited_native_nginx_under_lock(
             11, "debian", host._BOOTSTRAP_CONFIG)
     assert state["commands"] == ["daemon-reload", "start"]
+    assert observed_states == [False, True, True]
 
 
 def test_pid_cleanup_refuses_symlink_without_unlink(tmp_path):
