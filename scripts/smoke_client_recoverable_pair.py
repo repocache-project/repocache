@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import signal
+import struct
 import sys
 import tempfile
 from pathlib import Path
@@ -295,6 +296,43 @@ def hostile(manager):
         assert pair.restore_sandbox(root, IDENT)["status"] == "restored"
         assert src.read_bytes() == original and not mirror.exists()
         print(f"{manager}: schema-2 approved plan bound to journal/restore PASS", flush=True)
+
+    with tempfile.TemporaryDirectory(prefix="repocache-pair-attrs-ci-") as place:
+        root = Path(place)
+        src, mirror, lock, state = build(root, manager)
+        os.setxattr(src, "user.repocache-ci", b"exact-private-metadata")
+        # Linux POSIX ACL xattr format v2: explicit read-only named user,
+        # owner rw, group/mask/other r. No widened write authority.
+        acl = struct.pack("<I", 2) + b"".join(
+            struct.pack("<HHI", tag, perms, uid)
+            for tag, perms, uid in ((1, 6, 0xffffffff), (2, 4, 65534),
+                                    (4, 4, 0xffffffff), (16, 4, 0xffffffff),
+                                    (32, 4, 0xffffffff)))
+        os.setxattr(src, "system.posix_acl_access", acl)
+        fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            identity, attrs = boundary.metadata._metadata(fd)
+        finally:
+            os.close(fd)
+        assert {name for name, _ in attrs} == {"user.repocache-ci", "system.posix_acl_access"}
+        manifest = state / ("candidate-" + IDENT + ".json")
+        approval = json.loads(manifest.read_text())
+        approval["schema"] = 3
+        approval["source_identity"] = identity
+        approval["source_attributes_sha256"] = boundary.metadata.attribute_digest(attrs)
+        manifest.write_text(json.dumps(approval))
+        before = src.read_bytes()
+        assert pair.apply_sandbox(root, IDENT)["status"] == "installed-sandbox"
+        assert pair.apply_sandbox(root, IDENT)["status"] == "unchanged"
+        assert tuple(sorted((name, os.getxattr(src, name)) for name in os.listxattr(src))) == attrs
+        os.setxattr(src, "user.repocache-ci", b"foreign")
+        refuses(lambda: pair.restore_sandbox(root, IDENT),
+                "Changed approved metadata cannot authorize rollback")
+        os.setxattr(src, "user.repocache-ci", b"exact-private-metadata")
+        assert pair.restore_sandbox(root, IDENT)["status"] == "restored"
+        assert src.read_bytes() == before
+        assert tuple(sorted((name, os.getxattr(src, name)) for name in os.listxattr(src))) == attrs
+        print(f"{manager}: schema-3 ACL/xattr apply, drift refusal and restore PASS", flush=True)
 
     with tempfile.TemporaryDirectory(prefix="repocache-pair-native-lock-ci-") as place:
         root = Path(place)

@@ -2,6 +2,7 @@
 """Booted native privileged client fixture; never writes host sources."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -10,6 +11,7 @@ import ssl
 import subprocess
 import sys
 import tempfile
+import time
 
 from ci_v06_vm_signed_client_guest import (
     guarded_native_guest, installed_packages, installed_sources,
@@ -212,10 +214,95 @@ def _alma_label_roundtrip(root: Path) -> None:
     print("PASS: AlmaLinux Enforcing schema-3 source label/user-xattr SIGKILL recovery; private fixture")
 
 
+def _signed_helper_placement(platform: str) -> None:
+    """Actual fixed root-owned helper placement with synthetic Ed25519 trust."""
+    checkout = Path("/home/pr237ci/source")
+    sys.path[:0] = [str(checkout / "src"), str(checkout), str(checkout / "tests")]
+    from repocache import signatures
+    from scripts import build_release, stage_native_client_helper as stage
+    from test_v06_release_source_inventory import _candidate_source
+
+    target = Path("/usr/libexec/repocache-client") / stage.HELPER
+    assert not os.path.lexists(target) and not os.path.lexists(target.parent)
+    with tempfile.TemporaryDirectory(prefix="repocache-client-signed-", dir="/root") as work:
+        root = Path(work)
+        source = _candidate_source(root)
+        prior_root = build_release.ROOT
+        try:
+            build_release.ROOT = source
+            archive, _ = build_release.build_release(root / "assets", "v0.6.0")
+        finally:
+            build_release.ROOT = prior_root
+        digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+        # Synthetic fixture identity, NOT a claim of a publisher Git commit.
+        # The outer QEMU artifact independently records the exact source HEAD.
+        pin = digest[:40]
+        now = int(time.time())
+        manifest = archive.with_name(archive.name + ".manifest.json")
+        manifest.write_text(json.dumps({
+            "schema": 1, "repository": "repocache-project/repocache",
+            "key_id": "client-vm-fixture", "channel": "stable", "version": "0.6.0",
+            "commit": pin, "archive": archive.name, "archive_sha256": digest,
+            "policy_sha256": hashlib.sha256((source / "release-policy.json").read_bytes()).hexdigest(),
+            "wheelhouse_sha256": "b" * 64, "issued_at": now - 30, "expires_at": now + 3600,
+        }, sort_keys=True, separators=(",", ":")) + "\n")
+        trust = root / "etc/repocache/trust.d"
+        trust.mkdir(parents=True, mode=0o700)
+        key = root / "fixture-key.pem"
+        public = trust / "client-vm-fixture.pem"
+        detached = manifest.with_name(manifest.name + ".sig")
+        for args in (
+            ["genpkey", "-algorithm", "Ed25519", "-out", str(key)],
+            ["pkey", "-in", str(key), "-pubout", "-out", str(public)],
+            ["pkeyutl", "-sign", "-inkey", str(key), "-rawin", "-in", str(manifest), "-out", str(detached)],
+        ):
+            subprocess.run(["/usr/bin/openssl", *args], check=True,
+                           capture_output=True, timeout=20)
+        key.unlink()
+        original_trust = signatures.TRUST_DIR
+        signatures.TRUST_DIR = trust
+        options = {"platform": platform, "commit": pin, "archive_sha256": digest}
+        signed = detached.read_bytes()
+        try:
+            detached.write_bytes(b"\0" * 64)
+            try:
+                stage.install_authenticated_fixture(archive.parent, **options)
+            except signatures.SignatureError:
+                pass
+            else:
+                raise AssertionError("Invalid signature placed a client helper")
+            assert not os.path.lexists(target.parent)
+            detached.write_bytes(signed)
+            placed = stage.install_authenticated_fixture(archive.parent, **options)
+            assert placed["placement"] == "placed" and not placed["source_writer_installed"]
+            before = _snapshot(target)
+            repeat = stage.install_authenticated_fixture(archive.parent, **options)
+            assert repeat["placement"] == "unchanged" and _snapshot(target) == before
+            assert hashlib.sha256(before[0]).hexdigest() == placed["helper_sha256"]
+            assert target.stat().st_uid == target.stat().st_gid == 0
+            assert target.stat().st_mode & 0o777 == 0o700
+            status = subprocess.run([str(target), "--json", "status"],
+                                    check=True, capture_output=True, timeout=15)
+            report = json.loads(status.stdout)
+            assert not report["write_eligible"] and not report["commit_available"]
+            try:
+                subprocess.run([str(target), "--json", "status"],
+                               user=65534, group=65534, extra_groups=[],
+                               cwd="/", capture_output=True, timeout=15)
+            except PermissionError:
+                pass
+            else:
+                raise AssertionError("Unprivileged execution reached the root-only helper")
+        finally:
+            signatures.TRUST_DIR = original_trust
+    print("PASS: synthetic Ed25519 authenticated fixed root-only client helper placement and idempotence")
+
+
 def main(platform: str) -> None:
     guarded_native_guest(platform)
     before_sources = installed_sources(platform)
     before_packages = installed_packages(platform)
+    _signed_helper_placement(platform)
     with tempfile.TemporaryDirectory(prefix="repocache-booted-approval-") as work:
         root = Path(work)
         if platform == "debian13":
@@ -229,7 +316,7 @@ def main(platform: str) -> None:
     assert installed_packages(platform) == before_packages
     guarded_native_guest(platform)
     print("PASS: booted-native-client-privileged-fixture " + platform)
-    print("NOT VERIFIED: installed root helper, real host source writer, native locks, "
+    print("NOT VERIFIED: installed root source writer, complete native locks, "
           "installed SELinux-labelled transactions, publisher identity")
 
 

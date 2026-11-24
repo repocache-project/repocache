@@ -164,3 +164,12 @@ exercise disposable signatures, bad signatures/pins, closed module
 inventory and ambient import isolation. The trusted-checkout tool
 still requires release-inventory reconciliation before publication.
 Installed native helper placement and source mutation remain disabled.
+
+
+The booted guest now exercises actual fixed root-only placement of this
+non-activating executable, using a freshly generated disposable Ed25519
+identity and the unchanged verifier with a private fixture trust directory.
+Bad signature must precede placement; identical retry must preserve inode,
+bytes and timestamps; the executable must deny non-root execution.
+This placement entry is VM-guarded and not in the production installer.
+It is not installation or acceptance of the real source writer.

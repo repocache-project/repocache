@@ -234,8 +234,10 @@ def _write_new(directory_fd: int, leaf: str, ident: str,
                     if name == "security.selinux":
                         if not attributes.policy_active():
                             raise staging.StageError("Unreviewed native security label")
-                        attributes._policy_label(fd)
-                        if os.getxattr(fd, name) == value:
+                        inherited = attributes._policy_label(fd)
+                        if inherited.rstrip(b"\0").split(b":", 3)[1:] != value.rstrip(b"\0").split(b":", 3)[1:]:
+                            raise staging.StageError("Approved SELinux context differs from native policy")
+                        if inherited == value:
                             continue
                     os.setxattr(fd, name, value)
             for name, value in expected_attrs:

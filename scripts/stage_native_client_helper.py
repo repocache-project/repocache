@@ -9,6 +9,8 @@ executed. Staging does not authorize installation or package source changes.
 from __future__ import annotations
 
 import argparse
+import ctypes
+import secrets
 from contextlib import ExitStack
 import hashlib
 import io
@@ -131,6 +133,79 @@ def stage_authenticated_client_helper(asset_directory: Path, output: Path, *,
         os.fsync(directory)
         os.fsync(parent)
     return receipt
+
+
+def install_authenticated_fixture(asset_directory: Path, *, platform: str,
+                                  commit: str, archive_sha256: str) -> dict:
+    """Fixed real placement in the explicitly disposable native VM only.
+
+    This operation is deliberately absent from the production installer and
+    stage CLI. The caller cannot supply an alternate destination or trust key.
+    No setuid, socket, service, source writer or root escalation is installed.
+    """
+    from scripts.ci_v06_vm_signed_client_guest import guarded_native_guest
+
+    guarded_native_guest(platform)
+    if os.getresuid() != (0, 0, 0):
+        raise ClientHelperStageError("CLIENT_HELPER_INSTALL_ROOT_REQUIRED")
+    payload, receipt = authenticated_payload(
+        asset_directory, commit=commit, archive_sha256=archive_sha256)
+    with ExitStack() as stack:
+        parent = os.open("/", DIRECTORY)
+        stack.callback(os.close, parent)
+        witnesses = []
+        for name in ("usr", "libexec", "repocache-client"):
+            if name != "usr":
+                try:
+                    os.mkdir(name, mode=0o755, dir_fd=parent)
+                    os.fsync(parent)
+                except FileExistsError:
+                    pass
+            child = os.open(name, DIRECTORY, dir_fd=parent)
+            stack.callback(os.close, child)
+            info = os.fstat(child)
+            if info.st_uid != 0 or info.st_gid != 0 or info.st_mode & 0o022:
+                raise ClientHelperStageError("CLIENT_HELPER_INSTALL_PARENT_UNSAFE")
+            witnesses.append((parent, name, child))
+            parent = child
+
+        def recheck():
+            for p, name, fd in witnesses:
+                actual = os.fstat(fd)
+                named = os.stat(name, dir_fd=p, follow_symlinks=False)
+                if (actual.st_uid != 0 or actual.st_gid != 0 or actual.st_mode & 0o022
+                        or (actual.st_dev, actual.st_ino) != (named.st_dev, named.st_ino)):
+                    raise ClientHelperStageError("CLIENT_HELPER_INSTALL_PARENT_CHANGED")
+
+        recheck()
+        try:
+            os.stat(HELPER, dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError:
+            temporary = ".client-helper-" + secrets.token_hex(16)
+            _private_write(parent, temporary, payload, 0o700)
+            if _asset_bytes(parent, temporary, len(payload), installed_mode=0o700) != payload:
+                raise ClientHelperStageError("CLIENT_HELPER_INSTALL_STAGE_MISMATCH")
+            recheck()
+            libc = ctypes.CDLL(None, use_errno=True)
+            rename = libc.renameat2
+            rename.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
+                               ctypes.c_char_p, ctypes.c_uint)
+            rename.restype = ctypes.c_int
+            if rename(parent, os.fsencode(temporary), parent, os.fsencode(HELPER), 1):
+                # Preserve the private staged inode for investigation. Never
+                # overwrite a destination that appeared concurrently.
+                error = ctypes.get_errno()
+                raise OSError(error, os.strerror(error))
+            os.fsync(parent)
+            placement = "placed"
+        else:
+            placement = "unchanged"
+        recheck()
+        if _asset_bytes(parent, HELPER, len(payload), installed_mode=0o700) != payload:
+            raise ClientHelperStageError("CLIENT_HELPER_INSTALL_CONTENT_MISMATCH")
+        os.fsync(parent)
+    return {**receipt, "status": "AUTHENTICATED_CLIENT_HELPER_FIXTURE_PLACED",
+            "placement": placement, "source_writer_installed": False}
 
 
 def main() -> int:
