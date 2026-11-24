@@ -41,7 +41,7 @@ from repocache.server_repository_reconcile_v1 import plan_declarative_reconcilia
 from repocache.server_native_v2_transaction_v1 import (
     _no_conflicting_pending, _write_private,
     _require_audited_native_package_for_activation,
-    _native_syntax_check,
+    _native_syntax_check, _OWNED_BOOTSTRAP_CONFIG,
 )
 from repocache.server_native_nginx_effective_unit_v1 import (
     inspect_effective_native_nginx_unit, _observe_systemd_pid1,
@@ -483,7 +483,7 @@ _OWN_CONFIG = "/etc/nginx/repocache.conf"
 _CONFIG_MARKER_PREFIX = OWNED_NGINX_CONFIG_MARKER_PREFIX
 # A fixed, reviewed immutable bootstrap; the source archive must contain
 # precisely these signed bytes. Managed TLS deployment is a different step.
-_BOOTSTRAP_CONFIG = "# Authenticated bootstrap only. Never include the vendor's nginx.conf.\n# The fixed local endpoint has no repository routes, TLS or external listener.\n# Full managed TLS/route activation remains a separate guarded transaction.\npid /run/repocache-nginx/nginx.pid;\nerror_log stderr warn;\nworker_processes 1;\nevents {\n    worker_connections 128;\n}\nhttp {\n    access_log off;\n    server {\n        listen 127.0.0.1:8008;\n        server_name localhost;\n        location = /__repocache/private {\n            return 204;\n        }\n        location / {\n            return 404;\n        }\n    }\n}\n".encode("ascii")
+_BOOTSTRAP_CONFIG = _OWNED_BOOTSTRAP_CONFIG
 _CONFIG_MARKER = _CONFIG_MARKER_PREFIX + hashlib.sha256(_BOOTSTRAP_CONFIG).hexdigest()
 
 

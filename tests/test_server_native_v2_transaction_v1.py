@@ -1138,6 +1138,36 @@ def test_generated_complete_managed_nginx_server_passes_real_distro_parser(
     observed_catalog = json.loads(catalog)
     assert len(observed_catalog["repositories"]) == int(active)
 
+    # The new dedicated context must also pass the real distro parser.
+    # Substitute ONLY the fixed include and runtime PID paths with private
+    # disposable fixture paths; never write the live /etc/nginx directory.
+    cfg["deployment"]["paths"]["generated_include"] = native._OWNED_INCLUDE_PATH
+    distro = "debian" if "ca-certificates" in ca else "almalinux"
+    main, owned_include, owned_catalog = native._render_owned_managed_candidate(
+        cfg, 1, distro, pins,
+    )
+    assert owned_include == source and owned_catalog == catalog
+    owned_config = tmp_path / "repocache.conf"
+    own_pid = str(tmp_path / "owned-nginx.pid").encode("ascii")
+    fixture_main = main.replace(b"/run/repocache-nginx/nginx.pid", own_pid).replace(
+        native._OWNED_INCLUDE_PATH.encode("ascii"), str(candidate).encode("ascii"),
+    )
+    owned_config.write_bytes(fixture_main)
+    completed = subprocess.run(
+        [nginx, "-T", "-c", str(owned_config), "-p", str(tmp_path)],
+        shell=False, check=False, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
+    )
+    assert completed.returncode == 0, "dedicated managed NGINX context rejected"
+    # Normalize the two test-only paths back to the production constants
+    # before exercising exact complete-context comparison.
+    normalized = completed.stdout.replace(
+        b"# configuration file " + str(owned_config).encode("ascii") + b":",
+        b"# configuration file " + native._OWNED_MAIN_PATH.encode("ascii") + b":",
+    ).replace(str(candidate).encode("ascii"), native._OWNED_INCLUDE_PATH.encode("ascii")
+    ).replace(own_pid, b"/run/repocache-nginx/nginx.pid")
+    native._verify_owned_context_dump(normalized, owned_include)
+
 
 @pytest.mark.parametrize("resource", ["public_include", "private_state"])
 def test_interrupted_partial_stage_is_recoverable_without_unsafe_publication(
@@ -1461,3 +1491,101 @@ def test_owned_marker_scan_failure_refuses_legacy_vendor_mode(monkeypatch):
     with pytest.raises(native.NativeV2TransactionError,
                        match="^NATIVE_V2_NGINX_OWNERSHIP_UNVERIFIED$"):
         native._refuse_legacy_vendor_mode_after_owned_claim(123)
+
+def _owned_dump(include=None):
+    main = (native._OWNED_BOOTSTRAP_CONFIG if include is None
+            else native._OWNED_MANAGED_CONFIG)
+    result = b"# configuration file /etc/nginx/repocache.conf:\n" + main + b"\n"
+    if include is not None:
+        result += (b"# configuration file /etc/nginx/repocache-managed.conf:\n"
+                   + include + b"\n")
+    return result
+
+
+def test_owned_context_bootstrap_matches_signed_archive_source():
+    source = (Path(__file__).resolve().parents[1]
+              / "docs/examples/nginx/repocache.conf").read_bytes()
+    assert native._OWNED_BOOTSTRAP_CONFIG == installer._BOOTSTRAP_CONFIG == source
+    assert installer._CONFIG_MARKER.endswith(hashlib.sha256(source).hexdigest())
+    assert b"listen 127.0.0.1:8008;" in source
+    assert b"include " not in source.split(b"\npid ", 1)[1]
+    native._verify_owned_context_dump(_owned_dump(), None)
+
+
+@pytest.mark.parametrize("path", [
+    "/etc/nginx/conf.d/repocache-managed.conf",
+    "/etc/nginx/nginx.conf",
+    "/tmp/repocache-managed.conf",
+])
+def test_owned_context_candidate_refuses_legacy_or_caller_selected_include(path):
+    cfg = document(1)
+    cfg["expected_state_generation"] = 1
+    cfg["deployment"]["paths"]["generated_include"] = path
+    with pytest.raises(native.NativeV2TransactionError,
+                       match="OWNED_CONTEXT_LAYOUT_UNSUPPORTED"):
+        native._render_owned_managed_candidate(cfg, 1, "debian", {})
+
+
+@pytest.mark.parametrize("active", [False, True])
+def test_owned_context_candidate_exact_complete_dump(active):
+    cfg = document(1)
+    cfg["expected_state_generation"] = 1
+    cfg["deployment"]["paths"]["generated_include"] = native._OWNED_INCLUDE_PATH
+    cfg["repositories"][0]["desired_state"] = "active" if active else "disabled"
+    pins = {"repo-0": {"mirror0.example.invalid": ["8.8.8.8"]}} if active else {}
+    before = _canon(cfg)
+    main, include, catalog = native._render_owned_managed_candidate(
+        cfg, 1, "debian", pins,
+    )
+    assert main == native._OWNED_MANAGED_CONFIG
+    assert b"include /etc/nginx/repocache-managed.conf;" in main
+    assert b"conf.d" not in main and b"nginx.conf" not in main
+    assert b"127.0.0.1:8008" not in main
+    assert b'X-Repocache-Generation "1"' in include
+    assert len(json.loads(catalog)["repositories"]) == int(active)
+    assert _canon(cfg) == before
+    native._verify_owned_context_dump(_owned_dump(include), include)
+
+
+@pytest.mark.parametrize("tamper", [
+    "foreign-main", "foreign-include", "duplicate", "extra-section",
+    "altered-main", "altered-include", "missing-include", "wrong-order",
+])
+def test_owned_context_refuses_any_foreign_or_incomplete_section(tamper):
+    include = b"# REPOCACHE managed v2\nserver { listen 443 ssl; }\n"
+    dump = _owned_dump(include)
+    section = b"# configuration file /etc/nginx/repocache-managed.conf:\n"
+    if tamper == "foreign-main":
+        dump = dump.replace(b"/etc/nginx/repocache.conf:", b"/etc/nginx/nginx.conf:")
+    elif tamper == "foreign-include":
+        dump = dump.replace(b"/etc/nginx/repocache-managed.conf:", b"/etc/nginx/conf.d/repocache-managed.conf:")
+    elif tamper == "duplicate":
+        dump += section + include + b"\n"
+    elif tamper == "extra-section":
+        dump += b"# configuration file /etc/nginx/foreign.conf:\n# foreign\n"
+    elif tamper == "altered-main":
+        dump = dump.replace(b"worker_processes 1;", b"worker_processes 2;")
+    elif tamper == "altered-include":
+        dump = dump.replace(b"listen 443", b"listen 444")
+    elif tamper == "missing-include":
+        dump = dump.split(section)[0]
+    else:
+        main, rest = dump.split(section)
+        dump = section + rest + main
+    with pytest.raises(native.NativeV2TransactionError,
+                       match="OWNED_CONTEXT_DUMP_MISMATCH"):
+        native._verify_owned_context_dump(dump, include)
+
+
+def test_owned_context_bootstrap_never_accepts_managed_or_foreign_dump():
+    with pytest.raises(native.NativeV2TransactionError,
+                       match="OWNED_CONTEXT_DUMP_MISMATCH"):
+        native._verify_owned_context_dump(
+            _owned_dump(b"# REPOCACHE managed v2\nserver {}\n"), None,
+        )
+    with pytest.raises(native.NativeV2TransactionError,
+                       match="OWNED_CONTEXT_DUMP_MISMATCH"):
+        native._verify_owned_context_dump(
+            _owned_dump() + b"# configuration file /etc/nginx/foreign.conf:\n# foreign\n",
+            None,
+        )

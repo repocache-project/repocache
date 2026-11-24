@@ -547,3 +547,33 @@ appropriate writable cache directories under the systemd sandbox, and exact
 bootstrap/managed rollback. Existing fixed deployment-path contracts must
 be reconciled without permitting caller-selected paths. This increment
 does not activate managed routes, change TLS or close #27.
+
+### Dedicated complete-context candidate (#27)
+
+The new pure owned-service candidate uses the fixed
+`/etc/nginx/repocache-managed.conf` include, **outside** the vendor's automatic
+`conf.d` include domain. It refuses the legacy generated-include path and all
+other paths rather than silently remapping a reviewed deployment document.
+The deterministic new main context is a separate candidate; it does not
+modify the signed bootstrap archive member or its digest-bound ownership
+marker. A managed context replaces the private test listener with the exact
+TLS/route-generation include and derives the active-only catalog through the
+existing renderer. A failed first transition must restore the exact signed
+loopback bootstrap, not leave an empty HTTPS config.
+
+The complete-context comparison accepts only the exact fixed main file and
+the exact expected dedicated include in their native `nginx -T` sections
+(or just the signed bootstrap section before first apply/after rollback).
+Foreign/default sections, duplicate includes, changed bytes and omitted
+sections fail closed. It is a pure comparison, not an authenticated
+native command result or authorization. The existing real-parser regression
+now runs `nginx -T` against the complete dedicated context with disposable
+test paths as well as the prior vendor-style syntax fixture.
+
+The installer and candidate use one shared immutable bootstrap byte string;
+the signed archive inventory, actual bootstrap file and ownership marker
+digest are unchanged. **Not yet wired to host APPLY/RELOAD/RECOVER:** native
+fixed private syntax/dump execution under an audited ownership lease, WAL
+version/domain separation and atomic main/include/state/catalog rollback,
+sandbox/cache and SELinux provisioning, actual HTTPS generation and
+publication remain mandatory. No production exposure is enabled.
