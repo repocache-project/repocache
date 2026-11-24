@@ -2552,3 +2552,43 @@ def test_owned_live_health_refuses_listener_replacement(monkeypatch):
     with pytest.raises(native.NativeV2TransactionError, match="OWNED_LIVE_LISTENER_CHANGED"):
         native._owned_live_health_bound(0, (123, (1, 2)), (None, None, None), None,
                                         publish=False)
+
+
+def test_owned_live_intake_rechecked_at_wal_boundary(
+    filesystem, monkeypatch, owned_live_simulation,
+):
+    old = _owned_bootstrap_resources()
+    new = _owned_generation()
+    paths = _owned_fixture_paths(filesystem, old)
+    fd, state, _, _, _ = filesystem
+    report = {"expected_generation": 0, "expected_state_sha256": None}
+    monkeypatch.setattr(native, "_load_private_under_root",
+                        lambda *a, **kw: (report, b"changed intake"))
+    with native._owned_fixture_layout(fd, recovering=False) as layout:
+        with pytest.raises(native.NativeV2TransactionError, match="CANDIDATE_CHANGED"):
+            native._apply_owned_live_locked(fd, *layout, new, expected_intake=report)
+    assert _fixture_resource_bytes(paths) == old
+    _assert_owned_fixture_clean(filesystem, paths)
+
+
+def test_owned_live_fixed_intake_apply_and_replay(
+    filesystem, monkeypatch, owned_live_simulation,
+):
+    old = _owned_bootstrap_resources()
+    new = _owned_generation()
+    paths = _owned_fixture_paths(filesystem, old)
+    fd, state, _, _, _ = filesystem
+    report = {"expected_generation": 0, "expected_state_sha256": None}
+    monkeypatch.setattr(native, "_load_private_under_root",
+                        lambda *a, **kw: (report, new[V2_STATE]))
+    monkeypatch.setattr(native, "_verify_tls_pair", lambda *a, **kw: "a" * 64)
+    monkeypatch.setattr(native, "_resolve_pins",
+                        lambda doc: {"repo-0": {"mirror0.example.invalid": ["8.8.8.8"]}})
+    with native._owned_fixture_layout(fd, recovering=False) as layout:
+        assert native._apply_prepared_owned_live_locked(fd, *layout, "debian")[
+            "status"] == "OWNED_LIVE_COMMIT_OBSERVED"
+    with native._owned_fixture_layout(fd, recovering=False) as layout:
+        assert native._apply_prepared_owned_live_locked(fd, *layout, "debian")[
+            "status"] == "OWNED_LIVE_NO_CHANGE"
+    assert _fixture_resource_bytes(paths) == new
+    _assert_owned_fixture_clean(filesystem, paths)

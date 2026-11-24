@@ -42,6 +42,7 @@ from repocache.server_native_v2_transaction_v1 import (
     _no_conflicting_pending, _write_private,
     _require_audited_native_package_for_activation,
     _native_syntax_check, _OWNED_BOOTSTRAP_CONFIG,
+    _owned_layout_locked, _read_owned_resources, _validate_owned_resources,
 )
 from repocache.server_native_nginx_effective_unit_v1 import (
     inspect_effective_native_nginx_unit, _observe_systemd_pid1,
@@ -1115,11 +1116,24 @@ def _stage_proposal_under_root(
         type(expected_state_sha256) is not str or not signatures.HEX64.fullmatch(expected_state_sha256)
     ):
         _reject("PREVIOUS_STATE_PIN_MISMATCH")
-    with _locked(root_fd, 0) as state:
-        # Native package-effects markers and all unresolved WALs must stay
-        # in place. Proposal staging grants no recovery or activation authority.
-        _no_conflicting_pending(state)
+    with ExitStack() as stack:
+        state = stack.enter_context(_locked(root_fd, 0))
+        # Staging never adopts foreign files or consumes a pending WAL.
+        # A dedicated ownership claim must select the dedicated manifest
+        # domain, even when no managed generation has yet been committed.
+        claimed = any(name.startswith(OWNED_NGINX_CONFIG_MARKER_PREFIX)
+                      for name in os.listdir(state))
+        if claimed:
+            _, nginx, public, check_layout = stack.enter_context(
+                _owned_layout_locked(root_fd, state, recovering=False),
+            )
+            owned = _read_owned_resources(state, nginx, public)
+            _validate_owned_resources(owned)
+        else:
+            _no_conflicting_pending(state)
         previous, previous_raw = _read_v2(state, 0)
+        if claimed and previous_raw != owned["state-v2.json"]:
+            _reject("PROPOSAL_OWNED_STATE_CHANGED")
         generation = 0 if previous is None else previous["state_generation"]
         prior = _read_proposal_at(state, _PROPOSAL)
         interrupted = _read_proposal_at(state, _PROPOSAL_STAGE)
@@ -1166,6 +1180,10 @@ def _stage_proposal_under_root(
             _, prior_state = _proposal(prior)
             if prior_state != previous_raw:
                 _reject("UNCOMMITTED_PRIOR_PROPOSAL")
+        if claimed:
+            check_layout()
+            if _read_owned_resources(state, nginx, public) != owned:
+                _reject("PROPOSAL_OWNED_STATE_CHANGED")
         if interrupted is not None:
             _unlink_known(state, _PROPOSAL_STAGE, envelope, 0, _MAX_ENVELOPE)
         if prior != envelope:

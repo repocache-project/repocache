@@ -1364,41 +1364,53 @@ def _owned_require_absent(parent: int, name: str) -> None:
 
 
 @contextmanager
+def _owned_layout_locked(root_fd: int, state_fd: int, *, recovering: bool):
+    """Retain the fixed resource directories; caller holds the state lock.
+
+    This is an internal layout helper, not a host-operation authorization.
+    The installed native dispatcher must independently establish host,
+    signed worker, package and storage authority before using it.
+    """
+    with ExitStack() as stack:
+    _no_conflicting_owned_wal_pending(state_fd, recovering=recovering)
+    marker = _owned_config_marker_identity(state_fd)
+    nginx_fd, nginx_chain = _walk(root_fd, ("etc", "nginx"), stack, 0)
+    vendor_fd, vendor_chain = _walk(root_fd, _INCLUDE_DIR, stack, 0)
+    public_fd, public_chain = _walk(root_fd, _PUBLIC_DIR, stack, 0)
+    if stat.S_IMODE(os.fstat(public_fd).st_mode) != 0o755:
+        _deny("PUBLIC_DIRECTORY_MODE_UNSAFE")
+
+    def check_layout():
+        # Recheck competing transaction domains throughout the retained
+        # lock, not just on entry. Never proceed after foreign drift.
+        _no_conflicting_owned_wal_pending(state_fd, recovering=True)
+        if (_read_file(state_fd, _MANIFEST, 0, _LIMIT[_MANIFEST]) is not None
+                or _read_public(vendor_fd, _INCLUDE, _LIMIT[_INCLUDE]) is not None):
+            _deny("OWNED_WAL_VENDOR_DOMAIN_CONFLICT")
+        for fd in (nginx_fd, vendor_fd, public_fd):
+            _owned_require_absent(fd, _STAGE)
+        # The dedicated nginx leaf may change directory timestamps.
+        # Its vendor child must remain completely unchanged.
+        _recheck_after_mutation(nginx_chain, 0)
+        _recheck(vendor_chain[-1:], 0)
+        _recheck_after_mutation(public_chain, 0)
+        if _owned_config_marker_identity(state_fd) != marker:
+            _deny("OWNED_CONTEXT_CLAIM_CHANGED")
+
+    check_layout()
+    if not recovering:
+        _owned_check_stages_absent(state_fd, nginx_fd, public_fd)
+    yield state_fd, nginx_fd, public_fd, check_layout
+    check_layout()
+
+
+@contextmanager
 def _owned_fixture_layout(root_fd: int, *, recovering: bool):
     """Pin the full fixture namespace; never expose a host operation."""
     _refuse_actual_root_fixture_write(root_fd)
-    with ExitStack() as stack:
-        with _locked(root_fd, 0) as state_fd:
-            _no_conflicting_owned_wal_pending(state_fd, recovering=recovering)
-            marker = _owned_config_marker_identity(state_fd)
-            nginx_fd, nginx_chain = _walk(root_fd, ("etc", "nginx"), stack, 0)
-            vendor_fd, vendor_chain = _walk(root_fd, _INCLUDE_DIR, stack, 0)
-            public_fd, public_chain = _walk(root_fd, _PUBLIC_DIR, stack, 0)
-            if stat.S_IMODE(os.fstat(public_fd).st_mode) != 0o755:
-                _deny("PUBLIC_DIRECTORY_MODE_UNSAFE")
-
-            def check_layout():
-                # Recheck competing transaction domains throughout the retained
-                # lock, not just on entry. Never proceed after foreign drift.
-                _no_conflicting_owned_wal_pending(state_fd, recovering=True)
-                if (_read_file(state_fd, _MANIFEST, 0, _LIMIT[_MANIFEST]) is not None
-                        or _read_public(vendor_fd, _INCLUDE, _LIMIT[_INCLUDE]) is not None):
-                    _deny("OWNED_WAL_VENDOR_DOMAIN_CONFLICT")
-                for fd in (nginx_fd, vendor_fd, public_fd):
-                    _owned_require_absent(fd, _STAGE)
-                # The dedicated nginx leaf may change directory timestamps.
-                # Its vendor child must remain completely unchanged.
-                _recheck_after_mutation(nginx_chain, 0)
-                _recheck(vendor_chain[-1:], 0)
-                _recheck_after_mutation(public_chain, 0)
-                if _owned_config_marker_identity(state_fd) != marker:
-                    _deny("OWNED_CONTEXT_CLAIM_CHANGED")
-
-            check_layout()
-            if not recovering:
-                _owned_check_stages_absent(state_fd, nginx_fd, public_fd)
-            yield state_fd, nginx_fd, public_fd, check_layout
-            check_layout()
+    with _locked(root_fd, 0) as state_fd:
+        with _owned_layout_locked(root_fd, state_fd, recovering=recovering) as layout:
+            yield layout
 
 
 def _owned_check_stages_absent(state_fd: int, nginx_fd: int, public_fd: int) -> None:
@@ -1954,7 +1966,8 @@ def _recover_owned_live_locked(root_fd: int, state_fd: int, nginx_fd: int,
 
 
 def _apply_owned_live_locked(root_fd: int, state_fd: int, nginx_fd: int,
-                             public_fd: int, check_layout, new: dict) -> dict:
+                             public_fd: int, check_layout, new: dict, *,
+                             expected_intake: dict | None = None) -> dict:
     """Private WAL-held service transaction; not yet a socket operation.
 
     The future fixed dispatch must supply only a deterministic CAS-approved
@@ -1970,6 +1983,13 @@ def _apply_owned_live_locked(root_fd: int, state_fd: int, nginx_fd: int,
     _owned_live_health_bound(root_fd, identity, context, old[_CATALOG], publish=True)
     if _owned_live_observe(root_fd) != identity:
         _deny("OWNED_LIVE_UNIT_CHANGED")
+    if expected_intake is not None:
+        again, candidate = _load_private_under_root(root_fd, owner_uid=0, owner_gid=0)
+        if again != expected_intake or candidate != new[V2_STATE]:
+            _deny("CANDIDATE_CHANGED")
+    else:
+        # The simulation-only call shape cannot perform a real host write.
+        _refuse_actual_root_fixture_write(root_fd)
     wal = _publish_owned_wal_locked(state_fd, nginx_fd, public_fd,
                                     old, new, check_layout, live=True)
     expected = dict(old)
@@ -2055,6 +2075,33 @@ def _prepare_owned_live_candidate_locked(root_fd: int, state_fd: int,
             or _read_owned_resources(state_fd, nginx_fd, public_fd) != old):
         _deny("CANDIDATE_CHANGED")
     return old, new, report
+
+
+def _apply_prepared_owned_live_locked(root_fd: int, state_fd: int, nginx_fd: int,
+                                      public_fd: int, check_layout,
+                                      distribution: str) -> dict:
+    """Fixed intake, CAS preparation and live transaction under one lock."""
+    check_layout()
+    previous = _read_owned_resources(state_fd, nginx_fd, public_fd)
+    snapshot = _validate_owned_resources(previous)
+    report, candidate = _load_private_under_root(root_fd, owner_uid=0, owner_gid=0)
+    if (snapshot is not None and candidate == previous[V2_STATE]
+            and report["expected_generation"] == snapshot["state_generation"] - 1):
+        again, raw = _load_private_under_root(root_fd, owner_uid=0, owner_gid=0)
+        if again != report or raw != candidate:
+            _deny("CANDIDATE_CHANGED")
+        return _reload_owned_live_committed_locked(
+            root_fd, state_fd, nginx_fd, public_fd, check_layout, reload=False,
+        )
+    old, new, prepared = _prepare_owned_live_candidate_locked(
+        root_fd, state_fd, nginx_fd, public_fd, distribution,
+    )
+    if (old != previous or prepared != report or new[V2_STATE] != candidate):
+        _deny("CANDIDATE_CHANGED")
+    return _apply_owned_live_locked(
+        root_fd, state_fd, nginx_fd, public_fd, check_layout, new,
+        expected_intake=prepared,
+    )
 
 
 def _reload_owned_live_committed_locked(root_fd: int, state_fd: int, nginx_fd: int,
