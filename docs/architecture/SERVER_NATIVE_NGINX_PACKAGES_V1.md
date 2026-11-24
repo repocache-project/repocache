@@ -520,3 +520,30 @@ redirected to the new service without a separate atomic and recoverable managed
 configuration/TLS upgrade, verified process/config/unit identity and explicit
 security tests. Original issue #27 complete initial deployment and dependent
 #28/#30/#31 end-to-end acceptance remain NOT VERIFIED until that integration.
+
+
+### Shared owned-service identity and legacy transaction isolation (#27)
+
+The bootstrap installer and the upcoming managed transaction share
+`inspect_effective_owned_nginx_unit`, a fixed read-only observation of
+`repocache-nginx.service` (PID1, exact effective unit properties, no aliases or
+drop-ins, stable master PID and kernel executable identity). Its report grants
+no systemctl, reload or installation authority. Signed installed unit/config
+bytes, native package receipt, protected ownership and filesystem observations
+remain separate mandatory gates.
+
+The existing vendor-based V2 path is deliberately not redirected. Under the
+same exclusive state lock, any entry in the bootstrap configuration ownership
+marker namespace blocks legacy APPLY_V2, RELOAD_V2 and RECOVER_V2 before their
+filesystem or service effects. Malformed and dangling marker entries also
+refuse; no marker or WAL is deleted. An ambiguous existing WAL must never be
+recovered against an assumed vendor unit. This guard does not change the
+legacy no-claim transaction or its existing fixture-only tests.
+
+The next increment must implement a WAL-bound transition to an explicitly
+owned route include outside the vendor's automatically loaded conf.d domain,
+with complete candidate syntax/dump verification, private unit identity,
+appropriate writable cache directories under the systemd sandbox, and exact
+bootstrap/managed rollback. Existing fixed deployment-path contracts must
+be reconciled without permitting caller-selected paths. This increment
+does not activate managed routes, change TLS or close #27.

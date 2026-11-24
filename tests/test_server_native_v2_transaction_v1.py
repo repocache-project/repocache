@@ -1419,3 +1419,45 @@ def test_completed_same_version_noop_rejects_protected_inode_and_metadata_drift(
         assert extra.is_file() and extra.stat().st_ino == target.stat().st_ino
     if tamper == "mode":
         assert target.stat().st_mode & 0o777 == 0o666
+
+
+@pytest.mark.parametrize("operation", ["APPLY_V2", "RELOAD_V2", "RECOVER_V2"])
+@pytest.mark.parametrize("marker_kind", ["valid", "malformed", "dangling"])
+def test_owned_bootstrap_claim_blocks_all_legacy_vendor_operations(
+    filesystem, monkeypatch, operation, marker_kind,
+):
+    fd, state, include, catalog, events = filesystem
+    name = (installer._CONFIG_MARKER if marker_kind == "valid"
+            else installer._CONFIG_MARKER_PREFIX + "unrecognized")
+    marker = state / name
+    if marker_kind == "dangling":
+        marker.symlink_to("missing")
+    else:
+        marker.write_bytes(b"" if marker_kind == "valid" else b"foreign")
+        marker.chmod(0o600)
+    before = sorted(os.listdir(state))
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("owned bootstrap claim reached legacy vendor effects")
+
+    for name in ("_apply_locked", "_reload_owned_locked", "_recover_locked",
+                 "_require_audited_native_package_for_activation"):
+        monkeypatch.setattr(native, name, forbidden)
+    with pytest.raises(native.NativeV2TransactionError,
+                       match="OWNED_NGINX_TRANSITION_REQUIRED"):
+        native._operation_under_root(fd, distribution="debian",
+                                     operation=operation, fixture=False)
+    assert sorted(os.listdir(state)) == before
+    assert os.path.lexists(marker)
+    assert not include.exists() and not catalog.exists() and not events
+    assert not (state / native._WAL).exists()
+    assert not (state / native._WAL_TMP).exists()
+
+
+def test_owned_marker_scan_failure_refuses_legacy_vendor_mode(monkeypatch):
+    def unavailable(_fd):
+        raise PermissionError("private path must not be returned")
+    monkeypatch.setattr(native.os, "listdir", unavailable)
+    with pytest.raises(native.NativeV2TransactionError,
+                       match="^NATIVE_V2_NGINX_OWNERSHIP_UNVERIFIED$"):
+        native._refuse_legacy_vendor_mode_after_owned_claim(123)

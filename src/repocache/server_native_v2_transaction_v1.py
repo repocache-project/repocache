@@ -38,6 +38,7 @@ from repocache.server_locked_manifest_reconcile_v1 import (
 )
 from repocache.server_native_nginx_effective_unit_v1 import (
     EffectiveNginxUnitError, inspect_effective_native_nginx_unit,
+    OWNED_NGINX_CONFIG_MARKER_PREFIX,
 )
 from repocache.server_native_nginx_package_journal_v1 import (
     _read_completed_native_install_under_lock, NativePackageJournalError,
@@ -1090,6 +1091,23 @@ def _require_audited_native_package_for_activation(
         _deny("NATIVE_PACKAGE_PROVENANCE_UNVERIFIED")
 
 
+def _refuse_legacy_vendor_mode_after_owned_claim(state_fd: int) -> None:
+    """A bootstrap ownership claim must never fall back to vendor operations.
+
+    Called under the same protected lock as the installer. Any entry in the
+    reserved marker namespace, even a malformed or dangling entry, blocks
+    legacy apply, reload and recovery until the dedicated service transaction
+    is implemented. Never remove a marker or guess which service owns a WAL.
+    """
+    try:
+        claimed = any(name.startswith(OWNED_NGINX_CONFIG_MARKER_PREFIX)
+                      for name in os.listdir(state_fd))
+    except (OSError, ValueError, TypeError):
+        _deny("NGINX_OWNERSHIP_UNVERIFIED")
+    if claimed:
+        _deny("OWNED_NGINX_TRANSITION_REQUIRED")
+
+
 def _operation_under_root(root_fd: int, *, distribution: str,
                           operation: str, fixture: bool = False) -> dict:
     """Internal entry. Only trusted root code selects the fixed operation."""
@@ -1101,6 +1119,8 @@ def _operation_under_root(root_fd: int, *, distribution: str,
         _refuse_actual_root_fixture_write(root_fd)
     with ExitStack() as stack:
         with _locked(root_fd, 0) as state_fd:
+            if not fixture:
+                _refuse_legacy_vendor_mode_after_owned_claim(state_fd)
             include_fd, include_chain = _walk(root_fd, _INCLUDE_DIR, stack, 0)
             public_fd, public_chain = _walk(root_fd, _PUBLIC_DIR, stack, 0)
             # Do not use a foreign state/catalog filesystem without reviewed

@@ -1,8 +1,8 @@
 """Read-only, fixed-name NGINX PID1 systemd observation (#27/#64).
 
-A vendor unit on disk can be overridden or bypassed at runtime. This
-prerequisite observes only an exact effective nginx.service identity and
-reports it with the already verified vendor unit digest. It does NOT
+A vendor unit on disk can be overridden or bypassed at runtime. Fixed
+observations distinguish the distributor nginx.service from the separately
+owned repocache-nginx.service; neither grants service authority. It does NOT
 authorize systemctl, unit changes, reloads, package installations or state
 writes, and it cannot attest native host-root or SELinux enforcement.
 """
@@ -243,3 +243,80 @@ def inspect_effective_native_nginx_unit(distribution: str) -> dict[str, Any]:
         "authorizes_nginx_reload": False,
         "authorizes_nginx_install": False,
     }
+
+
+# Separate from vendor package ownership. A claim is not activation authority.
+OWNED_NGINX_CONFIG_MARKER_PREFIX = ".native-nginx-config-owner-v1-"
+_OWN_UNIT = "repocache-nginx.service"
+_OWN_PROPERTIES = _PROPERTIES
+_OWN_SHOW = (_SYSTEMCTL, "show", "--no-pager",
+             *(f"--property={name}" for name in _OWN_PROPERTIES), _OWN_UNIT)
+
+
+def inspect_effective_owned_nginx_unit(*, active: bool) -> dict[str, Any]:
+    """Read-only fixed REPOCACHE unit observation, not signed-file authority.
+
+    The caller must independently verify installed signed unit/config bytes,
+    native package provenance, ownership intent and any required state lock.
+    No service operation is authorized by this observation.
+    """
+    if type(active) is not bool:
+        _deny("OWN_UNIT_UNVERIFIED")
+    try:
+        _observe_systemd_pid1()
+        _safe_native_systemctl()
+        observed = []
+        for sample in range(2):
+            proc = subprocess.run(
+                _OWN_SHOW, shell=False, check=False, capture_output=True,
+                text=True, stdin=subprocess.DEVNULL, cwd="/", timeout=5,
+                env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+                close_fds=True, start_new_session=True,
+            )
+            if (proc.returncode != 0 or type(proc.stdout) is not str
+                    or not 1 <= len(proc.stdout) <= 8192 or
+                    type(proc.stderr) is not str or len(proc.stderr) > 4096 or
+                    "\x00" in proc.stdout or "\r" in proc.stdout):
+                _deny("OWN_UNIT_UNVERIFIED")
+            fields = {}
+            for line in proc.stdout.splitlines():
+                if "=" not in line:
+                    _deny("OWN_UNIT_UNVERIFIED")
+                key, value = line.split("=", 1)
+                if key not in _OWN_PROPERTIES or key in fields:
+                    _deny("OWN_UNIT_UNVERIFIED")
+                fields[key] = value
+            if set(fields) != set(_OWN_PROPERTIES):
+                _deny("OWN_UNIT_UNVERIFIED")
+            expected = {
+                "Id": _OWN_UNIT, "Names": _OWN_UNIT,
+                "FragmentPath": "/etc/systemd/system/" + _OWN_UNIT,
+                "DropInPaths": "", "LoadState": "loaded",
+                "ActiveState": "active" if active else "inactive",
+                "SubState": "running" if active else "dead",
+                "CanReload": "yes", "NeedDaemonReload": "no",
+            }
+            if any(fields[k] != v for k, v in expected.items()):
+                _deny("OWN_UNIT_UNVERIFIED")
+            pid = fields["MainPID"]
+            if active:
+                if (not 1 <= len(pid) <= 10 or not pid.isascii() or not pid.isdecimal()
+                        or not 2 <= int(pid) <= 2**31 - 1):
+                    _deny("OWN_UNIT_UNVERIFIED")
+                _observe_nginx_master_kernel(int(pid))
+            elif pid != "0":
+                _deny("OWN_UNIT_UNVERIFIED")
+            observed.append(fields)
+        if observed[0] != observed[1]:
+            _deny("OWN_UNIT_CHANGED")
+        return {"status": "NATIVE_REPOCACHE_NGINX_SERVICE_VERIFIED",
+                "main_pid_observed": int(observed[0]["MainPID"]),
+                "unit_name": _OWN_UNIT,
+                "authorizes_systemctl": False,
+                "authorizes_nginx_reload": False,
+                "authorizes_nginx_install": False}
+    except EffectiveNginxUnitError:
+        raise
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        _deny("OWN_UNIT_UNVERIFIED")
+

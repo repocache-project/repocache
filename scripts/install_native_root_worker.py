@@ -46,6 +46,8 @@ from repocache.server_native_v2_transaction_v1 import (
 from repocache.server_native_nginx_effective_unit_v1 import (
     inspect_effective_native_nginx_unit, _observe_systemd_pid1,
     _safe_native_systemctl, _FIXED_ARGS as _EFFECTIVE_SYSTEMCTL_ARGS,
+    EffectiveNginxUnitError, inspect_effective_owned_nginx_unit,
+    OWNED_NGINX_CONFIG_MARKER_PREFIX,
 )
 from repocache.server_root_control_full_context_v1 import _capture_default_nginx_dump_private
 from repocache.server_proposed_state_v2_store import _read_v2
@@ -478,17 +480,12 @@ _OWN_UNIT = "repocache-nginx.service"
 _OWN_CONFIG = "/etc/nginx/repocache.conf"
 # Activation ownership marker is intentionally separate from the signed worker
 # receipt: no unrelated root-owned file is implicitly adopted on first use.
-_CONFIG_MARKER_PREFIX = ".native-nginx-config-owner-v1-"
+_CONFIG_MARKER_PREFIX = OWNED_NGINX_CONFIG_MARKER_PREFIX
 # A fixed, reviewed immutable bootstrap; the source archive must contain
 # precisely these signed bytes. Managed TLS deployment is a different step.
 _BOOTSTRAP_CONFIG = "# Authenticated bootstrap only. Never include the vendor's nginx.conf.\n# The fixed local endpoint has no repository routes, TLS or external listener.\n# Full managed TLS/route activation remains a separate guarded transaction.\npid /run/repocache-nginx/nginx.pid;\nerror_log stderr warn;\nworker_processes 1;\nevents {\n    worker_connections 128;\n}\nhttp {\n    access_log off;\n    server {\n        listen 127.0.0.1:8008;\n        server_name localhost;\n        location = /__repocache/private {\n            return 204;\n        }\n        location / {\n            return 404;\n        }\n    }\n}\n".encode("ascii")
 _CONFIG_MARKER = _CONFIG_MARKER_PREFIX + hashlib.sha256(_BOOTSTRAP_CONFIG).hexdigest()
-_OWN_PROPERTIES = (
-    "Id", "Names", "FragmentPath", "DropInPaths", "LoadState",
-    "ActiveState", "SubState", "MainPID", "CanReload", "NeedDaemonReload",
-)
-_OWN_SHOW = ("/usr/bin/systemctl", "show", "--no-pager",
-             *(f"--property={name}" for name in _OWN_PROPERTIES), _OWN_UNIT)
+
 
 
 def _private_config_present() -> None:
@@ -665,61 +662,12 @@ def _own_systemctl(action: str) -> tuple[int, bytes]:
 
 
 def _own_service_observation(*, active: bool) -> dict:
-    """Observe the independently installed REPOCACHE service, not vendor unit."""
-    from repocache.server_native_nginx_effective_unit_v1 import _observe_nginx_master_kernel
+    """Retain installer diagnostics while sharing the fixed observer."""
     try:
-        _observe_systemd_pid1()
-        _safe_native_systemctl()
-        observed = []
-        for sample in range(2):
-            proc = subprocess.run(
-                _OWN_SHOW, shell=False, check=False, capture_output=True,
-                text=True, stdin=subprocess.DEVNULL, cwd="/", timeout=5,
-                env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
-                close_fds=True, start_new_session=True,
-            )
-            if (proc.returncode != 0 or type(proc.stdout) is not str
-                    or not 1 <= len(proc.stdout) <= 8192 or
-                    type(proc.stderr) is not str or len(proc.stderr) > 4096 or
-                    "\x00" in proc.stdout or "\r" in proc.stdout):
-                _reject("NATIVE_OWN_UNIT_UNVERIFIED")
-            fields = {}
-            for line in proc.stdout.splitlines():
-                if "=" not in line:
-                    _reject("NATIVE_OWN_UNIT_UNVERIFIED")
-                key, value = line.split("=", 1)
-                if key not in _OWN_PROPERTIES or key in fields:
-                    _reject("NATIVE_OWN_UNIT_UNVERIFIED")
-                fields[key] = value
-            if set(fields) != set(_OWN_PROPERTIES):
-                _reject("NATIVE_OWN_UNIT_UNVERIFIED")
-            expected = {
-                "Id": _OWN_UNIT, "Names": _OWN_UNIT,
-                "FragmentPath": "/etc/systemd/system/" + _OWN_UNIT,
-                "DropInPaths": "", "LoadState": "loaded",
-                "ActiveState": "active" if active else "inactive",
-                "SubState": "running" if active else "dead",
-                "CanReload": "yes", "NeedDaemonReload": "no",
-            }
-            if any(fields[k] != v for k, v in expected.items()):
-                _reject("NATIVE_OWN_UNIT_UNVERIFIED")
-            pid = fields["MainPID"]
-            if active:
-                if (not pid.isascii() or not pid.isdecimal()
-                        or not 2 <= int(pid) <= 2**31 - 1):
-                    _reject("NATIVE_OWN_UNIT_UNVERIFIED")
-                _observe_nginx_master_kernel(int(pid))
-            elif pid != "0":
-                _reject("NATIVE_OWN_UNIT_UNVERIFIED")
-            observed.append(fields)
-        if observed[0] != observed[1]:
+        return inspect_effective_owned_nginx_unit(active=active)
+    except EffectiveNginxUnitError as exc:
+        if str(exc) == "NATIVE_NGINX_EFFECTIVE_OWN_UNIT_CHANGED":
             _reject("NATIVE_OWN_UNIT_CHANGED")
-        return {"status": "NATIVE_REPOCACHE_NGINX_SERVICE_VERIFIED",
-                "main_pid_observed": int(observed[0]["MainPID"]),
-                "unit_name": _OWN_UNIT}
-    except stage.WorkerStageError:
-        raise
-    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
         _reject("NATIVE_OWN_UNIT_UNVERIFIED")
 
 
