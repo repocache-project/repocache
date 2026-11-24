@@ -64,7 +64,7 @@ def guarded_native_guest(platform: str) -> None:
     # These binaries were obtained via the guest's original native manager,
     # not by pip, untrusted download, system CA change or release publisher.
     bins = ("apt-get", "dpkg-deb", "gpg", "openssl") if platform == "debian13" else (
-        "dnf", "createrepo_c", "gpg", "openssl",
+        "dnf", "createrepo_c", "gpg", "openssl", "rpmbuild", "rpmsign", "rpm",
     )
     for item in bins:
         require(shutil.which(item) is not None,
@@ -122,6 +122,9 @@ def main(platform: str) -> None:
         # Actual DNF5 with temporary repo/config/cache roots. OpenPGP-signed
         # repomd metadata and a guest-local public key must reject tampering.
         probe("dnf", tls=True, signed_dnf=True)
+        from ci_dnf_signed_rpm_fallback import probe_booted_vm
+
+        probe_booted_vm()
 
     require(installed_sources(platform) == before_sources,
             "real system APT/DNF source files were modified")
