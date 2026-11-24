@@ -19,6 +19,7 @@ EXAMPLE = Path(__file__).resolve().parents[1] / "docs/examples/server-install-v1
 
 def document():
     sample = json.loads(EXAMPLE.read_text(encoding="utf-8"))
+    sample["repositories"][1]["id"] = "almalinux-baseos"
     sample["deployment"]["cache_policy"]["disk_pressure"] = {
         "warning_free_bytes": 200, "critical_free_bytes": 100,
     }
@@ -51,7 +52,7 @@ def test_exact_warning_and_critical_boundaries(free, expected, advisory):
     assert result["level"] == expected
     assert result["action_advisory"] == advisory
     assert result["measurement_complete"] is True
-    assert result["cache_writes_safe_to_assert"] == (expected == "normal")
+    assert result["no_pressure_in_sample"] == (expected == "normal")
     assert result["critical_free_bytes"] == 100
     assert result["warning_free_bytes"] == 200
     for key in ("native_cache_eviction_observed", "authorizes_cache_deletion",
@@ -91,7 +92,7 @@ def test_incomplete_or_missing_observations_are_unknown(kwargs):
     assert result["level"] == "unknown"
     assert result["action_advisory"] == "RECHECK_COMPLETE_METRICS"
     assert result["measurement_complete"] is False
-    assert result["cache_writes_safe_to_assert"] is False
+    assert result["no_pressure_in_sample"] is False
     assert result["authorizes_nginx_reload"] is False
 
 
@@ -150,7 +151,7 @@ def test_fixed_redacted_output_does_not_return_filesystem_usage_or_host_paths():
         "schema_version", "status", "level", "measurement_complete",
         "previous_level", "warning_free_bytes", "critical_free_bytes",
         "recovery_hysteresis_bytes", "action_advisory",
-        "cache_writes_safe_to_assert", "native_cache_eviction_observed",
+        "no_pressure_in_sample", "native_cache_eviction_observed",
         "native_nginx_capability_verified", "authorizes_cache_deletion",
         "authorizes_nginx_reload", "authorizes_client_source_change",
     }
