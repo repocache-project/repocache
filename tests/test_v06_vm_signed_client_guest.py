@@ -28,8 +28,8 @@ def test_native_guest_guard_never_accepts_ci_container_or_unknown_platform(platf
 
 
 @pytest.mark.parametrize("platform,expected", [
-    ("debian13", ("apt", True, False, True)),
-    ("almalinux10", ("dnf", True, True, False)),
+    ("debian13", ("apt", {"tls": True, "package_transfer": True})),
+    ("almalinux10", ("dnf", {"tls": True, "signed_dnf": True})),
 ])
 def test_native_manager_selection_preserves_sources_and_packages(
     platform, expected, monkeypatch, capsys,
@@ -45,10 +45,9 @@ def test_native_manager_selection_preserves_sources_and_packages(
         )
     monkeypatch.setitem(sys.modules, "ci_client_native_fallback",
                         SimpleNamespace(
-                            probe=lambda manager, **k: calls.append((
-                                manager, k["tls"], k["signed_dnf"],
-                                k["package_transfer"],
-                            )),
+                            probe=lambda manager, **kwargs: calls.append(
+                                (manager, kwargs)
+                            ),
                         ))
     guest.main(platform)
     assert calls == [expected]
