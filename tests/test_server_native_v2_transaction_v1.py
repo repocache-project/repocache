@@ -2625,6 +2625,7 @@ def test_owned_socket_active_candidate_refused_before_wal(filesystem, monkeypatc
         yield (1, 2, 3, lambda: None)
     monkeypatch.setattr(native, "_owned_layout_locked", layout)
     monkeypatch.setattr(native, "_owned_socket_host_boundary", lambda *_: None)
+    monkeypatch.setattr(native, "_owned_socket_recheck_write_boundary", lambda *_: None)
     monkeypatch.setattr(native, "_read_owned_resources",
                         lambda *_: {native.V2_STATE: None})
     monkeypatch.setattr(native, "_validate_owned_resources", lambda *_: None)
@@ -2667,3 +2668,59 @@ def test_old_path_claim_is_not_new_directory_authority(filesystem):
             pytest.fail("old path claim reused")
     assert old_claim.exists()
     assert main.read_bytes() == native._OWNED_BOOTSTRAP_CONFIG
+
+
+def test_isolated_owned_layout_refuses_unrelated_directory_entry(filesystem):
+    fd, state, vendor, _, _ = filesystem
+    old = _owned_bootstrap_resources()
+    paths = _owned_fixture_paths(filesystem, old)
+    foreign = paths[native._OWNED_MAIN].parent / "foreign.conf"
+    foreign.write_bytes(b"foreign")
+    with pytest.raises(native.NativeV2TransactionError, match="OWNED_DIRECTORY_FOREIGN_ENTRY"):
+        with native._owned_fixture_layout(fd, recovering=False):
+            pytest.fail("unrelated file in isolated directory adopted")
+    assert foreign.read_bytes() == b"foreign"
+    assert _fixture_resource_bytes(paths) == old
+
+
+def test_socket_apply_binds_storage_check_to_exact_prepared_candidate(
+    filesystem, monkeypatch, owned_live_simulation,
+):
+    fd, state, _, _, _ = filesystem
+    old = _owned_bootstrap_resources()
+    new = _owned_generation(active=False)
+    paths = _owned_fixture_paths(filesystem, old)
+    report = {"expected_generation": 0, "expected_state_sha256": None}
+    monkeypatch.setattr(native, "_owned_socket_host_boundary", lambda *_: None)
+    monkeypatch.setattr(native, "_owned_socket_recheck_write_boundary", lambda *_: None)
+    monkeypatch.setattr(native, "_load_private_under_root",
+                        lambda *_a, **_kw: (report, new[V2_STATE]))
+    monkeypatch.setattr(native, "_prepare_owned_live_candidate_locked",
+                        lambda *_: (old, new, report))
+    with native._locked(fd, 0) as state_fd:
+        result = native._owned_socket_operation_locked(fd, state_fd, "debian", "APPLY_V2")
+    assert result == {"status": "NATIVE_V2_COMMITTED", "state_generation": 1}
+    assert _fixture_resource_bytes(paths) == new
+    _assert_owned_fixture_clean(filesystem, paths)
+
+
+def test_socket_recovery_dispatches_prior_snapshot_not_partial_current(
+    filesystem, monkeypatch, owned_live_simulation,
+):
+    fd, state, _, _, _ = filesystem
+    old = _owned_bootstrap_resources()
+    new = _owned_generation(active=False)
+    paths = _owned_fixture_paths(filesystem, old)
+    monkeypatch.setattr(native, "_owned_socket_host_boundary", lambda *_: None)
+    monkeypatch.setattr(native, "_owned_socket_recheck_write_boundary", lambda *_: None)
+    with native._owned_fixture_layout(fd, recovering=False) as layout:
+        state_fd, nginx_fd, public_fd, check_layout = layout
+        native._publish_owned_wal_locked(state_fd, nginx_fd, public_fd,
+                                        old, new, check_layout, live=True)
+    paths[native._INCLUDE].write_bytes(new[native._INCLUDE])
+    paths[native._INCLUDE].chmod(0o644)
+    with native._locked(fd, 0) as state_fd:
+        result = native._owned_socket_operation_locked(fd, state_fd, "debian", "RECOVER_V2")
+    assert result == {"status": "NATIVE_V2_ROLLED_BACK"}
+    assert _fixture_resource_bytes(paths) == old
+    _assert_owned_fixture_clean(filesystem, paths)

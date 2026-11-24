@@ -1403,6 +1403,9 @@ def _owned_layout_locked(root_fd: int, state_fd: int, *, recovering: bool):
                 _deny("OWNED_WAL_VENDOR_DOMAIN_CONFLICT")
             for name in (_OWNED_MAIN, _INCLUDE, *_OWNED_STAGES.values()):
                 _owned_require_absent(shared_fd, name)
+            if set(os.listdir(nginx_fd)) - {_OWNED_MAIN, _INCLUDE,
+                    _OWNED_STAGES[_OWNED_MAIN], _OWNED_STAGES[_INCLUDE]}:
+                _deny("OWNED_DIRECTORY_FOREIGN_ENTRY")
             for fd in (nginx_fd, vendor_fd, public_fd):
                 _owned_require_absent(fd, _STAGE)
             # The dedicated nginx leaf may change directory timestamps.
@@ -2405,6 +2408,51 @@ def _owned_socket_host_boundary(root_fd: int, state_fd: int,
         _deny("OWNED_SOCKET_HOST_BOUNDARY_REFUSED")
 
 
+
+def _owned_socket_recheck_write_boundary(root_fd: int, nginx_fd: int,
+                                        distribution: str) -> None:
+    """Cheap retained mount/metadata check before every WAL resource effect."""
+    try:
+        with ExitStack() as stack:
+            shared = os.open("/etc/nginx", _DIRECTORY_FLAGS)
+            stack.callback(os.close, shared)
+            host = os.open("/proc/1/root", os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC)
+            stack.callback(os.close, host)
+            if (not os.fstatvfs(shared).f_flag & os.ST_RDONLY
+                    or os.fstatvfs(nginx_fd).f_flag & os.ST_RDONLY):
+                _deny("OWNED_SOCKET_ATOMIC_WRITE_BOUNDARY_UNVERIFIED")
+            _metadata_no_acl(shared, directory=True)
+            _metadata_no_acl(nginx_fd, directory=True)
+            if (distribution == "almalinux" and
+                    os.getxattr(nginx_fd, "security.selinux").split(b":")[2:3] != [b"httpd_config_t"]):
+                _deny("OWNED_SOCKET_CONFIG_LABEL_UNVERIFIED")
+            for name in (_OWNED_MAIN, _INCLUDE):
+                try:
+                    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                                 | os.O_CLOEXEC, dir_fd=nginx_fd)
+                except FileNotFoundError:
+                    continue
+                stack.callback(os.close, fd)
+                info = _metadata_no_acl(fd)
+                if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                        or stat.S_IMODE(info.st_mode) != 0o644
+                        or os.fstatvfs(fd).f_flag & os.ST_RDONLY):
+                    _deny("OWNED_SOCKET_CONFIG_METADATA_UNVERIFIED")
+                path = "/etc/nginx/repocache.d/" + name
+                reference = _path_snapshot(host, path, leaf_type=stat.S_IFREG)
+                if (_path_snapshot(root_fd, path, leaf_type=stat.S_IFREG) != reference
+                        or _path_snapshot(host, path, leaf_type=stat.S_IFREG) != reference
+                        or (info.st_dev, info.st_ino) != reference[-1][:2]):
+                    _deny("OWNED_SOCKET_MOUNT_VIEW_CHANGED")
+                if (distribution == "almalinux" and
+                        os.getxattr(fd, "security.selinux").split(b":")[2:3] != [b"httpd_config_t"]):
+                    _deny("OWNED_SOCKET_CONFIG_LABEL_UNVERIFIED")
+    except NativeV2TransactionError:
+        raise
+    except (RootControlWorkerError, OSError, ValueError, TypeError):
+        _deny("OWNED_SOCKET_WRITE_BOUNDARY_REFUSED")
+
+
 def _owned_socket_require_inactive_routes(snapshot: dict | None) -> None:
     """Until #450 storage and live access are verified, no active routes."""
     if snapshot is None:
@@ -2425,6 +2473,12 @@ def _owned_socket_operation_locked(root_fd: int, state_fd: int,
         _owned_socket_host_boundary(
             root_fd, state_fd, nginx_fd, public_fd, distribution,
         )
+        retained_check = check_layout
+        def check_layout():
+            retained_check()
+            _owned_socket_recheck_write_boundary(root_fd, nginx_fd, distribution)
+        layout = (state_fd, nginx_fd, public_fd, check_layout)
+        check_layout()
         current = _read_owned_resources(state_fd, nginx_fd, public_fd)
         if operation == "RECOVER_V2":
             # A partially applied resource set is not a committed snapshot.

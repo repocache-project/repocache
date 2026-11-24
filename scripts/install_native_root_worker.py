@@ -567,7 +567,12 @@ def _place_signed_private_config(raw: bytes, state_fd: int) -> None:
                 _reject("NATIVE_PRIVATE_CONFIG_FOREIGN_COLLISION")
             _require_owned_private_config_intent(state_fd, nginx)
             if existing is None:
+                # The signed intent is durable before mkdir. Explicitly
+                # set the new directory mode, independent of caller umask.
                 os.mkdir("repocache.d", mode=0o755, dir_fd=nginx)
+                new_fd = _open_directory(nginx, "repocache.d", stack)
+                os.fchmod(new_fd, 0o755)
+                os.fsync(new_fd)
                 os.fsync(nginx)
             dedicated = _open_directory(nginx, "repocache.d", stack)
             if (stat.S_IMODE(os.fstat(dedicated).st_mode) != 0o755
