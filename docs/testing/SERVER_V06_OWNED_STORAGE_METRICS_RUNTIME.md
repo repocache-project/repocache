@@ -32,9 +32,8 @@ sample and checks observed counts and byte totals against the source
 rows. It does not run the CLI with host-root privileges or transfer any
 operator credentials, certificates, or production logs.
 
-The current installed rotation candidate uses a fixed USR1 reopen hook.
-This fixture does not exercise or endorse that hook with a private root-only
-log directory. It uses an explicit validated reload of its own spawned master
+The rotation candidate has no service hook and must not be installed as a
+standalone scheduled profile. This fixture uses an explicit validated reload of its own spawned master
 and drains the old worker generation, not systemd or the host's NGINX. An
 installed lock-coordinated strategy remains a separate acceptance gate;
 no production reload authorization or label changes follow from this test.

@@ -27,8 +27,8 @@ The existing audit log must continue receiving requests.
 The harness consumes the existing real logrotate profile. **Only in this
 disposable fixture**, it maps the fixed root-owned log to a private file,
 maps root-owned create permissions to the unprivileged test account and
-maps the fixed installed-systemd reopen action to the running test NGINX
-process's private nginx -s reopen argv. It calls the real packaged
+inserts a fixture-only reopen hook for the running test NGINX process's
+private nginx -s reopen argv. The candidate itself has no service hook. It calls the real packaged
 logrotate binary with --force twice, verifying both uncompressed and
 compressed archive files, private 0600 modes, the new live log, exact
 per-repository labels and no secret request URI in recorded metrics. The
@@ -43,8 +43,8 @@ source or TLS file is touched. Port binding is loopback-only inside the
 throwaway container, not a publicly exposed listener.
 
 This is Stage-A integration evidence only. An installed root worker must
-prove owned log paths, vendor NGINX identity and correct credentialed
-systemd reopen. Actual AlmaLinux SELinux enforcing, booted native host
+prove owned log paths, dedicated REPOCACHE NGINX identity and a correct
+lock-coordinated reopen. Actual AlmaLinux SELinux enforcing, booted native host
 logging, cache preservation, signed installation, repair and interruption
 recovery still require the consolidated #19 native VM campaign. This PR
 does not close #29 or imply production log permissions are validated.

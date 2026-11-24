@@ -33,11 +33,15 @@ def test_fixed_root_only_non_authorizing_rotation():
     for expected in (
         "    daily\n", "    rotate 7\n", "    create 0600 root root\n",
         "    compress\n", "    delaycompress\n", "    notifempty\n",
-        "    postrotate\n",
-        "/usr/bin/systemctl kill --kill-who=main --signal=USR1 nginx.service",
     ):
         assert expected in out["rotation_candidate"]
-    for field in ("authorizes_logrotate_installation","authorizes_nginx_signal",
+    assert out["required_owned_nginx_unit"] == "repocache-nginx.service"
+    assert out["requires_exact_vendor_nginx_unit"] is False
+    assert out["requires_locked_rotation_transaction"] is True
+    assert out["requires_external_reopen_after_marker_reconcile"] is True
+    for token in ("postrotate", "prerotate", "systemctl", "nginx.service", "USR1", "copytruncate"):
+        assert token not in out["rotation_candidate"]
+    for field in ("authorizes_standalone_scheduled_rotation", "authorizes_logrotate_installation","authorizes_nginx_signal",
                   "actual_nginx_reopen_verified","live_log_retention_verified"):
         assert out[field] is False
 
@@ -47,6 +51,10 @@ def test_logging_optout_has_no_rotation_profile():
     assert out["rotation_candidate"] == ""
     assert out["retention_days"] is None
     assert not out["requires_authenticated_root_install"]
+    assert out["required_owned_nginx_unit"] is None
+    assert not out["requires_locked_rotation_transaction"]
+    assert not out["requires_external_reopen_after_marker_reconcile"]
+    assert not out["authorizes_standalone_scheduled_rotation"]
 
 
 @pytest.mark.parametrize("days",[0,-1,3651,True,1.0,"7",None])

@@ -46,7 +46,6 @@ from repocache.server_nginx_metrics_bundle_join_v1 import render_repository_ngin
 
 _MARKER = ".repocache-metrics-log.owner-v1"
 _FIXED_LOG = "/var/log/nginx/repocache-managed/metrics.jsonl"
-_REOPEN = "/usr/bin/systemctl kill --kill-who=main --signal=USR1 nginx.service"
 
 
 def _identity(path: Path) -> tuple[int, int, int, int, int]:
@@ -160,8 +159,10 @@ def exercise_owned_runtime() -> None:
             assert not rotation["authorizes_logrotate_installation"]
             profile = root / "rotation.conf"
             source = rotation["rotation_candidate"]
-            assert source.count(_FIXED_LOG) == source.count(_REOPEN) == 1
-            profile.write_text(source.replace(_FIXED_LOG, str(log)).replace(_REOPEN, "/bin/true"))
+            assert source.count(_FIXED_LOG) == 1 and "postrotate" not in source
+            assert rotation["required_owned_nginx_unit"] == "repocache-nginx.service"
+            assert not rotation["authorizes_standalone_scheduled_rotation"]
+            profile.write_text(source.replace(_FIXED_LOG, str(log)))
             origin_cert, origin_key = root / "origin.pem", root / "origin-key.pem"
             front_cert, front_key = root / "front.pem", root / "front-key.pem"
             self_signed(openssl, origin_cert, origin_key, HOST)
