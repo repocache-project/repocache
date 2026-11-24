@@ -9,10 +9,15 @@ cause a fail-closed refusal, not an attempt to relabel a production source.
 """
 from __future__ import annotations
 
+import base64
+import contextlib
+import contextvars
 import hashlib
+import json
 import os
 import secrets
 import stat
+import subprocess
 from pathlib import Path
 
 import source_preflight as pre
@@ -23,6 +28,107 @@ MAX_TOTAL_ATTRIBUTE_BYTES = 65536
 TEMP_PREFIX = ".repocache-metadata-lab-"
 FLAGS_DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 FLAGS_FILE = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+
+
+# Explicit internal scope only. Existing sandbox APIs still refuse labels
+# unless the caller establishes this root-bound native policy context.
+_POLICY = contextvars.ContextVar("repocache_native_metadata", default=None)
+
+
+@contextlib.contextmanager
+def native_metadata_scope(root: Path):
+    """Read native policy for a fixed host or marked private root.
+
+    This grants no file-write authority and never changes SELinux state or
+    policy. Private fixture roots are accepted only with real root credentials
+    and the existing preflight marker. No environment override is supported.
+    """
+    root = Path(root)
+    if os.getresuid() != (0, 0, 0) or os.uname().machine != "x86_64":
+        raise pre.PreflightError("Native metadata scope requires root x86_64")
+    if root != Path("/"):
+        fd = os.open(root, FLAGS_DIR)
+        try:
+            pre._fixture(root, fd, 0)
+        finally:
+            os.close(fd)
+    values = {}
+    for line in Path("/etc/os-release").read_text("ascii").splitlines():
+        if "=" in line and not line.startswith("#"):
+            key, value = line.split("=", 1)
+            values[key] = value.strip('"')
+    target = (values.get("ID"), values.get("VERSION_ID", "").split(".")[0])
+    if target not in {("debian", "13"), ("almalinux", "10")}:
+        raise pre.PreflightError("Unsupported native metadata target")
+    enforcing = target[0] == "almalinux"
+    if enforcing and Path("/sys/fs/selinux/enforce").read_text("ascii").strip() != "1":
+        raise pre.PreflightError("Native AlmaLinux requires SELinux Enforcing")
+    token = _POLICY.set((root, enforcing))
+    try:
+        yield
+    finally:
+        _POLICY.reset(token)
+
+
+def policy_active() -> bool:
+    return _POLICY.get() is not None
+
+
+def _policy_label(fd: int) -> bytes:
+    """Require the opened inode's label to match its native path policy.
+
+    A newly created file may carry a different SELinux user than the policy
+    default. Require role, type and MLS/MCS range to match; preserve the full
+    actual label bytes, including its user, throughout any transaction.
+    """
+    policy = _POLICY.get()
+    if policy is None or not policy[1]:
+        raise pre.PreflightError("Unreviewed SELinux label")
+    root = policy[0]
+    path = Path(os.readlink("/proc/self/fd/" + str(fd)))
+    if not path.is_absolute() or not path.is_relative_to(root) or path == root:
+        raise pre.PreflightError("SELinux label outside anchored policy scope")
+    info = os.fstat(fd)
+    named = path.lstat()
+    if (info.st_dev, info.st_ino) != (named.st_dev, named.st_ino):
+        raise pre.PreflightError("SELinux policy pathname changed")
+    result = subprocess.run(
+        ["/usr/sbin/matchpathcon", "-n", str(path)],
+        env={"PATH": "/usr/sbin:/usr/bin", "LC_ALL": "C"},
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        check=False, timeout=5,
+    )
+    if result.returncode != 0 or not 1 <= len(result.stdout) <= 512:
+        raise pre.PreflightError("Native SELinux path policy unavailable")
+    expected = result.stdout.strip().split(b":", 3)
+    raw = os.getxattr(fd, "security.selinux")
+    actual = raw.rstrip(b"\0").split(b":", 3)
+    if len(actual) != 4 or len(expected) != 4 or actual[1:] != expected[1:]:
+        raise pre.PreflightError("SELinux label does not match native path policy")
+    after = path.lstat()
+    if (after.st_dev, after.st_ino, after.st_ctime_ns) != (
+            info.st_dev, info.st_ino, info.st_ctime_ns):
+        raise pre.PreflightError("SELinux-labelled inode changed")
+    return raw
+
+
+def private_state_attributes(fd: int) -> None:
+    """Private control files may carry only a verified default SELinux label."""
+    names = set(os.listxattr(fd))
+    policy = _POLICY.get()
+    if policy is not None and policy[1]:
+        if names != {"security.selinux"}:
+            raise pre.PreflightError("Unexpected protected state attributes")
+        _policy_label(fd)
+    elif names:
+        raise pre.PreflightError("Unexpected protected state attributes")
+
+
+def attribute_digest(attrs: tuple[tuple[str, bytes], ...]) -> str:
+    encoded = json.dumps(
+        [[name, base64.b64encode(value).decode("ascii")] for name, value in attrs],
+        separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _allowed_attribute(name: str) -> bool:
@@ -43,7 +149,15 @@ def _metadata(fd: int) -> tuple[dict, tuple[tuple[str, bytes], ...]]:
         raise pre.PreflightError("Cannot enumerate file metadata") from exc
     if len(names) > MAX_ATTRS:
         raise pre.PreflightError("Too many file attributes")
-    if any(not isinstance(name, str) or not _allowed_attribute(name)
+    policy = _POLICY.get()
+    label = None
+    if policy is not None and policy[1]:
+        if "security.selinux" not in names:
+            raise pre.PreflightError("Native source label missing")
+        label = _policy_label(fd)
+    if any(not isinstance(name, str)
+           or not (_allowed_attribute(name) or
+                   (name == "security.selinux" and label is not None))
            or len(name.encode("utf-8")) > 255 for name in names):
         raise pre.PreflightError("Security label or unsupported metadata namespace")
     attrs = []
@@ -51,6 +165,8 @@ def _metadata(fd: int) -> tuple[dict, tuple[tuple[str, bytes], ...]]:
     for name in sorted(names):
         try:
             value = os.getxattr(fd, name)
+            if name == "security.selinux" and value != label:
+                raise pre.PreflightError("Native source label changed during read")
         except OSError as exc:
             raise pre.PreflightError("Cannot safely read file attribute") from exc
         total += len(value)

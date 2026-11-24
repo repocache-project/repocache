@@ -35,7 +35,7 @@ INTERPRETER = b"#!/usr/bin/python3 -IS\n"
 MODULES = (
     "root_source_boundary", "repocache_client", "native_fallback_plan",
     "source_preflight", "source_entry_boundaries", "source_structure_subset",
-    "native_package_lock_observation",
+    "native_package_lock_observation", "source_metadata_lab",
 )
 ENTRYPOINT = b"from root_source_boundary import main\nraise SystemExit(main())\n"
 DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC

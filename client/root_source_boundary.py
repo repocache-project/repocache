@@ -29,6 +29,7 @@ import repocache_client as client
 import native_fallback_plan as fallback
 import source_preflight as pre
 import source_entry_boundaries as entries
+import source_metadata_lab as metadata
 
 DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 REG = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
@@ -89,9 +90,8 @@ def _read_pinned(directory_fd: int, name: str, max_size: int,
                    (pointed.st_dev, pointed.st_ino)):
             raise BoundaryRefused("Protected state changed during read")
         try:
-            if os.listxattr(fd):
-                raise BoundaryRefused("Unreviewed protected state attributes")
-        except OSError as exc:
+            metadata.private_state_attributes(fd)
+        except (OSError, pre.PreflightError) as exc:
             raise BoundaryRefused("Cannot inspect protected state attributes") from exc
         return body
     finally:
@@ -180,9 +180,8 @@ def _exclusive_lock(state_fd: int, owner: int) -> Iterator[None]:
                 or (info.st_dev, info.st_ino) != (named.st_dev, named.st_ino)):
             raise BoundaryRefused("Unsafe transaction lock inode")
         try:
-            if os.listxattr(fd):
-                raise BoundaryRefused("Unexpected protected lock attributes")
-        except OSError as exc:
+            metadata.private_state_attributes(fd)
+        except (OSError, pre.PreflightError) as exc:
             raise BoundaryRefused("Cannot inspect transaction lock attributes") from exc
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -239,9 +238,12 @@ def _decode_manifest(raw: bytes, ident: str, *, pending: bool = False) -> dict:
     if type(obj) is not dict or type(obj.get("schema")) is not int:
         raise BoundaryRefused("Protected approval schema refused")
     schema = obj["schema"]
-    if (schema not in (1, 2) or (pending and schema != 2)
-            or set(obj) != (MANIFEST_FIELDS if schema == 1 else
-                            MANIFEST_FIELDS | {"source_identity"})
+    fields = (MANIFEST_FIELDS if schema == 1 else
+              MANIFEST_FIELDS | {"source_identity"})
+    if schema == 3:
+        fields |= {"source_attributes_sha256"}
+    if (schema not in (1, 2, 3) or (pending and schema == 1)
+            or set(obj) != fields
             or type(obj["id"]) is not str or obj["id"] != ident
             or type(obj["source"]) is not str
             or not pre.SOURCE_PATH.fullmatch(obj["source"])
@@ -250,7 +252,10 @@ def _decode_manifest(raw: bytes, ident: str, *, pending: bool = False) -> dict:
                    for k in ("source_sha256", "entry_sha256", "route_sha256"))
             or any(type(obj[k]) is not str for k in ("upstream", "cache"))):
         raise BoundaryRefused("Protected approval schema refused")
-    if schema == 2:
+    if schema == 3 and (type(obj["source_attributes_sha256"]) is not str
+                        or not DIGEST.fullmatch(obj["source_attributes_sha256"])):
+        raise BoundaryRefused("Protected source attribute digest refused")
+    if schema in (2, 3):
         identity = obj["source_identity"]
         if (type(identity) is not dict or set(identity) != SOURCE_IDENTITY_FIELDS
                 or any(type(value) is not int for value in identity.values())
@@ -261,7 +266,8 @@ def _decode_manifest(raw: bytes, ident: str, *, pending: bool = False) -> dict:
     return obj
 
 
-def _source_bytes(root: Path, relative: str, observed: dict) -> bytes:
+def _source_bytes(root: Path, relative: str, observed: dict, *,
+                  attrs_out: list | None = None) -> bytes:
     """Read exact allowlisted source through stable anchored file descriptors."""
     fd = None
     try:
@@ -292,7 +298,16 @@ def _source_bytes(root: Path, relative: str, observed: dict) -> bytes:
                     or before.st_ctime_ns != observed["ctime_ns"]
                     or before.st_size > pre.MAX_SOURCE_BYTES):
                 raise BoundaryRefused("Protected source baseline changed")
+            captured = None
+            if attrs_out is not None:
+                identity, captured = metadata._metadata(source_fd)
+                if identity != {key: observed[key] for key in SOURCE_IDENTITY_FIELDS}:
+                    raise BoundaryRefused("Source metadata identity changed")
             raw = os.read(source_fd, pre.MAX_SOURCE_BYTES + 1)
+            if attrs_out is not None:
+                if metadata._metadata(source_fd) != (identity, captured):
+                    raise BoundaryRefused("Source attributes changed during read")
+                attrs_out.extend(captured)
             after = os.fstat(source_fd)
             named = os.stat(leaf, dir_fd=fd, follow_symlinks=False)
             if (len(raw) > pre.MAX_SOURCE_BYTES
@@ -384,18 +399,21 @@ def _validate_record(root: Path, state_fd: int, ident: str, record: dict,
     """Validate under the caller's protected client lock, never grant writes."""
     if hashlib.sha256(record["cache"].encode("utf-8")).hexdigest() != record["route_sha256"]:
         raise BoundaryRefused("Exact cache route approval is stale")
-    if current_catalog and record["schema"] != 2:
+    if current_catalog and record["schema"] not in (2, 3):
         raise BoundaryRefused("Native approval requires bound source inode identity")
     try:
         before = pre.inspect_source(record["source"], root=root)
         if before["sha256"] != record["source_sha256"]:
             raise BoundaryRefused("Original source baseline does not match")
-        if record["schema"] == 2 and record["source_identity"] != {
+        if record["schema"] in (2, 3) and record["source_identity"] != {
                 field: before[field] for field in SOURCE_IDENTITY_FIELDS}:
             raise BoundaryRefused("Approved source inode identity changed")
-        if before["extended_attributes_present"]:
+        attrs = [] if record["schema"] == 3 else None
+        if before["extended_attributes_present"] and attrs is None:
             raise BoundaryRefused("Unreviewed source security metadata")
-        raw = _source_bytes(root, record["source"], before)
+        raw = _source_bytes(root, record["source"], before, attrs_out=attrs)
+        if attrs is not None and metadata.attribute_digest(tuple(attrs)) != record["source_attributes_sha256"]:
+            raise BoundaryRefused("Approved source attributes changed")
         chunks = entries.boundaries(record["source"], raw)
         if len([x for x in chunks
                 if x["sha256"] == record["entry_sha256"]
@@ -446,7 +464,7 @@ def _publish_approval(state_fd: int, ident: str, record: dict, *,
     Such a file is not an approval and is never automatically reused.
     A retry after rename revalidates the entire record before idempotence.
     """
-    if not IDENT.fullmatch(ident) or record.get("id") != ident or record.get("schema") != 2:
+    if not IDENT.fullmatch(ident) or record.get("id") != ident or record.get("schema") not in (2, 3):
         raise BoundaryRefused("Invalid protected approval publication")
     target = ("pending-" if pending else "candidate-") + ident + ".json"
     payload = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
@@ -469,8 +487,9 @@ def _publish_approval(state_fd: int, ident: str, record: dict, *,
     try:
         info = os.fstat(fd)
         identity = (info.st_dev, info.st_ino)
-        if info.st_uid != 0 or info.st_nlink != 1 or os.listxattr(fd):
+        if info.st_uid != 0 or info.st_nlink != 1:
             raise BoundaryRefused("Unsafe staged approval metadata")
+        metadata.private_state_attributes(fd)
         os.fchmod(fd, 0o600)
         offset = 0
         while offset < len(payload):
@@ -556,11 +575,12 @@ def _select_source(root: Path, source_sha256: str, entry_sha256: str):
         before = pre.inspect_source(relative, root=root)
         if before["sha256"] != source_sha256:
             continue
-        if before["extended_attributes_present"]:
+        if before["extended_attributes_present"] and not metadata.policy_active():
             raise BoundaryRefused("Unreviewed source security metadata")
         if before["mode"] not in (0o600, 0o640, 0o644):
             raise BoundaryRefused("Unsafe source ownership or mode")
-        raw = _source_bytes(root, relative, before)
+        attrs = [] if metadata.policy_active() else None
+        raw = _source_bytes(root, relative, before, attrs_out=attrs)
         _, chosen, selected = fallback._strict_source(
             relative, raw, source_sha256, entry_sha256)
         if chosen["kind"] in ("apt-list", "apt-deb822"):
@@ -570,7 +590,7 @@ def _select_source(root: Path, source_sha256: str, entry_sha256: str):
         fallback._canonical_https(upstream, allow_missing_slash=True)
         if pre.inspect_source(relative, root=root) != before:
             raise BoundaryRefused("Source changed during candidate selection")
-        matches.append((relative, before, raw, upstream.rstrip("/") + "/"))
+        matches.append((relative, before, raw, upstream.rstrip("/") + "/", attrs))
         if len(matches) > 1:
             raise BoundaryRefused("Ambiguous source content selection")
     if len(matches) != 1:
@@ -596,6 +616,18 @@ def _pending_records(state_fd: int) -> list[dict]:
     return records
 
 
+@contextlib.contextmanager
+def _native_metadata_scope(root: Path):
+    try:
+        if root == Path("/") and not metadata.policy_active():
+            with metadata.native_metadata_scope(root):
+                yield
+        else:
+            yield
+    except (pre.PreflightError, OSError, ValueError) as exc:
+        raise BoundaryRefused("Native metadata validation refused") from exc
+
+
 def prepare_current_candidate(source_sha256: str, entry_sha256: str, *,
                               _test_root: Path | None = None) -> dict:
     """Internal root-only preparation; never accepts a path, URL or write recipe.
@@ -610,10 +642,10 @@ def prepare_current_candidate(source_sha256: str, entry_sha256: str, *,
         raise BoundaryRefused("Invalid fixed source selection")
     root = Path("/") if _test_root is None else Path(_test_root)
     try:
-        with _state(root) as (state_fd, owner):
+        with _native_metadata_scope(root), _state(root) as (state_fd, owner):
             with _exclusive_lock(state_fd, owner):
                 paths, selected = _select_source(root, source_sha256, entry_sha256)
-                relative, before, raw, upstream = selected
+                relative, before, raw, upstream, attrs = selected
                 origin = client._server(client._installed_server_config(root))
                 catalog = client._catalog(origin, context=_native_tls_context())
                 mappings = [mapping for mapping in catalog["repositories"]
@@ -631,6 +663,9 @@ def prepare_current_candidate(source_sha256: str, entry_sha256: str, *,
                     "upstream": upstream, "cache": cache,
                     "route_sha256": hashlib.sha256(cache.encode("ascii")).hexdigest(),
                 }
+                if attrs is not None:
+                    candidate["schema"] = 3
+                    candidate["source_attributes_sha256"] = metadata.attribute_digest(tuple(attrs))
                 existing = _pending_records(state_fd)
                 same = [record for record in existing if
                         {k: v for k, v in record.items() if k != "id"} == candidate]
@@ -681,7 +716,7 @@ def approve_current_candidate(ident: str, route_sha256: str, *,
             or type(route_sha256) is not str or not DIGEST.fullmatch(route_sha256)):
         raise BoundaryRefused("Invalid fixed approval arguments")
     root = Path("/") if _test_root is None else Path(_test_root)
-    with _state(root) as (state_fd, owner):
+    with _native_metadata_scope(root), _state(root) as (state_fd, owner):
         with _exclusive_lock(state_fd, owner):
             record = _manifest(state_fd, ident, pending=True)
             if record["route_sha256"] != route_sha256:
@@ -696,7 +731,7 @@ def approve_current_candidate(ident: str, route_sha256: str, *,
 def validate(ident: str, *, _test_root: Path | None = None) -> dict:
     """Verify one immutable local approval and source in a root-only boundary."""
     root = Path("/") if _test_root is None else Path(_test_root)
-    with _state(root) as (state_fd, owner):
+    with _native_metadata_scope(root), _state(root) as (state_fd, owner):
         with _exclusive_lock(state_fd, owner):
             record = _manifest(state_fd, ident)
             proposal, route_origin = _validate_record(
@@ -707,7 +742,8 @@ def validate(ident: str, *, _test_root: Path | None = None) -> dict:
                 "source_digest_matched": True,
                 "entry_digest_matched": True,
                 "route_digest_matched": True,
-                "source_inode_identity_matched": record["schema"] == 2,
+                "source_inode_identity_matched": record["schema"] in (2, 3),
+                "source_attributes_matched": record["schema"] == 3,
                 "current_active_catalog_route_matched": route_origin is not None,
                 "fallback_plan_generated": True,
                 "multi_file_changes_required": proposal.companion is not None,
