@@ -64,3 +64,10 @@ It verifies Enforcing and the exact rpm_var_lib_t label before running
 rpm --initdb, with no host RPMDB fallback or policy relaxation. Container
 tests do not relabel. This addresses the observed isolated .rpm.lock
 permission error; successful execution on the new HEAD remains required.
+
+The initial label-only retry still failed at RPMDB lock creation in `/tmp`.
+The subsequent disposable VM probe allocates the database directly under
+`/var/lib/repocache-ci-rpmdb-*`, verifies its native RPMDB label, and
+removes it on exit. The fixture repository remains in `/tmp`. Initialization
+failure reports bounded directory contexts without changing SELinux policy.
+This correction requires fresh booted-native acceptance evidence.

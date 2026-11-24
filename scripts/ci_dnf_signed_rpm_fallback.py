@@ -8,6 +8,7 @@ A production client writer remains disabled and #24 host gates remain OPEN.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
 from pathlib import Path
@@ -95,9 +96,8 @@ def _label_isolated_rpmdb(rpmdb: Path) -> None:
     distro RPMDB directory as a label reference, not as a database.
     Never relabel a host path or disable enforcement.
     """
-    if (rpmdb.parent.parent != Path("/tmp")
-            or not rpmdb.parent.name.startswith("repocache-dnf-signed-rpm-")
-            or rpmdb.name != "rpmdb" or rpmdb.resolve(strict=True) != rpmdb
+    if (rpmdb.parent != Path("/var/lib")
+            or not rpmdb.name.startswith("repocache-ci-rpmdb-") or rpmdb.resolve(strict=True) != rpmdb
             or rpmdb.stat().st_uid != 0 or any(rpmdb.iterdir())):
         raise RuntimeError("Unsafe isolated RPMDB label target")
     if _run(["getenforce"]).strip() != "Enforcing":
@@ -113,7 +113,7 @@ def _label_isolated_rpmdb(rpmdb: Path) -> None:
         raise RuntimeError("Isolated RPMDB label verification failed")
 
 
-def _signed_fixture(base: Path, *, booted_vm: bool = False) -> tuple[Path, Path, bytes, Path]:
+def _signed_fixture(base: Path, *, isolated_rpmdb: Path | None = None) -> tuple[Path, Path, bytes, Path]:
     """Build no-script RPM, sign with *ephemeral CI* key, sign generated repodata."""
     public_key = native.dnf_repository(base, signed=True)
     assert public_key is not None
@@ -154,9 +154,10 @@ def _signed_fixture(base: Path, *, booted_vm: bool = False) -> tuple[Path, Path,
 
     # No host RPMDB: only a temporary, disposable trust store is used for
     # native RPM's own signature check after each successful download.
-    rpmdb = base / "rpmdb"
-    rpmdb.mkdir(mode=0o700)
-    if booted_vm:
+    rpmdb = isolated_rpmdb if isolated_rpmdb is not None else base / "rpmdb"
+    if isolated_rpmdb is None:
+        rpmdb.mkdir(mode=0o700)
+    else:
         _label_isolated_rpmdb(rpmdb)
     # Preserve a bounded native diagnostic for this disposable operation.
     # No trust-store relaxation, SELinux change or host RPMDB fallback.
@@ -166,9 +167,15 @@ def _signed_fixture(base: Path, *, booted_vm: bool = False) -> tuple[Path, Path,
         timeout=120, check=False,
     )
     if init.returncode != 0:
+        diagnostic = subprocess.run(
+            ["ls", "-Zd", str(rpmdb.parent), str(rpmdb)],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            timeout=10, check=False,
+        )
         raise RuntimeError(
             "Isolated RPMDB initialization failed; exit=" + str(init.returncode)
             + "; output=" + init.stdout[-2000:]
+            + "; directory contexts=" + diagnostic.stdout[-1000:]
         )
     _run(["rpm", "--dbpath", str(rpmdb), "--import", str(public_key)])
     check = _run(["rpm", "--dbpath", str(rpmdb), "-Kv", str(package)])
@@ -201,10 +208,20 @@ def probe_booted_vm() -> None:
 
 
 def _probe_signed_rpm(*, booted_vm: bool = False) -> None:
-    with tempfile.TemporaryDirectory(prefix="repocache-dnf-signed-rpm-", dir="/tmp") as folder:
+    with contextlib.ExitStack() as stack:
+        folder = stack.enter_context(tempfile.TemporaryDirectory(
+            prefix="repocache-dnf-signed-rpm-", dir="/tmp",
+        ))
+        # Avoid the temporary-directory SELinux traversal boundary: only
+        # the database is relocated into a fresh private var_lib_t child.
+        isolated_rpmdb = None
+        if booted_vm:
+            isolated_rpmdb = Path(stack.enter_context(tempfile.TemporaryDirectory(
+                prefix="repocache-ci-rpmdb-", dir="/var/lib",
+            )))
         base = Path(folder)
         (base / "www").mkdir()
-        key, rpm_file, expected_bytes, rpmdb = _signed_fixture(base, booted_vm=booted_vm)
+        key, rpm_file, expected_bytes, rpmdb = _signed_fixture(base, isolated_rpmdb=isolated_rpmdb)
         certificate, private_key = native.temporary_tls_identity(base, "rpm")
         wrong_ca, _ = native.temporary_tls_identity(base, "foreign")
         primary = native.HTTPBackend(
