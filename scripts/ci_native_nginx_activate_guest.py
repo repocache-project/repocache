@@ -87,14 +87,26 @@ def verify_guest(distribution: str, phase: str) -> None:
             try:
                 native.activate_authenticated_native_nginx(assets, **pins)
             except stage.WorkerStageError as exc:
-                assert str(exc) == "WORKER_PLACEMENT_FOREIGN_FILE"
+                assert str(exc) == "WORKER_PLACEMENT_NATIVE_PRIVATE_CONFIG_FOREIGN_COLLISION"
             else:
                 raise AssertionError("pre-existing private config symlink adopted")
         finally:
             OWN_CONFIG.unlink()
+
+        # Matching bytes alone are not proof of REPOCACHE ownership.
+        OWN_CONFIG.write_bytes(native._BOOTSTRAP_CONFIG)
+        try:
+            try:
+                native.activate_authenticated_native_nginx(assets, **pins)
+            except stage.WorkerStageError as exc:
+                assert str(exc) == "WORKER_PLACEMENT_NATIVE_PRIVATE_CONFIG_FOREIGN_COLLISION"
+            else:
+                raise AssertionError("byte-identical pre-existing config adopted")
+        finally:
+            OWN_CONFIG.unlink()
         require_status(OWN, False, False)
         require_status(VENDOR, False, False)
-        print("PASS: foreign private configuration symlink rejected without service mutation", flush=True)
+        print("PASS: foreign NGINX configuration symlink and matching file both refused before activation", flush=True)
 
         original = native._nginx_activation_command
 
