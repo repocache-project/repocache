@@ -148,3 +148,19 @@ identity and compiler result without accepting caller-supplied URLs or
 paths. Preparation and explicit approval are separate state transitions;
 no public command or installed writer is enabled. A route change
 requires new consent; previous records are not overwritten.
+
+
+## Authenticated client helper candidate
+
+The independent trusted-checkout staging tool
+`scripts/stage_native_client_helper.py` authenticates the v0.6 archive
+through the existing Ed25519 verifier and closed source extractor,
+including exact commit/archive pins and dependency policy. It builds
+a deterministic isolated OS-Python executable with only the fixed
+client validation modules, no server authority or sandbox writer.
+The stage is private, no-replace and includes a content receipt;
+there is no unsigned path or install/activation operation. Tests
+exercise disposable signatures, bad signatures/pins, closed module
+inventory and ambient import isolation. The trusted-checkout tool
+still requires release-inventory reconciliation before publication.
+Installed native helper placement and source mutation remain disabled.
