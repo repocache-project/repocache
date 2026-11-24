@@ -25,7 +25,8 @@ def synthetic_pair(tmp_path):
     done = subprocess.run(
         [openssl, "req", "-x509", "-newkey", "rsa:2048", "-nodes",
          "-days", "1", "-keyout", str(key), "-out", str(cert),
-         "-subj", "/CN=synthetic.invalid"],
+         "-subj", "/CN=synthetic.invalid",
+         "-addext", "subjectAltName=DNS:synthetic.invalid"],
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL, check=False, timeout=15,
         env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
@@ -179,3 +180,65 @@ def test_worker_never_dispatches_tls_validator():
     code = inspect.getsource(serve_one_fixed_request)
     assert "_inspect_pinned_tls_pair_for_future_transaction" not in code
     assert "ROOT_TRANSACTION_NOT_IMPLEMENTED" in code
+
+
+@pytest.mark.parametrize("name,trust,passes", [
+    ("synthetic.invalid", True, True),
+    ("foreign.invalid", True, False),
+    ("synthetic.invalid", False, False),
+])
+def test_pinned_pair_in_memory_tls_trust_and_hostname(
+        synthetic_pair, monkeypatch, name, trust, passes):
+    import hashlib
+
+    cert, key = synthetic_pair
+    original = ssl.create_default_context
+
+    if trust:
+        # Only the disposable test certificate is trusted by this test.
+        monkeypatch.setattr(gate.ssl, "create_default_context",
+                            lambda purpose: original(purpose, cafile=str(cert)))
+    else:
+        # Empty trust store, while retaining mandatory verification.
+        monkeypatch.setattr(gate.ssl, "create_default_context",
+                            lambda purpose: ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT))
+    c, k = _open_readonly(cert), _open_readonly(key)
+    try:
+        if passes:
+            report = gate._inspect_pinned_tls_pair_for_future_transaction(
+                c, k, expected_owner_uid=os.geteuid(), expected_hostname=name,
+            )
+            expected_der = ssl.PEM_cert_to_DER_cert(cert.read_text())
+            assert report["certificate_issuer_hostname_expiry_verified"] is True
+            assert report["private_verified_leaf_der_sha256"] == hashlib.sha256(
+                expected_der
+            ).hexdigest()
+            assert report["authorizes_nginx_reload"] is False
+            assert report["active_exposure_verified"] is False
+        else:
+            with pytest.raises(gate.PinnedTLSPairError, match="TLS_IDENTITY_UNVERIFIED"):
+                gate._inspect_pinned_tls_pair_for_future_transaction(
+                    c, k, expected_owner_uid=os.geteuid(), expected_hostname=name,
+                )
+    finally:
+        os.close(c)
+        os.close(k)
+
+
+def test_in_memory_tls_never_accepts_unverified_client_context(
+        synthetic_pair, monkeypatch):
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    monkeypatch.setattr(gate.ssl, "create_default_context", lambda purpose: context)
+    cert, key = synthetic_pair
+    c, k = _open_readonly(cert), _open_readonly(key)
+    try:
+        with pytest.raises(gate.PinnedTLSPairError, match="CLIENT_TRUST_REFUSED"):
+            gate._inspect_pinned_tls_pair_for_future_transaction(
+                c, k, expected_owner_uid=os.geteuid(),
+                expected_hostname="synthetic.invalid",
+            )
+    finally:
+        os.close(c)
+        os.close(k)

@@ -599,3 +599,76 @@ runtime identity and the remaining host prerequisites. The new tests mock
 native execution for drift/refusal cases, in addition to the disposable
 real-parser test above. No activation, reload, catalog publication or
 privileged operation is exposed by this increment.
+
+### Dedicated versioned WAL domain (fixture prerequisite)
+
+The private NGINX transaction requires a separate five-resource WAL
+(domain `repocache-nginx.service`, schema version 2): state-v2, exact main
+configuration, dedicated route include, public catalog and a distinct
+ownership manifest. The manifest pins the main configuration as well as the
+other resources. A first-generation WAL preserves the immutable signed
+loopback bootstrap bytes, not an absent/default vendor configuration.
+A managed previous generation must match the dedicated manifest, fixed
+layout and active-only catalog semantics. Candidate generation must pass the
+existing state-transition rules. Unknown domains, wrong versions, changed
+hashes, ambiguous or foreign resource states fail closed.
+
+The protected private fixture-only publisher exercises exclusive temp
+creation, fsync, exact pre-publication drift checks, atomic WAL rename and
+directory fsync. It refuses the actual root namespace and never changes any
+target resource, starts or reloads NGINX, or publishes a catalog. An
+unpublished journal may describe only unchanged previous bytes; after
+publication each resource may be exactly old or candidate, never foreign.
+Existing legacy v1/v2 state-only and vendor transaction entry points refuse
+the new journal/manifest namespace (including dangling artifacts).
+
+This is not the authenticated live transaction. Wiring the protected lock
+through the actual five-resource writes, distinct stage names, runtime
+reload, verified TLS/catalog exposure and first/managed rollback is still
+required. No recovery-complete or native activation result is claimed.
+
+The fixture publisher also exercises a previously committed, exactly
+manifest-bound generation. The dedicated prepublication gate may recognize
+its own manifest, but still refuses state-only, shadow, legacy vendor and
+dedicated pending journals. A rename-fault regression verifies that a
+durable unpublished temporary journal leaves the bootstrap and all other
+resources unchanged, and is refused on a fresh apply rather than discarded
+or adopted by another domain.
+
+### Five-resource filesystem transaction and crash compensation (fixture only)
+
+The dedicated fixture engine now writes all five resources under the retained
+protected lock with separate fixed stage names. The durable WAL precedes
+any target change. The route include precedes its referencing main config;
+the catalog and manifest are last. Exact old/new byte identities are checked
+throughout, pinned leaf directories retain structural identity, and the
+vendor include directory and bootstrap claim remain unchanged. Recovery
+validates the entire resource set and all stage metadata before cleanup.
+It restores the previous main before removing the first managed include,
+then verifies the complete prior byte set before removing the WAL. A valid
+unpublished WAL may be discarded only with unchanged resources and no
+staging artifacts; malformed unpublished records remain for inspection.
+
+Executed tests are required for first/repeat commit, interruption after
+each resource, recovery of partial/complete stages, foreign resource/stage
+refusal, and ordinary write failure under the retained lock. These helpers
+refuse the real root namespace and never invoke NGINX, systemd or network
+commands. The result is filesystem-only fixture evidence: the live
+transaction must still bind authenticated reload, TLS generation and
+catalog exposure, cache permissions and SELinux to WAL completion.
+
+Every target mutation now rechecks the exact published WAL and absence of a
+competing temporary WAL. Apply additionally checks the entire expected
+intermediate resource set, not only the resource about to be written.
+Compensation requires the original WAL and byte-exact old resources;
+an unlink/fsync uncertainty or changed WAL cannot be reported as a
+successful rollback. A real child-process SIGKILL regression at the catalog
+boundary, followed by interrupted recovery and retry, exercises lock release
+and both first-generation and previously managed recovery in fixtures.
+
+
+The retained layout check also revalidates competing transaction domains
+before every target effect, including compensation. A changed unpublished
+WAL is refused before rename; no target may change on this path. Regression
+tests cover competing state-stage drift after the first resource write,
+unpublished WAL drift, and empty private stages left at exclusive creation.
