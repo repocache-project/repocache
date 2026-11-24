@@ -1507,7 +1507,8 @@ def test_owned_context_bootstrap_matches_signed_archive_source():
     source = (Path(__file__).resolve().parents[1]
               / "docs/examples/nginx/repocache.conf").read_bytes()
     assert native._OWNED_BOOTSTRAP_CONFIG == installer._BOOTSTRAP_CONFIG == source
-    assert installer._CONFIG_MARKER.endswith(hashlib.sha256(source).hexdigest())
+    assert installer._CONFIG_MARKER.endswith(hashlib.sha256(
+        b"/etc/nginx/repocache.d/\0" + source).hexdigest())
     assert b"listen 127.0.0.1:8008;" in source
     assert b"include " not in source.split(b"\npid ", 1)[1]
     native._verify_owned_context_dump(_owned_dump(), None)
@@ -2636,3 +2637,33 @@ def test_owned_socket_active_candidate_refused_before_wal(filesystem, monkeypatc
                        match="OWNED_SOCKET_ACTIVE_STORAGE_UNVERIFIED"):
         native._owned_socket_operation_locked(fd, 1, "debian", "APPLY_V2")
     assert not (state / native._OWNED_WAL).exists()
+
+
+@pytest.mark.parametrize("name", ["repocache.conf", "repocache-managed.conf"])
+def test_isolated_owned_layout_never_adopts_legacy_siblings(filesystem, name):
+    fd, state, vendor, _, _ = filesystem
+    old = _owned_bootstrap_resources()
+    paths = _owned_fixture_paths(filesystem, old)
+    foreign = vendor.parent.parent / name
+    foreign.symlink_to("missing")
+    with pytest.raises(native.NativeV2TransactionError, match="ORPHAN_STAGE"):
+        with native._owned_fixture_layout(fd, recovering=False):
+            pytest.fail("legacy sibling was adopted")
+    assert foreign.is_symlink()
+    assert _fixture_resource_bytes(paths) == old
+    assert not (state / native._OWNED_WAL).exists()
+
+
+def test_old_path_claim_is_not_new_directory_authority(filesystem):
+    fd, state, vendor, _, _ = filesystem
+    main = vendor.parent.parent / "repocache.d" / native._OWNED_MAIN
+    main.write_bytes(native._OWNED_BOOTSTRAP_CONFIG)
+    main.chmod(0o644)
+    old_claim = state / (installer._CONFIG_MARKER_PREFIX
+                         + hashlib.sha256(native._OWNED_BOOTSTRAP_CONFIG).hexdigest())
+    old_claim.touch(mode=0o600)
+    with pytest.raises(native.NativeV2TransactionError, match="OWNED_CONTEXT_CLAIM_REQUIRED"):
+        with native._owned_fixture_layout(fd, recovering=False):
+            pytest.fail("old path claim reused")
+    assert old_claim.exists()
+    assert main.read_bytes() == native._OWNED_BOOTSTRAP_CONFIG

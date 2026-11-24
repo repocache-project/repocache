@@ -720,7 +720,7 @@ foreign listener, including after reboot. Managed TLS listener acceptance
 and access from the confined installed socket worker remain native gates.
 
 
-### Confined dedicated broker: nonmutating operations and outstanding write boundary
+### Confined dedicated broker: nonmutating operations and outstanding write boundary (historical; superseded below)
 
 The existing socket protocol and kernel peer credential checks remain unchanged.
 The authenticated installer persists its canonical local placement receipt, with
@@ -759,3 +759,49 @@ The booted activation guest tests the restricted socket operations and
 refusals through the installed broker, in addition to the separate root-only
 live WAL fault/reboot rehearsal. New test results are not inferred from
 earlier green runs.
+
+
+### Approved isolated configuration directory and fixed live socket dispatch
+
+The maintainer authorized the dedicated configuration path change on
+2026-11-24. The signed dedicated unit and native syntax probe now use
+/etc/nginx/repocache.d/repocache.conf and the managed renderer requires
+/etc/nginx/repocache.d/repocache-managed.conf as the reviewed generated_include.
+The parent is root-owned mode 0755; only the dedicated leaf is added to the
+socket worker's existing writable path set. The shared /etc/nginx parent
+must remain read-only in the actual worker mount namespace. The existing
+legacy conf.d exception remains for the independently supported vendor-mode
+transaction, not a fallback for a dedicated claim. The actual dedicated
+NGINX service itself does not receive config-write permission.
+
+A path-bound bootstrap claim uses SHA-256 over the fixed new directory
+(with a NUL separator) and the signed bootstrap bytes. First activation
+writes durable intent before directory creation, refuses a pre-existing
+unclaimed directory (including symlinks and matching content), and refuses
+old sibling config files, partial stages and old claim markers. Existing
+installations using the old experimental path are explicitly rejected;
+there is no silent adoption, relocation, deletion or downgrade. A migration
+of an installed old-path managed generation would require separate verified
+preservation of the old signed unit, WAL, configuration and TLS/catalog.
+Do not manually relocate files to bypass the refusal.
+
+The dedicated dispatch uses the existing kernel-authorized fixed operations
+and retained state lock. APPLY validates the fixed private intake and CAS,
+checks the inactive-repository prerequisite against both the exact candidate
+and predecessor, and performs the version-3 WAL transaction. RECOVER checks
+the WAL's closed prior snapshot (not a partially written current snapshot)
+before actual compensation. RELOAD validates and reloads the exact committed
+generation. Existing stable reply codes are retained. No fallback or arbitrary
+filesystem/command arguments are accepted. The host boundary checks matching
+PID1 path identity, shared parent read-only and dedicated leaf writable,
+receipt and package provenance, metadata and enforcing SELinux (including
+the stock httpd_config_t type on the dedicated configuration leaf/files).
+The VM harness uses the actual installed socket for initial apply and
+post-reboot rollback, and keeps the separate root-only fault injection for
+the interrupted generation.
+
+Active repositories remain refused until #450 storage and runtime access
+are verified in a combined candidate. Installer repeat of an existing
+managed generation and recovery from an inactive dedicated service remain
+separate gates. No production deployment, genuine publisher signature, or
+exact-new-HEAD native PASS is claimed until those results exist.

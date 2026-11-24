@@ -572,6 +572,7 @@ def _place_signed_private_config(raw: bytes, state_fd: int) -> None:
             dedicated = _open_directory(nginx, "repocache.d", stack)
             if (stat.S_IMODE(os.fstat(dedicated).st_mode) != 0o755
                     or os.fstat(dedicated).st_dev != os.fstat(nginx).st_dev
+                    or set(os.listxattr(nginx)) - {"security.selinux"}
                     or set(os.listxattr(dedicated)) - {"security.selinux"}
                     or set(os.listdir(dedicated)) - {stage.CONFIG, _TEMP + stage.CONFIG}):
                 _reject("NATIVE_PRIVATE_DIRECTORY_UNSAFE")

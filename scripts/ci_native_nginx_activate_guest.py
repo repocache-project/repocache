@@ -477,7 +477,20 @@ def verify_guest(distribution: str, phase: str) -> None:
     if phase == "activate":
         require_status(VENDOR, False, False)
         require_status(OWN, False, False)
-        assert not OWN_CONFIG.exists() and not OWN_CONFIG.is_symlink()
+        assert not OWN_CONFIG.parent.exists() and not OWN_CONFIG.parent.is_symlink()
+        legacy = OWN_CONFIG.parent.parent / OWN_CONFIG.name
+        legacy.symlink_to(VENDOR_CONFIG)
+        try:
+            try:
+                native.activate_authenticated_native_nginx(assets, **pins)
+            except stage.WorkerStageError as exc:
+                assert str(exc) == "WORKER_PLACEMENT_NATIVE_PRIVATE_CONFIG_LEGACY_LAYOUT_REFUSED"
+            else:
+                raise AssertionError("legacy layout silently adopted")
+            assert legacy.is_symlink()
+            assert not OWN_CONFIG.parent.exists()
+        finally:
+            legacy.unlink()
 
         # An untrusted pre-existing path must never be adopted or overwritten.
         OWN_CONFIG.parent.mkdir(mode=0o755)
