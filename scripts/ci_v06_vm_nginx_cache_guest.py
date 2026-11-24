@@ -220,6 +220,15 @@ def main(platform: str) -> None:
         check=False, timeout=5,
     ).returncode != 0
     observe_native_capacity(nginx)
+    # The separate root wrapper verifies native identity and private mount
+    # propagation before creating only two disposable 4 MiB tmpfs mounts.
+    subprocess.run(
+        ["/usr/bin/sudo", "/usr/bin/unshare", "--mount", "--propagation", "private",
+         "/usr/bin/env", "PYTHONPATH=/home/pr237ci/source/src",
+         "/usr/bin/python3", "-B",
+         "/home/pr237ci/source/scripts/ci_v06_vm_cache_pressure_guest.py", platform],
+        check=True, timeout=400,
+    )
     print("PASS: booted native VM stock NGINX disposable HTTPS APT/DNF MISS/HIT")
     print("NOT VERIFIED: authentic APT/DNF signatures, native package manager, "
           "managed route/SELinux context, persistent cache, client fallback")

@@ -20,6 +20,8 @@ on:
       - 'scripts/collect_v06_vm_campaign_coverage.py'
       - 'scripts/ci_v06_vm_nginx_cache_guest.py'
       - 'scripts/ci_v06_vm_cache_eviction.py'
+      - 'scripts/ci_v06_vm_cache_pressure_guest.py'
+      - 'scripts/ci_server_nginx_enospc_bypass_native.py'
       - 'docs/testing/SERVER_VM_NATIVE_CACHE_EVICTION.md'
       - 'scripts/ci_v06_vm_client_cli_guest.py'
       - 'scripts/ci_v06_vm_signed_client_guest.py'
