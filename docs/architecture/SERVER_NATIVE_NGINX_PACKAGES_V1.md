@@ -577,3 +577,25 @@ fixed private syntax/dump execution under an audited ownership lease, WAL
 version/domain separation and atomic main/include/state/catalog rollback,
 sandbox/cache and SELinux provisioning, actual HTTPS generation and
 publication remain mandatory. No production exposure is enabled.
+
+### Fixed private native syntax/dump prerequisite
+
+The dedicated context now has a bounded private native probe using only
+`/usr/sbin/nginx -T -c /etc/nginx/repocache.conf`; `-T` includes syntax
+validation. It never selects the vendor configuration or accepts a path,
+executable, environment or command from a socket peer. Before and after the
+command, the fixed binary, main file, expected include (or its absence) and
+parent identities are rechecked. A transaction-side prerequisite verifies
+the current root namespace, pinned configuration directory, exact expected
+bytes and the unique existing bootstrap ownership marker before the
+command, then compares every native dump section and rechecks those facts
+afterward. The raw dump remains internal; no command output is published.
+The original vendor probe retains its prior behavior.
+
+This code remains an internal prerequisite, not a live managed apply path:
+the caller must retain the protected lock and supply only renderer- or
+WAL-verified bytes, and independently verify signed unit/package provenance,
+runtime identity and the remaining host prerequisites. The new tests mock
+native execution for drift/refusal cases, in addition to the disposable
+real-parser test above. No activation, reload, catalog publication or
+privileged operation is exposed by this increment.

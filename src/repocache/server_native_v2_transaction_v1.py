@@ -73,7 +73,8 @@ from repocache.server_root_control_fixed_candidate_v1 import (
     _load_private_under_root,
 )
 from repocache.server_root_control_full_context_v1 import (
-    _capture_default_nginx_dump_private,
+    _capture_default_nginx_dump_private, _capture_owned_nginx_dump_private,
+    _OWNED_MAIN_PATH, _OWNED_INCLUDE_PATH, FixedNginxFullContextError,
 )
 from repocache.server_root_control_host_preflight_v1 import (
     require_socket_worker_host_preconditions,
@@ -110,8 +111,6 @@ _UNIT = "nginx.service"
 # These paths are disjoint from the vendor's default auto-included conf.d.
 # The bootstrap bytes are also the exact signed archive member used by the
 # installer. Never change them without an explicit signed ownership migration.
-_OWNED_MAIN_PATH = "/etc/nginx/repocache.conf"
-_OWNED_INCLUDE_PATH = "/etc/nginx/repocache-managed.conf"
 _OWNED_BOOTSTRAP_CONFIG = "# Authenticated bootstrap only. Never include the vendor's nginx.conf.\n# The fixed local endpoint has no repository routes, TLS or external listener.\n# Full managed TLS/route activation remains a separate guarded transaction.\npid /run/repocache-nginx/nginx.pid;\nerror_log stderr warn;\nworker_processes 1;\nevents {\n    worker_connections 128;\n}\nhttp {\n    access_log off;\n    server {\n        listen 127.0.0.1:8008;\n        server_name localhost;\n        location = /__repocache/private {\n            return 204;\n        }\n        location / {\n            return 404;\n        }\n    }\n}\n".encode("ascii")
 _OWNED_MANAGED_CONFIG = (
     b"# REPOCACHE dedicated managed NGINX context v1\n"
@@ -1027,6 +1026,74 @@ def _verify_owned_context_dump(dump: bytes, include: bytes | None) -> None:
     if not any(dump == first + gap + section + tail
                for gap in (b"", b"\n") for tail in (b"", b"\n")):
         _deny("OWNED_CONTEXT_DUMP_MISMATCH")
+
+
+def _owned_config_marker_identity(state_fd: int) -> tuple[int, ...]:
+    """Observe the exact existing installer claim, not a new/adopted marker."""
+    name = (OWNED_NGINX_CONFIG_MARKER_PREFIX
+            + hashlib.sha256(_OWNED_BOOTSTRAP_CONFIG).hexdigest())
+    try:
+        claims = sorted(entry for entry in os.listdir(state_fd)
+                        if entry.startswith(OWNED_NGINX_CONFIG_MARKER_PREFIX))
+        if claims != [name]:
+            _deny("OWNED_CONTEXT_CLAIM_REQUIRED")
+        before = os.stat(name, dir_fd=state_fd, follow_symlinks=False)
+        if before.st_gid != 0 or _read_file(state_fd, name, 0, 0) != b"":
+            _deny("OWNED_CONTEXT_CLAIM_REQUIRED")
+        after = os.stat(name, dir_fd=state_fd, follow_symlinks=False)
+        if _identity(before) != _identity(after):
+            _deny("OWNED_CONTEXT_CLAIM_REQUIRED")
+        return _identity(after)
+    except NativeV2TransactionError:
+        raise
+    except (OSError, ValueError, TypeError):
+        _deny("OWNED_CONTEXT_CLAIM_REQUIRED")
+
+
+def _probe_owned_context_locked(
+    root_fd: int, state_fd: int, include: bytes | None,
+) -> bytes:
+    """Verify exact fixed private files and perform a bounded native syntax dump.
+
+    The authenticated transaction must retain its protected lock and supply
+    only renderer- or WAL-verified include bytes. This is a prerequisite for
+    reload, not a reload authorization. Never expose the private dump.
+    """
+    expected_main = (_OWNED_BOOTSTRAP_CONFIG if include is None
+                     else _OWNED_MANAGED_CONFIG)
+    # Validate bounds and expected section shape before invoking native nginx.
+    synthetic = (b"# configuration file " + _OWNED_MAIN_PATH.encode("ascii")
+                 + b":\n" + expected_main)
+    if include is not None:
+        if type(include) is not bytes or len(include) > _LIMIT[_INCLUDE]:
+            _deny("OWNED_CONTEXT_DUMP_INVALID")
+        synthetic += (b"# configuration file " + _OWNED_INCLUDE_PATH.encode("ascii")
+                      + b":\n" + include)
+    _verify_owned_context_dump(synthetic, include)
+    try:
+        _verify_current_root_fd(root_fd)
+        with ExitStack() as stack:
+            directory, chain = _walk(root_fd, ("etc", "nginx"), stack, 0)
+            marker = _owned_config_marker_identity(state_fd)
+
+            def verify_bytes() -> None:
+                if (_read_public(directory, "repocache.conf", 4096) != expected_main
+                        or _read_public(directory, _INCLUDE, _LIMIT[_INCLUDE]) != include):
+                    _deny("OWNED_CONTEXT_FILE_DRIFT")
+                _recheck(chain, 0)
+                if _owned_config_marker_identity(state_fd) != marker:
+                    _deny("OWNED_CONTEXT_CLAIM_CHANGED")
+
+            verify_bytes()
+            dump = _capture_owned_nginx_dump_private(managed=include is not None)
+            _verify_owned_context_dump(dump, include)
+            verify_bytes()
+            _verify_current_root_fd(root_fd)
+            return dump
+    except NativeV2TransactionError:
+        raise
+    except (OSError, ValueError, TypeError, FixedNginxFullContextError):
+        _deny("OWNED_CONTEXT_PROBE_REFUSED")
 
 
 def _recover_locked(state_fd: int, include_fd: int,

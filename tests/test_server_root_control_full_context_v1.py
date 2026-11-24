@@ -128,3 +128,68 @@ def test_private_dump_not_wired_into_worker():
     assert "ROOT_TRANSACTION_NOT_IMPLEMENTED" in inspect.getsource(
         serve_one_fixed_request,
     )
+
+@pytest.mark.parametrize("managed", [False, True])
+def test_owned_context_uses_only_fixed_private_command(monkeypatch, managed):
+    monkeypatch.setattr(observed.os, "geteuid", lambda: 0)
+    seen = []
+    monkeypatch.setattr(observed, "_trusted_owned_fixed_files",
+                        lambda selected: seen.append(selected) or ((1,), (2,)))
+    monkeypatch.setattr(observed, "_trusted_fixed_files",
+                        lambda: pytest.fail("vendor probe selected"))
+    calls = _child_with_output(monkeypatch, "print('private-context')")
+    assert observed._capture_owned_nginx_dump_private(managed=managed) == b"private-context\n"
+    assert seen == [managed, managed]
+    assert calls[0][0] == (
+        "/usr/sbin/nginx", "-T", "-c", "/etc/nginx/repocache.conf",
+    )
+    assert calls[0][1]["shell"] is False
+    assert calls[0][1]["stderr"] == subprocess.DEVNULL
+
+
+@pytest.mark.parametrize("managed", [False, True])
+def test_owned_context_refuses_file_identity_drift(monkeypatch, managed):
+    monkeypatch.setattr(observed.os, "geteuid", lambda: 0)
+    reads = iter(((1,), (2,)))
+    monkeypatch.setattr(observed, "_trusted_owned_fixed_files",
+                        lambda selected: next(reads))
+    _child_with_output(monkeypatch, "print('private-context')")
+    with pytest.raises(observed.FixedNginxFullContextError,
+                       match="FIXED_FILES_CHANGED"):
+        observed._capture_owned_nginx_dump_private(managed=managed)
+
+
+def test_owned_context_bootstrap_refuses_even_dangling_include(monkeypatch):
+    import stat
+    from types import SimpleNamespace
+
+    def meta(mode, ino):
+        return SimpleNamespace(st_mode=mode, st_uid=0, st_gid=0,
+                               st_nlink=1, st_dev=4, st_ino=ino,
+                               st_size=32, st_mtime_ns=1, st_ctime_ns=2)
+
+    paths = {path: meta(stat.S_IFDIR | 0o755, i)
+             for i, path in enumerate(observed._PARENTS, 1)}
+    paths[observed._NGINX] = meta(stat.S_IFREG | 0o755, 101)
+    paths[observed._OWNED_MAIN_PATH] = meta(stat.S_IFREG | 0o644, 102)
+
+    def lookup(path):
+        if path not in paths:
+            raise FileNotFoundError(path)
+        return paths[path]
+
+    monkeypatch.setattr(observed.os, "lstat", lookup)
+    assert observed._trusted_owned_fixed_files(False)[1][-1] is None
+    with pytest.raises(observed.FixedNginxFullContextError,
+                       match="FIXED_FILES_UNVERIFIED"):
+        observed._trusted_owned_fixed_files(True)
+    paths[observed._OWNED_INCLUDE_PATH] = meta(stat.S_IFLNK | 0o777, 103)
+    for managed in (False, True):
+        with pytest.raises(observed.FixedNginxFullContextError,
+                           match="FIXED_FILES_UNVERIFIED"):
+            observed._trusted_owned_fixed_files(managed)
+    paths[observed._OWNED_INCLUDE_PATH] = meta(stat.S_IFREG | 0o644, 104)
+    assert observed._trusted_owned_fixed_files(True)[1][-1] is not None
+    with pytest.raises(observed.FixedNginxFullContextError,
+                       match="FIXED_FILES_UNVERIFIED"):
+        observed._trusted_owned_fixed_files(False)

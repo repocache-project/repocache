@@ -1589,3 +1589,58 @@ def test_owned_context_bootstrap_never_accepts_managed_or_foreign_dump():
             _owned_dump() + b"# configuration file /etc/nginx/foreign.conf:\n# foreign\n",
             None,
         )
+
+@pytest.mark.parametrize("managed", [False, True])
+@pytest.mark.parametrize("fault", ["none", "missing-claim", "foreign-main",
+                                  "foreign-include", "post-drift"])
+def test_owned_context_native_probe_requires_exact_files_and_claim(
+    tmp_path, monkeypatch, managed, fault,
+):
+    root = tmp_path / "root"
+    root.mkdir(mode=0o755)
+    directory = root / "etc/nginx"
+    directory.mkdir(parents=True)
+    state = root / "state"
+    state.mkdir(mode=0o700)
+    marker = state / installer._CONFIG_MARKER
+    if fault != "missing-claim":
+        marker.touch(mode=0o600)
+    main = directory / "repocache.conf"
+    main.write_bytes(native._OWNED_MANAGED_CONFIG if managed
+                     else native._OWNED_BOOTSTRAP_CONFIG)
+    main.chmod(0o644)
+    expected = b"# REPOCACHE managed v2\nserver {}\n" if managed else None
+    include = directory / "repocache-managed.conf"
+    if expected is not None:
+        include.write_bytes(expected)
+        include.chmod(0o644)
+    if fault == "foreign-main":
+        main.write_bytes(b"foreign")
+    if fault == "foreign-include":
+        include.write_bytes(b"foreign")
+        include.chmod(0o644)
+    seen = []
+    # Test the filesystem contract against a disposable root, never launch
+    # a host command. Production refuses a non-current namespace root.
+    monkeypatch.setattr(native, "_verify_current_root_fd", lambda _fd: None)
+
+    def capture(*, managed):
+        seen.append(managed)
+        if fault == "post-drift":
+            main.write_bytes(b"changed after native command")
+        return _owned_dump(expected)
+
+    monkeypatch.setattr(native, "_capture_owned_nginx_dump_private", capture)
+    rfd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    sfd = os.open(state, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        if fault == "none":
+            assert native._probe_owned_context_locked(rfd, sfd, expected) == _owned_dump(expected)
+            assert seen == [managed]
+        else:
+            with pytest.raises(native.NativeV2TransactionError, match="OWNED_CONTEXT_"):
+                native._probe_owned_context_locked(rfd, sfd, expected)
+            assert seen == ([managed] if fault == "post-drift" else [])
+    finally:
+        os.close(sfd)
+        os.close(rfd)

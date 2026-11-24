@@ -12,15 +12,20 @@ from __future__ import annotations
 import hashlib
 import os
 import select
+import stat
 import subprocess
 import time
 from typing import Any
 
 from repocache.server_root_control_native_syntax_v1 import (
-    _CONF, _NGINX, _trusted_fixed_files, FixedNginxSyntaxError,
+    _CONF, _NGINX, _PARENTS, _signature, _trusted_fixed_files,
+    FixedNginxSyntaxError,
 )
 
 _COMMAND = (_NGINX, "-T", "-c", _CONF)
+_OWNED_MAIN_PATH = "/etc/nginx/repocache.conf"
+_OWNED_INCLUDE_PATH = "/etc/nginx/repocache-managed.conf"
+_OWNED_COMMAND = (_NGINX, "-T", "-c", _OWNED_MAIN_PATH)
 _MAX_DUMP_BYTES = 4 * 1024 * 1024
 _TIMEOUT_SECONDS = 10
 _ENV = {"PATH": "/usr/sbin:/usr/bin:/bin", "LC_ALL": "C"}
@@ -34,22 +39,77 @@ def _deny(code: str) -> None:
     raise FixedNginxFullContextError("NATIVE_NGINX_FULL_CONTEXT_" + code)
 
 
-def _capture_default_nginx_dump_private() -> bytes:
-    """Private exact-root NGINX -T dump, byte-bounded before accumulation.
+def _trusted_owned_fixed_files(managed: bool) -> tuple:
+    """Pin fixed private files, never infer their ownership from metadata alone."""
+    try:
+        parents = []
+        for path in _PARENTS:
+            info = os.lstat(path)
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0
+                    or info.st_gid != 0 or stat.S_IMODE(info.st_mode) & 0o022):
+                _deny("FIXED_FILES_UNVERIFIED")
+            parents.append((info.st_dev, info.st_ino, info.st_uid,
+                            info.st_gid, info.st_mode))
+        files = []
+        for path, mode, limit in (
+            (_NGINX, 0o755, 128 * 1024 * 1024),
+            (_OWNED_MAIN_PATH, 0o644, 4096),
+            (_OWNED_INCLUDE_PATH, 0o644, 1024 * 1024),
+        ):
+            try:
+                info = os.lstat(path)
+            except FileNotFoundError:
+                if path == _OWNED_INCLUDE_PATH and not managed:
+                    files.append(None)
+                    continue
+                raise
+            if ((path == _OWNED_INCLUDE_PATH and not managed)
+                    or not stat.S_ISREG(info.st_mode) or info.st_uid != 0
+                    or info.st_gid != 0 or info.st_nlink != 1
+                    or stat.S_IMODE(info.st_mode) != mode
+                    or not 1 <= info.st_size <= limit):
+                _deny("FIXED_FILES_UNVERIFIED")
+            files.append(_signature(info))
+        return tuple(parents), tuple(files)
+    except FixedNginxFullContextError:
+        raise
+    except (OSError, ValueError, TypeError, AttributeError):
+        _deny("FIXED_FILES_UNVERIFIED")
 
-    This is NOT a host trust token, proof of effective systemd ownership,
-    or an actual running configuration. Never print/serialize this output,
-    pass it to client APIs, or let a caller supply a path or executable.
+
+def _capture_default_nginx_dump_private() -> bytes:
+    """Private bounded dump of the fixed vendor context."""
+    return _capture_fixed_nginx_dump_private(owned=False, managed=False)
+
+
+def _capture_owned_nginx_dump_private(*, managed: bool) -> bytes:
+    """Private bounded syntax/dump of the fixed independent context.
+
+    Only an internal transaction holding its ownership lock and having
+    verified the exact expected main/include bytes may use this helper.
+    Metadata alone is not authority; no path, executable, or argument is
+    accepted from a caller.
     """
+    if type(managed) is not bool:
+        _deny("FIXED_FILES_UNVERIFIED")
+    return _capture_fixed_nginx_dump_private(owned=True, managed=managed)
+
+
+def _capture_fixed_nginx_dump_private(*, owned: bool, managed: bool) -> bytes:
+    """Private exact-root NGINX -T dump, byte-bounded before accumulation."""
     if os.geteuid() != 0:
         _deny("ROOT_REQUIRED")
+    def observe():
+        if owned:
+            return _trusted_owned_fixed_files(managed)
+        return _trusted_fixed_files()
     try:
-        identity = _trusted_fixed_files()
+        identity = observe()
     except FixedNginxSyntaxError:
         _deny("FIXED_FILES_UNVERIFIED")
     try:
         proc = subprocess.Popen(
-            _COMMAND, shell=False,
+            _OWNED_COMMAND if owned else _COMMAND, shell=False,
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, cwd="/", env=_ENV,
             start_new_session=True, close_fds=True,
@@ -98,9 +158,10 @@ def _capture_default_nginx_dump_private() -> bytes:
         if type(return_code) is not int or return_code != 0 or not length:
             _deny("CHECK_FAILED")
         try:
-            if _trusted_fixed_files() != identity:
-                _deny("FIXED_FILES_CHANGED")
-        except FixedNginxSyntaxError:
+            observed_after = observe()
+        except (FixedNginxSyntaxError, FixedNginxFullContextError):
+            _deny("FIXED_FILES_CHANGED")
+        if observed_after != identity:
             _deny("FIXED_FILES_CHANGED")
         return b"".join(output)
     except FixedNginxFullContextError:
