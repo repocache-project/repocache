@@ -1864,6 +1864,98 @@ def _apply_owned_live_locked(root_fd: int, state_fd: int, nginx_fd: int,
         _deny("OWNED_LIVE_APPLY_ROLLED_BACK")
 
 
+def _prepare_owned_live_candidate_locked(root_fd: int, state_fd: int,
+                                         nginx_fd: int, public_fd: int,
+                                         distribution: str) -> tuple[dict, dict, dict]:
+    """Read only the fixed root intake; never accept bytes from a socket peer.
+
+    Returns the old/new exact resource sets and intake report. A future
+    dispatcher must retain the same lock and re-read both intake and
+    resources immediately before starting the live WAL. Replay is handled
+    separately by verified committed-generation reload/no-change.
+    """
+    old = _read_owned_resources(state_fd, nginx_fd, public_fd)
+    previous = _validate_owned_resources(old)
+    generation = 0 if previous is None else previous["state_generation"]
+    report, candidate = _load_private_under_root(root_fd, owner_uid=0, owner_gid=0)
+    if (report["expected_generation"] != generation
+            or report["expected_state_sha256"] != _hash(old[V2_STATE])):
+        _deny("STATE_STALE")
+    try:
+        snapshot = _json(candidate, limit=_LIMIT[V2_STATE])
+        transition = preview_proposed_v2_state_transition(
+            snapshot, expected_generation=generation, previous_snapshot=previous,
+        )
+        document = parse_install_bytes(
+            base64.b64decode(snapshot["configuration_base64"], validate=True),
+            for_apply=True,
+        )
+        if transition["proposed_generation"] != snapshot["state_generation"]:
+            _deny("STATE_STALE")
+        # Ensure the new cert/key can actually complete a trusted handshake
+        # before withdrawing the previously published catalog or writing WAL.
+        _verify_tls_pair(root_fd, document, verify_identity=True)
+        pins = _resolve_pins(document)
+        main, include, catalog = _render_owned_managed_candidate(
+            document, snapshot["state_generation"], distribution, pins,
+        )
+        new = {
+            V2_STATE: candidate, _OWNED_MAIN: main, _INCLUDE: include,
+            _CATALOG: catalog,
+            _OWNED_MANIFEST: _owned_manifest_for(candidate, main, include, catalog),
+        }
+        _validate_owned_resources(new)
+    except NativeV2TransactionError:
+        raise
+    except (ValueError, TypeError, KeyError, OverflowError):
+        _deny("CANDIDATE_INVALID")
+    again, again_candidate = _load_private_under_root(root_fd, owner_uid=0, owner_gid=0)
+    if (again != report or again_candidate != candidate
+            or _read_owned_resources(state_fd, nginx_fd, public_fd) != old):
+        _deny("CANDIDATE_CHANGED")
+    return old, new, report
+
+
+def _reload_owned_live_committed_locked(root_fd: int, state_fd: int, nginx_fd: int,
+                                       public_fd: int, check_layout, *,
+                                       reload: bool = True) -> dict:
+    """Explicit reload or no-change of one exact committed generation only.
+
+    No WAL or catalog writes, no fallback to the vendor service. Not an
+    authorization entry; same host gates as the future live apply dispatcher.
+    """
+    if type(reload) is not bool:
+        _deny("OPERATION_REFUSED")
+    def clean():
+        check_layout()
+        for name in (_OWNED_WAL, _OWNED_WAL_TMP):
+            _owned_require_absent(state_fd, name)
+        _owned_check_stages_absent(state_fd, nginx_fd, public_fd)
+    clean()
+    old = _read_owned_resources(state_fd, nginx_fd, public_fd)
+    if _validate_owned_resources(old) is None:
+        _deny("MANAGED_GENERATION_REQUIRED")
+    identity = _owned_live_observe(root_fd)
+    context = _owned_live_validate(root_fd, state_fd, old)
+    _owned_live_health(context, old[_CATALOG], publish=True)
+    clean()
+    if (_read_owned_resources(state_fd, nginx_fd, public_fd) != old
+            or _owned_live_observe(root_fd) != identity):
+        _deny("OWNED_LIVE_PRE_RELOAD_DRIFT")
+    if reload:
+        _owned_live_reload(root_fd, identity)
+        _owned_live_wait_generation(root_fd, identity, context)
+    if _owned_live_validate(root_fd, state_fd, old) != context:
+        _deny("OWNED_LIVE_POST_RELOAD_DRIFT")
+    _owned_live_health(context, old[_CATALOG], publish=True)
+    clean()
+    if (_read_owned_resources(state_fd, nginx_fd, public_fd) != old
+            or _owned_live_observe(root_fd) != identity):
+        _deny("OWNED_LIVE_POST_RELOAD_DRIFT")
+    return {"status": "OWNED_LIVE_RELOADED" if reload else "OWNED_LIVE_NO_CHANGE",
+            "state_generation": context[1]}
+
+
 def _recover_locked(state_fd: int, include_fd: int,
                     public_fd: int, distribution: str) -> dict:
     journal = _read_wal(state_fd, _WAL)

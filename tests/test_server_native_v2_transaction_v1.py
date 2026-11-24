@@ -2443,3 +2443,64 @@ def test_owned_live_generation_wait_is_bounded_and_rechecks_unit(monkeypatch):
     with pytest.raises(native.NativeV2TransactionError, match="OWNED_LIVE_UNIT_CHANGED"):
         native._owned_live_wait_generation(0, identity, ({}, 2, "a" * 64))
     assert len(calls) == 2
+
+@pytest.mark.parametrize("reload", [True, False])
+def test_owned_live_committed_reload_never_writes(
+    filesystem, monkeypatch, owned_live_simulation, reload,
+):
+    old = _owned_generation()
+    paths = _owned_fixture_paths(filesystem, old)
+    fd, state, _, _, _ = filesystem
+    before = {name: path.stat() for name, path in paths.items()}
+    with native._owned_fixture_layout(fd, recovering=False) as layout:
+        result = native._reload_owned_live_committed_locked(fd, *layout, reload=reload)
+    assert result["status"] == ("OWNED_LIVE_RELOADED" if reload else "OWNED_LIVE_NO_CHANGE")
+    assert owned_live_simulation.count(("reload",)) == int(reload)
+    assert _fixture_resource_bytes(paths) == old
+    for name, path in paths.items():
+        after = path.stat()
+        assert (after.st_ino, after.st_mtime_ns) == (
+            before[name].st_ino, before[name].st_mtime_ns)
+    _assert_owned_fixture_clean(filesystem, paths)
+
+
+def test_owned_live_committed_reload_refuses_pending_before_service_observation(
+    filesystem, owned_live_simulation,
+):
+    old = _owned_generation()
+    new = _owned_generation(2, previous=json.loads(old[V2_STATE]), active=False)
+    _owned_fixture_paths(filesystem, old)
+    fd, state, _, _, _ = filesystem
+    with native._owned_fixture_layout(fd, recovering=False) as layout:
+        native._publish_owned_wal_locked(*layout[:3], old, new, layout[3], live=True)
+    with native._owned_fixture_layout(fd, recovering=True) as layout:
+        with pytest.raises(native.NativeV2TransactionError, match="ORPHAN_STAGE"):
+            native._reload_owned_live_committed_locked(fd, *layout)
+    assert owned_live_simulation == []
+    assert (state / native._OWNED_WAL).exists()
+
+
+@pytest.mark.parametrize("stale", [False, True])
+def test_owned_live_prepare_fixed_intake_cas(
+    filesystem, monkeypatch, stale,
+):
+    old = _owned_bootstrap_resources()
+    new = _owned_generation()
+    paths = _owned_fixture_paths(filesystem, old)
+    fd, state, _, _, _ = filesystem
+    report = {"expected_generation": 1 if stale else 0,
+              "expected_state_sha256": None}
+    monkeypatch.setattr(native, "_load_private_under_root",
+                        lambda *args, **kwargs: (report, new[V2_STATE]))
+    monkeypatch.setattr(native, "_verify_tls_pair", lambda *args, **kwargs: "a" * 64)
+    monkeypatch.setattr(native, "_resolve_pins",
+                        lambda doc: {"repo-0": {"mirror0.example.invalid": ["8.8.8.8"]}})
+    with native._owned_fixture_layout(fd, recovering=False) as layout:
+        if stale:
+            with pytest.raises(native.NativeV2TransactionError, match="STATE_STALE"):
+                native._prepare_owned_live_candidate_locked(fd, *layout[:3], "debian")
+        else:
+            assert native._prepare_owned_live_candidate_locked(
+                fd, *layout[:3], "debian") == (old, new, report)
+    assert _fixture_resource_bytes(paths) == old
+    _assert_owned_fixture_clean(filesystem, paths)

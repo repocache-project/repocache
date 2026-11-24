@@ -672,3 +672,39 @@ before every target effect, including compensation. A changed unpublished
 WAL is refused before rename; no target may change on this path. Regression
 tests cover competing state-stage drift after the first resource write,
 unpublished WAL drift, and empty private stages left at exclusive creation.
+
+
+### Dedicated live-WAL assembly (development branch; not dispatched)
+
+The private live transaction adds a version-3 record in the existing owned
+service domain. It binds the previous five-resource snapshot and candidate
+hashes, and explicitly allows a temporarily absent catalog only after
+durable WAL publication. Version-2 filesystem fixture journals keep their
+original old/new-only rules; fixture recovery refuses version-3 records.
+
+Under the retained protected state lock, prepare the fixed root-owned intake
+using generation/digest CAS and deterministic rendering. Validate the
+trusted certificate/key pair before any durable effect. Withdraw the old
+catalog before modifying routes, write the include before the main config,
+validate the exact dedicated context, and request only the fixed
+`repocache-nginx.service` reload. Recheck the signed unit identity, exact
+context, certificate leaf and live generation before publishing the
+active-only catalog; prove its exact live bytes, then persist the manifest
+and clear the WAL. A failed apply restores the old context, checks the old
+generation (including private bootstrap HTTP 204 on first-install rollback),
+and only then restores and verifies the previous catalog. Uncertain
+compensation retains the WAL. If the old catalog cannot be verified after
+publication, withdraw it again only while the exact WAL/resources remain
+owned. An unpublished live record is discarded only after proving the
+unchanged previous resources and runtime; a missing record is not proof of
+compensation. Explicit same-generation reload/no-change does not write
+resources or clear pending records.
+
+These are private assembly functions, not an exposed socket operation.
+Before enabling dispatch, prove the authenticated installed caller, retained
+actual-root layout and package receipt, deterministic candidate recheck at
+the WAL boundary, kernel listener ownership, storage confinement and
+SELinux labels; handle inactive-service recovery, installer repair and
+booted fault/reboot tests. No host activation, publisher signature,
+complete #27/#64 acceptance or production support is claimed by this
+source increment.
