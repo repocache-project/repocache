@@ -1372,36 +1372,36 @@ def _owned_layout_locked(root_fd: int, state_fd: int, *, recovering: bool):
     signed worker, package and storage authority before using it.
     """
     with ExitStack() as stack:
-    _no_conflicting_owned_wal_pending(state_fd, recovering=recovering)
-    marker = _owned_config_marker_identity(state_fd)
-    nginx_fd, nginx_chain = _walk(root_fd, ("etc", "nginx"), stack, 0)
-    vendor_fd, vendor_chain = _walk(root_fd, _INCLUDE_DIR, stack, 0)
-    public_fd, public_chain = _walk(root_fd, _PUBLIC_DIR, stack, 0)
-    if stat.S_IMODE(os.fstat(public_fd).st_mode) != 0o755:
-        _deny("PUBLIC_DIRECTORY_MODE_UNSAFE")
+        _no_conflicting_owned_wal_pending(state_fd, recovering=recovering)
+        marker = _owned_config_marker_identity(state_fd)
+        nginx_fd, nginx_chain = _walk(root_fd, ("etc", "nginx"), stack, 0)
+        vendor_fd, vendor_chain = _walk(root_fd, _INCLUDE_DIR, stack, 0)
+        public_fd, public_chain = _walk(root_fd, _PUBLIC_DIR, stack, 0)
+        if stat.S_IMODE(os.fstat(public_fd).st_mode) != 0o755:
+            _deny("PUBLIC_DIRECTORY_MODE_UNSAFE")
 
-    def check_layout():
-        # Recheck competing transaction domains throughout the retained
-        # lock, not just on entry. Never proceed after foreign drift.
-        _no_conflicting_owned_wal_pending(state_fd, recovering=True)
-        if (_read_file(state_fd, _MANIFEST, 0, _LIMIT[_MANIFEST]) is not None
-                or _read_public(vendor_fd, _INCLUDE, _LIMIT[_INCLUDE]) is not None):
-            _deny("OWNED_WAL_VENDOR_DOMAIN_CONFLICT")
-        for fd in (nginx_fd, vendor_fd, public_fd):
-            _owned_require_absent(fd, _STAGE)
-        # The dedicated nginx leaf may change directory timestamps.
-        # Its vendor child must remain completely unchanged.
-        _recheck_after_mutation(nginx_chain, 0)
-        _recheck(vendor_chain[-1:], 0)
-        _recheck_after_mutation(public_chain, 0)
-        if _owned_config_marker_identity(state_fd) != marker:
-            _deny("OWNED_CONTEXT_CLAIM_CHANGED")
+        def check_layout():
+            # Recheck competing transaction domains throughout the retained
+            # lock, not just on entry. Never proceed after foreign drift.
+            _no_conflicting_owned_wal_pending(state_fd, recovering=True)
+            if (_read_file(state_fd, _MANIFEST, 0, _LIMIT[_MANIFEST]) is not None
+                    or _read_public(vendor_fd, _INCLUDE, _LIMIT[_INCLUDE]) is not None):
+                _deny("OWNED_WAL_VENDOR_DOMAIN_CONFLICT")
+            for fd in (nginx_fd, vendor_fd, public_fd):
+                _owned_require_absent(fd, _STAGE)
+            # The dedicated nginx leaf may change directory timestamps.
+            # Its vendor child must remain completely unchanged.
+            _recheck_after_mutation(nginx_chain, 0)
+            _recheck(vendor_chain[-1:], 0)
+            _recheck_after_mutation(public_chain, 0)
+            if _owned_config_marker_identity(state_fd) != marker:
+                _deny("OWNED_CONTEXT_CLAIM_CHANGED")
 
-    check_layout()
-    if not recovering:
-        _owned_check_stages_absent(state_fd, nginx_fd, public_fd)
-    yield state_fd, nginx_fd, public_fd, check_layout
-    check_layout()
+        check_layout()
+        if not recovering:
+            _owned_check_stages_absent(state_fd, nginx_fd, public_fd)
+        yield state_fd, nginx_fd, public_fd, check_layout
+        check_layout()
 
 
 @contextmanager
