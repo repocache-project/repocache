@@ -708,3 +708,13 @@ SELinux labels; handle inactive-service recovery, installer repair and
 booted fault/reboot tests. No host activation, publisher signature,
 complete #27/#64 acceptance or production support is claimed by this
 source increment.
+
+The private generation/catalog probe additionally requires the single exact
+configured TCP listener inode to be held by the signed unit's observed
+NGINX master, in the same kernel network namespace. Re-observe process,
+unit and listener identity before and after exposure, refuse competing
+listeners on that port in either family, and do not accept a matching TLS
+certificate alone as service identity. The existing signed-test activation
+guest exercises the real bootstrap listener and refusal of a disposable
+foreign listener, including after reboot. Managed TLS listener acceptance
+and access from the confined installed socket worker remain native gates.

@@ -66,6 +66,10 @@ from repocache.server_native_nginx_effective_unit_v1 import (
 )
 from repocache.server_protected_state_inspect_v1 import _DIRECTORY_FLAGS
 from repocache.server_protected_state_store_v1 import _locked
+from repocache.server_native_v2_transaction_v1 import (
+    NativeV2TransactionError, _owned_live_verify_listener,
+)
+import socket
 root = os.open("/", _DIRECTORY_FLAGS)
 try:
     with _locked(root, 0):
@@ -83,6 +87,22 @@ try:
             assert result["main_pid_observed"] == int(sys.argv[2])
             assert result["authorizes_nginx_reload"] is False
             assert result["authorizes_systemctl"] is False
+            identity = (result["main_pid_observed"], result["private_unit_identity"])
+            assert _owned_live_verify_listener(root, identity, (None, None, None)) > 0
+            # Real kernel listener in this test process, not the signed NGINX
+            # master. No production dispatch or alternate service is exposed.
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as foreign:
+                foreign.bind(("127.0.0.1", 0))
+                foreign.listen(1)
+                foreign_doc = {"deployment": {"listen": {
+                    "bind_address": "127.0.0.1", "https_port": foreign.getsockname()[1],
+                }}}
+                try:
+                    _owned_live_verify_listener(root, identity, (foreign_doc, 1, None))
+                except NativeV2TransactionError as exc:
+                    assert str(exc) == "NATIVE_V2_OWNED_LIVE_LISTENER_UNVERIFIED"
+                else:
+                    raise AssertionError("Foreign kernel listener adopted")
         require_owned_bootstrap_health()
 finally:
     os.close(root)
