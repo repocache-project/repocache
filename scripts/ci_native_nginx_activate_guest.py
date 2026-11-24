@@ -127,6 +127,36 @@ def verify_guest(distribution: str, phase: str) -> None:
         loopback_response()
         repeated = native.activate_authenticated_native_nginx(assets, **pins)
         assert repeated["status"] == "AUTHENTICATED_REPOCACHE_NGINX_ALREADY_ACTIVE"
+
+        # The signed, owned NGINX service must retain its last working
+        # in-memory configuration when a foreign invalid config is injected.
+        # Neither the signer-gated activation nor systemd reload may adopt it.
+        known_good = OWN_CONFIG.read_bytes()
+        working_pid = native._own_service_observation(active=True)["main_pid_observed"]
+        try:
+            OWN_CONFIG.write_bytes(b"events { repocache_invalid_directive on; }\\n")
+            try:
+                native.activate_authenticated_native_nginx(assets, **pins)
+            except stage.WorkerStageError as exc:
+                assert str(exc) == "WORKER_PLACEMENT_FILE_CONTENT_MISMATCH"
+            else:
+                raise AssertionError("modified config adopted despite signed bytes mismatch")
+            reload_failed = run("/usr/bin/systemctl", "reload", OWN)
+            assert reload_failed.returncode != 0, "invalid configuration reloaded"
+            assert native._own_service_observation(active=True)[
+                "main_pid_observed"] == working_pid
+            require_status(OWN, True, True)
+            require_status(VENDOR, False, False)
+            loopback_response()
+        finally:
+            OWN_CONFIG.write_bytes(known_good)
+        assert hashlib.sha256(OWN_CONFIG.read_bytes()).hexdigest() == hashlib.sha256(known_good).hexdigest()
+        assert run("/usr/bin/systemctl", "reload", OWN).returncode == 0
+        assert native._own_service_observation(active=True)[
+            "main_pid_observed"] == working_pid
+        loopback_response()
+        print("PASS: invalid owned config and failed real systemd reload preserved previous working service", flush=True)
+
         assert hashlib.sha256(completion.read_bytes()).hexdigest() == receipt
         assert hashlib.sha256(VENDOR_CONFIG.read_bytes()).hexdigest() == vendor_conf
         assert inspect_stock_nginx_package_file_integrity()[
