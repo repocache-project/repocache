@@ -271,7 +271,12 @@ def test_authenticated_stage_binds_closed_files_and_never_overwrites(candidate, 
     assert report["authorizes_host_installation"] is False
     assert report["authorizes_service_activation"] is False
     assert report["archive_sha256"] == candidate[1]
-    assert report["files"].keys() == {stage.WORKER, *stage.UNITS}
+    # The private NGINX config is signed and staged, but installed only by
+    # the separately authorized service activation operation.
+    assert report["files"].keys() == {stage.WORKER, *stage.UNITS, stage.CONFIG}
+    assert (output / stage.CONFIG).read_bytes() == (
+        ROOT / stage.CONFIG_SOURCE
+    ).read_bytes()
     assert {p.name for p in output.iterdir()} == {*report["files"], stage.RECEIPT}
     assert report == json.loads((output / stage.RECEIPT).read_bytes())
     assert stat.S_IMODE(output.stat().st_mode) == 0o700
