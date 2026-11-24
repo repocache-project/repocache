@@ -2592,3 +2592,45 @@ def test_owned_live_fixed_intake_apply_and_replay(
             "status"] == "OWNED_LIVE_NO_CHANGE"
     assert _fixture_resource_bytes(paths) == new
     _assert_owned_fixture_clean(filesystem, paths)
+
+
+@pytest.mark.parametrize("operation", ["APPLY_V2", "RECOVER_V2", "RELOAD_V2"])
+def test_owned_socket_claim_never_dispatches_vendor(filesystem, monkeypatch, operation):
+    fd, state, _, _, _ = filesystem
+    (state / (native.OWNED_NGINX_CONFIG_MARKER_PREFIX + "foreign")).touch(mode=0o600)
+    monkeypatch.setattr(native, "inspect_effective_native_nginx_unit",
+                        lambda *_: pytest.fail("vendor fallthrough"))
+    monkeypatch.setattr(native, "_apply_locked",
+                        lambda *_a, **_kw: pytest.fail("vendor apply"))
+    monkeypatch.setattr(native, "_recover_locked",
+                        lambda *_: pytest.fail("vendor recovery"))
+    monkeypatch.setattr(native, "_reload_owned_locked",
+                        lambda *_: pytest.fail("vendor reload"))
+    def reject(*args):
+        assert args[0] == fd and args[-1] == operation
+        raise native.NativeV2TransactionError("OWNED_SOCKET_TEST_REFUSAL")
+    monkeypatch.setattr(native, "_owned_socket_operation_locked", reject)
+    with pytest.raises(native.NativeV2TransactionError, match="OWNED_SOCKET_TEST_REFUSAL"):
+        native._operation_under_root(fd, distribution="debian",
+                                     operation=operation, socket_dispatch=True)
+
+
+def test_owned_socket_new_candidate_refused_before_wal(filesystem, monkeypatch):
+    from contextlib import contextmanager
+    fd, state, _, _, _ = filesystem
+    @contextmanager
+    def layout(*_a, **_kw):
+        yield (1, 2, 3, lambda: None)
+    monkeypatch.setattr(native, "_owned_layout_locked", layout)
+    monkeypatch.setattr(native, "_owned_socket_host_boundary", lambda *_: None)
+    monkeypatch.setattr(native, "_read_owned_resources",
+                        lambda *_: {native.V2_STATE: None})
+    monkeypatch.setattr(native, "_validate_owned_resources", lambda *_: None)
+    monkeypatch.setattr(native, "_load_private_under_root",
+                        lambda *_a, **_kw: ({"expected_generation": 0}, b"new"))
+    monkeypatch.setattr(native, "_apply_prepared_owned_live_locked",
+                        lambda *_: pytest.fail("new candidate reached live apply"))
+    with pytest.raises(native.NativeV2TransactionError,
+                       match="OWNED_SOCKET_ATOMIC_WRITE_NAMESPACE_REQUIRED"):
+        native._owned_socket_operation_locked(fd, 1, "debian", "APPLY_V2")
+    assert not (state / native._OWNED_WAL).exists()

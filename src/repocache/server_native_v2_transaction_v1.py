@@ -81,6 +81,10 @@ from repocache.server_root_control_full_context_v1 import (
 )
 from repocache.server_root_control_host_preflight_v1 import (
     require_socket_worker_host_preconditions,
+    _path_snapshot,
+)
+from repocache.server_root_control_worker_v1 import (
+    require_installed_control_receipt, RootControlWorkerError, _metadata_no_acl,
 )
 from repocache.server_root_control_pinned_tls_pair_v1 import (
     _inspect_pinned_tls_pair_for_future_transaction,
@@ -2307,8 +2311,134 @@ def _refuse_legacy_vendor_mode_after_owned_claim(state_fd: int) -> None:
         _deny("OWNED_NGINX_TRANSITION_REQUIRED")
 
 
+
+def _owned_socket_host_boundary(root_fd: int, state_fd: int,
+                                nginx_fd: int, public_fd: int,
+                                distribution: str) -> None:
+    """Fail closed on a shared writable NGINX parent or foreign mount view.
+
+    Existing fixed public paths still live directly under /etc/nginx.
+    A socket worker must not be granted that entire parent merely to make
+    rename() work. Only verify/no-change/reload of a committed generation
+    is enabled here, pending an approved isolated atomic-write namespace.
+    """
+    try:
+        _verify_current_root_fd(root_fd)
+        require_installed_control_receipt(root_fd, state_fd)
+        _require_audited_native_package_for_activation(
+            state_fd, distribution=distribution,
+        )
+        for action, expected in (("is-active", (3, b"inactive\n")),
+                                 ("is-enabled", (1, b"disabled\n"))):
+            result = subprocess.run(
+                (_SYSTEMCTL, action, _UNIT), shell=False, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, cwd="/",
+                env=_ENV, timeout=5, check=False,
+            )
+            if (result.returncode, result.stdout) != expected:
+                _deny("OWNED_SOCKET_VENDOR_STATE_REFUSED")
+        if distribution == "almalinux":
+            enforcing = subprocess.run(
+                ("/usr/sbin/getenforce",), shell=False, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, cwd="/",
+                env=_ENV, timeout=5, check=False,
+            )
+            if enforcing.returncode != 0 or enforcing.stdout != b"Enforcing\n":
+                _deny("OWNED_SOCKET_SELINUX_REQUIRED")
+        # Match the actual fixed paths with PID1's view; the generic legacy
+        # mount observation does not include these dedicated paths.
+        with ExitStack() as stack:
+            host = os.open("/proc/1/root", os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC)
+            stack.callback(os.close, host)
+            for path, kind in (
+                ("/etc/nginx", stat.S_IFDIR),
+                ("/etc/nginx/repocache.conf", stat.S_IFREG),
+                ("/run/repocache-nginx", stat.S_IFDIR),
+                ("/etc/systemd/system", stat.S_IFDIR),
+            ):
+                reference = _path_snapshot(host, path, leaf_type=kind)
+                if (_path_snapshot(root_fd, path, leaf_type=kind) != reference
+                        or _path_snapshot(host, path, leaf_type=kind) != reference):
+                    _deny("OWNED_SOCKET_MOUNT_VIEW_CHANGED")
+            if not os.fstatvfs(nginx_fd).f_flag & os.ST_RDONLY:
+                _deny("OWNED_SOCKET_SHARED_PARENT_WRITABLE")
+            for fd in (state_fd, nginx_fd, public_fd):
+                _metadata_no_acl(fd, directory=True)
+            for parent, name in ((nginx_fd, _OWNED_MAIN), (nginx_fd, _INCLUDE),
+                                 (public_fd, _CATALOG), (state_fd, V2_STATE),
+                                 (state_fd, _OWNED_MANIFEST)):
+                try:
+                    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                                 | os.O_CLOEXEC, dir_fd=parent)
+                except FileNotFoundError:
+                    continue
+                stack.callback(os.close, fd)
+                _metadata_no_acl(fd)
+    except NativeV2TransactionError:
+        raise
+    except (RootControlWorkerError, OSError, ValueError, TypeError,
+            subprocess.SubprocessError):
+        _deny("OWNED_SOCKET_HOST_BOUNDARY_REFUSED")
+
+
+def _owned_socket_operation_locked(root_fd: int, state_fd: int,
+                                   distribution: str, operation: str) -> dict:
+    """Fixed dedicated dispatch, without weakening the current write boundary.
+
+    A pending live WAL cannot be consumed through the read-only shared
+    parent. A new candidate is refused before WAL publication. The trusted
+    root installer/test path retains separate explicit recovery authority.
+    No selected operation can fall through to vendor or expose private data.
+    """
+    with _owned_layout_locked(root_fd, state_fd, recovering=False) as layout:
+        _, nginx_fd, public_fd, check_layout = layout
+        _owned_socket_host_boundary(
+            root_fd, state_fd, nginx_fd, public_fd, distribution,
+        )
+        current = _read_owned_resources(state_fd, nginx_fd, public_fd)
+        snapshot = _validate_owned_resources(current)
+        if snapshot is not None:
+            document = parse_install_bytes(
+                base64.b64decode(snapshot["configuration_base64"], validate=True),
+                for_apply=True,
+            )
+            # Storage and actual confined cache access remain a separate
+            # prerequisite. Do not introduce new active-route authority here.
+            if any(row["desired_state"] == "active" for row in document["repositories"]):
+                _deny("OWNED_SOCKET_ACTIVE_STORAGE_UNVERIFIED")
+        if operation == "RECOVER_V2":
+            for name in (_OWNED_WAL, _OWNED_WAL_TMP):
+                _owned_require_absent(state_fd, name)
+            result = _recover_owned_live_locked(root_fd, *layout)
+            if result != {"status": "OWNED_LIVE_CLEAN_OBSERVED", "recovery_required": False}:
+                _deny("OWNED_SOCKET_RECOVERY_UNVERIFIED")
+            return {"status": "NATIVE_V2_CLEAN"}
+        if operation == "APPLY_V2":
+            report, candidate = _load_private_under_root(root_fd, owner_uid=0, owner_gid=0)
+            if (snapshot is None or candidate != current[V2_STATE]
+                    or report["expected_generation"] != snapshot["state_generation"] - 1):
+                _deny("OWNED_SOCKET_ATOMIC_WRITE_NAMESPACE_REQUIRED")
+            result = _apply_prepared_owned_live_locked(root_fd, *layout, distribution)
+            expected = "OWNED_LIVE_NO_CHANGE"
+            status = "NATIVE_V2_NO_CHANGE"
+        elif operation == "RELOAD_V2":
+            result = _reload_owned_live_committed_locked(root_fd, *layout)
+            expected = "OWNED_LIVE_RELOADED"
+            status = "NATIVE_V2_RELOADED"
+        else:
+            _deny("OPERATION_REFUSED")
+        check_layout()
+        if (result.get("status") != expected
+                or _read_owned_resources(state_fd, nginx_fd, public_fd) != current
+                or snapshot is None
+                or result.get("state_generation") != snapshot["state_generation"]):
+            _deny("OWNED_SOCKET_RESULT_UNVERIFIED")
+        return {"status": status, "state_generation": snapshot["state_generation"]}
+
+
 def _operation_under_root(root_fd: int, *, distribution: str,
-                          operation: str, fixture: bool = False) -> dict:
+                          operation: str, fixture: bool = False,
+                          socket_dispatch: bool = False) -> dict:
     """Internal entry. Only trusted root code selects the fixed operation."""
     if type(distribution) is not str or distribution not in _CA:
         _deny("DISTRIBUTION_UNSUPPORTED")
@@ -2318,9 +2448,22 @@ def _operation_under_root(root_fd: int, *, distribution: str,
         _refuse_actual_root_fixture_write(root_fd)
     with ExitStack() as stack:
         with _locked(root_fd, 0) as state_fd:
+            if socket_dispatch:
+                if fixture:
+                    _deny("OPERATION_REFUSED")
+                # A malformed or dangling reserved marker still selects the
+                # dedicated domain; no denial may fall through to vendor.
+                claimed = any(name.startswith(OWNED_NGINX_CONFIG_MARKER_PREFIX)
+                              for name in os.listdir(state_fd))
+                if claimed:
+                    return _owned_socket_operation_locked(
+                        root_fd, state_fd, distribution, operation,
+                    )
             _refuse_owned_nginx_transaction_artifacts(state_fd)
             if not fixture:
                 _refuse_legacy_vendor_mode_after_owned_claim(state_fd)
+                if socket_dispatch:
+                    inspect_effective_native_nginx_unit(distribution)
             include_fd, include_chain = _walk(root_fd, _INCLUDE_DIR, stack, 0)
             public_fd, public_chain = _walk(root_fd, _PUBLIC_DIR, stack, 0)
             # Do not use a foreign state/catalog filesystem without reviewed
@@ -2365,14 +2508,14 @@ def execute_native_fixed_v2_transaction(operation: str,
     report = require_socket_worker_host_preconditions()
     if report["host_root_provenance_verified"] is not False:
         _deny("HOST_CONTEXT_INVALID")
-    # A fixed working vendor NGINX unit must already exist, be active and
-    # have unmodified default systemd identity, before *any* host mutation.
-    inspect_effective_native_nginx_unit(distribution)
+    # Select ownership domain only under the retained state lock. Never
+    # inspect/reload the vendor unit as a fallback from a dedicated claim.
     fd = os.open("/", _DIRECTORY_FLAGS)
     try:
         _verify_current_root_fd(fd)
         result = _operation_under_root(
             fd, distribution=distribution, operation=operation,
+            socket_dispatch=True,
         )
         _verify_current_root_fd(fd)
         return result
