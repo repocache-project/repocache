@@ -63,6 +63,7 @@ from scripts import stage_native_root_worker as stage
 
 
 _MARKER = ".native-worker-placement."
+_RUNTIME_RECEIPT = ".native-worker-receipt-v1.json"
 _TEMP = ".repocache-worker-part-"
 _UNIT_DIRECTORY = ("etc", "systemd", "system")
 
@@ -261,7 +262,8 @@ def _place_worker_files(
     root: Path, payloads: dict[str, bytes], receipt: dict, *, unit_paths: tuple[str, ...],
     prepare_namespace: bool = False,
 ) -> None:
-    digest = hashlib.sha256(stage._json_line(receipt)).hexdigest()
+    receipt_raw = stage._json_line(receipt)
+    digest = hashlib.sha256(receipt_raw).hexdigest()
     pending = _MARKER + "pending-" + digest
     complete = _MARKER + "complete-" + digest
     with ExitStack() as stack:
@@ -306,6 +308,9 @@ def _place_worker_files(
                        for directory, name in targets):
                     _reject("FOREIGN_PARTIAL_FILE")
                 stage._audit_worker_files(root, payloads)
+                # Only an independently authenticated identical installation
+                # can fill the local receipt on an older completed placement.
+                _place_file(state, _RUNTIME_RECEIPT, receipt_raw, 0o600)
             else:
                 try:
                     (root / "run/repocache/server-control.sock").lstat()
@@ -314,6 +319,9 @@ def _place_worker_files(
                 else:
                     _reject("LIVE_CONTROL_SOCKET")
                 if pending not in markers:
+                    if any(_named(state, name) is not None for name in (
+                            _RUNTIME_RECEIPT, _TEMP + _RUNTIME_RECEIPT)):
+                        _reject("FOREIGN_RUNTIME_RECEIPT")
                     for directory, name in targets:
                         if _named(directory, name) is not None or _named(directory, _TEMP + name) is not None:
                             _reject("FOREIGN_EXISTING_DESTINATION")
@@ -323,6 +331,7 @@ def _place_worker_files(
                 for unit in stage.UNITS:
                     _place_file(units, unit, payloads[unit], 0o644)
                 stage._audit_worker_files(root, payloads)
+                _place_file(state, _RUNTIME_RECEIPT, receipt_raw, 0o600)
                 _create_marker(state, complete)
             final_pending = _named(state, pending)
             if final_pending is not None:

@@ -373,3 +373,37 @@ def test_worker_unauthorized_peer_never_receives_an_acknowledgment(monkeypatch):
         with pytest.raises(FixedRootControlError, match="ADMIN_GROUP_REQUIRED"):
             worker.serve_one_fixed_request()
         assert client.recv(1024) == b""
+
+
+def test_runtime_receipt_is_closed_and_canonical():
+    from repocache import server_root_control_worker_v1 as native
+    import json
+    receipt = {
+        "schema_version": 1, "status": "AUTHENTICATED_WORKER_STAGED",
+        "version": "0.6.0", "source_sha": "a" * 40,
+        "archive_sha256": "b" * 64, "manifest_sha256": "c" * 64,
+        "publisher_key_id": "synthetic-ci",
+        "files": {name: "d" * 64 for name in native._RECEIPT_FILES},
+        "authorizes_host_installation": False,
+        "authorizes_service_activation": False,
+    }
+    def encode(value):
+        return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+    assert native._placement_receipt(encode(receipt)) == receipt
+    for invalid in (
+        {**receipt, "authorizes_host_installation": True},
+        {**receipt, "schema_version": True},
+        {**receipt, "files": {**receipt["files"], "/etc/shadow": "a" * 64}},
+        {**receipt, "source_sha": "bad"},
+        {**receipt, "publisher_key_id": []},
+    ):
+        with pytest.raises(native.RootControlWorkerError, match="PLACEMENT_RECEIPT_INVALID"):
+            native._placement_receipt(encode(invalid))
+    with pytest.raises(native.RootControlWorkerError, match="PLACEMENT_RECEIPT_INVALID"):
+        native._placement_receipt(encode(receipt).replace(b'"version":', b'"version":"0.6.0","version":'))
+
+
+def test_runtime_receipt_source_import_cannot_attest_worker():
+    from repocache import server_root_control_worker_v1 as native
+    with pytest.raises(native.RootControlWorkerError, match="PLACEMENT_INSTALLED_WORKER_REQUIRED"):
+        native.require_installed_control_receipt(-1, -1)
