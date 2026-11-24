@@ -2239,3 +2239,123 @@ def test_owned_files_fixture_recovers_empty_private_stage(filesystem, name):
     assert native._recover_owned_files_fixture(fd)["status"] == "OWNED_FIXTURE_FILES_RESTORED"
     assert _fixture_resource_bytes(paths) == old
     _assert_owned_fixture_clean(filesystem, paths)
+
+@pytest.fixture
+def owned_live_simulation(monkeypatch):
+    """Actual fixture bytes/WAL, simulated private native observations only."""
+    events = []
+    monkeypatch.setattr(native, "_owned_live_observe", lambda fd: (123, (1, 2)))
+    def validate(root, state, resources):
+        snapshot = native._validate_owned_resources(resources)
+        generation = None if snapshot is None else snapshot["state_generation"]
+        events.append(("validate", generation))
+        return None if generation is None else {}, generation, "a" * 64
+    def reload(root, identity):
+        events.append(("reload",))
+    def health(context, catalog, *, publish):
+        events.append(("health", context[1], publish))
+    monkeypatch.setattr(native, "_owned_live_validate", validate)
+    monkeypatch.setattr(native, "_owned_live_reload", reload)
+    monkeypatch.setattr(native, "_owned_live_health", health)
+    return events
+
+
+@pytest.mark.parametrize("initial", [True, False])
+def test_owned_live_wal_catalog_withdrawal_and_commit(
+    filesystem, monkeypatch, owned_live_simulation, initial,
+):
+    old = _owned_bootstrap_resources() if initial else _owned_generation()
+    new = _owned_generation(1 if initial else 2,
+                            previous=None if initial else json.loads(old[V2_STATE]),
+                            active=initial)
+    paths = _owned_fixture_paths(filesystem, old)
+    fd, state, _, _, _ = filesystem
+    events = owned_live_simulation
+    def reload(root, identity):
+        assert (state / native._OWNED_WAL).exists()
+        assert not paths[native._CATALOG].exists()
+        assert paths[native._INCLUDE].read_bytes() == new[native._INCLUDE]
+        events.append(("reload",))
+    def health(context, catalog, *, publish):
+        if ("reload",) in events:
+            assert (state / native._OWNED_WAL).exists()
+            if publish:
+                assert paths[native._CATALOG].read_bytes() == catalog
+            else:
+                assert not paths[native._CATALOG].exists()
+        events.append(("health", context[1], publish))
+    monkeypatch.setattr(native, "_owned_live_reload", reload)
+    monkeypatch.setattr(native, "_owned_live_health", health)
+    with native._owned_fixture_layout(fd, recovering=False) as layout:
+        result = native._apply_owned_live_locked(fd, *layout, new)
+    assert result["status"] == "OWNED_LIVE_COMMIT_OBSERVED"
+    assert _fixture_resource_bytes(paths) == new
+    _assert_owned_fixture_clean(filesystem, paths)
+    assert events.count(("reload",)) == 1
+
+
+@pytest.mark.parametrize("initial", [True, False])
+def test_owned_live_wal_rollback_retains_record_until_prior_health(
+    filesystem, monkeypatch, owned_live_simulation, initial,
+):
+    old = _owned_bootstrap_resources() if initial else _owned_generation()
+    new = _owned_generation(1 if initial else 2,
+                            previous=None if initial else json.loads(old[V2_STATE]),
+                            active=initial)
+    paths = _owned_fixture_paths(filesystem, old)
+    fd, state, _, _, _ = filesystem
+    calls = []
+    def reload(root, identity):
+        assert (state / native._OWNED_WAL).exists()
+        assert not paths[native._CATALOG].exists()
+        calls.append(paths[native._OWNED_MAIN].read_bytes())
+        if len(calls) == 1:
+            raise native.NativeV2TransactionError("injected reload fault")
+    monkeypatch.setattr(native, "_owned_live_reload", reload)
+    with native._owned_fixture_layout(fd, recovering=False) as layout:
+        with pytest.raises(native.NativeV2TransactionError, match="OWNED_LIVE_APPLY_ROLLED_BACK"):
+            native._apply_owned_live_locked(fd, *layout, new)
+    assert calls == [new[native._OWNED_MAIN], old[native._OWNED_MAIN]]
+    assert _fixture_resource_bytes(paths) == old
+    _assert_owned_fixture_clean(filesystem, paths)
+
+
+def test_owned_live_failed_compensation_retains_wal_and_withdraws_catalog(
+    filesystem, monkeypatch, owned_live_simulation,
+):
+    old = _owned_generation()
+    new = _owned_generation(2, previous=json.loads(old[V2_STATE]), active=False)
+    paths = _owned_fixture_paths(filesystem, old)
+    fd, state, _, _, _ = filesystem
+    def fail(*args):
+        raise native.NativeV2TransactionError("injected unavailable service")
+    monkeypatch.setattr(native, "_owned_live_reload", fail)
+    with native._owned_fixture_layout(fd, recovering=False) as layout:
+        with pytest.raises(native.NativeV2TransactionError, match="OWNED_LIVE_APPLY_RECOVERY_REQUIRED"):
+            native._apply_owned_live_locked(fd, *layout, new)
+    assert not paths[native._CATALOG].exists()
+    assert (state / native._OWNED_WAL).exists()
+    with pytest.raises(native.NativeV2TransactionError, match="OWNED_LIVE_WAL_REQUIRES_RUNTIME_RECOVERY"):
+        native._recover_owned_files_fixture(fd)
+    monkeypatch.setattr(native, "_owned_live_reload", lambda *args: None)
+    with native._owned_fixture_layout(fd, recovering=True) as layout:
+        assert native._recover_owned_live_locked(fd, *layout)["status"] == "OWNED_LIVE_ROLLBACK_OBSERVED"
+    assert _fixture_resource_bytes(paths) == old
+    _assert_owned_fixture_clean(filesystem, paths)
+
+
+def test_owned_live_wal_never_accepts_v2_catalog_gap():
+    old = _owned_generation()
+    new = _owned_generation(2, previous=json.loads(old[V2_STATE]), active=False)
+    current = dict(old)
+    current[native._CATALOG] = None
+    _, hashes = native._decode_owned_wal(native._owned_wal_record(old, new))
+    with pytest.raises(native.NativeV2TransactionError, match="OWNED_WAL_FOREIGN_DRIFT"):
+        native._owned_wal_resource_drift(old, hashes, current, unpublished=False)
+    live = native._owned_wal_record(old, new, live=True)
+    _, hashes = native._decode_owned_wal(live)
+    native._owned_wal_resource_drift(old, hashes, current, unpublished=False,
+                                      catalog_withdrawal=True)
+    with pytest.raises(native.NativeV2TransactionError, match="OWNED_WAL_UNPUBLISHED_DRIFT"):
+        native._owned_wal_resource_drift(old, hashes, current, unpublished=True,
+                                          catalog_withdrawal=True)

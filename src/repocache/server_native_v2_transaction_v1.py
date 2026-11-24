@@ -39,6 +39,7 @@ from repocache.server_locked_manifest_reconcile_v1 import (
 from repocache.server_native_nginx_effective_unit_v1 import (
     EffectiveNginxUnitError, inspect_effective_native_nginx_unit,
     OWNED_NGINX_CONFIG_MARKER_PREFIX,
+    inspect_signed_owned_nginx_unit, require_owned_bootstrap_health,
 )
 from repocache.server_native_nginx_package_journal_v1 import (
     _read_completed_native_install_under_lock, NativePackageJournalError,
@@ -575,7 +576,7 @@ def _reload_native(distribution: str) -> None:
 
 
 def _fixed_https_get(document: dict[str, Any], path: str,
-                     maximum: int) -> bytes:
+                     maximum: int, *, expected_leaf_sha256: str | None = None) -> bytes:
     """Bounded verified-TLS local request, exact health/catalog paths only."""
     if path not in (_HEALTH, "/.well-known/repocache/catalog.json"):
         _deny("HTTP_PATH_REFUSED")
@@ -592,6 +593,12 @@ def _fixed_https_get(document: dict[str, Any], path: str,
         context = ssl.create_default_context()
         with socket.create_connection((address, port), timeout=4) as tcp:
             with context.wrap_socket(tcp, server_hostname=hostname) as tls:
+                if expected_leaf_sha256 is not None:
+                    leaf = tls.getpeercert(binary_form=True)
+                    if (not _valid_sha(expected_leaf_sha256)
+                            or type(leaf) is not bytes
+                            or _hash(leaf) != expected_leaf_sha256):
+                        _deny("EXPOSURE_TLS_LEAF_MISMATCH")
                 tls.settimeout(4)
                 tls.sendall(request)
                 fragments = []
@@ -643,7 +650,8 @@ def _local_https_catalog(document: dict[str, Any], catalog: bytes) -> None:
         _deny("CATALOG_EXPOSURE_UNVERIFIED")
 
 
-def _verify_tls_pair(root_fd: int, document: dict[str, Any]) -> None:
+def _verify_tls_pair(root_fd: int, document: dict[str, Any], *,
+                     verify_identity: bool = False) -> str | None:
     """Open real root-owned cert/key without symlinks and verify exact pair.
 
     Absolute paths originate in the *independently root-owned*, full-schema
@@ -676,6 +684,8 @@ def _verify_tls_pair(root_fd: int, document: dict[str, Any]) -> None:
         try:
             report = _inspect_pinned_tls_pair_for_future_transaction(
                 opened[0], opened[1], expected_owner_uid=0,
+                **({"expected_hostname": document["deployment"]["listen"]["hostname"]}
+                   if verify_identity else {}),
             )
         except (OSError, TypeError, ValueError):
             _deny("TLS_PAIR_INVALID")
@@ -683,6 +693,13 @@ def _verify_tls_pair(root_fd: int, document: dict[str, Any]) -> None:
                 or report.get("private_key_pair_load_observed") is not True
                 or report.get("authorizes_nginx_reload") is not False):
             _deny("TLS_PAIR_INVALID")
+        if verify_identity:
+            leaf = report.get("private_verified_leaf_der_sha256")
+            if (report.get("certificate_issuer_hostname_expiry_verified") is not True
+                    or not _valid_sha(leaf)):
+                _deny("TLS_IDENTITY_INVALID")
+            return leaf
+        return None
 
 
 def _resolve_pins(document: dict[str, Any]) -> dict[str, dict[str, list[str]]]:
@@ -1199,7 +1216,7 @@ def _validate_owned_resources(resources: dict[str, bytes | None]) -> dict | None
 
 
 def _owned_wal_record(old: dict[str, bytes | None],
-                      new: dict[str, bytes | None]) -> bytes:
+                      new: dict[str, bytes | None], *, live: bool = False) -> bytes:
     """Versioned five-resource journal, with exact rollback bytes."""
     previous = _validate_owned_resources(old)
     candidate = _validate_owned_resources(new)
@@ -1212,8 +1229,11 @@ def _owned_wal_record(old: dict[str, bytes | None],
         )
         if transition["proposed_generation"] != generation + 1:
             _deny("OWNED_WAL_GENERATION_INVALID")
+        if type(live) is not bool:
+            _deny("OWNED_WAL_INVALID")
         return _canonical({
-            "version": 2,
+            "version": 3 if live else 2,
+            **({"catalog_withdrawal": True} if live else {}),
             "service_domain": _OWNED_WAL_DOMAIN,
             "old_base64": {name: _encode(old[name]) for name in _OWNED_ORDER},
             "old_sha256": {name: _hash(old[name]) for name in _OWNED_ORDER},
@@ -1231,10 +1251,12 @@ def _decode_owned_wal(raw: bytes) -> tuple[dict, dict]:
         if type(raw) is not bytes:
             _deny("OWNED_WAL_INVALID")
         data = _json(raw, limit=_MAX_WAL)
-        if (type(data) is not dict
-                or set(data) != {"version", "service_domain", "old_base64",
-                                 "old_sha256", "new_sha256"}
-                or type(data["version"]) is not int or data["version"] != 2
+        fields = {"version", "service_domain", "old_base64", "old_sha256", "new_sha256"}
+        if (type(data) is not dict or type(data.get("version")) is not int
+                or data["version"] not in (2, 3)
+                or set(data) != (fields | {"catalog_withdrawal"}
+                                 if data["version"] == 3 else fields)
+                or (data["version"] == 3 and data["catalog_withdrawal"] is not True)
                 or data["service_domain"] != _OWNED_WAL_DOMAIN):
             _deny("OWNED_WAL_INVALID")
         for field in ("old_base64", "old_sha256", "new_sha256"):
@@ -1256,7 +1278,8 @@ def _decode_owned_wal(raw: bytes) -> tuple[dict, dict]:
 
 
 def _owned_wal_resource_drift(old: dict, new_sha: dict, current: dict,
-                              *, unpublished: bool) -> None:
+                              *, unpublished: bool,
+                              catalog_withdrawal: bool = False) -> None:
     """Only old or candidate bytes may be reconciled after WAL publication."""
     if (type(unpublished) is not bool or type(current) is not dict
             or set(current) != set(_OWNED_ORDER)):
@@ -1269,6 +1292,10 @@ def _owned_wal_resource_drift(old: dict, new_sha: dict, current: dict,
         if unpublished:
             if raw != old[name]:
                 _deny("OWNED_WAL_UNPUBLISHED_DRIFT")
+        elif (name == _CATALOG and raw is None and catalog_withdrawal is True):
+            # The live protocol deliberately withdraws the catalog before a
+            # route change; only an explicitly versioned live WAL allows it.
+            continue
         elif _hash(raw) not in (_hash(old[name]), new_sha[name]):
             _deny("OWNED_WAL_FOREIGN_DRIFT")
 
@@ -1373,9 +1400,10 @@ def _owned_check_stages_absent(state_fd: int, nginx_fd: int, public_fd: int) -> 
 
 
 def _publish_owned_wal_locked(state_fd: int, nginx_fd: int, public_fd: int,
-                              old: dict, new: dict, check_layout) -> bytes:
+                              old: dict, new: dict, check_layout, *,
+                              live: bool = False) -> bytes:
     """Durably publish the rollback bytes before touching any target."""
-    wal = _owned_wal_record(old, new)
+    wal = _owned_wal_record(old, new, live=live)
     _write_exclusive(state_fd, _OWNED_WAL_TMP, wal, 0, _MAX_WAL)
     _owned_wal_resource_drift(
         old, _decode_owned_wal(wal)[1],
@@ -1463,6 +1491,11 @@ def _owned_restore_files_locked(state_fd: int, nginx_fd: int, public_fd: int,
         _deny("OWNED_WAL_CHANGED")
     if wal is not None and tmp is not None:
         _deny("OWNED_WAL_CONFLICTING_RECORDS")
+    for raw in (wal, tmp):
+        if raw is not None:
+            _decode_owned_wal(raw)
+            if _json(raw, limit=_MAX_WAL)["version"] == 3:
+                _deny("OWNED_LIVE_WAL_REQUIRES_RUNTIME_RECOVERY")
     if wal is None and tmp is None:
         _owned_check_stages_absent(state_fd, nginx_fd, public_fd)
         _validate_owned_resources(current)
@@ -1558,6 +1591,222 @@ def _apply_owned_files_fixture(root_fd: int, new: dict[str, bytes | None]) -> di
                 # evidence of compensation. Never claim rollback in that case.
                 _deny("OWNED_WAL_APPLY_RECOVERY_REQUIRED")
             _deny("OWNED_WAL_APPLY_FILES_RESTORED")
+
+
+def _owned_live_observe(root_fd: int) -> tuple:
+    """Private fixed observation. Not an authorization or dispatch entry."""
+    _verify_current_root_fd(root_fd)
+    try:
+        observed = inspect_signed_owned_nginx_unit()
+        if (observed.get("unit_name") != _OWNED_WAL_DOMAIN
+                or observed.get("signed_worker_unit_bytes_match") is not True
+                or observed.get("authorizes_nginx_reload") is not False
+                or observed.get("authorizes_systemctl") is not False
+                or type(observed.get("main_pid_observed")) is not int
+                or observed["main_pid_observed"] <= 1
+                or type(observed.get("private_unit_identity")) is not tuple):
+            _deny("OWNED_LIVE_UNIT_UNVERIFIED")
+        return observed["main_pid_observed"], observed["private_unit_identity"]
+    except (EffectiveNginxUnitError, OSError, TypeError, ValueError):
+        _deny("OWNED_LIVE_UNIT_UNVERIFIED")
+
+
+def _owned_live_validate(root_fd: int, state_fd: int, resources: dict) -> tuple:
+    """Bind trusted TLS identity and exact native syntax to the snapshot."""
+    snapshot = _validate_owned_resources(resources)
+    if snapshot is None:
+        _probe_owned_context_locked(root_fd, state_fd, None)
+        return None, None, None
+    document = parse_install_bytes(
+        base64.b64decode(snapshot["configuration_base64"], validate=True),
+        for_apply=True,
+    )
+    leaf = _verify_tls_pair(root_fd, document, verify_identity=True)
+    _probe_owned_context_locked(root_fd, state_fd, resources[_INCLUDE])
+    if _verify_tls_pair(root_fd, document, verify_identity=True) != leaf:
+        _deny("OWNED_LIVE_TLS_CHANGED")
+    return document, snapshot["state_generation"], leaf
+
+
+def _owned_live_reload(root_fd: int, identity: tuple) -> None:
+    """Only the fixed dedicated service; never fall back to vendor reload."""
+    if _owned_live_observe(root_fd) != identity:
+        _deny("OWNED_LIVE_UNIT_CHANGED")
+    try:
+        result = subprocess.run(
+            (_SYSTEMCTL, "reload", _OWNED_WAL_DOMAIN),
+            shell=False, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            cwd="/", env=_ENV, timeout=10, close_fds=True,
+            start_new_session=True, check=False,
+        )
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        _deny("OWNED_LIVE_RELOAD_UNAVAILABLE")
+    if type(result.returncode) is not int or result.returncode != 0:
+        _deny("OWNED_LIVE_RELOAD_FAILED")
+    if _owned_live_observe(root_fd) != identity:
+        _deny("OWNED_LIVE_UNIT_CHANGED")
+
+
+def _owned_live_health(context: tuple, catalog: bytes | None, *, publish: bool) -> None:
+    """Observe generation and (after publication) exact catalog, with pinned TLS."""
+    document, generation, leaf = context
+    if document is None:
+        if catalog is not None:
+            _deny("OWNED_LIVE_BOOTSTRAP_DRIFT")
+        require_owned_bootstrap_health()
+        return
+    response = _fixed_https_get(document, _HEALTH, 8192, expected_leaf_sha256=leaf)
+    header, body = response.split(b"\r\n\r\n", 1)
+    lines = header.lower().split(b"\r\n")
+    markers = [line for line in lines if line.startswith(b"x-repocache-generation:")]
+    if (not header.startswith(b"HTTP/1.1 204 ") or body
+            or markers != [f"x-repocache-generation: {generation}".encode("ascii")]
+            or any(line.startswith((b"transfer-encoding:", b"content-encoding:"))
+                   for line in lines)
+            or [line for line in lines if line.startswith(b"content-length:")]
+               not in ([], [b"content-length: 0"])):
+        _deny("OWNED_LIVE_GENERATION_UNVERIFIED")
+    if publish:
+        if type(catalog) is not bytes:
+            _deny("OWNED_LIVE_CATALOG_REQUIRED")
+        response = _fixed_https_get(
+            document, "/.well-known/repocache/catalog.json",
+            _LIMIT[_CATALOG] + 8192, expected_leaf_sha256=leaf,
+        )
+        header, body = response.split(b"\r\n\r\n", 1)
+        lines = header.lower().split(b"\r\n")
+        lengths = [line for line in lines if line.startswith(b"content-length:")]
+        if (not header.startswith(b"HTTP/1.1 200 ") or body != catalog
+                or lengths != [b"content-length: " + str(len(catalog)).encode("ascii")]
+                or any(line.startswith((b"transfer-encoding:", b"content-encoding:"))
+                       for line in lines)):
+            _deny("OWNED_LIVE_CATALOG_UNVERIFIED")
+
+
+def _owned_live_guard(state_fd: int, nginx_fd: int, public_fd: int,
+                      check_layout, wal: bytes, expected: dict) -> None:
+    check_layout()
+    _owned_require_exact_wal(state_fd, wal)
+    if _read_owned_resources(state_fd, nginx_fd, public_fd) != expected:
+        _deny("OWNED_LIVE_RESOURCE_DRIFT")
+
+
+def _owned_live_write(state_fd: int, nginx_fd: int, public_fd: int,
+                      check_layout, wal: bytes, expected: dict,
+                      name: str, after: bytes | None) -> None:
+    _owned_live_guard(state_fd, nginx_fd, public_fd, check_layout, wal, expected)
+    _owned_write_resource(state_fd, nginx_fd, public_fd, name, expected[name], after)
+    expected[name] = after
+    _owned_live_guard(state_fd, nginx_fd, public_fd, check_layout, wal, expected)
+
+
+def _owned_live_finish(state_fd: int, nginx_fd: int, public_fd: int,
+                       check_layout, wal: bytes, expected: dict) -> None:
+    _owned_live_guard(state_fd, nginx_fd, public_fd, check_layout, wal, expected)
+    _validate_owned_resources(expected)
+    _owned_check_stages_absent(state_fd, nginx_fd, public_fd)
+    _owned_require_exact_wal(state_fd, wal)
+    _unlink_known(state_fd, _OWNED_WAL, wal, 0, _MAX_WAL)
+
+
+def _recover_owned_live_locked(root_fd: int, state_fd: int, nginx_fd: int,
+                               public_fd: int, check_layout, *,
+                               expected_wal: bytes | None = None) -> dict:
+    """Recover a published live WAL under a retained trusted state lock.
+
+    Not connected to host dispatch. The future caller must establish native
+    package, signed worker, storage/ACL/SELinux and listener provenance first.
+    Failure to prove the old service retains the journal and withdraws any
+    candidate catalog. Never infer rollback from the absence of a WAL.
+    """
+    check_layout()
+    wal = _read_file(state_fd, _OWNED_WAL, 0, _MAX_WAL)
+    if wal is None or (expected_wal is not None and wal != expected_wal):
+        _deny("OWNED_LIVE_WAL_REQUIRED")
+    _owned_require_exact_wal(state_fd, wal)
+    old, new_sha = _decode_owned_wal(wal)
+    if _json(wal, limit=_MAX_WAL)["version"] != 3:
+        _deny("OWNED_LIVE_WAL_REQUIRED")
+    expected = _read_owned_resources(state_fd, nginx_fd, public_fd)
+    _owned_wal_resource_drift(old, new_sha, expected, unpublished=False,
+                              catalog_withdrawal=True)
+    identity = _owned_live_observe(root_fd)
+    _owned_live_guard(state_fd, nginx_fd, public_fd, check_layout, wal, expected)
+    _owned_cleanup_stages(state_fd, nginx_fd, public_fd, old, new_sha)
+    # Both a newly published and a previous catalog may advertise a route
+    # that the next reload will remove. Withdraw before restoring context.
+    for name, after in ((_CATALOG, None), (_OWNED_MAIN, old[_OWNED_MAIN]),
+                        (_INCLUDE, old[_INCLUDE]), (V2_STATE, old[V2_STATE])):
+        _owned_live_write(state_fd, nginx_fd, public_fd, check_layout, wal,
+                          expected, name, after)
+    context = _owned_live_validate(root_fd, state_fd, old)
+    _owned_live_guard(state_fd, nginx_fd, public_fd, check_layout, wal, expected)
+    _owned_live_reload(root_fd, identity)
+    _owned_live_health(context, None, publish=False)
+    if (_owned_live_observe(root_fd) != identity
+            or _owned_live_validate(root_fd, state_fd, old) != context):
+        _deny("OWNED_LIVE_RECOVERY_DRIFT")
+    _owned_live_write(state_fd, nginx_fd, public_fd, check_layout, wal,
+                      expected, _CATALOG, old[_CATALOG])
+    _owned_live_health(context, old[_CATALOG], publish=True)
+    _owned_live_write(state_fd, nginx_fd, public_fd, check_layout, wal,
+                      expected, _OWNED_MANIFEST, old[_OWNED_MANIFEST])
+    if expected != old or _owned_live_observe(root_fd) != identity:
+        _deny("OWNED_LIVE_RECOVERY_DRIFT")
+    _owned_live_finish(state_fd, nginx_fd, public_fd, check_layout, wal, expected)
+    return {"status": "OWNED_LIVE_ROLLBACK_OBSERVED", "recovery_required": False}
+
+
+def _apply_owned_live_locked(root_fd: int, state_fd: int, nginx_fd: int,
+                             public_fd: int, check_layout, new: dict) -> dict:
+    """Private WAL-held service transaction; not yet a socket operation.
+
+    The future fixed dispatch must supply only a deterministic CAS-approved
+    candidate, retain the protected lock, and establish storage, SELinux,
+    package and kernel listener authority. No callback comes from the peer.
+    """
+    check_layout()
+    old = _read_owned_resources(state_fd, nginx_fd, public_fd)
+    new = dict(new)
+    _validate_owned_resources(new)
+    identity = _owned_live_observe(root_fd)
+    context = _owned_live_validate(root_fd, state_fd, old)
+    _owned_live_health(context, old[_CATALOG], publish=True)
+    if _owned_live_observe(root_fd) != identity:
+        _deny("OWNED_LIVE_UNIT_CHANGED")
+    wal = _publish_owned_wal_locked(state_fd, nginx_fd, public_fd,
+                                    old, new, check_layout, live=True)
+    expected = dict(old)
+    try:
+        for name, after in ((_CATALOG, None), (_INCLUDE, new[_INCLUDE]),
+                            (_OWNED_MAIN, new[_OWNED_MAIN]), (V2_STATE, new[V2_STATE])):
+            _owned_live_write(state_fd, nginx_fd, public_fd, check_layout, wal,
+                              expected, name, after)
+        context = _owned_live_validate(root_fd, state_fd, new)
+        _owned_live_guard(state_fd, nginx_fd, public_fd, check_layout, wal, expected)
+        _owned_live_reload(root_fd, identity)
+        _owned_live_health(context, None, publish=False)
+        if (_owned_live_observe(root_fd) != identity
+                or _owned_live_validate(root_fd, state_fd, new) != context):
+            _deny("OWNED_LIVE_COMMIT_DRIFT")
+        _owned_live_write(state_fd, nginx_fd, public_fd, check_layout, wal,
+                          expected, _CATALOG, new[_CATALOG])
+        _owned_live_health(context, new[_CATALOG], publish=True)
+        _owned_live_write(state_fd, nginx_fd, public_fd, check_layout, wal,
+                          expected, _OWNED_MANIFEST, new[_OWNED_MANIFEST])
+        if expected != new or _owned_live_observe(root_fd) != identity:
+            _deny("OWNED_LIVE_COMMIT_DRIFT")
+        _owned_live_finish(state_fd, nginx_fd, public_fd, check_layout, wal, expected)
+        return {"status": "OWNED_LIVE_COMMIT_OBSERVED",
+                "state_generation": context[1], "recovery_required": False}
+    except Exception:
+        try:
+            _recover_owned_live_locked(root_fd, state_fd, nginx_fd, public_fd,
+                                       check_layout, expected_wal=wal)
+        except Exception:
+            _deny("OWNED_LIVE_APPLY_RECOVERY_REQUIRED")
+        _deny("OWNED_LIVE_APPLY_ROLLED_BACK")
 
 
 def _recover_locked(state_fd: int, include_fd: int,
