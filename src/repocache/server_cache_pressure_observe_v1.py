@@ -42,6 +42,28 @@ def _capacity(fd: int) -> tuple[int, int, bool]:
             or info.f_favail > MAX_INT
             or (flags is not None and (type(flags) is not int or flags < 0))):
         raise ValueError("CACHE_CAPACITY_UNVERIFIED")
+    # Linux statvfs exposes total/free block and inode counters as well as
+    # available counters. If the optional totals are present, reject
+    # contradictory readings rather than reporting fabricated free capacity.
+    # Older synthetic fixtures intentionally expose only the three counters
+    # above, so absent optional totals do not manufacture a completeness claim.
+    totals = {
+        name: getattr(info, name, None)
+        for name in ("f_blocks", "f_bfree", "f_files", "f_ffree")
+    }
+    if any(value is not None and
+           (type(value) is not int or not 0 <= value <= MAX_INT)
+           for value in totals.values()):
+        raise ValueError("CACHE_CAPACITY_UNVERIFIED")
+    blocks, bfree = totals["f_blocks"], totals["f_bfree"]
+    files, ffree = totals["f_files"], totals["f_ffree"]
+    if ((blocks is not None and info.f_bavail > blocks)
+            or (bfree is not None and info.f_bavail > bfree)
+            or (blocks is not None and bfree is not None and bfree > blocks)
+            or (files is not None and info.f_favail > files)
+            or (ffree is not None and info.f_favail > ffree)
+            or (files is not None and ffree is not None and ffree > files)):
+        raise ValueError("CACHE_CAPACITY_UNVERIFIED")
     readonly = (flags is not None
                 and bool(flags & getattr(os, "ST_RDONLY", 1)))
     return info.f_bavail * info.f_frsize, info.f_favail, readonly
