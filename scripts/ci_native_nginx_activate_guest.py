@@ -50,6 +50,87 @@ def loopback_response() -> None:
     assert response.startswith(b"HTTP/1.1 204"), response[:70]
 
 
+def verify_signed_runtime(expected_pid: int, *, reject_mode: bool = False) -> None:
+    """Run the fixed read-only probes from the actual installed signed zipapp.
+
+    The VM has already verified the installed worker against the disposable
+    signed release. A source-tree import cannot exercise its embedded unit.
+    """
+    code = """
+import os
+import sys
+sys.path.insert(0, "/usr/libexec/repocache/server-control-worker")
+from repocache.server_native_nginx_effective_unit_v1 import (
+    EffectiveNginxUnitError, inspect_signed_owned_nginx_unit,
+    require_owned_bootstrap_health,
+)
+from repocache.server_protected_state_inspect_v1 import _DIRECTORY_FLAGS
+from repocache.server_protected_state_store_v1 import _locked
+root = os.open("/", _DIRECTORY_FLAGS)
+try:
+    with _locked(root, 0):
+        if sys.argv[1] == "reject":
+            try:
+                inspect_signed_owned_nginx_unit()
+            except EffectiveNginxUnitError as exc:
+                assert str(exc) == "NATIVE_NGINX_EFFECTIVE_SIGNED_OWN_UNIT_METADATA_MISMATCH"
+            else:
+                raise AssertionError("Unsafe installed unit mode accepted")
+        else:
+            result = inspect_signed_owned_nginx_unit()
+            assert result["unit_name"] == "repocache-nginx.service"
+            assert result["signed_worker_unit_bytes_match"] is True
+            assert result["main_pid_observed"] == int(sys.argv[2])
+            assert result["authorizes_nginx_reload"] is False
+            assert result["authorizes_systemctl"] is False
+        require_owned_bootstrap_health()
+finally:
+    os.close(root)
+"""
+    result = subprocess.run(
+        ["/usr/bin/python3", "-IS", "-B", "-c", code,
+         "reject" if reject_mode else "accept", str(expected_pid)],
+        stdin=subprocess.DEVNULL, capture_output=True, text=True,
+        env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+        cwd="/", timeout=45, check=False,
+    )
+    if result.returncode:
+        # Only static error types/codes from the disposable guest, never
+        # raw subprocess output, private config or signed asset contents.
+        import re
+        for marker in re.findall(
+                r"NATIVE_NGINX_EFFECTIVE_[A-Z_]+", result.stderr):
+            print("SIGNED_RUNTIME_DIAGNOSTIC: " + marker, flush=True)
+        raise AssertionError("Installed signed runtime probe failed")
+
+
+def verify_signed_runtime_mode_refusal(expected_pid: int) -> None:
+    """Change only the test guest's mode; retain the original unit inode."""
+    unit = Path("/etc/systemd/system/repocache-nginx.service")
+    fd = os.open(unit, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        import stat
+        before = os.fstat(fd)
+        assert stat.S_ISREG(before.st_mode)
+        assert (before.st_uid, before.st_gid, before.st_nlink,
+                stat.S_IMODE(before.st_mode)) == (0, 0, 1, 0o644)
+        try:
+            os.fchmod(fd, 0o600)
+            verify_signed_runtime(expected_pid, reject_mode=True)
+        finally:
+            os.fchmod(fd, 0o644)
+        restored = unit.lstat()
+        assert (restored.st_dev, restored.st_ino, restored.st_uid,
+                restored.st_gid, restored.st_mode, restored.st_mtime_ns) == (
+            before.st_dev, before.st_ino, before.st_uid,
+            before.st_gid, before.st_mode, before.st_mtime_ns,
+        )
+    finally:
+        os.close(fd)
+    verify_signed_runtime(expected_pid)
+    print("PASS: installed signed unit mode drift refused, fixed bootstrap health preserved", flush=True)
+
+
 def verify_guest(distribution: str, phase: str) -> None:
     assert os.getresuid() == (0, 0, 0)
     assert Path("/proc/1/comm").read_text().strip() == "systemd"
@@ -137,6 +218,12 @@ def verify_guest(distribution: str, phase: str) -> None:
         require_status(OWN, True, True)
         require_status(VENDOR, False, False)
         loopback_response()
+        signed_pid = native._own_service_observation(active=True)["main_pid_observed"]
+        verify_signed_runtime(signed_pid)
+        print("PASS: installed signed worker verified exact dedicated unit and bootstrap health", flush=True)
+        verify_signed_runtime_mode_refusal(signed_pid)
+        assert stage.verify_installed_worker(assets, **pins)[
+            "status"] == "AUTHENTICATED_WORKER_FILES_MATCH"
         repeated = native.activate_authenticated_native_nginx(assets, **pins)
         assert repeated["status"] == "AUTHENTICATED_REPOCACHE_NGINX_ALREADY_ACTIVE"
 
@@ -187,6 +274,8 @@ def verify_guest(distribution: str, phase: str) -> None:
         require_status(VENDOR, False, False)
         assert native._own_service_observation(active=True)["main_pid_observed"] > 1
         loopback_response()
+        verify_signed_runtime(native._own_service_observation(active=True)["main_pid_observed"])
+        print("PASS: installed signed worker reverified exact unit and bootstrap health after reboot", flush=True)
         again = native.activate_authenticated_native_nginx(assets, **pins)
         assert again["status"] == "AUTHENTICATED_REPOCACHE_NGINX_ALREADY_ACTIVE"
         assert inspect_stock_nginx_package_file_integrity()[
