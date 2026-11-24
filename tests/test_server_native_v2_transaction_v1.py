@@ -1781,3 +1781,73 @@ def test_owned_wal_fixture_refuses_actual_root_before_io():
             native._publish_owned_wal_fixture(fd, {})
     finally:
         os.close(fd)
+
+def test_owned_wal_fixture_accepts_exact_committed_generation(filesystem):
+    fd, state, vendor, catalog, events = filesystem
+    (state / installer._CONFIG_MARKER).touch(mode=0o600)
+    old = _owned_generation()
+    main = vendor.parent.parent / native._OWNED_MAIN
+    include = main.parent / native._INCLUDE
+    paths = {
+        V2_STATE: state / V2_STATE, native._OWNED_MAIN: main,
+        native._INCLUDE: include, native._CATALOG: catalog,
+        native._OWNED_MANIFEST: state / native._OWNED_MANIFEST,
+    }
+    for name, path in paths.items():
+        path.write_bytes(old[name])
+        path.chmod(0o600 if name in (V2_STATE, native._OWNED_MANIFEST) else 0o644)
+    new = _owned_generation(2, previous=json.loads(old[V2_STATE]))
+    journal = native._publish_owned_wal_fixture(fd, new)
+    assert native._decode_owned_wal(journal)[0] == old
+    assert {name: path.read_bytes() for name, path in paths.items()} == old
+    assert not vendor.exists() and not events
+
+
+def test_owned_wal_fixture_interrupted_rename_preserves_temp_and_bootstrap(
+    filesystem, monkeypatch,
+):
+    fd, state, vendor, catalog, events = filesystem
+    (state / installer._CONFIG_MARKER).touch(mode=0o600)
+    main = vendor.parent.parent / native._OWNED_MAIN
+    main.write_bytes(native._OWNED_BOOTSTRAP_CONFIG)
+    main.chmod(0o644)
+    actual = os.replace
+
+    def interrupted(src, dst, **kwargs):
+        if src == native._OWNED_WAL_TMP and dst == native._OWNED_WAL:
+            raise OSError("injected crash before publication")
+        return actual(src, dst, **kwargs)
+
+    monkeypatch.setattr(native.os, "replace", interrupted)
+    with pytest.raises(OSError, match="injected crash"):
+        native._publish_owned_wal_fixture(fd, _owned_generation())
+    assert not (state / native._OWNED_WAL).exists()
+    raw = (state / native._OWNED_WAL_TMP).read_bytes()
+    old, new_sha = native._decode_owned_wal(raw)
+    native._owned_wal_resource_drift(old, new_sha, _owned_bootstrap_resources(),
+                                     unpublished=True)
+    assert main.read_bytes() == native._OWNED_BOOTSTRAP_CONFIG
+    assert not catalog.exists() and not vendor.exists() and not events
+    with pytest.raises(native.NativeV2TransactionError, match="OWNED_WAL_DOMAIN_REQUIRED"):
+        native._publish_owned_wal_fixture(fd, _owned_generation())
+
+
+@pytest.mark.parametrize("name", [native._OWNED_WAL, native._OWNED_WAL_TMP,
+                                  native._OWNED_MANIFEST])
+def test_owned_domain_refused_by_state_only_and_legacy_v1_interlocks(
+    filesystem, name,
+):
+    from repocache import server_proposed_state_v2_store as v2
+    from repocache import server_protected_state_store_v1 as v1
+    _, state, _, _, _ = filesystem
+    path = state / name
+    path.write_bytes(b"owned-domain")
+    path.chmod(0o600)
+    sfd = os.open(state, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        assert v2._multi_resource_pending(sfd, 0) is True
+        with pytest.raises(ValueError, match="PROTECTED_V2_COHABITATION_REFUSED"):
+            v1._refuse_proposed_v2_coexistence(sfd)
+    finally:
+        os.close(sfd)
+    assert path.read_bytes() == b"owned-domain"

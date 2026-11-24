@@ -626,3 +626,11 @@ This is not the authenticated live transaction. Wiring the protected lock
 through the actual five-resource writes, distinct stage names, runtime
 reload, verified TLS/catalog exposure and first/managed rollback is still
 required. No recovery-complete or native activation result is claimed.
+
+The fixture publisher also exercises a previously committed, exactly
+manifest-bound generation. The dedicated prepublication gate may recognize
+its own manifest, but still refuses state-only, shadow, legacy vendor and
+dedicated pending journals. A rename-fault regression verifies that a
+durable unpublished temporary journal leaves the bootstrap and all other
+resources unchanged, and is refused on a fresh apply rather than discarded
+or adopted by another domain.

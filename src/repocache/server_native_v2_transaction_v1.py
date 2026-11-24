@@ -60,7 +60,7 @@ from repocache.server_derived_catalog_candidate_v1 import (
 )
 from repocache.server_proposed_state_v2_store import (
     V2_STATE, MAX_V2_STATE_BYTES, _legacy_refusal, _pending, _read_v2,
-    _refuse_actual_root_fixture_write,
+    _refuse_actual_root_fixture_write, _shadow_multi_resource_pending,
 )
 from repocache.server_protected_state_inspect_v1 import (
     _DIRECTORY_FLAGS, _walk, _recheck,
@@ -1273,6 +1273,25 @@ def _read_owned_resources(state_fd: int, nginx_fd: int,
     }
 
 
+def _no_conflicting_owned_wal_pending(state_fd: int) -> None:
+    """Dedicated domain may recognize its own manifest, never other WALs."""
+    _legacy_refusal(state_fd, 0)
+    if (_pending(state_fd, 0, include_multi=False)
+            or _shadow_multi_resource_pending(state_fd, 0)):
+        _deny("FOREIGN_PENDING")
+    for name in (_WAL, _WAL_TMP, _STATE_STAGE, _MANIFEST_STAGE,
+                 _OWNED_WAL, _OWNED_WAL_TMP):
+        # Presence itself is a conflict; even dangling or malformed entries
+        # cannot be silently treated as absent or garbage-collected.
+        try:
+            os.stat(name, dir_fd=state_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            _deny("OWNED_WAL_DOMAIN_UNVERIFIED")
+        _deny("OWNED_WAL_DOMAIN_REQUIRED")
+
+
 def _publish_owned_wal_fixture(root_fd: int, new: dict[str, bytes | None]) -> bytes:
     """Durable fixture-only publication, before any configuration mutation.
 
@@ -1283,7 +1302,7 @@ def _publish_owned_wal_fixture(root_fd: int, new: dict[str, bytes | None]) -> by
     _refuse_actual_root_fixture_write(root_fd)
     with ExitStack() as stack:
         with _locked(root_fd, 0) as state_fd:
-            _no_conflicting_pending(state_fd)
+            _no_conflicting_owned_wal_pending(state_fd)
             marker = _owned_config_marker_identity(state_fd)
             nginx_fd, nginx_chain = _walk(root_fd, ("etc", "nginx"), stack, 0)
             vendor_fd, vendor_chain = _walk(root_fd, _INCLUDE_DIR, stack, 0)
