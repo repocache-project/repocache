@@ -12,12 +12,12 @@ from __future__ import annotations
 import base64
 import contextlib
 import contextvars
+import ctypes
 import hashlib
 import json
 import os
 import secrets
 import stat
-import subprocess
 from pathlib import Path
 
 import source_preflight as pre
@@ -74,6 +74,43 @@ def policy_active() -> bool:
     return _POLICY.get() is not None
 
 
+def _expected_file_context(path: Path, mode: int) -> bytes:
+    """Use the native SELinux file-context database, including local policy.
+
+    Raw lookup avoids translated contexts and dependence on matchpathcon's
+    executable location or stdout formatting. This only reads policy.
+    """
+    try:
+        lib = ctypes.CDLL("/usr/lib64/libselinux.so.1", use_errno=True)
+        lib.selabel_open.argtypes = (ctypes.c_uint, ctypes.c_void_p, ctypes.c_uint)
+        lib.selabel_open.restype = ctypes.c_void_p
+        lib.selabel_lookup_raw.argtypes = (
+            ctypes.c_void_p, ctypes.POINTER(ctypes.c_char_p), ctypes.c_char_p, ctypes.c_int)
+        lib.selabel_lookup_raw.restype = ctypes.c_int
+        lib.selabel_close.argtypes = (ctypes.c_void_p,)
+        lib.selabel_close.restype = None
+        lib.freecon.argtypes = (ctypes.c_void_p,)
+        lib.freecon.restype = None
+        handle = lib.selabel_open(0, None, 0)  # SELABEL_CTX_FILE
+        if not handle:
+            raise pre.PreflightError("Native SELinux file policy open failed")
+        try:
+            result = ctypes.c_char_p()
+            if lib.selabel_lookup_raw(handle, ctypes.byref(result), os.fsencode(path), mode) != 0:
+                raise pre.PreflightError("Native SELinux file policy lookup failed")
+            try:
+                raw = result.value
+                if raw is None or not 1 <= len(raw) <= 512:
+                    raise pre.PreflightError("Native SELinux file policy context invalid")
+                return raw
+            finally:
+                lib.freecon(result)
+        finally:
+            lib.selabel_close(handle)
+    except (OSError, AttributeError) as exc:
+        raise pre.PreflightError("Native SELinux file policy unavailable") from exc
+
+
 def _policy_label(fd: int) -> bytes:
     """Require the opened inode's label to match its native path policy.
 
@@ -92,15 +129,7 @@ def _policy_label(fd: int) -> bytes:
     named = path.lstat()
     if (info.st_dev, info.st_ino) != (named.st_dev, named.st_ino):
         raise pre.PreflightError("SELinux policy pathname changed")
-    result = subprocess.run(
-        ["/usr/sbin/matchpathcon", "-n", str(path)],
-        env={"PATH": "/usr/sbin:/usr/bin", "LC_ALL": "C"},
-        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-        check=False, timeout=5,
-    )
-    if result.returncode != 0 or not 1 <= len(result.stdout) <= 512:
-        raise pre.PreflightError("Native SELinux path policy unavailable")
-    expected = result.stdout.strip().split(b":", 3)
+    expected = _expected_file_context(path, info.st_mode).split(b":", 3)
     raw = os.getxattr(fd, "security.selinux")
     actual = raw.rstrip(b"\0").split(b":", 3)
     if len(actual) != 4 or len(expected) != 4 or actual[1:] != expected[1:]:

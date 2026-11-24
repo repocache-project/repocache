@@ -357,7 +357,7 @@ def apply_sandbox(root: Path, ident: str, *, crash: str | None = None) -> dict:
                 approved = boundary._manifest(statefd, ident)
                 source = journal["source"] if journal is not None else approved["source"]
                 recheck = scope.enter_context(
-                    locks.hold_existing_native_package_locks(_manager(source), root=root))
+                    locks.hold_existing_native_package_locks(_manager(source), root=root, revalidation=True))
                 if journal is not None:
                     if journal["phase"] != "installed":
                         raise PairRefused("Interrupted or restored transaction needs review")
@@ -584,7 +584,7 @@ def restore_sandbox(root: Path, ident: str, *,
             if j is None or j["phase"] not in ("installed", "restore-armed"):
                 raise PairRefused("No committed sandbox transaction to restore")
             try:
-                with locks.hold_existing_native_package_locks(_manager(j["source"]), root=root) as recheck:
+                with locks.hold_existing_native_package_locks(_manager(j["source"]), root=root, revalidation=True) as recheck:
                     return _restore_locked(root, fd, ident, j, recheck=recheck, crash=crash or "manual")
             except locks.LockInspectionRefused as exc:
                 raise PairRefused("Native lock scope refused rollback") from exc
@@ -602,7 +602,7 @@ def recover_sandbox(root: Path, ident: str) -> dict:
             if j is None:
                 return {"status": "no-intent", "write_eligible": False}
             try:
-                with locks.hold_existing_native_package_locks(_manager(j["source"]), root=root) as recheck:
+                with locks.hold_existing_native_package_locks(_manager(j["source"]), root=root, revalidation=True) as recheck:
                     if j["phase"] in ("installed", "restored"):
                         return _restore_locked(root, fd, ident, j, recheck=recheck)
                     return _restore_locked(root, fd, ident, j, recheck=recheck, crash="recover")

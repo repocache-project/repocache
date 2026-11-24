@@ -303,3 +303,27 @@ def test_lock_parent_mode_drift_during_scope_refuses(tmp_path):
     first.parent.chmod(0o755)
     assert _competing_process(first, "flock") == 0
     assert _competing_process(first, "posix") == 0
+
+
+@pytest.mark.parametrize("manager,names", [("apt", locks.APT), ("dnf5", locks.DNF5)])
+def test_revalidation_is_opt_in_and_expires_with_scope(tmp_path, manager, names):
+    paths = setup_locks(tmp_path, names)
+    with locks.hold_existing_native_package_locks(
+            manager, root=tmp_path, revalidation=True) as recheck:
+        assert callable(recheck)
+        assert recheck() is None
+        for family in ("flock", "posix"):
+            assert _competing_process(paths[names[-1]], family) == 17
+    with pytest.raises(locks.LockInspectionRefused, match="scope expired"):
+        recheck()
+
+
+def test_revalidation_detects_drift_before_returning_from_scope(tmp_path):
+    paths = setup_locks(tmp_path, locks.APT)
+    with pytest.raises(locks.LockInspectionRefused, match="scope drift"):
+        with locks.hold_existing_native_package_locks(
+                "apt", root=tmp_path, revalidation=True) as recheck:
+            first = paths[locks.APT[0]]
+            first.rename(first.with_name("previous-lock"))
+            first.write_bytes(b"")
+            recheck()

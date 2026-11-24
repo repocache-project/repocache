@@ -169,6 +169,17 @@ def _alma_label_roundtrip(root: Path) -> None:
     assert root.parent == Path("/tmp") and root.name.startswith("repocache-booted-label-")
     subprocess.run(["/usr/sbin/restorecon", "-RF", str(root)], check=True,
                    timeout=30, capture_output=True)
+    # Verify the actual raw policy lookup for every initial private control
+    # file before attempting approval. Diagnostic names are fixture-only.
+    with boundary.metadata.native_metadata_scope(root):
+        for path in (root / boundary.MARKER, lock, source):
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            try:
+                boundary.metadata._policy_label(fd)
+            except boundary.pre.PreflightError as exc:
+                raise AssertionError("Fixture policy lookup refused " + path.name) from exc
+            finally:
+                os.close(fd)
     os.setxattr(source, "user.repocache-ci", b"preserve")
     baseline = _snapshot(source)
     origin = "https://cache.example.org"

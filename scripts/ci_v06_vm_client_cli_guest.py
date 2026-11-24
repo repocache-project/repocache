@@ -96,7 +96,7 @@ def main(platform: str) -> None:
             "PASS: booted-native-client-privileged-fixture " + platform
             not in privileged.stdout):
         raise AssertionError("privileged client guest failed: "
-                             + privileged.stdout[-3000:] + privileged.stderr[-1500:])
+                             + privileged.stdout[-3000:] + privileged.stderr[-9000:])
     print(privileged.stdout[-10000:], flush=True)
     if source_snapshot(platform) != before:
         raise AssertionError("native sources modified by privileged fixture")

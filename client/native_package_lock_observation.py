@@ -144,7 +144,7 @@ def inspect_native_locks(manager: str, *, root: Path = Path("/"),
 
 @contextlib.contextmanager
 def hold_existing_native_package_locks(
-    manager: str, *, root: Path = Path("/"),
+    manager: str, *, root: Path = Path("/"), revalidation: bool = False,
 ):
     """Hold real nonblocking POSIX and BSD locks on fixed existing inodes.
 
@@ -179,6 +179,7 @@ def hold_existing_native_package_locks(
     held: list[int] = []
     identities: set[tuple[int, int]] = set()
     witnesses: list[tuple[str, int, tuple[int, ...]]] = []
+    active = False
 
     def fingerprint(info: os.stat_result) -> tuple[int, ...]:
         return (info.st_dev, info.st_ino, info.st_uid, info.st_gid,
@@ -190,6 +191,8 @@ def hold_existing_native_package_locks(
         # the directory FDs used during acquisition. stat does not open a
         # second descriptor on a POSIX-locked inode (closing such an FD
         # in this process could drop the POSIX lock).
+        if not active:
+            raise LockInspectionRefused("Native package lock scope expired")
         try:
             for relative, lockfd, expected in witnesses:
                 if (fingerprint(os.fstat(lockfd)) != expected
@@ -254,6 +257,7 @@ def hold_existing_native_package_locks(
                     os.close(parent)
         # An earlier pathname may have changed while a later lock was
         # acquired. Never enter the scope on this stale lock set.
+        active = True
         recheck_all()
     except (OSError, OverflowError, TypeError) as exc:
         raise LockInspectionRefused("Native package lock scope unavailable") from exc
@@ -263,11 +267,12 @@ def hold_existing_native_package_locks(
         # caller exceptions untouched; only acquisition errors are mapped.
         # The transaction can revalidate all pinned identities immediately
         # before each durable transition, without reopening any lock inode.
-        yield recheck_all
+        yield recheck_all if revalidation else None
         # Successful scope completion must not hide a replaced inode or
         # unsafe parent. This detects drift, not a race-free commit lease.
         recheck_all()
     finally:
+        active = False
         # Closing each fd releases both of its kernel lock families.
         # Attempt every close even if one fails; never leak held lock FDs.
         close_error = False
