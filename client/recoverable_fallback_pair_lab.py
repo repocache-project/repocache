@@ -23,6 +23,7 @@ from pathlib import Path
 import native_fallback_plan as compiler
 import root_source_boundary as boundary
 import source_preflight as pre
+import source_metadata_lab as security_metadata
 import transaction_atomic_lab as atom
 
 MARKER = ".repocache-recoverable-pair-test"
@@ -100,6 +101,35 @@ def _journal_name(ident: str) -> str:
     return "pair-" + ident + ".json"
 
 
+def _source_attrs(journal: dict) -> tuple[tuple[str, bytes], ...]:
+    if journal["schema"] == 2:
+        return ()
+    encoded = journal["source_attributes"]
+    if type(encoded) is not list or len(encoded) > security_metadata.MAX_ATTRS:
+        raise PairRefused("Protected attribute snapshot refused")
+    parsed = []
+    total = 0
+    for item in encoded:
+        if (type(item) is not list or len(item) != 2 or type(item[0]) is not str
+                or len(item[0].encode("utf-8")) > 255
+                or not (security_metadata._allowed_attribute(item[0])
+                        or (item[0] == "security.selinux"
+                            and security_metadata.policy_active()))):
+            raise PairRefused("Protected attribute namespace refused")
+        value = _decode(item[1])
+        total += len(value)
+        if (len(value) > security_metadata.MAX_ATTRIBUTE_BYTES
+                or total > security_metadata.MAX_TOTAL_ATTRIBUTE_BYTES):
+            raise PairRefused("Protected attribute snapshot too large")
+        parsed.append((item[0], value))
+    if [name for name, _ in parsed] != sorted({name for name, _ in parsed}):
+        raise PairRefused("Duplicate or unordered protected attributes")
+    attrs = tuple(parsed)
+    if security_metadata.attribute_digest(attrs) != journal["approval"].get("source_attributes_sha256"):
+        raise PairRefused("Protected attribute snapshot differs from approval")
+    return attrs
+
+
 def _get_journal(fd: int, ident: str) -> dict | None:
     name = _journal_name(ident)
     try:
@@ -118,8 +148,10 @@ def _get_journal(fd: int, ident: str) -> dict | None:
         "original_digest", "proposed_digest", "mirror_digest",
         "approval", "approval_sha256",
     }
+    if type(j) is dict and j.get("schema") == 3:
+        required.add("source_attributes")
     if (type(j) is not dict or set(j) != required
-            or type(j["schema"]) is not int or j["schema"] != 2
+            or type(j["schema"]) is not int or j["schema"] not in (2, 3)
             or type(j["id"]) is not str or j["id"] != ident
             or type(j["approval"]) is not dict
             or type(j["approval_sha256"]) is not str
@@ -170,7 +202,10 @@ def _get_journal(fd: int, ident: str) -> dict | None:
                 or approval["source_sha256"] != j["original_digest"]
                 or _hash(approval["cache"].encode("ascii")) != approval["route_sha256"]):
             raise PairRefused("Journal approval identity mismatch")
-        if approval["schema"] == 2:
+        if (approval["schema"] == 3) != (j["schema"] == 3):
+            raise PairRefused("Journal attribute schema differs from approval")
+        _source_attrs(j)
+        if approval["schema"] in (2, 3):
             identity = approval["source_identity"]
             if ([identity["device"], identity["inode"]] != j["original_id"]
                     or identity["uid"] != 0 or identity["gid"] != j["gid"]
@@ -207,6 +242,7 @@ def _put_journal(fd: int, ident: str, j: dict) -> None:
             with os.fdopen(out, "wb", closefd=False) as stream:
                 stream.write(data)
                 stream.flush()
+                security_metadata.private_state_attributes(out)
                 os.fsync(out)
         finally:
             os.close(out)
@@ -222,9 +258,9 @@ def _put_journal(fd: int, ident: str, j: dict) -> None:
         raise
 
 
-def _read_named(fd: int, name: str) -> tuple[bytes, dict] | None:
+def _read_named(fd: int, name: str, attrs: tuple = ()) -> tuple[bytes, dict] | None:
     try:
-        data, metadata = atom._target_state(fd, name)
+        data, metadata = atom._target_state(fd, name, attrs)
         return data, metadata
     except FileNotFoundError:
         return None
@@ -256,8 +292,8 @@ def _stat_required(fd: int, name: str, expected: list[int]) -> None:
 
 
 def _remove_known(fd: int, name: str, payload: bytes,
-                  ident: list[int] | None) -> None:
-    current = _read_named(fd, name)
+                  ident: list[int] | None, attrs: tuple = ()) -> None:
+    current = _read_named(fd, name, attrs)
     if current is None:
         return
     if ident is None or not _matches(current, payload, ident):
@@ -276,7 +312,14 @@ def _metadata(current: dict, journal: dict) -> None:
 def _fixture_approval(statefd: int, root: Path, ident: str):
     approval = boundary._manifest(statefd, ident)
     compiled, _ = boundary._validate_record(root, statefd, ident, approval)
-    return approval, compiled
+    captured = []
+    if approval["schema"] == 3:
+        before = pre.inspect_source(approval["source"], root=root)
+        raw = boundary._source_bytes(root, approval["source"], before, attrs_out=captured)
+        if (raw != compiled.original or security_metadata.attribute_digest(tuple(captured))
+                != approval["source_attributes_sha256"]):
+            raise PairRefused("Source attributes changed before stage")
+    return approval, compiled, tuple(captured)
 
 
 
@@ -311,7 +354,7 @@ def apply_sandbox(root: Path, ident: str, *, crash: str | None = None) -> dict:
                             or _hash(_pack(approval)) != journal["approval_sha256"]):
                         raise PairRefused("Installed approval identity changed")
                     with _paths(root, journal) as (fd, leaf):
-                        curr = _read_named(fd, leaf)
+                        curr = _read_named(fd, leaf, _source_attrs(journal))
                         if not _matches(curr, _decode(journal["proposed"]),
                                         journal["proposed_id"]):
                             raise PairRefused("Installed source externally modified")
@@ -324,22 +367,27 @@ def apply_sandbox(root: Path, ident: str, *, crash: str | None = None) -> dict:
                                 raise PairRefused("Installed mirror externally modified")
                             _metadata(observed_mirror[1], journal)
                     return {"status": "unchanged", "write_eligible": False}
-                approval, proposal = _fixture_approval(statefd, root, ident)
+                approval, proposal, attrs = _fixture_approval(statefd, root, ident)
+                # Label-aware APT companion placement needs its own policy
+                # context; current supported enforcing platform uses DNF.
+                if proposal.companion and any(name == "security.selinux" for name, _ in attrs):
+                    raise PairRefused("Labelled APT companion not supported")
                 with atom._source_directory(root, proposal.source) as (fd, leaf):
-                    source = _read_named(fd, leaf)
+                    source = _read_named(fd, leaf, attrs)
                     if source is None or source[0] != proposal.original:
                         raise PairRefused("Source changed before stage")
-                    if approval["schema"] == 2 and approval["source_identity"] != {
+                    if approval["schema"] in (2, 3) and approval["source_identity"] != {
                             **{key: source[1][key] for key in boundary.SOURCE_IDENTITY_FIELDS
                                if key != "size"}, "size": len(source[0])}:
                         raise PairRefused("Approved source inode identity changed before stage")
                     mode, gid = source[1]["mode"], source[1]["gid"]
-                    if source[1]["uid"] != 0 or mode not in (0o600, 0o640, 0o644):
-                        raise PairRefused("Unsafe source ownership or mode")
+                    if (source[1]["uid"] != 0 or mode not in (0o600, 0o640, 0o644)
+                            or (proposal.companion and (mode != 0o644 or gid != 0))):
+                        raise PairRefused("Unsafe source or APT mirror ownership or mode")
                     source_temp, new_id = atom._write_new(
-                        fd, leaf, ident, proposal.proposed, source[1])
+                        fd, leaf, ident, proposal.proposed, source[1], attrs)
                     # All current permissions and metadata must still match.
-                    if _read_named(fd, leaf) != source:
+                    if _read_named(fd, leaf, attrs) != source:
                         raise PairRefused("Source replaced during staging")
                 companion = None
                 companion_id = None
@@ -369,6 +417,9 @@ def apply_sandbox(root: Path, ident: str, *, crash: str | None = None) -> dict:
                     "mirror_digest": _hash(proposal.companion[1]
                                            if proposal.companion else b""),
                 }
+                if approval["schema"] == 3:
+                    j["schema"] = 3
+                    j["source_attributes"] = [[name, _blob(value)] for name, value in attrs]
                 _put_journal(statefd, ident, j)
                 _crash(crash, "armed")
                 if companion is not None:
@@ -381,12 +432,21 @@ def apply_sandbox(root: Path, ident: str, *, crash: str | None = None) -> dict:
                         os.fsync(fd)
                     _crash(crash, "companion")
                 with atom._source_directory(root, proposal.source) as (fd, leaf):
-                    if _read_named(fd, leaf) != source:
+                    if _read_named(fd, leaf, attrs) != source:
                         raise PairRefused("Source changed before transaction commit")
+                    staged = _read_named(fd, source_temp, attrs)
+                    if not _matches(staged, proposal.proposed, list(new_id)):
+                        raise PairRefused("Staged source changed before transaction commit")
+                    _metadata(staged[1], j)
                     if boundary._manifest(statefd, ident) != approval:
                         raise PairRefused("Approval changed before transaction commit")
                     atom._replace(fd, source_temp, leaf, tuple(_identity(source[1])))
                 _crash(crash, "source")
+                with atom._source_directory(root, proposal.source) as (fd, leaf):
+                    installed = _read_named(fd, leaf, attrs)
+                    if not _matches(installed, proposal.proposed, list(new_id)):
+                        raise PairRefused("Installed source readback mismatch")
+                    _metadata(installed[1], j)
                 j["phase"] = "installed"
                 _put_journal(statefd, ident, j)
                 return {"status": "installed-sandbox", "write_eligible": False}
@@ -399,8 +459,9 @@ def _restore_locked(root: Path, fdstate: int, ident: str, j: dict,
                     *, crash: str | None = None) -> dict:
     original, proposed, mirror = (
         _decode(j["original"]), _decode(j["proposed"]), _decode(j["mirror"]))
+    attrs = _source_attrs(j)
     with atom._source_directory(root, j["source"]) as (fd, leaf):
-        current = _read_named(fd, leaf)
+        current = _read_named(fd, leaf, attrs)
         if current is None:
             raise PairRefused("Source missing in transaction recovery")
         _metadata(current[1], j)
@@ -441,7 +502,7 @@ def _restore_locked(root: Path, fdstate: int, ident: str, j: dict,
     if from_proposed:
         with atom._source_directory(root, j["source"]) as (fd, leaf):
             if j["restore_id"] is None:
-                temp, new_id = atom._write_new(fd, leaf, ident, original, current[1])
+                temp, new_id = atom._write_new(fd, leaf, ident, original, current[1], attrs)
                 j["restore_id"] = list(new_id)
                 j["phase"] = "restore-armed"
                 _put_journal(fdstate, ident, j)
@@ -449,10 +510,20 @@ def _restore_locked(root: Path, fdstate: int, ident: str, j: dict,
             else:
                 temp = ".repocache-atomic-" + ident
                 _stat_required(fd, temp, j["restore_id"])
-                pending = _read_named(fd, temp)
+                pending = _read_named(fd, temp, attrs)
                 if not _matches(pending, original, j["restore_id"]):
                     raise PairRefused("Foreign rollback temp")
+            if _read_named(fd, leaf, attrs) != current:
+                raise PairRefused("Source changed before rollback commit")
+            staged = _read_named(fd, temp, attrs)
+            if not _matches(staged, original, j["restore_id"]):
+                raise PairRefused("Staged rollback source changed")
+            _metadata(staged[1], j)
             atom._replace(fd, temp, leaf, tuple(j["proposed_id"]))
+            restored = _read_named(fd, leaf, attrs)
+            if not _matches(restored, original, j["restore_id"]):
+                raise PairRefused("Restored source readback mismatch")
+            _metadata(restored[1], j)
             _crash(crash, "source-restored")
     elif not (from_original or from_restored):
         raise PairRefused("Unrecognized restore state")
@@ -464,7 +535,7 @@ def _restore_locked(root: Path, fdstate: int, ident: str, j: dict,
         # No source replacement happened: only a journalled temp can go.
         with atom._source_directory(root, j["source"]) as (fd, _):
             _remove_known(fd, ".repocache-atomic-" + ident,
-                          proposed, j["proposed_id"])
+                          proposed, j["proposed_id"], attrs)
     if j["companion"] is not None:
         with atom._source_directory(root, j["companion"]) as (fd, _):
             _remove_known(fd, ".repocache-atomic-" + ident,

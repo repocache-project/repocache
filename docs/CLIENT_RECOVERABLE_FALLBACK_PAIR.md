@@ -104,3 +104,16 @@ and labels. Both compare actual host source and installed package inventories
 before/after. These are not installed native writer acceptance or positive
 SELinux label preservation. The disposable distro smoke additionally covers
 real SIGKILL at each rollback phase.
+
+
+Schema-3 approved source metadata binds bounded user attributes, POSIX
+access ACL and (in an explicit native metadata scope) the actual SELinux
+context through a canonical digest. The private journal stores the exact
+attribute snapshot and verifies it against consent, including during
+replay and interrupted rollback. Source temp and installed readback
+verify bytes, inode and attributes; the APT companion must remain
+readable and never inherit arbitrary source xattrs. Unknown security
+namespaces and unreviewed labels still fail closed. The new AlmaLinux
+booted guest test uses only a freshly marked private fixture, Enforcing
+policy and a real SIGKILL; it does not relabel or modify host sources.
+No result is claimed before execution.

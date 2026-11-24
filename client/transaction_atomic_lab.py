@@ -228,6 +228,15 @@ def _write_new(directory_fd: int, leaf: str, ident: str,
         try:
             for name, value in expected_attrs:
                 if name != "system.posix_acl_access":
+                    # Preserve the exact original label; avoid relabelling
+                    # a correctly inherited context. The bounded policy
+                    # snapshot and post-write check reject a foreign type.
+                    if name == "security.selinux":
+                        if not attributes.policy_active():
+                            raise staging.StageError("Unreviewed native security label")
+                        attributes._policy_label(fd)
+                        if os.getxattr(fd, name) == value:
+                            continue
                     os.setxattr(fd, name, value)
             for name, value in expected_attrs:
                 if name == "system.posix_acl_access":

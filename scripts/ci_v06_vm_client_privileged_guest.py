@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import signal
 import ssl
+import subprocess
 import sys
 import tempfile
 
@@ -128,6 +129,62 @@ def _alma_label_refusal(root: Path) -> None:
     print("PASS: AlmaLinux enforcing unreviewed labels refused; source and lock labels intact")
 
 
+def _alma_label_roundtrip(root: Path) -> None:
+    source, _, lock, state = build(root, "dnf")
+    old = state / ("candidate-" + IDENT + ".json")
+    record = json.loads(old.read_text())
+    old.unlink()
+    (root / "etc/os-release").write_text('ID=almalinux\nVERSION_ID="10"\n')
+    # Only this freshly created private VM fixture may be normalized to
+    # native default labels, never any real host source or trust directory.
+    assert root.parent == Path("/tmp") and root.name.startswith("repocache-booted-label-")
+    subprocess.run(["/usr/sbin/restorecon", "-RF", str(root)], check=True,
+                   timeout=30, capture_output=True)
+    os.setxattr(source, "user.repocache-ci", b"preserve")
+    baseline = _snapshot(source)
+    origin = "https://cache.example.org"
+    original_catalog = boundary.client._catalog
+    original_config = boundary.client._installed_server_config
+    original_context = boundary._native_tls_context
+    boundary.client._catalog = lambda *_a, **_kw: {
+        "schema": 1, "repositories": [{"upstream": record["upstream"],
+                                       "cache": record["cache"]}]}
+    boundary.client._installed_server_config = lambda *_: origin
+    boundary._native_tls_context = lambda: object()
+    try:
+        with boundary.metadata.native_metadata_scope(root):
+            proposal = boundary.prepare_current_candidate(
+                record["source_sha256"], record["entry_sha256"], _test_root=root)
+            ident = proposal["managed_id"]
+            boundary.approve_current_candidate(
+                ident, proposal["route_sha256"], _test_root=root)
+            approved = json.loads((state / ("candidate-" + ident + ".json")).read_text())
+            assert approved["schema"] == 3 and approved["source_attributes_sha256"]
+            assert boundary.validate(ident, _test_root=root)["source_attributes_matched"]
+            pid = os.fork()
+            if pid == 0:
+                def kill_at(active, phase):
+                    if active == phase:
+                        os.kill(os.getpid(), signal.SIGKILL)
+                pair._crash = kill_at
+                pair.apply_sandbox(root, ident, crash="source")
+                os._exit(77)
+            _, status = os.waitpid(pid, 0)
+            assert os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGKILL
+            changed = _snapshot(source)
+            assert changed[0] != baseline[0] and changed[-1] == baseline[-1]
+            assert pair.recover_sandbox(root, ident)["status"] == "restored"
+            restored = _snapshot(source)
+            assert restored[0] == baseline[0]
+            assert restored[3:6] == baseline[3:6] and restored[-1] == baseline[-1]
+            assert pair.recover_sandbox(root, ident)["status"] == "restored"
+    finally:
+        boundary.client._catalog = original_catalog
+        boundary.client._installed_server_config = original_config
+        boundary._native_tls_context = original_context
+    print("PASS: AlmaLinux Enforcing schema-3 source label/user-xattr SIGKILL recovery; private fixture")
+
+
 def main(platform: str) -> None:
     guarded_native_guest(platform)
     before_sources = installed_sources(platform)
@@ -138,12 +195,15 @@ def main(platform: str) -> None:
             _debian_fixture(root)
         else:
             _alma_label_refusal(root)
+    if platform == "almalinux10":
+        with tempfile.TemporaryDirectory(prefix="repocache-booted-label-", dir="/tmp") as work:
+            _alma_label_roundtrip(Path(work))
     assert installed_sources(platform) == before_sources
     assert installed_packages(platform) == before_packages
     guarded_native_guest(platform)
     print("PASS: booted-native-client-privileged-fixture " + platform)
     print("NOT VERIFIED: installed root helper, real host source writer, native locks, "
-          "AlmaLinux positive SELinux-labelled transactions, publisher identity")
+          "installed SELinux-labelled transactions, publisher identity")
 
 
 if __name__ == "__main__":
