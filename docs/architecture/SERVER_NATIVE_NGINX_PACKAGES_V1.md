@@ -473,7 +473,12 @@ The bootstrap config is independently checked against exact reviewed bytes
 from that archive and securely placed at the **new**, initially absent
 `/etc/nginx/repocache.conf` leaf only during separately requested activation,
 not during the APT/DNF package transaction. A foreign file, link, unexpected
-existing content, untrusted ancestry or changed signed source is refused.
+existing content (including a byte-identical file), untrusted ancestry or
+changed signed source is refused. The installation records a durable,
+root-owned, config-digest-bound first-use ownership-intent marker under the
+existing protected state lock before creating the private config; interruption
+can retry only the exact signed bytes. Any unrecognized competing marker is
+refused, never implicitly migrated or adopted.
 The stock package-owned `/etc/nginx/nginx.conf` stays byte-for-byte intact.
 
 The only bootstrap NGINX listener is the signed, closed fixed configuration:
