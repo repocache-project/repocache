@@ -17,6 +17,7 @@ def _setup(monkeypatch):
     state = {
         "active": False, "enabled": False, "vendor_queries": 0,
         "commands": [], "package_audits": 0, "config_checks": 0, "runtime_preps": 0,
+        "storage_preps": [], "storage_mounts": [],
     }
     def audit(*args, **kwargs):
         state["package_audits"] += 1
@@ -43,6 +44,13 @@ def _setup(monkeypatch):
     monkeypatch.setattr(host, "_prepare_own_runtime_directory",
                         lambda: state.__setitem__(
                             "runtime_preps", state["runtime_preps"] + 1))
+    def storage(distribution, *, allow_create):
+        state["storage_preps"].append((distribution, allow_create))
+        return {"cache_root_verified": True, "log_root_verified": True,
+                "actual_service_write_verified": False}
+    monkeypatch.setattr(host, "prepare_installed_storage", storage)
+    monkeypatch.setattr(host, "verify_service_storage_mounts",
+                        lambda pid: state["storage_mounts"].append(pid))
     def own_status(command):
         return ((0, b"enabled\n") if state["enabled"] else
                 (1, b"disabled\n")) if command == "is-enabled" else (
@@ -81,6 +89,10 @@ def test_explicit_signed_own_service_is_idempotent(monkeypatch):
     assert again["status"] == "AUTHENTICATED_REPOCACHE_NGINX_ALREADY_ACTIVE"
     assert state["commands"] == ["daemon-reload", "start", "enable"]
     assert state["package_audits"] == 3
+    assert state["storage_preps"] == [("debian", True), ("debian", False), ("debian", False)]
+    assert state["storage_mounts"] == [1234, 1234, 1234]
+    assert first["service_storage_mounts_verified"] is True
+    assert again["storage"]["actual_service_write_verified"] is False
 
 
 def test_explicit_activation_refuses_vendor_active(monkeypatch):
@@ -372,3 +384,25 @@ def test_shared_owned_observer_refuses_changed_or_foreign_runtime(monkeypatch, c
     monkeypatch.setattr(effective.subprocess, "run", run)
     with pytest.raises(effective.EffectiveNginxUnitError, match="OWN_UNIT_"):
         effective.inspect_effective_owned_nginx_unit(active=True)
+
+def test_storage_refusal_blocks_service_start(monkeypatch):
+    state = _setup(monkeypatch)
+    from repocache.server_native_installed_storage_v1 import InstalledStorageError
+    def refuse(*args, **kwargs):
+        raise InstalledStorageError("INSTALLED_NGINX_STORAGE_PARTIAL_OR_FOREIGN_ROOT")
+    monkeypatch.setattr(host, "prepare_installed_storage", refuse)
+    with pytest.raises(InstalledStorageError, match="PARTIAL_OR_FOREIGN_ROOT"):
+        host._activate_audited_native_nginx_under_lock(11, "debian", host._BOOTSTRAP_CONFIG)
+    assert state["commands"] == []
+
+
+def test_mount_refusal_compensates_owned_start(monkeypatch):
+    state = _setup(monkeypatch)
+    from repocache.server_native_installed_storage_v1 import InstalledStorageError
+    def refuse(_pid):
+        raise InstalledStorageError("INSTALLED_NGINX_STORAGE_SERVICE_PARENT_WRITABLE")
+    monkeypatch.setattr(host, "verify_service_storage_mounts", refuse)
+    with pytest.raises(stage.WorkerStageError, match="NATIVE_ACTIVATION_FAILED_ROLLED_BACK"):
+        host._activate_audited_native_nginx_under_lock(11, "debian", host._BOOTSTRAP_CONFIG)
+    assert state["commands"] == ["daemon-reload", "start", "stop", "disable"]
+    assert not state["active"] and not state["enabled"]
