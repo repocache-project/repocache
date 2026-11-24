@@ -32,7 +32,7 @@ def _setup(monkeypatch):
         )
     monkeypatch.setattr(host, "_nginx_systemctl", vendor_status)
     monkeypatch.setattr(host, "_place_signed_private_config",
-                        lambda _bytes: state.__setitem__(
+                        lambda _bytes, _fd: state.__setitem__(
                             "config_checks", state["config_checks"] + 1))
     monkeypatch.setattr(host, "_require_private_nginx_listeners",
                         lambda: state.__setitem__(
@@ -121,7 +121,7 @@ def test_unexpected_signed_config_bytes_refused_without_writes(monkeypatch):
     monkeypatch.setattr(host.os, "open", forbidden)
     with pytest.raises(stage.WorkerStageError,
                        match="NATIVE_SIGNED_CONFIG_UNEXPECTED"):
-        host._place_signed_private_config(b"http { listen 80; }")
+        host._place_signed_private_config(b"http { listen 80; }", 11)
 
 
 def test_failed_enable_stops_only_own_service(monkeypatch):
@@ -191,6 +191,47 @@ def test_unknown_master_on_failed_start_is_never_killed(monkeypatch):
             11, "debian", host._BOOTSTRAP_CONFIG)
     assert state["commands"] == ["daemon-reload", "start"]
     assert observed_states == [False, True]
+
+
+def test_owned_config_intent_refuses_even_exact_foreign_bytes(tmp_path):
+    import os
+
+    state = tmp_path / "state"
+    nginx = tmp_path / "nginx"
+    state.mkdir()
+    nginx.mkdir()
+    (nginx / stage.CONFIG).write_bytes(host._BOOTSTRAP_CONFIG)
+    state_fd = os.open(state, os.O_RDONLY | os.O_DIRECTORY)
+    nginx_fd = os.open(nginx, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(stage.WorkerStageError,
+                           match="NATIVE_PRIVATE_CONFIG_FOREIGN_COLLISION"):
+            host._require_owned_private_config_intent(state_fd, nginx_fd)
+        assert list(state.iterdir()) == []
+        assert (nginx / stage.CONFIG).read_bytes() == host._BOOTSTRAP_CONFIG
+    finally:
+        os.close(nginx_fd)
+        os.close(state_fd)
+
+
+def test_owned_config_intent_rejects_another_owner_marker(tmp_path):
+    import os
+
+    state = tmp_path / "state"
+    nginx = tmp_path / "nginx"
+    state.mkdir()
+    nginx.mkdir()
+    (state / (host._CONFIG_MARKER_PREFIX + "unrecognized")).write_bytes(b"")
+    state_fd = os.open(state, os.O_RDONLY | os.O_DIRECTORY)
+    nginx_fd = os.open(nginx, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(stage.WorkerStageError,
+                           match="NATIVE_PRIVATE_CONFIG_MARKER_CONFLICT"):
+            host._require_owned_private_config_intent(state_fd, nginx_fd)
+        assert not (nginx / stage.CONFIG).exists()
+    finally:
+        os.close(nginx_fd)
+        os.close(state_fd)
 
 
 def test_pid_cleanup_refuses_symlink_without_unlink(tmp_path):
