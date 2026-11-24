@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Exercise real ENOSPC and read-only mounts with cache-off candidates (#97).
 
-This is a rootless throwaway Linux container integration test. It never mounts
-or fills an actual host filesystem, mutates installed NGINX, invokes systemd,
+The CLI is a rootless throwaway Linux container integration test; a separate
+guarded VM harness reuses the bounded mount exercise. It never fills an
+actual host filesystem, mutates installed NGINX, invokes systemd,
 or authorizes a deployed cache/NGINX transaction. TLS and metadata payloads
 are generated disposable fixtures, not publisher-signed client data.
 """
@@ -65,23 +66,29 @@ def verify_disposable_scope() -> None:
             or not MOUNT.is_dir()
             or not os.path.ismount(MOUNT)):
         raise RuntimeError("DISPOSABLE_ROOTLESS_TMPFS_REQUIRED")
-    fs = os.statvfs(MOUNT)
+    verify_bounded_tmpfs(MOUNT)
+
+
+def verify_bounded_tmpfs(mount: Path) -> None:
+    """Reject non-tmpfs, unbounded, shared or missing fill targets."""
+    if (os.geteuid() == 0 or mount.is_symlink() or not mount.is_dir()
+            or not os.path.ismount(mount)):
+        raise RuntimeError("DISPOSABLE_ROOTLESS_TMPFS_REQUIRED")
+    fs = os.statvfs(mount)
     total = fs.f_blocks * fs.f_frsize
     available = fs.f_bavail * fs.f_frsize
     if (not MIN_TEST_VOLUME_BYTES <= total <= MAX_TEST_VOLUME_BYTES
             or available < 2 * 1024 * 1024):
         raise RuntimeError("DEDICATED_BOUNDED_TMPFS_NOT_VERIFIED")
-    # Docker's dedicated ephemeral tmpfs is the only accepted target.
     with open("/proc/self/mountinfo", encoding="utf-8") as handle:
         mounts = [line.split(" - ", 1) for line in handle if " - " in line]
     if not any(
         len(parts) == 2 and len(parts[0].split()) > 4
-        and parts[0].split()[4] == str(MOUNT)
+        and parts[0].split()[4] == str(mount)
         and parts[1].split()[0] == "tmpfs"
         for parts in mounts
     ):
         raise RuntimeError("DEDICATED_TMPFS_MOUNT_IDENTITY_UNVERIFIED")
-
 
 def available_bytes(cache: Path) -> int:
     fs = os.statvfs(cache)
@@ -211,8 +218,8 @@ def stop_test_nginx(process: subprocess.Popen) -> None:
         process.wait(timeout=4)
 
 
-def read_only_capacity() -> tuple[int, int]:
-    fd = os.open(READ_ONLY_MOUNT, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+def read_only_capacity(readonly_mount: Path = READ_ONLY_MOUNT) -> tuple[int, int]:
+    fd = os.open(readonly_mount, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         free_bytes, free_inodes, read_only = _capacity(fd)
         if not read_only:
@@ -250,13 +257,32 @@ def assert_uncached_origin(
 
 def main() -> None:
     verify_disposable_scope()
+    exercise_bounded_mounts(MOUNT, READ_ONLY_MOUNT)
+
+
+def observed_capacity(cache: Path) -> tuple[int, int]:
+    fd = os.open(cache, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        free, inodes, read_only = _capacity(fd)
+        if read_only:
+            raise AssertionError("WRITABLE_MOUNT_UNEXPECTEDLY_READ_ONLY")
+        return free, inodes
+    finally:
+        os.close(fd)
+
+
+def exercise_bounded_mounts(mount: Path, readonly_mount: Path) -> None:
+    """Common bounded test; the caller must also enforce its runtime guard."""
+    verify_bounded_tmpfs(mount)
+    if readonly_mount == mount or readonly_mount.is_symlink():
+        raise RuntimeError("READ_ONLY_TEST_MOUNT_UNVERIFIED")
     nginx = shutil.which("nginx")
     openssl = shutil.which("openssl")
     if nginx != "/usr/sbin/nginx" or not openssl:
         raise RuntimeError("STOCK_DISTRIBUTION_TOOLS_REQUIRED")
     with tempfile.TemporaryDirectory(prefix="repocache-enospc-") as outer:
         root = Path(outer)
-        with tempfile.TemporaryDirectory(prefix="rc-cache-", dir=MOUNT) as inner:
+        with tempfile.TemporaryDirectory(prefix="rc-cache-", dir=mount) as inner:
             cache = Path(inner)
             doc, pins = validated_document(cache)
             origin_cert, origin_key = root / "origin.crt", root / "origin.key"
@@ -312,14 +338,14 @@ def main() -> None:
                 filler = fill_until_real_enospc(cache)
                 # Evidence of kernel ENOSPC is independent of any NGINX
                 # HTTP error: unbypassed NGINX may drop an upstream response.
-                exhausted = available_bytes(cache)
+                exhausted, exhausted_inodes = observed_capacity(cache)
                 if exhausted > doc["deployment"]["cache_policy"]["disk_pressure"]["critical_free_bytes"]:
                     raise AssertionError("CRITICAL_DISK_PRESSURE_NOT_OBSERVED")
                 decision = preview_cache_pressure_nginx_recovery_candidate(
                     doc, expected_state_generation=0,
                     candidate_pins_by_repository=pins,
                     ca_bundle_path=str(origin_cert),
-                    free_bytes=exhausted, free_inodes=256,
+                    free_bytes=exhausted, free_inodes=exhausted_inodes,
                     disk_writable=False, measurements_complete=True,
                     recovery_margin_bytes=64 * 1024,
                 )
@@ -349,14 +375,22 @@ def main() -> None:
                         raise AssertionError("PREEXISTING_CACHE_BYTES_MODIFIED")
 
                 filler.unlink()
-                recovered_bytes = available_bytes(cache)
+                # Require actual successful writes after releasing only our fill.
+                probe = cache / ".ci-recovery-write"
+                with probe.open("xb") as handle:
+                    handle.write(b"recovered")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                assert probe.read_bytes() == b"recovered"
+                probe.unlink()
+                recovered_bytes, recovered_inodes = observed_capacity(cache)
                 if recovered_bytes <= 2 * 1024 * 1024 + 64 * 1024:
                     raise AssertionError("FREE_SPACE_NOT_RECOVERED")
                 restored = preview_cache_pressure_nginx_recovery_candidate(
                     doc, expected_state_generation=0,
                     candidate_pins_by_repository=pins,
                     ca_bundle_path=str(origin_cert),
-                    free_bytes=recovered_bytes, free_inodes=256,
+                    free_bytes=recovered_bytes, free_inodes=recovered_inodes,
                     disk_writable=True, measurements_complete=True,
                     recovery_margin_bytes=64 * 1024,
                     previous_alarm=decision["alarm_candidate"]["next_state"],
@@ -394,16 +428,16 @@ def main() -> None:
                       "exact uncached APT/DNF upstream fixture bytes, retained warm "
                       "cache hashes, hysteresis restore and MISS/HIT recovery")
 
-                readonly_bytes, readonly_inodes = read_only_capacity()
+                readonly_bytes, readonly_inodes = read_only_capacity(readonly_mount)
                 pressure = doc["deployment"]["cache_policy"]["disk_pressure"]
                 warning = pressure["warning_free_bytes"]
                 if readonly_bytes <= warning or readonly_inodes == 0:
                     raise AssertionError("READ_ONLY_FAILURE_NOT_ISOLATED_FROM_CAPACITY")
-                readonly_files = cached_hashes(READ_ONLY_MOUNT)
+                readonly_files = cached_hashes(readonly_mount)
                 if set(readonly_files) != {f"{APT_ID}/fixture"}:
                     raise AssertionError("READ_ONLY_CACHE_FIXTURE_MISSING")
                 readonly_doc = copy.deepcopy(doc)
-                readonly_doc["deployment"]["paths"]["cache_root"] = str(READ_ONLY_MOUNT)
+                readonly_doc["deployment"]["paths"]["cache_root"] = str(readonly_mount)
                 readonly_candidate = preview_cache_pressure_nginx_recovery_candidate(
                     readonly_doc, expected_state_generation=0,
                     candidate_pins_by_repository=pins, ca_bundle_path=str(origin_cert),
@@ -432,7 +466,7 @@ def main() -> None:
                 process = start_test_nginx(nginx, root, conf)
                 wait_for_test_nginx(process, url_root, context)
                 assert_uncached_origin(url_root, context, counts)
-                if cached_hashes(READ_ONLY_MOUNT) != readonly_files:
+                if cached_hashes(readonly_mount) != readonly_files:
                     raise AssertionError("READ_ONLY_CACHE_FILES_CHANGED")
                 print("PASS: kernel EROFS with healthy capacity; validated NGINX "
                       "cache-off startup, exact APT/DNF fixture bytes and preserved files")
