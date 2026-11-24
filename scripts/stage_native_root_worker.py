@@ -29,7 +29,10 @@ VERSION = "0.6.0"
 ARCHIVE = f"repocache-v{VERSION}.tar.gz"
 EXPECTED_REPOSITORY = "repocache-project/repocache"
 UNIT_DIR = Path("docs/examples/systemd")
-UNITS = ("repocache-control.service", "repocache-control.socket")
+UNITS = ("repocache-control.service", "repocache-control.socket",
+         "repocache-nginx.service")
+CONFIG = "repocache.conf"
+CONFIG_SOURCE = Path("docs/examples/nginx/repocache.conf")
 WORKER = "server-control-worker"
 RECEIPT = "worker-receipt.json"
 _DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -111,6 +114,7 @@ def _authenticated_payloads(
         upgrade._verified_dependency_profile(identity, policy, VERSION)
         payloads = {WORKER: build_native_root_worker.build(source)}
         payloads.update({name: (source / UNIT_DIR / name).read_bytes() for name in UNITS})
+        payloads[CONFIG] = (source / CONFIG_SOURCE).read_bytes()
 
     receipt = {
         "schema_version": 1,
