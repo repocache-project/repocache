@@ -25,9 +25,9 @@ case "$phase" in
   prepare-installer)
     if test "$platform" = debian13; then
       apt-get update -qq
-      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends python3-cryptography python3-pytest openssl curl gnupg
+      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends python3-cryptography python3-pytest openssl curl
     else
-      dnf -y -q install python3-cryptography python3-pytest openssl curl gnupg2 createrepo_c
+      dnf -y -q install python3-cryptography python3-pytest openssl curl
     fi
     test ! -e /usr/sbin/nginx
     test ! -e /etc/nginx
