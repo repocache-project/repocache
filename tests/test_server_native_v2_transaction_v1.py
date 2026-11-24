@@ -1851,3 +1851,186 @@ def test_owned_domain_refused_by_state_only_and_legacy_v1_interlocks(
     finally:
         os.close(sfd)
     assert path.read_bytes() == b"owned-domain"
+
+def _owned_fixture_paths(filesystem, old):
+    fd, state, vendor, catalog, _ = filesystem
+    (state / installer._CONFIG_MARKER).touch(mode=0o600)
+    main = vendor.parent.parent / native._OWNED_MAIN
+    paths = {
+        V2_STATE: state / V2_STATE, native._OWNED_MAIN: main,
+        native._INCLUDE: main.parent / native._INCLUDE, native._CATALOG: catalog,
+        native._OWNED_MANIFEST: state / native._OWNED_MANIFEST,
+    }
+    for name, path in paths.items():
+        if old[name] is not None:
+            path.write_bytes(old[name])
+            path.chmod(0o600 if name in native._OWNED_PRIVATE else 0o644)
+    return paths
+
+
+def _fixture_resource_bytes(paths):
+    return {name: path.read_bytes() if path.exists() else None
+            for name, path in paths.items()}
+
+
+def _assert_owned_fixture_clean(filesystem, paths):
+    _, state, vendor, _, events = filesystem
+    assert not (state / native._OWNED_WAL).exists()
+    assert not (state / native._OWNED_WAL_TMP).exists()
+    assert not any((path.parent / native._OWNED_STAGES[name]).exists()
+                   for name, path in paths.items())
+    assert not vendor.exists() and not events
+
+
+def test_owned_files_fixture_commit_first_and_repeat(filesystem):
+    fd = filesystem[0]
+    paths = _owned_fixture_paths(filesystem, _owned_bootstrap_resources())
+    first = _owned_generation()
+    second = _owned_generation(2, previous=json.loads(first[V2_STATE]))
+    for new in (first, second):
+        result = native._apply_owned_files_fixture(fd, new)
+        assert result["status"] == "OWNED_FIXTURE_FILES_COMMITTED"
+        assert result["fixture_only"] and not result["authorizes_nginx_reload"]
+        assert not result["authorizes_catalog_publication"]
+        assert _fixture_resource_bytes(paths) == new
+        _assert_owned_fixture_clean(filesystem, paths)
+        assert native._recover_owned_files_fixture(fd)["status"] == "OWNED_FIXTURE_CLEAN"
+
+
+class _OwnedFixturePowerLoss(BaseException):
+    pass
+
+
+@pytest.mark.parametrize("initial", [True, False])
+@pytest.mark.parametrize("boundary", ["include", "main", "state", "catalog", "manifest"])
+def test_owned_files_fixture_crash_after_each_resource_restores_exact_prior(
+    filesystem, monkeypatch, initial, boundary,
+):
+    old = _owned_bootstrap_resources() if initial else _owned_generation()
+    new = _owned_generation(1 if initial else 2,
+                            previous=None if initial else json.loads(old[V2_STATE]))
+    paths = _owned_fixture_paths(filesystem, old)
+    fd, state, _, _, _ = filesystem
+    target = {"include": native._INCLUDE, "main": native._OWNED_MAIN,
+              "state": V2_STATE, "catalog": native._CATALOG,
+              "manifest": native._OWNED_MANIFEST}[boundary]
+    actual = native._owned_write_resource
+
+    def interrupted(*args):
+        actual(*args)
+        if args[3] == target:
+            assert (state / native._OWNED_WAL).is_file()
+            raise _OwnedFixturePowerLoss()
+
+    monkeypatch.setattr(native, "_owned_write_resource", interrupted)
+    with pytest.raises(_OwnedFixturePowerLoss):
+        native._apply_owned_files_fixture(fd, new)
+    assert (state / native._OWNED_WAL).is_file()
+    monkeypatch.setattr(native, "_owned_write_resource", actual)
+    assert native._recover_owned_files_fixture(fd)["status"] == "OWNED_FIXTURE_FILES_RESTORED"
+    assert _fixture_resource_bytes(paths) == old
+    _assert_owned_fixture_clean(filesystem, paths)
+
+
+def test_owned_files_fixture_ordinary_failure_compensates_under_same_lock(
+    filesystem, monkeypatch,
+):
+    old = _owned_bootstrap_resources()
+    paths = _owned_fixture_paths(filesystem, old)
+    fd = filesystem[0]
+    actual = native._owned_write_resource
+    failed = False
+
+    def fail_once(*args):
+        nonlocal failed
+        actual(*args)
+        if args[3] == V2_STATE and not failed:
+            failed = True
+            raise OSError("injected write failure")
+
+    monkeypatch.setattr(native, "_owned_write_resource", fail_once)
+    with pytest.raises(native.NativeV2TransactionError, match="OWNED_WAL_APPLY_FILES_RESTORED"):
+        native._apply_owned_files_fixture(fd, _owned_generation())
+    assert _fixture_resource_bytes(paths) == old
+    _assert_owned_fixture_clean(filesystem, paths)
+
+
+def test_owned_files_fixture_recovery_refuses_foreign_target_before_cleanup(
+    filesystem,
+):
+    old = _owned_bootstrap_resources()
+    paths = _owned_fixture_paths(filesystem, old)
+    fd, state, _, _, _ = filesystem
+    new = _owned_generation()
+    wal = native._publish_owned_wal_fixture(fd, new)
+    paths[native._OWNED_MAIN].write_bytes(b"foreign")
+    stage = paths[native._INCLUDE].parent / native._OWNED_STAGES[native._INCLUDE]
+    stage.write_bytes(b"partial")
+    stage.chmod(0o600)
+    before = _fixture_resource_bytes(paths)
+    with pytest.raises(native.NativeV2TransactionError, match="OWNED_WAL_FOREIGN_DRIFT"):
+        native._recover_owned_files_fixture(fd)
+    assert _fixture_resource_bytes(paths) == before
+    assert stage.read_bytes() == b"partial"
+    assert (state / native._OWNED_WAL).read_bytes() == wal
+
+
+@pytest.mark.parametrize("mode,content", [(0o600, b"partial"), (0o644, None)])
+def test_owned_files_fixture_recovers_torn_or_complete_public_stage(
+    filesystem, mode, content,
+):
+    old = _owned_bootstrap_resources()
+    paths = _owned_fixture_paths(filesystem, old)
+    fd = filesystem[0]
+    new = _owned_generation()
+    native._publish_owned_wal_fixture(fd, new)
+    stage = paths[native._INCLUDE].parent / native._OWNED_STAGES[native._INCLUDE]
+    stage.write_bytes(new[native._INCLUDE] if content is None else content)
+    stage.chmod(mode)
+    assert native._recover_owned_files_fixture(fd)["status"] == "OWNED_FIXTURE_FILES_RESTORED"
+    assert _fixture_resource_bytes(paths) == old
+    _assert_owned_fixture_clean(filesystem, paths)
+
+
+def test_owned_files_fixture_refuses_foreign_complete_stage_without_other_cleanup(filesystem):
+    old = _owned_bootstrap_resources()
+    paths = _owned_fixture_paths(filesystem, old)
+    fd, state, _, _, _ = filesystem
+    wal = native._publish_owned_wal_fixture(fd, _owned_generation())
+    first = state / native._OWNED_STAGES[V2_STATE]
+    first.write_bytes(b"partial")
+    first.chmod(0o600)
+    foreign = paths[native._INCLUDE].parent / native._OWNED_STAGES[native._INCLUDE]
+    foreign.write_bytes(b"foreign")
+    foreign.chmod(0o644)
+    with pytest.raises(native.NativeV2TransactionError, match="FOREIGN_STAGE"):
+        native._recover_owned_files_fixture(fd)
+    assert first.read_bytes() == b"partial" and foreign.read_bytes() == b"foreign"
+    assert (state / native._OWNED_WAL).read_bytes() == wal
+
+
+def test_owned_files_fixture_unpublished_wal_recovery_does_not_mutate_targets(filesystem):
+    old = _owned_bootstrap_resources()
+    paths = _owned_fixture_paths(filesystem, old)
+    fd, state, _, _, _ = filesystem
+    raw = native._owned_wal_record(old, _owned_generation())
+    pending = state / native._OWNED_WAL_TMP
+    pending.write_bytes(raw)
+    pending.chmod(0o600)
+    result = native._recover_owned_files_fixture(fd)
+    assert result["status"] == "OWNED_FIXTURE_UNPUBLISHED_WAL_DISCARDED"
+    assert _fixture_resource_bytes(paths) == old
+    _assert_owned_fixture_clean(filesystem, paths)
+
+
+@pytest.mark.parametrize("operation", ["apply", "recover"])
+def test_owned_files_fixture_refuses_live_root(operation):
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(ValueError, match="CURRENT_NAMESPACE_ROOT_WRITES_REFUSED"):
+            if operation == "apply":
+                native._apply_owned_files_fixture(fd, {})
+            else:
+                native._recover_owned_files_fixture(fd)
+    finally:
+        os.close(fd)

@@ -634,3 +634,25 @@ dedicated pending journals. A rename-fault regression verifies that a
 durable unpublished temporary journal leaves the bootstrap and all other
 resources unchanged, and is refused on a fresh apply rather than discarded
 or adopted by another domain.
+
+### Five-resource filesystem transaction and crash compensation (fixture only)
+
+The dedicated fixture engine now writes all five resources under the retained
+protected lock with separate fixed stage names. The durable WAL precedes
+any target change. The route include precedes its referencing main config;
+the catalog and manifest are last. Exact old/new byte identities are checked
+throughout, pinned leaf directories retain structural identity, and the
+vendor include directory and bootstrap claim remain unchanged. Recovery
+validates the entire resource set and all stage metadata before cleanup.
+It restores the previous main before removing the first managed include,
+then verifies the complete prior byte set before removing the WAL. A valid
+unpublished WAL may be discarded only with unchanged resources and no
+staging artifacts; malformed unpublished records remain for inspection.
+
+Executed tests are required for first/repeat commit, interruption after
+each resource, recovery of partial/complete stages, foreign resource/stage
+refusal, and ordinary write failure under the retained lock. These helpers
+refuse the real root namespace and never invoke NGINX, systemd or network
+commands. The result is filesystem-only fixture evidence: the live
+transaction must still bind authenticated reload, TLS generation and
+catalog exposure, cache permissions and SELinux to WAL completion.

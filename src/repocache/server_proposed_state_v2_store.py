@@ -243,6 +243,8 @@ def _multi_resource_pending(directory: int, uid: int) -> bool:
             (".state-v2-owned-nginx.pending", 8 * 1024 * 1024),
             (".state-v2-owned-nginx.pending-tmp", 8 * 1024 * 1024),
             (".state-v2-owned-nginx.manifest", 8192),
+            (".state-v2-owned-nginx.state-stage", MAX_V2_STATE_BYTES),
+            (".state-v2-owned-nginx.manifest-stage", 8192),
         )
     )
 

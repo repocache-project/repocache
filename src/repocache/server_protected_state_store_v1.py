@@ -319,7 +319,8 @@ _V2_NAMES = (
     ".state-v2-multi.stage", ".fixture-managed-nginx.conf",
     ".fixture-derived-catalog.json", ".fixture-active-manifest.json",
     ".state-v2-owned-nginx.pending", ".state-v2-owned-nginx.pending-tmp",
-    ".state-v2-owned-nginx.manifest",
+    ".state-v2-owned-nginx.manifest", ".state-v2-owned-nginx.state-stage",
+    ".state-v2-owned-nginx.manifest-stage",
 )
 
 

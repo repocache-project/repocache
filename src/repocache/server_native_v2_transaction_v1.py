@@ -27,7 +27,7 @@ import ssl
 import stat
 import subprocess
 import time
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from typing import Any
 
 from repocache.server_bounded_dns_v1 import DEFAULT_DNS_SECONDS, bounded_getaddrinfo
@@ -67,6 +67,7 @@ from repocache.server_protected_state_inspect_v1 import (
 )
 from repocache.server_protected_state_store_v1 import (
     _canonical, _json, _locked, _read_file, _unlink_known,
+    _recheck_after_mutation,
     _write_exclusive,
 )
 from repocache.server_root_control_fixed_candidate_v1 import (
@@ -116,6 +117,14 @@ _OWNED_LIMIT = {V2_STATE: _LIMIT[V2_STATE], _OWNED_MAIN: 4096,
                 _INCLUDE: _LIMIT[_INCLUDE], _CATALOG: _LIMIT[_CATALOG],
                 _OWNED_MANIFEST: _LIMIT[_MANIFEST]}
 _OWNED_WAL_DOMAIN = "repocache-nginx.service"
+_OWNED_STAGES = {
+    V2_STATE: ".state-v2-owned-nginx.state-stage",
+    _OWNED_MAIN: ".repocache-owned-main.stage",
+    _INCLUDE: ".repocache-owned-include.stage",
+    _CATALOG: ".repocache-owned-catalog.stage",
+    _OWNED_MANIFEST: ".state-v2-owned-nginx.manifest-stage",
+}
+_OWNED_PRIVATE = (V2_STATE, _OWNED_MANIFEST)
 _NGINX = "/usr/sbin/nginx"
 _SYSTEMCTL = "/usr/bin/systemctl"
 _UNIT = "nginx.service"
@@ -228,7 +237,7 @@ def _read_public(parent: int, name: str, maximum: int) -> bytes | None:
 
 
 def _write_public(parent: int, name: str, before: bytes | None,
-                  after: bytes | None, maximum: int) -> None:
+                  after: bytes | None, maximum: int, *, stage: str = _STAGE) -> None:
     """Atomic same-parent replacement, fsynced; no foreign target takeover."""
     if _read_public(parent, name, maximum) != before:
         _deny("RESOURCE_DRIFT")
@@ -243,10 +252,10 @@ def _write_public(parent: int, name: str, before: bytes | None,
         return
     if type(after) is not bytes or not 1 <= len(after) <= maximum:
         _deny("RESOURCE_SIZE")
-    if _read_public(parent, _STAGE, maximum) is not None:
+    if _read_public(parent, stage, maximum) is not None:
         _deny("ORPHAN_STAGE")
     try:
-        fd = os.open(_STAGE, os.O_CREAT | os.O_EXCL | os.O_WRONLY
+        fd = os.open(stage, os.O_CREAT | os.O_EXCL | os.O_WRONLY
                      | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
                      0o600, dir_fd=parent)
     except OSError:
@@ -272,7 +281,7 @@ def _write_public(parent: int, name: str, before: bytes | None,
     try:
         if _read_public(parent, name, maximum) != before:
             _deny("RESOURCE_DRIFT")
-        os.replace(_STAGE, name, src_dir_fd=parent, dst_dir_fd=parent)
+        os.replace(stage, name, src_dir_fd=parent, dst_dir_fd=parent)
         os.fsync(parent)
     except NativeV2TransactionError:
         raise
@@ -409,7 +418,8 @@ def _read_wal(state_fd: int, name: str) -> tuple[dict, dict, bytes] | None:
 
 def _refuse_owned_nginx_transaction_artifacts(state_fd: int) -> None:
     """No legacy or bootstrap operation may consume an owned-domain WAL."""
-    for name in (_OWNED_WAL, _OWNED_WAL_TMP, _OWNED_MANIFEST):
+    for name in (_OWNED_WAL, _OWNED_WAL_TMP, _OWNED_MANIFEST,
+                 *(_OWNED_STAGES[key] for key in _OWNED_PRIVATE)):
         try:
             os.stat(name, dir_fd=state_fd, follow_symlinks=False)
         except FileNotFoundError:
@@ -443,7 +453,8 @@ def _current_resources_allowed(old: dict[str, bytes | None],
             _deny("FOREIGN_RESOURCE_DRIFT")
 
 
-def _cleanup_stage(parent: int, maximum: int, new_shas: set[str]) -> None:
+def _cleanup_stage(parent: int, maximum: int, new_shas: set[str], *,
+                   stage: str = _STAGE, remove: bool = True) -> None:
     """Discard known fixed stage only after verifying its on-disk identity.
 
     Before the final chmod a crash leaves a partial 0600 root-owned inode.
@@ -451,13 +462,13 @@ def _cleanup_stage(parent: int, maximum: int, new_shas: set[str]) -> None:
     Symlink, hardlink, foreign owner, unexpected mode/dev/size always refuses.
     """
     try:
-        named = os.stat(_STAGE, dir_fd=parent, follow_symlinks=False)
+        named = os.stat(stage, dir_fd=parent, follow_symlinks=False)
     except FileNotFoundError:
         return
     except OSError:
         _deny("FOREIGN_STAGE")
     try:
-        before = os.stat(_STAGE, dir_fd=parent, follow_symlinks=False)
+        before = os.stat(stage, dir_fd=parent, follow_symlinks=False)
         directory = os.fstat(parent)
         mode = stat.S_IMODE(before.st_mode)
         if (not stat.S_ISREG(before.st_mode)
@@ -468,17 +479,18 @@ def _cleanup_stage(parent: int, maximum: int, new_shas: set[str]) -> None:
                 or _identity(named) != _identity(before)):
             _deny("FOREIGN_STAGE")
         if mode == 0o644:
-            raw = _read_public(parent, _STAGE, maximum)
+            raw = _read_public(parent, stage, maximum)
             if raw is None or _hash(raw) not in new_shas:
                 _deny("FOREIGN_STAGE")
         # A 0600 stage cannot be complete/published: its contents may be
         # empty/partial, but this exact root-owned staging path is safe to
         # discard while a validated durable WAL protects the old targets.
         if _identity(before) != _identity(
-                os.stat(_STAGE, dir_fd=parent, follow_symlinks=False)):
+                os.stat(stage, dir_fd=parent, follow_symlinks=False)):
             _deny("FOREIGN_STAGE")
-        os.unlink(_STAGE, dir_fd=parent)
-        os.fsync(parent)
+        if remove:
+            os.unlink(stage, dir_fd=parent)
+            os.fsync(parent)
     except NativeV2TransactionError:
         raise
     except OSError:
@@ -1273,14 +1285,17 @@ def _read_owned_resources(state_fd: int, nginx_fd: int,
     }
 
 
-def _no_conflicting_owned_wal_pending(state_fd: int) -> None:
+def _no_conflicting_owned_wal_pending(state_fd: int, *, recovering: bool = False) -> None:
     """Dedicated domain may recognize its own manifest, never other WALs."""
     _legacy_refusal(state_fd, 0)
     if (_pending(state_fd, 0, include_multi=False)
             or _shadow_multi_resource_pending(state_fd, 0)):
         _deny("FOREIGN_PENDING")
-    for name in (_WAL, _WAL_TMP, _STATE_STAGE, _MANIFEST_STAGE,
-                 _OWNED_WAL, _OWNED_WAL_TMP):
+    names = (_WAL, _WAL_TMP, _STATE_STAGE, _MANIFEST_STAGE)
+    if not recovering:
+        names += (_OWNED_WAL, _OWNED_WAL_TMP,
+                  *(_OWNED_STAGES[key] for key in _OWNED_PRIVATE))
+    for name in names:
         # Presence itself is a conflict; even dangling or malformed entries
         # cannot be silently treated as absent or garbage-collected.
         try:
@@ -1292,56 +1307,233 @@ def _no_conflicting_owned_wal_pending(state_fd: int) -> None:
         _deny("OWNED_WAL_DOMAIN_REQUIRED")
 
 
-def _publish_owned_wal_fixture(root_fd: int, new: dict[str, bytes | None]) -> bytes:
-    """Durable fixture-only publication, before any configuration mutation.
+def _owned_resource_parent(name: str, state_fd: int, nginx_fd: int,
+                           public_fd: int) -> int:
+    if name in _OWNED_PRIVATE:
+        return state_fd
+    if name in (_OWNED_MAIN, _INCLUDE):
+        return nginx_fd
+    if name == _CATALOG:
+        return public_fd
+    _deny("OWNED_WAL_RESOURCES_INVALID")
 
-    This is NOT reachable from the native dispatcher. The actual root is
-    expressly refused. The future authenticated transaction must retain the
-    lock across the remaining effects and prove signed unit/runtime identity.
-    """
+
+def _owned_require_absent(parent: int, name: str) -> None:
+    try:
+        os.stat(name, dir_fd=parent, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    except OSError:
+        _deny("OWNED_WAL_DOMAIN_UNVERIFIED")
+    _deny("ORPHAN_STAGE")
+
+
+@contextmanager
+def _owned_fixture_layout(root_fd: int, *, recovering: bool):
+    """Pin the full fixture namespace; never expose a host operation."""
     _refuse_actual_root_fixture_write(root_fd)
     with ExitStack() as stack:
         with _locked(root_fd, 0) as state_fd:
-            _no_conflicting_owned_wal_pending(state_fd)
+            _no_conflicting_owned_wal_pending(state_fd, recovering=recovering)
             marker = _owned_config_marker_identity(state_fd)
             nginx_fd, nginx_chain = _walk(root_fd, ("etc", "nginx"), stack, 0)
             vendor_fd, vendor_chain = _walk(root_fd, _INCLUDE_DIR, stack, 0)
             public_fd, public_chain = _walk(root_fd, _PUBLIC_DIR, stack, 0)
             if stat.S_IMODE(os.fstat(public_fd).st_mode) != 0o755:
                 _deny("PUBLIC_DIRECTORY_MODE_UNSAFE")
-            # No old vendor ownership or stage can be adopted as dedicated.
-            if (_read_file(state_fd, _MANIFEST, 0, _LIMIT[_MANIFEST]) is not None
-                    or _read_public(vendor_fd, _INCLUDE, _LIMIT[_INCLUDE]) is not None):
-                _deny("OWNED_WAL_VENDOR_DOMAIN_CONFLICT")
-            for fd in (nginx_fd, vendor_fd, public_fd):
-                try:
-                    os.stat(_STAGE, dir_fd=fd, follow_symlinks=False)
-                except FileNotFoundError:
-                    continue
-                _deny("ORPHAN_STAGE")
-            old = _read_owned_resources(state_fd, nginx_fd, public_fd)
-            wal = _owned_wal_record(old, new)
-            # Fixture-only writer leaves the real fsynced journal for tests;
-            # no target byte, service, catalog, or manifest is changed.
-            _write_exclusive(state_fd, _OWNED_WAL_TMP, wal, 0, _MAX_WAL)
-            _owned_wal_resource_drift(
-                old, _decode_owned_wal(wal)[1],
-                _read_owned_resources(state_fd, nginx_fd, public_fd),
-                unpublished=True,
-            )
-            if _owned_config_marker_identity(state_fd) != marker:
-                _deny("OWNED_CONTEXT_CLAIM_CHANGED")
-            _recheck(nginx_chain, 0)
-            _recheck(vendor_chain, 0)
-            _recheck(public_chain, 0)
-            if _read_file(state_fd, _OWNED_WAL, 0, _MAX_WAL) is not None:
-                _deny("OWNED_WAL_DOMAIN_REQUIRED")
-            os.replace(_OWNED_WAL_TMP, _OWNED_WAL,
-                       src_dir_fd=state_fd, dst_dir_fd=state_fd)
-            os.fsync(state_fd)
-            if _read_file(state_fd, _OWNED_WAL, 0, _MAX_WAL) != wal:
-                _deny("OWNED_WAL_INVALID")
-            return wal
+
+            def check_layout():
+                if (_read_file(state_fd, _MANIFEST, 0, _LIMIT[_MANIFEST]) is not None
+                        or _read_public(vendor_fd, _INCLUDE, _LIMIT[_INCLUDE]) is not None):
+                    _deny("OWNED_WAL_VENDOR_DOMAIN_CONFLICT")
+                for fd in (nginx_fd, vendor_fd, public_fd):
+                    _owned_require_absent(fd, _STAGE)
+                # The dedicated nginx leaf may change directory timestamps.
+                # Its vendor child must remain completely unchanged.
+                _recheck_after_mutation(nginx_chain, 0)
+                _recheck(vendor_chain[-1:], 0)
+                _recheck_after_mutation(public_chain, 0)
+                if _owned_config_marker_identity(state_fd) != marker:
+                    _deny("OWNED_CONTEXT_CLAIM_CHANGED")
+
+            check_layout()
+            if not recovering:
+                _owned_check_stages_absent(state_fd, nginx_fd, public_fd)
+            yield state_fd, nginx_fd, public_fd, check_layout
+            check_layout()
+
+
+def _owned_check_stages_absent(state_fd: int, nginx_fd: int, public_fd: int) -> None:
+    for name in _OWNED_ORDER:
+        parent = _owned_resource_parent(name, state_fd, nginx_fd, public_fd)
+        _owned_require_absent(parent, _OWNED_STAGES[name])
+
+
+def _publish_owned_wal_locked(state_fd: int, nginx_fd: int, public_fd: int,
+                              old: dict, new: dict, check_layout) -> bytes:
+    """Durably publish the rollback bytes before touching any target."""
+    wal = _owned_wal_record(old, new)
+    _write_exclusive(state_fd, _OWNED_WAL_TMP, wal, 0, _MAX_WAL)
+    _owned_wal_resource_drift(
+        old, _decode_owned_wal(wal)[1],
+        _read_owned_resources(state_fd, nginx_fd, public_fd), unpublished=True,
+    )
+    check_layout()
+    _owned_check_stages_absent(state_fd, nginx_fd, public_fd)
+    if _read_file(state_fd, _OWNED_WAL, 0, _MAX_WAL) is not None:
+        _deny("OWNED_WAL_DOMAIN_REQUIRED")
+    os.replace(_OWNED_WAL_TMP, _OWNED_WAL,
+               src_dir_fd=state_fd, dst_dir_fd=state_fd)
+    os.fsync(state_fd)
+    if _read_file(state_fd, _OWNED_WAL, 0, _MAX_WAL) != wal:
+        _deny("OWNED_WAL_INVALID")
+    return wal
+
+
+def _publish_owned_wal_fixture(root_fd: int, new: dict[str, bytes | None]) -> bytes:
+    """Fixture-only WAL publication, before any target mutation."""
+    with _owned_fixture_layout(root_fd, recovering=False) as layout:
+        state_fd, nginx_fd, public_fd, check_layout = layout
+        old = _read_owned_resources(state_fd, nginx_fd, public_fd)
+        return _publish_owned_wal_locked(state_fd, nginx_fd, public_fd,
+                                         old, new, check_layout)
+
+
+def _owned_write_resource(state_fd: int, nginx_fd: int, public_fd: int,
+                          name: str, before: bytes | None,
+                          after: bytes | None) -> None:
+    if before == after:
+        return
+    parent = _owned_resource_parent(name, state_fd, nginx_fd, public_fd)
+    stage = _OWNED_STAGES[name]
+    maximum = _OWNED_LIMIT[name]
+    if name in _OWNED_PRIVATE:
+        _write_private(parent, name, stage, before, after, maximum)
+    else:
+        _write_public(parent, name, before, after, maximum, stage=stage)
+
+
+def _owned_cleanup_stages(state_fd: int, nginx_fd: int, public_fd: int,
+                          old: dict, new_sha: dict) -> None:
+    """Check ALL fixed stages before unlinking any; only under a valid WAL."""
+    private = []
+    for name in _OWNED_ORDER:
+        parent = _owned_resource_parent(name, state_fd, nginx_fd, public_fd)
+        stage = _OWNED_STAGES[name]
+        maximum = _OWNED_LIMIT[name]
+        if name in _OWNED_PRIVATE:
+            raw = _read_file(parent, stage, 0, maximum)
+            if raw is not None:
+                # A 0600 stage may be torn by SIGKILL; its exact bytes are
+                # rechecked on unlink, never used as committed authority.
+                private.append((parent, stage, raw, maximum))
+        else:
+            hashes = {new_sha[name], _hash(old[name])} - {None}
+            _cleanup_stage(parent, maximum, hashes, stage=stage, remove=False)
+    for parent, stage, raw, maximum in private:
+        _unlink_known(parent, stage, raw, 0, maximum)
+    for name in _OWNED_ORDER:
+        if name not in _OWNED_PRIVATE:
+            parent = _owned_resource_parent(name, state_fd, nginx_fd, public_fd)
+            hashes = {new_sha[name], _hash(old[name])} - {None}
+            _cleanup_stage(parent, _OWNED_LIMIT[name], hashes,
+                           stage=_OWNED_STAGES[name])
+
+
+def _owned_restore_files_locked(state_fd: int, nginx_fd: int, public_fd: int,
+                                check_layout) -> dict:
+    """Restore bytes only; this is not live service compensation."""
+    check_layout()
+    wal = _read_file(state_fd, _OWNED_WAL, 0, _MAX_WAL)
+    tmp = _read_file(state_fd, _OWNED_WAL_TMP, 0, _MAX_WAL)
+    current = _read_owned_resources(state_fd, nginx_fd, public_fd)
+    if wal is not None and tmp is not None:
+        _deny("OWNED_WAL_CONFLICTING_RECORDS")
+    if wal is None and tmp is None:
+        _owned_check_stages_absent(state_fd, nginx_fd, public_fd)
+        _validate_owned_resources(current)
+        return {"status": "OWNED_FIXTURE_CLEAN", "fixture_only": True,
+                "authorizes_nginx_reload": False}
+    if wal is None:
+        # No published journal => no target write was allowed. A malformed
+        # temp is deliberately retained, never guessed or removed.
+        old, new_sha = _decode_owned_wal(tmp)
+        _owned_wal_resource_drift(old, new_sha, current, unpublished=True)
+        _owned_check_stages_absent(state_fd, nginx_fd, public_fd)
+        check_layout()
+        _unlink_known(state_fd, _OWNED_WAL_TMP, tmp, 0, _MAX_WAL)
+        return {"status": "OWNED_FIXTURE_UNPUBLISHED_WAL_DISCARDED",
+                "fixture_only": True, "authorizes_nginx_reload": False}
+    old, new_sha = _decode_owned_wal(wal)
+    _owned_wal_resource_drift(old, new_sha, current, unpublished=False)
+    _owned_cleanup_stages(state_fd, nginx_fd, public_fd, old, new_sha)
+    # Restore bootstrap main BEFORE removing the managed include; a
+    # managed previous generation keeps its fixed main unchanged. This is
+    # disk-only fixture ordering, not authorization to advertise live routes.
+    for name in (_CATALOG, _OWNED_MAIN, _INCLUDE, V2_STATE, _OWNED_MANIFEST):
+        check_layout()
+        current = _read_owned_resources(state_fd, nginx_fd, public_fd)
+        _owned_wal_resource_drift(old, new_sha, current, unpublished=False)
+        _owned_write_resource(state_fd, nginx_fd, public_fd, name,
+                              current[name], old[name])
+    if _read_owned_resources(state_fd, nginx_fd, public_fd) != old:
+        _deny("OWNED_WAL_RESTORE_DRIFT")
+    _validate_owned_resources(old)
+    check_layout()
+    _owned_check_stages_absent(state_fd, nginx_fd, public_fd)
+    _unlink_known(state_fd, _OWNED_WAL, wal, 0, _MAX_WAL)
+    return {"status": "OWNED_FIXTURE_FILES_RESTORED", "fixture_only": True,
+            "authorizes_nginx_reload": False}
+
+
+def _recover_owned_files_fixture(root_fd: int) -> dict:
+    with _owned_fixture_layout(root_fd, recovering=True) as layout:
+        return _owned_restore_files_locked(*layout)
+
+
+def _apply_owned_files_fixture(root_fd: int, new: dict[str, bytes | None]) -> dict:
+    """Exercise real five-resource writes and rollback, strictly in fixtures.
+
+    No native command, callback, privileged dispatch or actual listener
+    verification is provided. The live path must additionally retain its
+    WAL across authenticated service reload and generation/catalog checks.
+    """
+    with _owned_fixture_layout(root_fd, recovering=False) as layout:
+        state_fd, nginx_fd, public_fd, check_layout = layout
+        _validate_owned_resources(new)
+        new = dict(new)
+        old = _read_owned_resources(state_fd, nginx_fd, public_fd)
+        wal = _publish_owned_wal_locked(state_fd, nginx_fd, public_fd,
+                                        old, new, check_layout)
+        _, new_sha = _decode_owned_wal(wal)
+        try:
+            # First stage the include, then the main that references it.
+            # The catalog and manifest are last; there is no live exposure
+            # in this isolated fixture namespace.
+            for name in (_INCLUDE, _OWNED_MAIN, V2_STATE, _CATALOG, _OWNED_MANIFEST):
+                check_layout()
+                current = _read_owned_resources(state_fd, nginx_fd, public_fd)
+                _owned_wal_resource_drift(old, new_sha, current, unpublished=False)
+                if current[name] != old[name]:
+                    _deny("OWNED_WAL_PREPARE_DRIFT")
+                _owned_write_resource(state_fd, nginx_fd, public_fd, name,
+                                      old[name], new[name])
+            if _read_owned_resources(state_fd, nginx_fd, public_fd) != new:
+                _deny("OWNED_WAL_COMMIT_DRIFT")
+            _validate_owned_resources(new)
+            check_layout()
+            _owned_check_stages_absent(state_fd, nginx_fd, public_fd)
+            _unlink_known(state_fd, _OWNED_WAL, wal, 0, _MAX_WAL)
+            return {"status": "OWNED_FIXTURE_FILES_COMMITTED", "fixture_only": True,
+                    "authorizes_nginx_reload": False,
+                    "authorizes_catalog_publication": False}
+        except Exception:
+            try:
+                _owned_restore_files_locked(*layout)
+            except Exception:
+                _deny("OWNED_WAL_APPLY_RECOVERY_REQUIRED")
+            _deny("OWNED_WAL_APPLY_FILES_RESTORED")
+
 
 
 def _recover_locked(state_fd: int, include_fd: int,
