@@ -212,6 +212,96 @@ def assert_native_socket_refuses_arbitrary_unit() -> None:
         assert reply == b"", "Installed root broker accepted a caller-selected unit"
 
 
+def assert_native_operator_group_boundary(request_native_fixed_v2, generation: int) -> None:
+    """Exercise actual kernel groups, not root or mocked credentials.
+
+    The temporary account is unique to the disposable guest. Removing its
+    supplementary group affects new credentials; existing sessions must end.
+    """
+    operator_name = "pr237operator"
+    try:
+        pwd.getpwnam(operator_name)
+    except KeyError:
+        pass
+    else:
+        raise AssertionError("Disposable operator account already exists")
+    admin_gid = grp.getgrnam("repocache-admin").gr_gid
+    service = pwd.getpwnam("repocache")
+    command("/usr/sbin/useradd", "--system", "--user-group", "--no-create-home",
+            "--shell", "/usr/sbin/nologin", operator_name)
+
+    def child_as(account, action, *, injected_groups=None) -> None:
+        pid = os.fork()
+        if pid == 0:
+            try:
+                if injected_groups is None:
+                    os.initgroups(account.pw_name, account.pw_gid)
+                else:
+                    os.setgroups(injected_groups)
+                os.setresgid(account.pw_gid, account.pw_gid, account.pw_gid)
+                os.setresuid(account.pw_uid, account.pw_uid, account.pw_uid)
+                assert os.getresuid() == (account.pw_uid,) * 3
+                assert os.getresgid() == (account.pw_gid,) * 3
+                action()
+            except BaseException:
+                os._exit(1)
+            os._exit(0)
+        _, status = os.waitpid(pid, 0)
+        assert os.waitstatus_to_exitcode(status) == 0, "Native identity probe failed"
+
+    def operator_reload() -> None:
+        assert admin_gid in os.getgroups()
+        result = request_native_fixed_v2("RELOAD_V2")
+        assert (result["status"], result["state_generation"]) == ("RELOADED", generation)
+        assert result["nginx_reload_and_exposure_observed"] is True
+
+    def service_group_refused() -> None:
+        assert admin_gid in os.getgroups()
+        with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as conn:
+            conn.settimeout(8)
+            # DAC must permit connect for this test. Only the installed
+            # broker's kernel credential policy should refuse the request.
+            conn.connect(str(SOCKET))
+            try:
+                conn.sendall(b"reload-v2\n")
+                reply = conn.recv(1025)
+            except (BrokenPipeError, ConnectionResetError):
+                reply = b""
+            assert reply == b"", "Service UID received a privileged reply"
+
+    def revoked_operator_refused() -> None:
+        assert admin_gid not in (os.getgid(), *os.getgroups())
+        with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as conn:
+            conn.settimeout(3)
+            try:
+                conn.connect(str(SOCKET))
+            except PermissionError:
+                return
+            raise AssertionError("Revoked operator connected to admin socket")
+
+    try:
+        operator = pwd.getpwnam(operator_name)
+        assert operator.pw_uid not in (0, service.pw_uid)
+        assert operator.pw_gid not in (0, admin_gid)
+        assert admin_gid not in os.getgrouplist(operator_name, operator.pw_gid)
+        command("/usr/sbin/usermod", "--append", "--groups", "repocache-admin", operator_name)
+        time.sleep(3)
+        child_as(operator, operator_reload)
+        print("PASS: non-root operator with real supplementary admin group reloaded live generation", flush=True)
+
+        time.sleep(3)
+        child_as(service, service_group_refused, injected_groups=[admin_gid])
+        print("PASS: installed broker refused actual service UID even with admin group credential", flush=True)
+
+        # The test account had no supplementary groups before authorization.
+        # Remove only its delegation and prove a fresh process is denied.
+        command("/usr/sbin/usermod", "--groups", "", operator_name)
+        child_as(operator, revoked_operator_refused)
+        print("PASS: fresh operator credentials refused after local group revocation", flush=True)
+    finally:
+        command("/usr/sbin/userdel", operator_name)
+
+
 def main(distribution: str) -> None:
     assert distribution in ("debian", "almalinux")
     assert os.getresuid() == (0, 0, 0)
@@ -393,9 +483,11 @@ def main(distribution: str) -> None:
     assert https_response("/.well-known/repocache/catalog.json").endswith(catalog_raw)
     print("PASS: native installed worker APPLY_V2 committed durable generation 1, reloaded nginx and exposed TLS/catalog", flush=True)
 
-    reloaded = authenticated_native_operation("RELOAD_V2")
-    assert (reloaded["status"], reloaded["state_generation"]) == ("RELOADED", 1)
+    assert_native_operator_group_boundary(request_native_fixed_v2, 1)
     assert snapshot() == before
+    assert unmanaged_nginx_snapshot() == unmanaged_before
+    assert b"x-repocache-generation: 1" in https_response("/__repocache/healthz").lower()
+    assert not (STATE / ".state-v2-native.pending").exists()
     unchanged = authenticated_native_operation("APPLY_V2")
     assert (unchanged["status"], unchanged["state_generation"]) == ("UNCHANGED", 1)
     assert snapshot() == before
