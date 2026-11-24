@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Actual native NGINX master/worker on detached owner-marked storage (#29).
 
-Only a disposable Docker job may invoke this script. No installed service,
-real host log, package trust, systemd or SELinux acceptance is implied.
+The command-line entrypoint is Docker-only. The separately guarded booted
+VM probe reuses the detached exercise on Debian 13. No installed service,
+real host log, package trust or SELinux acceptance is implied.
 """
 from __future__ import annotations
 
@@ -103,6 +104,13 @@ def main() -> None:
             or os.environ.get("REPOCACHE_NATIVE_OWNED_RUNTIME_CI") != "CONFIRMED_DISPOSABLE_DOCKER_ONLY"
             or Path("/proc/1/comm").read_text(encoding="ascii").strip() == "systemd"):
         raise AssertionError("DISPOSABLE_NATIVE_RUNTIME_REQUIRED")
+    exercise_owned_runtime()
+
+
+def exercise_owned_runtime() -> None:
+    """Detached fixture only; callers must enforce their environment guard."""
+    if os.geteuid() != 0 or os.getuid() != 0:
+        raise AssertionError("DISPOSABLE_ROOT_RUNTIME_REQUIRED")
     distro = validate_os_identity(Path("/etc/os-release").read_text("ascii"), sys.version_info[:2])
     import platform
     validate_server_architecture(platform.machine())
