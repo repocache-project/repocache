@@ -31,13 +31,14 @@ from contextlib import ExitStack
 from typing import Any
 
 from repocache.server_bounded_dns_v1 import DEFAULT_DNS_SECONDS, bounded_getaddrinfo
-from repocache.server_install_v1 import parse_install_bytes
+from repocache.server_install_v1 import parse_install_bytes, validate_install_document
 from repocache.server_locked_manifest_reconcile_v1 import (
     _validate_proposed_v2_snapshot, preview_proposed_v2_state_transition,
     _verify_current_root_fd,
 )
 from repocache.server_native_nginx_effective_unit_v1 import (
     EffectiveNginxUnitError, inspect_effective_native_nginx_unit,
+    OWNED_NGINX_CONFIG_MARKER_PREFIX,
 )
 from repocache.server_native_nginx_package_journal_v1 import (
     _read_completed_native_install_under_lock, NativePackageJournalError,
@@ -72,7 +73,8 @@ from repocache.server_root_control_fixed_candidate_v1 import (
     _load_private_under_root,
 )
 from repocache.server_root_control_full_context_v1 import (
-    _capture_default_nginx_dump_private,
+    _capture_default_nginx_dump_private, _capture_owned_nginx_dump_private,
+    _OWNED_MAIN_PATH, _OWNED_INCLUDE_PATH, FixedNginxFullContextError,
 )
 from repocache.server_root_control_host_preflight_v1 import (
     require_socket_worker_host_preconditions,
@@ -106,6 +108,19 @@ _MAX_WAL = 8 * 1024 * 1024
 _NGINX = "/usr/sbin/nginx"
 _SYSTEMCTL = "/usr/bin/systemctl"
 _UNIT = "nginx.service"
+# These paths are disjoint from the vendor's default auto-included conf.d.
+# The bootstrap bytes are also the exact signed archive member used by the
+# installer. Never change them without an explicit signed ownership migration.
+_OWNED_BOOTSTRAP_CONFIG = "# Authenticated bootstrap only. Never include the vendor's nginx.conf.\n# The fixed local endpoint has no repository routes, TLS or external listener.\n# Full managed TLS/route activation remains a separate guarded transaction.\npid /run/repocache-nginx/nginx.pid;\nerror_log stderr warn;\nworker_processes 1;\nevents {\n    worker_connections 128;\n}\nhttp {\n    access_log off;\n    server {\n        listen 127.0.0.1:8008;\n        server_name localhost;\n        location = /__repocache/private {\n            return 204;\n        }\n        location / {\n            return 404;\n        }\n    }\n}\n".encode("ascii")
+_OWNED_MANAGED_CONFIG = (
+    b"# REPOCACHE dedicated managed NGINX context v1\n"
+    b"pid /run/repocache-nginx/nginx.pid;\n"
+    b"error_log stderr warn;\n"
+    b"worker_processes 1;\n"
+    b"events {\n    worker_connections 128;\n}\n"
+    b"http {\n    access_log off;\n"
+    b"    include /etc/nginx/repocache-managed.conf;\n}\n"
+)
 _ENV = {"PATH": "/usr/sbin:/usr/bin:/bin", "LC_ALL": "C"}
 _HEALTH = "/__repocache/healthz"
 _DNS_CHILD_ID = 65534  # Unprivileged nobody identity on both supported distros.
@@ -944,6 +959,143 @@ def _render_using_pins(document: dict, next_generation: int,
     return include, catalog, bundle, preview
 
 
+def _render_owned_managed_candidate(
+    document: dict[str, Any], next_generation: int, distribution: str,
+    pins: dict[str, dict[str, list[str]]],
+) -> tuple[bytes, bytes, bytes]:
+    """Pure candidate for the independent service; no installed-file authority.
+
+    The legacy document path is refused, not silently redirected. Only the
+    reviewed fixed dedicated path is eligible. The returned main config is
+    distinct from the signed private bootstrap; a future WAL must bind both
+    the transition and the generated include before any write or reload.
+    """
+    try:
+        if (type(distribution) is not str or distribution not in _CA
+                or type(next_generation) is not int or next_generation < 1):
+            _deny("OWNED_CONTEXT_CANDIDATE_INVALID")
+        validated = validate_install_document(document, for_apply=True)
+        paths = validated["deployment"]["paths"]
+        if (paths["generated_include"] != _OWNED_INCLUDE_PATH
+                or paths["state_root"] != "/var/lib/repocache/server"):
+            _deny("OWNED_CONTEXT_LAYOUT_UNSUPPORTED")
+        bundle = render_repository_nginx_bundle_candidate(
+            validated, expected_state_generation=next_generation,
+            candidate_pins_by_repository=pins, ca_bundle_path=_CA[distribution],
+        )
+        include, catalog, _, _ = _render_using_pins(
+            validated, next_generation, distribution, pins, bundle,
+        )
+        return _OWNED_MANAGED_CONFIG, include, catalog
+    except NativeV2TransactionError:
+        raise
+    except (ValueError, TypeError, KeyError, OverflowError, RecursionError):
+        _deny("OWNED_CONTEXT_CANDIDATE_INVALID")
+
+
+def _verify_owned_context_dump(dump: bytes, include: bytes | None) -> None:
+    """Check the entire fixed main/include dump against exact expected bytes.
+
+    None represents the original signed loopback bootstrap. A managed
+    candidate must have exactly one dedicated include section, no default
+    config, no extra included files and no foreign directives in the main
+    file. Native nginx -T appends a separator newline to dumped files.
+    This pure comparison is not proof of native execution, installed-file
+    provenance, a running service or permission to activate anything.
+    """
+    if type(dump) is not bytes or not 1 <= len(dump) <= 4 * 1024 * 1024:
+        _deny("OWNED_CONTEXT_DUMP_INVALID")
+    if include is not None and (
+            type(include) is not bytes or not 1 <= len(include) <= _LIMIT[_INCLUDE]
+            or not include.startswith(b"# REPOCACHE managed v2\n")
+            or not include.endswith(b"\n") or not include.isascii()
+            or b"\x00" in include or b"\r" in include
+            or b"# configuration file " in include):
+        _deny("OWNED_CONTEXT_DUMP_INVALID")
+    main = (_OWNED_BOOTSTRAP_CONFIG if include is None else _OWNED_MANAGED_CONFIG)
+    head = b"# configuration file " + _OWNED_MAIN_PATH.encode("ascii") + b":\n"
+    first = head + main
+    if include is None:
+        if dump not in (first, first + b"\n"):
+            _deny("OWNED_CONTEXT_DUMP_MISMATCH")
+        return
+    section = (b"# configuration file " + _OWNED_INCLUDE_PATH.encode("ascii")
+               + b":\n" + include)
+    # Permit only the native section-separator newline; every other byte and
+    # the order/count of sections must match the fixed complete context.
+    if not any(dump == first + gap + section + tail
+               for gap in (b"", b"\n") for tail in (b"", b"\n")):
+        _deny("OWNED_CONTEXT_DUMP_MISMATCH")
+
+
+def _owned_config_marker_identity(state_fd: int) -> tuple[int, ...]:
+    """Observe the exact existing installer claim, not a new/adopted marker."""
+    name = (OWNED_NGINX_CONFIG_MARKER_PREFIX
+            + hashlib.sha256(_OWNED_BOOTSTRAP_CONFIG).hexdigest())
+    try:
+        claims = sorted(entry for entry in os.listdir(state_fd)
+                        if entry.startswith(OWNED_NGINX_CONFIG_MARKER_PREFIX))
+        if claims != [name]:
+            _deny("OWNED_CONTEXT_CLAIM_REQUIRED")
+        before = os.stat(name, dir_fd=state_fd, follow_symlinks=False)
+        if before.st_gid != 0 or _read_file(state_fd, name, 0, 0) != b"":
+            _deny("OWNED_CONTEXT_CLAIM_REQUIRED")
+        after = os.stat(name, dir_fd=state_fd, follow_symlinks=False)
+        if _identity(before) != _identity(after):
+            _deny("OWNED_CONTEXT_CLAIM_REQUIRED")
+        return _identity(after)
+    except NativeV2TransactionError:
+        raise
+    except (OSError, ValueError, TypeError):
+        _deny("OWNED_CONTEXT_CLAIM_REQUIRED")
+
+
+def _probe_owned_context_locked(
+    root_fd: int, state_fd: int, include: bytes | None,
+) -> bytes:
+    """Verify exact fixed private files and perform a bounded native syntax dump.
+
+    The authenticated transaction must retain its protected lock and supply
+    only renderer- or WAL-verified include bytes. This is a prerequisite for
+    reload, not a reload authorization. Never expose the private dump.
+    """
+    expected_main = (_OWNED_BOOTSTRAP_CONFIG if include is None
+                     else _OWNED_MANAGED_CONFIG)
+    # Validate bounds and expected section shape before invoking native nginx.
+    synthetic = (b"# configuration file " + _OWNED_MAIN_PATH.encode("ascii")
+                 + b":\n" + expected_main)
+    if include is not None:
+        if type(include) is not bytes or len(include) > _LIMIT[_INCLUDE]:
+            _deny("OWNED_CONTEXT_DUMP_INVALID")
+        synthetic += (b"# configuration file " + _OWNED_INCLUDE_PATH.encode("ascii")
+                      + b":\n" + include)
+    _verify_owned_context_dump(synthetic, include)
+    try:
+        _verify_current_root_fd(root_fd)
+        with ExitStack() as stack:
+            directory, chain = _walk(root_fd, ("etc", "nginx"), stack, 0)
+            marker = _owned_config_marker_identity(state_fd)
+
+            def verify_bytes() -> None:
+                if (_read_public(directory, "repocache.conf", 4096) != expected_main
+                        or _read_public(directory, _INCLUDE, _LIMIT[_INCLUDE]) != include):
+                    _deny("OWNED_CONTEXT_FILE_DRIFT")
+                _recheck(chain, 0)
+                if _owned_config_marker_identity(state_fd) != marker:
+                    _deny("OWNED_CONTEXT_CLAIM_CHANGED")
+
+            verify_bytes()
+            dump = _capture_owned_nginx_dump_private(managed=include is not None)
+            _verify_owned_context_dump(dump, include)
+            verify_bytes()
+            _verify_current_root_fd(root_fd)
+            return dump
+    except NativeV2TransactionError:
+        raise
+    except (OSError, ValueError, TypeError, FixedNginxFullContextError):
+        _deny("OWNED_CONTEXT_PROBE_REFUSED")
+
+
 def _recover_locked(state_fd: int, include_fd: int,
                     public_fd: int, distribution: str) -> dict:
     journal = _read_wal(state_fd, _WAL)
@@ -1090,6 +1242,23 @@ def _require_audited_native_package_for_activation(
         _deny("NATIVE_PACKAGE_PROVENANCE_UNVERIFIED")
 
 
+def _refuse_legacy_vendor_mode_after_owned_claim(state_fd: int) -> None:
+    """A bootstrap ownership claim must never fall back to vendor operations.
+
+    Called under the same protected lock as the installer. Any entry in the
+    reserved marker namespace, even a malformed or dangling entry, blocks
+    legacy apply, reload and recovery until the dedicated service transaction
+    is implemented. Never remove a marker or guess which service owns a WAL.
+    """
+    try:
+        claimed = any(name.startswith(OWNED_NGINX_CONFIG_MARKER_PREFIX)
+                      for name in os.listdir(state_fd))
+    except (OSError, ValueError, TypeError):
+        _deny("NGINX_OWNERSHIP_UNVERIFIED")
+    if claimed:
+        _deny("OWNED_NGINX_TRANSITION_REQUIRED")
+
+
 def _operation_under_root(root_fd: int, *, distribution: str,
                           operation: str, fixture: bool = False) -> dict:
     """Internal entry. Only trusted root code selects the fixed operation."""
@@ -1101,6 +1270,8 @@ def _operation_under_root(root_fd: int, *, distribution: str,
         _refuse_actual_root_fixture_write(root_fd)
     with ExitStack() as stack:
         with _locked(root_fd, 0) as state_fd:
+            if not fixture:
+                _refuse_legacy_vendor_mode_after_owned_claim(state_fd)
             include_fd, include_chain = _walk(root_fd, _INCLUDE_DIR, stack, 0)
             public_fd, public_chain = _walk(root_fd, _PUBLIC_DIR, stack, 0)
             # Do not use a foreign state/catalog filesystem without reviewed

@@ -279,8 +279,8 @@ def test_fixed_service_command_never_touches_vendor(monkeypatch):
 @pytest.mark.parametrize("value", ["", "not found", "/etc/systemd/system/nginx.service", "foreign"])
 def test_own_service_observation_refuses_foreign_unit(monkeypatch, value):
     from repocache import server_native_nginx_effective_unit_v1 as effective
-    monkeypatch.setattr(host, "_observe_systemd_pid1", lambda: None)
-    monkeypatch.setattr(host, "_safe_native_systemctl", lambda: None)
+    monkeypatch.setattr(effective, "_observe_systemd_pid1", lambda: None)
+    monkeypatch.setattr(effective, "_safe_native_systemctl", lambda: None)
     monkeypatch.setattr(effective, "_observe_nginx_master_kernel", lambda _pid: None)
     keys = {
         "Id": "repocache-nginx.service", "Names": "repocache-nginx.service",
@@ -299,8 +299,8 @@ def test_own_service_observation_refuses_foreign_unit(monkeypatch, value):
 def test_own_service_observation_accepts_exact_unit(monkeypatch):
     from repocache import server_native_nginx_effective_unit_v1 as effective
     seen = []
-    monkeypatch.setattr(host, "_observe_systemd_pid1", lambda: None)
-    monkeypatch.setattr(host, "_safe_native_systemctl", lambda: None)
+    monkeypatch.setattr(effective, "_observe_systemd_pid1", lambda: None)
+    monkeypatch.setattr(effective, "_safe_native_systemctl", lambda: None)
     monkeypatch.setattr(effective, "_observe_nginx_master_kernel",
                         lambda pid: seen.append(pid))
     keys = {
@@ -318,6 +318,11 @@ def test_own_service_observation_accepts_exact_unit(monkeypatch):
     assert host._own_service_observation(active=True)[
         "unit_name"] == "repocache-nginx.service"
     assert seen == [1234, 1234]
+    report = effective.inspect_effective_owned_nginx_unit(active=True)
+    assert report["main_pid_observed"] == 1234
+    assert report["authorizes_systemctl"] is False
+    assert report["authorizes_nginx_reload"] is False
+    assert report["authorizes_nginx_install"] is False
 
 
 def test_no_signed_worker_refuses_before_root(monkeypatch, tmp_path):
@@ -335,3 +340,35 @@ def test_no_signed_worker_refuses_before_root(monkeypatch, tmp_path):
                        match="NATIVE_SIGNED_WORKER_AUDIT_UNVERIFIED"):
         host.activate_authenticated_native_nginx(
             tmp_path, commit="a" * 40, archive_sha256="b" * 64)
+
+
+@pytest.mark.parametrize("change", [
+    {"Names": "repocache-nginx.service nginx.service"},
+    {"DropInPaths": "/etc/systemd/system/repocache-nginx.service.d/override.conf"},
+    {"NeedDaemonReload": "yes"},
+    {"MainPID": "99999999999999999999"},
+    {"MainPID": "5678"},
+])
+def test_shared_owned_observer_refuses_changed_or_foreign_runtime(monkeypatch, change):
+    from repocache import server_native_nginx_effective_unit_v1 as effective
+    monkeypatch.setattr(effective, "_observe_systemd_pid1", lambda: None)
+    monkeypatch.setattr(effective, "_safe_native_systemctl", lambda: None)
+    monkeypatch.setattr(effective, "_observe_nginx_master_kernel", lambda _pid: None)
+    original = {
+        "Id": "repocache-nginx.service", "Names": "repocache-nginx.service",
+        "FragmentPath": "/etc/systemd/system/repocache-nginx.service",
+        "DropInPaths": "", "LoadState": "loaded", "ActiveState": "active",
+        "SubState": "running", "MainPID": "1234", "CanReload": "yes",
+        "NeedDaemonReload": "no",
+    }
+    observations = iter((original, dict(original, **change)))
+
+    def run(argv, **_kwargs):
+        assert argv[-1] == "repocache-nginx.service"
+        return SimpleNamespace(returncode=0, stderr="", stdout="".join(
+            f"{k}={v}\n" for k, v in next(observations).items()
+        ))
+
+    monkeypatch.setattr(effective.subprocess, "run", run)
+    with pytest.raises(effective.EffectiveNginxUnitError, match="OWN_UNIT_"):
+        effective.inspect_effective_owned_nginx_unit(active=True)

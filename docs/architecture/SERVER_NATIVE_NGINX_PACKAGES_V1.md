@@ -520,3 +520,82 @@ redirected to the new service without a separate atomic and recoverable managed
 configuration/TLS upgrade, verified process/config/unit identity and explicit
 security tests. Original issue #27 complete initial deployment and dependent
 #28/#30/#31 end-to-end acceptance remain NOT VERIFIED until that integration.
+
+
+### Shared owned-service identity and legacy transaction isolation (#27)
+
+The bootstrap installer and the upcoming managed transaction share
+`inspect_effective_owned_nginx_unit`, a fixed read-only observation of
+`repocache-nginx.service` (PID1, exact effective unit properties, no aliases or
+drop-ins, stable master PID and kernel executable identity). Its report grants
+no systemctl, reload or installation authority. Signed installed unit/config
+bytes, native package receipt, protected ownership and filesystem observations
+remain separate mandatory gates.
+
+The existing vendor-based V2 path is deliberately not redirected. Under the
+same exclusive state lock, any entry in the bootstrap configuration ownership
+marker namespace blocks legacy APPLY_V2, RELOAD_V2 and RECOVER_V2 before their
+filesystem or service effects. Malformed and dangling marker entries also
+refuse; no marker or WAL is deleted. An ambiguous existing WAL must never be
+recovered against an assumed vendor unit. This guard does not change the
+legacy no-claim transaction or its existing fixture-only tests.
+
+The next increment must implement a WAL-bound transition to an explicitly
+owned route include outside the vendor's automatically loaded conf.d domain,
+with complete candidate syntax/dump verification, private unit identity,
+appropriate writable cache directories under the systemd sandbox, and exact
+bootstrap/managed rollback. Existing fixed deployment-path contracts must
+be reconciled without permitting caller-selected paths. This increment
+does not activate managed routes, change TLS or close #27.
+
+### Dedicated complete-context candidate (#27)
+
+The new pure owned-service candidate uses the fixed
+`/etc/nginx/repocache-managed.conf` include, **outside** the vendor's automatic
+`conf.d` include domain. It refuses the legacy generated-include path and all
+other paths rather than silently remapping a reviewed deployment document.
+The deterministic new main context is a separate candidate; it does not
+modify the signed bootstrap archive member or its digest-bound ownership
+marker. A managed context replaces the private test listener with the exact
+TLS/route-generation include and derives the active-only catalog through the
+existing renderer. A failed first transition must restore the exact signed
+loopback bootstrap, not leave an empty HTTPS config.
+
+The complete-context comparison accepts only the exact fixed main file and
+the exact expected dedicated include in their native `nginx -T` sections
+(or just the signed bootstrap section before first apply/after rollback).
+Foreign/default sections, duplicate includes, changed bytes and omitted
+sections fail closed. It is a pure comparison, not an authenticated
+native command result or authorization. The existing real-parser regression
+now runs `nginx -T` against the complete dedicated context with disposable
+test paths as well as the prior vendor-style syntax fixture.
+
+The installer and candidate use one shared immutable bootstrap byte string;
+the signed archive inventory, actual bootstrap file and ownership marker
+digest are unchanged. **Not yet wired to host APPLY/RELOAD/RECOVER:** native
+fixed private syntax/dump execution under an audited ownership lease, WAL
+version/domain separation and atomic main/include/state/catalog rollback,
+sandbox/cache and SELinux provisioning, actual HTTPS generation and
+publication remain mandatory. No production exposure is enabled.
+
+### Fixed private native syntax/dump prerequisite
+
+The dedicated context now has a bounded private native probe using only
+`/usr/sbin/nginx -T -c /etc/nginx/repocache.conf`; `-T` includes syntax
+validation. It never selects the vendor configuration or accepts a path,
+executable, environment or command from a socket peer. Before and after the
+command, the fixed binary, main file, expected include (or its absence) and
+parent identities are rechecked. A transaction-side prerequisite verifies
+the current root namespace, pinned configuration directory, exact expected
+bytes and the unique existing bootstrap ownership marker before the
+command, then compares every native dump section and rechecks those facts
+afterward. The raw dump remains internal; no command output is published.
+The original vendor probe retains its prior behavior.
+
+This code remains an internal prerequisite, not a live managed apply path:
+the caller must retain the protected lock and supply only renderer- or
+WAL-verified bytes, and independently verify signed unit/package provenance,
+runtime identity and the remaining host prerequisites. The new tests mock
+native execution for drift/refusal cases, in addition to the disposable
+real-parser test above. No activation, reload, catalog publication or
+privileged operation is exposed by this increment.
