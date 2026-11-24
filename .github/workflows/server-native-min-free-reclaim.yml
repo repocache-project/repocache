@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'scripts/ci_nginx_min_free_reclaim_v1.py'
+      - 'scripts/ci_nginx_cache_inactivity_v1.py'
       - 'tests/test_server_nginx_min_free_reclaim_v1.py'
       - '.github/workflows/server-native-min-free-reclaim.yml'
       - 'docs/testing/SERVER_NATIVE_MIN_FREE_MANAGER_RECLAIM_V1.md'
@@ -55,3 +56,12 @@ jobs:
             env PYTHONDONTWRITEBYTECODE=1 \
               REPOCACHE_DISPOSABLE_MIN_FREE_PRESSURE=1 \
             python3 -B scripts/ci_nginx_min_free_reclaim_v1.py
+      - name: Observe independent native inactivity expiry
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -f /.dockerenv
+          setpriv --reuid 65534 --regid 65534 --clear-groups \
+            env PYTHONDONTWRITEBYTECODE=1 \
+              REPOCACHE_DISPOSABLE_MIN_FREE_PRESSURE=1 \
+            python3 -B scripts/ci_nginx_cache_inactivity_v1.py
