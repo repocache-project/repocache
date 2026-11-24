@@ -63,7 +63,10 @@ def evaluate_cache_pressure(
 
     observations = (filesystem_total_bytes, filesystem_free_bytes,
                     cache_used_bytes)
-    complete_fields = all(_metric(value, allow_none=True) for value in observations)
+    # Validate every supplied field even if an earlier one is absent. An
+    # incomplete sample is not permission to hide a malformed later field.
+    field_present = tuple(_metric(value, allow_none=True) for value in observations)
+    complete_fields = all(field_present)
     complete = sample_complete and complete_fields
     if complete:
         total, free, used = observations
