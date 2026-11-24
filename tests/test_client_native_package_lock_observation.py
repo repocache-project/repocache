@@ -245,3 +245,61 @@ def test_caller_exception_propagates_after_all_kernel_locks_release(tmp_path):
             raise ZeroDivisionError("caller error is never masked")
     assert _competing_process(paths[locks.DNF5[0]], "flock") == 0
     assert _competing_process(paths[locks.DNF5[0]], "posix") == 0
+
+
+@pytest.mark.parametrize("manager,names", [
+    ("apt", locks.APT), ("dnf5", locks.DNF5),
+])
+def test_replaced_earlier_lock_before_scope_entry_refuses_and_releases(
+        tmp_path, monkeypatch, manager, names):
+    import fcntl
+    paths = setup_locks(tmp_path, names)
+    first = paths[names[0]]
+    original = first.with_name(first.name + ".original")
+    actual_lockf = fcntl.lockf
+    calls = 0
+
+    def replace_during_later_acquisition(fd, operation):
+        nonlocal calls
+        actual_lockf(fd, operation)
+        calls += 1
+        if calls == 2:
+            first.rename(original)
+            first.write_bytes(b"")
+
+    monkeypatch.setattr(locks.fcntl, "lockf", replace_during_later_acquisition)
+    with pytest.raises(locks.LockInspectionRefused, match="scope drift"):
+        with locks.hold_existing_native_package_locks(manager, root=tmp_path):
+            pytest.fail("stale lock set reached caller")
+    for path in (original, first, paths[names[-1]]):
+        for family in ("flock", "posix"):
+            assert _competing_process(path, family) == 0
+
+
+@pytest.mark.parametrize("manager,names", [
+    ("apt", locks.APT), ("dnf5", locks.DNF5),
+])
+def test_drift_during_scope_cannot_report_clean_completion(
+        tmp_path, manager, names):
+    paths = setup_locks(tmp_path, names)
+    first = paths[names[0]]
+    original = first.with_name(first.name + ".original")
+    with pytest.raises(locks.LockInspectionRefused, match="scope drift"):
+        with locks.hold_existing_native_package_locks(manager, root=tmp_path):
+            first.rename(original)
+            first.write_bytes(b"")
+            assert _competing_process(original, "posix") == 17
+    for path in (original, first, paths[names[-1]]):
+        for family in ("flock", "posix"):
+            assert _competing_process(path, family) == 0
+
+
+def test_lock_parent_mode_drift_during_scope_refuses(tmp_path):
+    paths = setup_locks(tmp_path, locks.APT)
+    first = paths[locks.APT[0]]
+    with pytest.raises(locks.LockInspectionRefused):
+        with locks.hold_existing_native_package_locks("apt", root=tmp_path):
+            first.parent.chmod(0o775)
+    first.parent.chmod(0o755)
+    assert _competing_process(first, "flock") == 0
+    assert _competing_process(first, "posix") == 0

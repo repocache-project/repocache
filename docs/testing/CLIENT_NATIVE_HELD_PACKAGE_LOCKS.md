@@ -35,3 +35,21 @@ exclusion across an actual source commit, client root operator consent,
 protected multi-resource source/mirror transaction, SELinux enforcing
 and final signed v0.6.0 Debian 13 / AlmaLinux 10 booted VM campaign.
 This Stage-A increment is not the real client writer and cannot close #24.
+
+
+## Full lock-set pathname revalidation
+
+After acquiring every lock, the primitive re-resolves all canonical
+pathnames from the trusted root and compares each named inode and its
+metadata with the held descriptor. A clean scope exit repeats that check.
+An earlier lock replaced during acquisition of a later one cannot reach
+the caller; a replacement or unsafe parent during the scope cannot
+report clean completion. Failure releases the held locks without opening,
+creating or deleting any replacement. Caller exceptions remain intact.
+
+These are conservative drift detection checks, **not a race-free lease
+against arbitrary same-privilege writers** and not authorization to
+modify host sources. No second descriptor on the held file is opened
+during the recheck, avoiding POSIX lock release on close. The actual
+privileged commit and its native package-manager exclusion remain
+separate mandatory acceptance gates.
