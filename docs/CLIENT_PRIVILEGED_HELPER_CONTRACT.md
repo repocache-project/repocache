@@ -185,3 +185,9 @@ lock beside transaction evidence. Retry is idempotent; unsafe existing
 state is retained and refused. The test-only installer still grants no
 production write authority. Native application, consent handoff and
 release installation remain separate gates.
+
+
+The v0.6-only closed release source inventory now includes the trusted
+client staging tool in both the builder and verifier. Historical release
+inventories remain unchanged. This includes a non-activating tool, not
+an installed source writer or a production activation permission.

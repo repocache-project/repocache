@@ -311,9 +311,10 @@ def _metadata(current: dict, journal: dict) -> None:
         raise PairRefused("Native source metadata drift")
 
 
-def _fixture_approval(statefd: int, root: Path, ident: str):
+def _fixture_approval(statefd: int, root: Path, ident: str, *, current_catalog: bool = False):
     approval = boundary._manifest(statefd, ident)
-    compiled, _ = boundary._validate_record(root, statefd, ident, approval)
+    compiled, _ = boundary._validate_record(
+        root, statefd, ident, approval, current_catalog=current_catalog)
     captured = []
     if approval["schema"] == 3:
         before = pre.inspect_source(approval["source"], root=root)
@@ -342,10 +343,22 @@ def _crash(where: str | None, phase: str) -> None:
 
 
 def apply_sandbox(root: Path, ident: str, *, crash: str | None = None) -> dict:
-    """Apply only in a root-owned private disposable marker tree.
+    """Legacy offline lab test only; never an installed writer."""
+    return _apply_sandbox(root, ident, crash=crash, current_catalog=False)
 
-    Successful repeated calls are exact no-ops, but not production idempotence.
+
+def apply_catalog_bound_sandbox(root: Path, ident: str, *, crash: str | None = None) -> dict:
+    """Rehearse the mandatory live-route gate under held locks.
+
+    Only the private marked fixture is writable. Unlike the offline lab
+    entry, both first apply and idempotent retry require the exact currently
+    active route. Recovery remains catalog-independent.
     """
+    return _apply_sandbox(root, ident, crash=crash, current_catalog=True)
+
+
+def _apply_sandbox(root: Path, ident: str, *, crash: str | None,
+                   current_catalog: bool) -> dict:
     root = Path(root)
     if root == Path("/"):
         raise PairRefused("Production root is forbidden")
@@ -378,8 +391,16 @@ def apply_sandbox(root: Path, ident: str, *, crash: str | None = None) -> dict:
                                             journal["mirror_id"]):
                                 raise PairRefused("Installed mirror externally modified")
                             _metadata(observed_mirror[1], journal)
+                    if current_catalog:
+                        if approval["schema"] not in (2, 3):
+                            raise PairRefused("Native consent identity missing")
+                        boundary._current_route(approval, root)
+                        if boundary._manifest(statefd, ident) != approval:
+                            raise PairRefused("Approval changed during retry")
+                        recheck()
                     return {"status": "unchanged", "write_eligible": False}
-                approval, proposal, attrs = _fixture_approval(statefd, root, ident)
+                approval, proposal, attrs = _fixture_approval(
+                    statefd, root, ident, current_catalog=current_catalog)
                 if approved != approval:
                     raise PairRefused("Approval changed during lock acquisition")
                 recheck()
@@ -438,6 +459,13 @@ def apply_sandbox(root: Path, ident: str, *, crash: str | None = None) -> dict:
                 recheck()
                 _put_journal(statefd, ident, j)
                 _crash(crash, "armed")
+                if current_catalog:
+                    # Durable journal already exists, so failure here is
+                    # recoverable offline without using a withdrawn route.
+                    boundary._current_route(approval, root)
+                    if boundary._manifest(statefd, ident) != approval:
+                        raise PairRefused("Approval changed before publication")
+                    recheck()
                 if companion is not None:
                     with atom._source_directory(root, companion) as (fd, leaf):
                         temp = ".repocache-atomic-" + ident

@@ -117,3 +117,12 @@ namespaces and unreviewed labels still fail closed. The new AlmaLinux
 booted guest test uses only a freshly marked private fixture, Enforcing
 policy and a real SIGKILL; it does not relabel or modify host sources.
 No result is claimed before execution.
+
+
+The catalog-bound sandbox rehearsal checks the fresh authenticated exact
+route while holding both client and package locks, before staging and
+again after durable intent but before publication. The booted Debian
+fixture rejects withdrawn and changed routes with no staging or source
+changes; it then interrupts a valid transaction and recovers offline.
+The offline historical laboratory entry remains private-test-only.
+Neither entry accepts the production root.

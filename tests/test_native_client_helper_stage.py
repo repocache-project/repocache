@@ -89,3 +89,13 @@ def test_invalid_signed_candidate_leaves_no_client_helper(candidate, tmp_path, f
                         stage.ClientHelperStageError)):
         _stage(candidate, output, **options)
     assert not output.exists()
+
+
+def test_client_helper_stager_in_closed_v06_inventory_only():
+    from scripts import build_release
+    path = "scripts/stage_native_client_helper.py"
+    assert path in build_release.release_files_for_version("0.6.0")
+    assert path in upgrade.release_files_for_version("0.6.0")
+    for version in ("0.4.0", "0.5.0"):
+        assert path not in build_release.release_files_for_version(version)
+        assert path not in upgrade.release_files_for_version(version)

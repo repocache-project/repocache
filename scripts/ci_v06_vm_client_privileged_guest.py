@@ -80,6 +80,36 @@ def _debian_fixture(root: Path) -> None:
         assert approved["status"] == "approved" and not approved["write_eligible"]
         assert manifest.is_file() and _snapshot(source) == original
         assert len(backend.hits) >= 2
+        # A withdrawn or changed route must refuse before any stage or source
+        # modification, even when the root-owned consent remains on disk.
+        for mappings in ([], [{"upstream": record["upstream"],
+                                "cache": origin + "/__repocache/repos/changed/"}]):
+            catalog.write_text(json.dumps({"schema": 1, "repositories": mappings}))
+            try:
+                pair.apply_catalog_bound_sandbox(root, ident)
+            except pair.PairRefused:
+                pass
+            else:
+                raise AssertionError("Withdrawn or changed route permitted commit")
+            assert _snapshot(source) == original
+            assert not list(state.glob("pair-*.json"))
+            assert not list(source.parent.glob(".repocache-atomic-*"))
+        catalog.write_text(json.dumps({"schema": 1, "repositories": [
+            {"upstream": record["upstream"], "cache": route}]}))
+        # Kill after actual private source publication while both authenticated
+        # route checks succeeded. The parent will recover with server offline.
+        pid = os.fork()
+        if pid == 0:
+            def kill_at(active, phase):
+                if active == phase:
+                    os.kill(os.getpid(), signal.SIGKILL)
+            pair._crash = kill_at
+            pair.apply_catalog_bound_sandbox(root, ident, crash="source")
+            os._exit(77)
+        _, status = os.waitpid(pid, 0)
+        assert os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGKILL
+        assert _snapshot(source)[0] != original[0]
+        print("PASS: current authenticated catalog under locks; withdrawn/changed route refused")
     finally:
         boundary._native_tls_context = original_context
         backend.close()
@@ -112,16 +142,6 @@ def _debian_fixture(root: Path) -> None:
 
     # The catalog is offline. All changes are in the marked private lab root.
     mirror = root / ("etc/apt/mirrors/repocache-" + ident + ".list")
-    pid = os.fork()
-    if pid == 0:
-        def kill_at(active, phase):
-            if active == phase:
-                os.kill(os.getpid(), signal.SIGKILL)
-        pair._crash = kill_at
-        pair.apply_sandbox(root, ident, crash="source")
-        os._exit(77)
-    _, status = os.waitpid(pid, 0)
-    assert os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGKILL
     assert pair.recover_sandbox(root, ident)["status"] == "restored"
     restored = _snapshot(source)
     assert restored[0] == original[0]
