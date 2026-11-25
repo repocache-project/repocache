@@ -221,6 +221,13 @@ def _write_new(directory_fd: int, leaf: str, ident: str,
         if (metadata["uid"] != os.geteuid()
                 or metadata["gid"] != os.getegid()):
             raise staging.StageError("Source owner/group preservation is unavailable")
+        labels = [value for name, value in expected_attrs if name == "security.selinux"]
+        if labels:
+            if len(labels) != 1:
+                raise staging.StageError("Ambiguous approved SELinux context")
+            attributes.initialize_exclusive_file_context(
+                fd, directory_fd, temp, leaf, approved=labels[0],
+            )
         with os.fdopen(fd, "wb", closefd=False) as stream:
             stream.write(data)
             stream.flush()

@@ -565,8 +565,8 @@ def _publish_approval(state_fd: int, ident: str, record: dict, *,
         identity = (info.st_dev, info.st_ino)
         if info.st_uid != 0 or info.st_nlink != 1:
             raise BoundaryRefused("Unsafe staged approval metadata")
-        metadata.private_state_attributes(fd)
         os.fchmod(fd, 0o600)
+        metadata.initialize_exclusive_file_context(fd, state_fd, temporary, target)
         offset = 0
         while offset < len(payload):
             written = os.write(fd, payload[offset:])

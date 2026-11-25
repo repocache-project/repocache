@@ -229,3 +229,51 @@ def test_corrupted_clone_bytes_are_detected_and_removed(root, monkeypatch):
     assert corrupted is True
     assert (root / APT).read_bytes() == APT_BYTES
     assert not list((root / APT).parent.glob(lab.TEMP_PREFIX + "*"))
+
+
+@pytest.mark.parametrize("temporary,final,approved", [
+    (b"system_u:object_r:tmp_t:s0", b"system_u:object_r:var_t:s0", None),
+    (b"system_u:object_r:tmp_t:s0", b"system_u:object_r:tmp_t:s0:c1", None),
+    (b"system_u:object_r:tmp_t:s0", b"system_u:object_r:tmp_t:s0", b"user_u:object_r:var_t:s0\\0"),
+    (b"bad", b"bad", None),
+])
+def test_fresh_context_refuses_policy_or_approval_mismatch(temporary, final, approved):
+    with pytest.raises(pre.PreflightError):
+        lab._fresh_policy_value(temporary, final, approved)
+
+
+def test_fresh_context_retains_approved_raw_user_and_range():
+    default = b"system_u:object_r:tmp_t:s0"
+    approved = b"unconfined_u:object_r:tmp_t:s0\\0"
+    assert lab._fresh_policy_value(default, default, approved) == approved
+    assert lab._fresh_policy_value(default, default, None) == default + b"\\0"
+
+
+def test_fresh_context_refuses_approved_label_outside_native_scope(root):
+    p = root / DNF
+    fd = os.open(p, os.O_RDONLY)
+    parent = os.open(p.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(pre.PreflightError, match="Unreviewed"):
+            lab.initialize_exclusive_file_context(
+                fd, parent, p.name, "other.repo", approved=b"system_u:object_r:tmp_t:s0\\0")
+    finally:
+        os.close(fd)
+        os.close(parent)
+
+
+def test_fresh_context_refuses_nonempty_existing_inode_before_relabel(root, monkeypatch):
+    path = root / DNF
+    fd = os.open(path, os.O_RDONLY)
+    parent = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    token = lab._POLICY.set((root, True))
+    try:
+        monkeypatch.setattr(lab.os, "getresuid", lambda: (0, 0, 0))
+        monkeypatch.setattr(lab.os, "getresgid", lambda: (0, 0, 0))
+        monkeypatch.setattr(lab.os, "setxattr", lambda *_: pytest.fail("existing inode relabelled"))
+        with pytest.raises(pre.PreflightError, match="identity"):
+            lab.initialize_exclusive_file_context(fd, parent, path.name, "other.repo")
+    finally:
+        lab._POLICY.reset(token)
+        os.close(fd)
+        os.close(parent)

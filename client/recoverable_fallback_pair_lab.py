@@ -241,6 +241,7 @@ def _put_journal(fd: int, ident: str, j: dict) -> None:
         raise PairRefused("Pending journal requires manual recovery") from exc
     try:
         try:
+            security_metadata.initialize_exclusive_file_context(out, fd, temp, name)
             with os.fdopen(out, "wb", closefd=False) as stream:
                 stream.write(data)
                 stream.flush()

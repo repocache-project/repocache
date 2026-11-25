@@ -138,3 +138,16 @@ This is labelled private-fixture recovery evidence only, not proof of stock
 /etc source policy or installed native source mutation. The existing negative
 unreviewed-label case runs without the local fixture mapping. Exact-head
 native execution remains required.
+
+The next enforcing native smoke reached real approval publication after
+successfully resolving the fixture path policy, but rejected a newly
+created approval inode whose transition label differed from its pathname
+policy. Exclusive fresh approval and journal files now receive only the
+exact raw policy label, and exclusive source staging files only the exact
+already-approved source label, through the retained descriptor. Temporary
+and final path policy role/type/range must agree. Empty single-link
+root-private file identity is checked before and after assignment; existing
+files remain strict read-only label checks, never automatically relabelled.
+No SELinux permission or enforcement change, new production writer, or
+actual native PASS is inferred. Re-execute the native positive and negative
+recovery paths on the new source HEAD.
