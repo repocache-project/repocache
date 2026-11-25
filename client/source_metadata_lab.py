@@ -151,16 +151,16 @@ def _fresh_policy_value(temporary: bytes, final: bytes, approved: bytes | None) 
     def parts(value):
         if type(value) is not bytes or not 1 <= len(value) <= 513:
             raise pre.PreflightError("Invalid fresh file SELinux context")
-        result = value.rstrip(b"\\0").split(b":", 3)
+        result = value.rstrip(b"\0").split(b":", 3)
         if len(result) != 4 or not all(result) or any(
-                c < 33 or c > 126 for c in value.rstrip(b"\\0")):
+                c < 33 or c > 126 for c in value.rstrip(b"\0")):
             raise pre.PreflightError("Invalid fresh file SELinux context")
         return result[1:]
     if parts(temporary) != parts(final):
         raise pre.PreflightError("Temporary and final SELinux policy differ")
     if approved is not None and parts(approved) != parts(final):
         raise pre.PreflightError("Approved SELinux context differs from native policy")
-    return approved if approved is not None else final.rstrip(b"\\0") + b"\\0"
+    return approved if approved is not None else final.rstrip(b"\0") + b"\0"
 
 
 def initialize_exclusive_file_context(fd: int, parent_fd: int, temporary: str,
@@ -179,6 +179,7 @@ def initialize_exclusive_file_context(fd: int, parent_fd: int, temporary: str,
         private_state_attributes(fd)
         return
     if (os.getresuid() != (0, 0, 0) or os.getresgid() != (0, 0, 0)
+            or temporary == final
             or any(type(name) is not str or name in ("", ".", "..") or "/" in name
                    for name in (temporary, final))):
         raise pre.PreflightError("Fresh SELinux file boundary invalid")

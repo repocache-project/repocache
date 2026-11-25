@@ -234,7 +234,7 @@ def test_corrupted_clone_bytes_are_detected_and_removed(root, monkeypatch):
 @pytest.mark.parametrize("temporary,final,approved", [
     (b"system_u:object_r:tmp_t:s0", b"system_u:object_r:var_t:s0", None),
     (b"system_u:object_r:tmp_t:s0", b"system_u:object_r:tmp_t:s0:c1", None),
-    (b"system_u:object_r:tmp_t:s0", b"system_u:object_r:tmp_t:s0", b"user_u:object_r:var_t:s0\\0"),
+    (b"system_u:object_r:tmp_t:s0", b"system_u:object_r:tmp_t:s0", b"user_u:object_r:var_t:s0\0"),
     (b"bad", b"bad", None),
 ])
 def test_fresh_context_refuses_policy_or_approval_mismatch(temporary, final, approved):
@@ -244,9 +244,9 @@ def test_fresh_context_refuses_policy_or_approval_mismatch(temporary, final, app
 
 def test_fresh_context_retains_approved_raw_user_and_range():
     default = b"system_u:object_r:tmp_t:s0"
-    approved = b"unconfined_u:object_r:tmp_t:s0\\0"
+    approved = b"unconfined_u:object_r:tmp_t:s0\0"
     assert lab._fresh_policy_value(default, default, approved) == approved
-    assert lab._fresh_policy_value(default, default, None) == default + b"\\0"
+    assert lab._fresh_policy_value(default, default, None) == default + b"\0"
 
 
 def test_fresh_context_refuses_approved_label_outside_native_scope(root):
@@ -256,7 +256,7 @@ def test_fresh_context_refuses_approved_label_outside_native_scope(root):
     try:
         with pytest.raises(pre.PreflightError, match="Unreviewed"):
             lab.initialize_exclusive_file_context(
-                fd, parent, p.name, "other.repo", approved=b"system_u:object_r:tmp_t:s0\\0")
+                fd, parent, p.name, "other.repo", approved=b"system_u:object_r:tmp_t:s0\0")
     finally:
         os.close(fd)
         os.close(parent)
