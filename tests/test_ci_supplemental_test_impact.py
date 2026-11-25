@@ -15,7 +15,7 @@ import ci_supplemental_test_impact as impact
     (["client/root_source_boundary.py", "scripts/ci_dnf_signed_rpm_fallback.py"],
      True, ("smoke",), False),
     (["scripts/ci_pr237_native_socket_guest.py", "docs/testing/PR237_BOOTED_VM.md"],
-     False, ("native-installer",), False),
+     False, ("native-installer", "native-lifecycle"), False),
     (["scripts/ci_v06_native_repository_lifecycle_guest.py"],
      False, ("native-lifecycle",), False),
     (["scripts/ci_pr237_native_package_interrupt_guest.py"],
@@ -24,12 +24,14 @@ import ci_supplemental_test_impact as impact
     (["src/repocache/server_native_installed_storage_v1.py"],
      False, impact.SCENARIOS, True),
     (["client/root_source_boundary.py", "scripts/ci_pr237_native_socket_guest.py"],
-     True, ("smoke", "native-installer"), False),
+     True, ("smoke", "native-installer", "native-lifecycle"), False),
     (["scripts/ci_v06_vm_client_privileged_guest.py"], True, ("smoke",), False),
     (["client/root_source_boundary.py", "scripts/build_release.py"],
      True, impact.SCENARIOS, True),
     (["src/repocache/upgrade.py"], True, impact.SCENARIOS, True),
     (["src/repocache/server_derived_catalog_candidate_v1.py"],
+     True, impact.SCENARIOS, True),
+    (["src/repocache/server_native_v2_transaction_v1.py"],
      True, impact.SCENARIOS, True),
     (["new/unclassified.py"], True, impact.SCENARIOS, True),
     ([".github/workflows/client-native-fallback.yml"], True, impact.SCENARIOS, True),
@@ -80,7 +82,7 @@ def test_complete_git_diff_and_manual_override(repository):
     path.parent.mkdir()
     path.write_text("fixture")
     head = commit(root, "test fixture")
-    assert decide(root, base, head).scenarios == ("native-installer",)
+    assert decide(root, base, head).scenarios == ("native-installer", "native-lifecycle")
     assert decide(root, base, head, event="workflow_dispatch") == impact.full("manual-or-non-pr-campaign")
     assert decide(root, base, head, target="release/v0.6.0").scenarios == impact.SCENARIOS
     assert decide(root, base, head, target="main", source="integration/v0.6.0").scenarios == impact.SCENARIOS
@@ -114,3 +116,12 @@ def test_large_diff_not_truncated(repository):
     head = commit(root, "many paths")
     assert len(impact.git_changes(base, head, root)) == 310
     assert decide(root, base, head).scenarios == impact.SCENARIOS
+
+def test_new_symlink_and_executable_mode_change_are_full(repository):
+    root, base = repository
+    (root / "SECURITY.md").symlink_to("README.md")
+    head = commit(root, "symlink")
+    assert decide(root, base, head).scenarios == impact.SCENARIOS
+    (root / "README.md").chmod(0o755)
+    changed = commit(root, "mode")
+    assert decide(root, head, changed).scenarios == impact.SCENARIOS

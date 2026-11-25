@@ -64,13 +64,13 @@ CLIENT_TESTS = frozenset({
 SERVER_PRIVATE = frozenset({
     "src/repocache/" + name + ".py" for name in (
         "server_native_installed_storage_v1", "server_native_nginx_effective_unit_v1",
-        "server_native_nginx_package_journal_v1", "server_native_v2_transaction_v1",
+        "server_native_nginx_package_journal_v1",
         "server_root_control_full_context_v1", "server_root_control_worker_v1",
     )
 }) | frozenset({
     "tests/" + name + ".py" for name in (
         "test_native_nginx_safe_activation_v1", "test_server_native_installed_storage_v1",
-        "test_server_native_nginx_package_journal_v1", "test_server_native_v2_transaction_v1",
+        "test_server_native_nginx_package_journal_v1",
         "test_server_root_control_full_context_v1", "test_server_root_control_units_v1",
         "test_server_root_control_worker_v1",
     )
@@ -79,7 +79,8 @@ SERVER_PRIVATE = frozenset({
 # Only scenario-local VM fixture edits can omit the other native scenarios.
 # Do not classify the common shell harness or any signed-worker assembly here.
 SERVER_FIXTURES = {
-    "scripts/ci_pr237_native_socket_guest.py": ("native-installer",),
+    # The lifecycle guest imports helpers from this socket fixture.
+    "scripts/ci_pr237_native_socket_guest.py": ("native-installer", "native-lifecycle"),
     "scripts/ci_v06_native_repository_lifecycle_guest.py": ("native-lifecycle",),
     "scripts/ci_pr237_native_package_interrupt_guest.py": ("native-package-interruption",),
     "scripts/ci_native_nginx_activate_guest.py": ("activation",),
@@ -91,7 +92,7 @@ SERVER_FIXTURES = {
 # Documentation tied to a specific existing scenario is deliberately not
 # treated as proof; it still requests that scenario on its exact HEAD.
 SCENARIO_DOCS = {
-    "docs/testing/PR237_BOOTED_VM.md": ("native-installer",),
+    "docs/testing/PR237_BOOTED_VM.md": ("native-installer", "native-lifecycle"),
     "docs/testing/SERVER_V06_NATIVE_LIFECYCLE_VM.md": ("native-lifecycle",),
     "docs/testing/SERVER_VM_NATIVE_CACHE_EVICTION.md": ("smoke",),
     "docs/testing/SERVER_NATIVE_INSTALLED_STORAGE_V1.md": ("activation",),
@@ -162,13 +163,26 @@ def git_changes(base: str, head: str, root: Path = ROOT) -> list[tuple[str, str]
     # Strict branch protection requires an updated base. Until then use a
     # complete campaign rather than assuming the merge-side delta is safe.
     git("merge-base", "--is-ancestor", base, head)
-    raw = git("diff", "--no-renames", "--name-status", "-z", base, head, "--")
+    # Raw records include file types/modes. A symlink, submodule or
+    # executable-mode change must not be mistaken for an isolated text edit.
+    raw = git("diff", "--no-renames", "--raw", "-z", base, head, "--")
     if not raw or not raw.endswith(b"\0"):
         raise ValueError("missing or malformed diff")
     fields = raw[:-1].decode("utf-8", errors="strict").split("\0")
     if len(fields) % 2 or any(not field for field in fields):
         raise ValueError("malformed diff")
-    return list(zip(fields[::2], fields[1::2]))
+    changes = []
+    for header, path in zip(fields[::2], fields[1::2]):
+        match = re.fullmatch(r":([0-7]{6}) ([0-7]{6}) [0-9a-f]+ [0-9a-f]+ ([AM])", header)
+        if match is None:
+            raise ValueError("non-add-modify diff")
+        old_mode, new_mode, status = match.groups()
+        if (new_mode not in ("100644", "100755")
+                or (status == "M" and old_mode != new_mode)
+                or (status == "A" and old_mode != "000000")):
+            raise ValueError("non-regular or changed file mode")
+        changes.append((status, path))
+    return changes
 
 
 def decide(event: str, base: str, head: str, base_ref: str,

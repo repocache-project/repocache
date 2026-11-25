@@ -18,7 +18,7 @@ path-filter list). Only reviewed isolated client modules/fixtures and
 scenario-specific test changes can narrow the execution. Server-private
 runtime changes still request all native scenarios. Shared source, packaging,
 trust, CLI, dependencies, common harness, workflow/selector changes,
-unclassified paths, deleted/renamed files, stale base or unverified diff
+unclassified paths, deleted/renamed files, file type/mode changes, stale base or unverified diff
 select the full campaign. Both target distros and existing image digests
 remain unchanged. Manual dispatch always selects the complete matrix of
 the dispatched workflow; release promotions and stabilization PRs also
