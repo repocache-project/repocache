@@ -405,9 +405,18 @@ def inspect_signed_owned_nginx_unit() -> dict[str, Any]:
     installed-worker and package provenance, validate the managed context
     and prove the live listener. No command mutation is performed here.
     """
+    return _inspect_owned_nginx_unit_bytes(_signed_owned_unit_bytes())
+
+
+def _inspect_owned_nginx_unit_bytes(expected: bytes) -> dict[str, Any]:
+    """Read-only common observation for authenticated internal callers.
+
+    The worker obtains expected bytes exclusively from its installed archive.
+    The signed installer may pass the exact unit it independently authenticated
+    and audited under the state lock. No socket request supplies these bytes.
+    """
     from repocache.server_protected_state_inspect_v1 import _DIRECTORY_FLAGS
 
-    expected = _signed_owned_unit_bytes()
     try:
         with ExitStack() as stack:
             root_fd = os.open("/", _DIRECTORY_FLAGS)

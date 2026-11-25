@@ -390,6 +390,45 @@ def verify_dedicated_socket(*, bootstrap: bool = False, pending: bool = False) -
         command("/usr/bin/systemctl", "stop", "repocache-control.socket")
 
 
+def verify_managed_installer_repeat(distribution, native, assets, pins):
+    """Reauthenticate the same signed test release without bootstrap rewrite."""
+    before = live_wal_resource_hashes()
+    pid = native._own_service_observation(active=True)["main_pid_observed"]
+    result = native.activate_authenticated_native_nginx(assets, **pins)
+    assert result["status"] == "AUTHENTICATED_REPOCACHE_NGINX_ALREADY_ACTIVE"
+    assert result["state_generation"] == 1
+    verify_storage_report(result, distribution)
+    assert live_wal_resource_hashes() == before
+    assert native._own_service_observation(active=True)["main_pid_observed"] == pid
+    # The installer must refuse an unsafe managed include without replacing
+    # it or restarting the prior working service. This is a disposable VM.
+    include = Path("/etc/nginx/repocache.d/repocache-managed.conf")
+    fd = os.open(include, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        import stat
+        assert stat.S_IMODE(os.fstat(fd).st_mode) == 0o644
+        try:
+            os.fchmod(fd, 0o666)
+            from scripts.stage_native_root_worker import WorkerStageError
+            try:
+                native.activate_authenticated_native_nginx(assets, **pins)
+            except WorkerStageError as exc:
+                assert str(exc) == "WORKER_PLACEMENT_NATIVE_ACTIVATION_MANAGED_STATE_REFUSED"
+            else:
+                raise AssertionError("Unsafe managed include accepted")
+            assert stat.S_IMODE(os.fstat(fd).st_mode) == 0o666
+            assert live_wal_resource_hashes() == before
+            assert native._own_service_observation(active=True)["main_pid_observed"] == pid
+        finally:
+            os.fchmod(fd, 0o644)
+    finally:
+        os.close(fd)
+    from scripts.ci_pr237_native_socket_guest import https_response
+    assert b"x-repocache-generation: 1" in https_response("/__repocache/healthz").lower()
+    assert live_wal_resource_hashes() == before
+    print("PASS: signed managed installer repeat and unsafe include refusal preserve exact prior service and generation", flush=True)
+
+
 def prepare_and_interrupt_live_wal(distribution: str, native, assets, pins) -> None:
     import base64
     from scripts.ci_pr237_native_socket_guest import synthetic_local_tls, https_response
@@ -429,6 +468,7 @@ def prepare_and_interrupt_live_wal(distribution: str, native, assets, pins) -> N
     assert not (STATE / ".state-v2-owned-nginx.pending").exists()
     print("PASS: actual installed signed-test dedicated WAL commits TLS generation and exact catalog, repeat and reload preserve resources", flush=True)
     verify_dedicated_socket()
+    verify_managed_installer_repeat(distribution, native, assets, pins)
     assert live_wal_resource_hashes() == old
     prior = STATE / "state-v2.json"
     prior_raw = prior.read_bytes()
@@ -711,6 +751,7 @@ def verify_guest(distribution: str, phase: str) -> None:
         assert native._own_service_observation(active=True)["main_pid_observed"] > 1
         recover_live_wal_after_reboot(distribution)
         verify_storage_after_recovery(distribution, native)
+        verify_managed_installer_repeat(distribution, native, assets, pins)
         require_status(OWN, True, True)
         require_status(VENDOR, False, False)
         assert hashlib.sha256(VENDOR_CONFIG.read_bytes()).hexdigest() == original["vendor_config_sha256"]
@@ -718,7 +759,7 @@ def verify_guest(distribution: str, phase: str) -> None:
         assert inspect_stock_nginx_package_file_integrity()[
             "native_package_file_integrity_verified"] is True
         print("PASS: separate REPOCACHE service survives real reboot with vendor service disabled and package integrity intact", flush=True)
-        print("NOT VERIFIED: active repository routes/storage, managed installer repair, final publisher-signed release", flush=True)
+        print("NOT VERIFIED: active repository routes/storage, inactive managed service repair, final publisher-signed release", flush=True)
     else:
         raise AssertionError("invalid test phase")
 

@@ -41,6 +41,7 @@ from repocache.server_native_nginx_effective_unit_v1 import (
     EffectiveNginxUnitError, inspect_effective_native_nginx_unit,
     OWNED_NGINX_CONFIG_MARKER_PREFIX,
     inspect_signed_owned_nginx_unit, require_owned_bootstrap_health,
+    _inspect_owned_nginx_unit_bytes,
 )
 from repocache.server_native_installed_storage_v1 import (
     InstalledStorageError, verify_control_storage, verify_service_storage_mounts,
@@ -1635,11 +1636,16 @@ def _apply_owned_files_fixture(root_fd: int, new: dict[str, bytes | None]) -> di
             _deny("OWNED_WAL_APPLY_FILES_RESTORED")
 
 
-def _owned_live_observe(root_fd: int) -> tuple:
-    """Private fixed observation. Not an authorization or dispatch entry."""
+def _owned_live_observe(root_fd: int, *, expected_unit: bytes | None = None) -> tuple:
+    """Private read-only observation; installer bytes must be authenticated.
+
+    Broker dispatch never supplies expected_unit; it uses its embedded unit.
+    This parameter cannot authorize a mutation or bypass a signed installer.
+    """
     _verify_current_root_fd(root_fd)
     try:
-        observed = inspect_signed_owned_nginx_unit()
+        observed = (inspect_signed_owned_nginx_unit() if expected_unit is None
+                    else _inspect_owned_nginx_unit_bytes(expected_unit))
         if (observed.get("unit_name") != _OWNED_WAL_DOMAIN
                 or observed.get("signed_worker_unit_bytes_match") is not True
                 or observed.get("authorizes_nginx_reload") is not False
@@ -1794,9 +1800,13 @@ def _owned_require_listener(rows: list[tuple[str, int]], sockets: set[int],
     return rows[0][1]
 
 
-def _owned_live_verify_listener(root_fd: int, identity: tuple, context: tuple) -> int:
+def _owned_live_verify_listener(root_fd: int, identity: tuple, context: tuple, *,
+                                expected_unit: bytes | None = None) -> int:
     """Bind the fixed endpoint to the observed signed-unit master socket."""
-    if _owned_live_observe(root_fd) != identity:
+    def observe():
+        return (_owned_live_observe(root_fd) if expected_unit is None
+                else _owned_live_observe(root_fd, expected_unit=expected_unit))
+    if observe() != identity:
         _deny("OWNED_LIVE_UNIT_CHANGED")
     pid = identity[0]
     document = context[0]
@@ -1849,7 +1859,7 @@ def _owned_live_verify_listener(root_fd: int, identity: tuple, context: tuple) -
                 return _owned_require_listener(rows, sockets, address), (local_ns.st_dev, local_ns.st_ino)
 
             first = sample()
-            if _owned_live_observe(root_fd) != identity or sample() != first:
+            if observe() != identity or sample() != first:
                 _deny("OWNED_LIVE_LISTENER_CHANGED")
             return first[0]
     except NativeV2TransactionError:
@@ -1859,10 +1869,15 @@ def _owned_live_verify_listener(root_fd: int, identity: tuple, context: tuple) -
 
 
 def _owned_live_health_bound(root_fd: int, identity: tuple, context: tuple,
-                             catalog: bytes | None, *, publish: bool) -> None:
-    before = _owned_live_verify_listener(root_fd, identity, context)
+                             catalog: bytes | None, *, publish: bool,
+                             expected_unit: bytes | None = None) -> None:
+    def listener():
+        return (_owned_live_verify_listener(root_fd, identity, context)
+                if expected_unit is None else _owned_live_verify_listener(
+                    root_fd, identity, context, expected_unit=expected_unit))
+    before = listener()
     _owned_live_health(context, catalog, publish=publish)
-    if _owned_live_verify_listener(root_fd, identity, context) != before:
+    if listener() != before:
         _deny("OWNED_LIVE_LISTENER_CHANGED")
 
 

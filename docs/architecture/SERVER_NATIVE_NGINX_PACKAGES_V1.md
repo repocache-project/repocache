@@ -827,3 +827,15 @@ marker drift refuses APPLY/RELOAD/RECOVER before effects; the booted VM
 checks exact managed resource hashes and prior TLS generation continuity.
 Active-route activation remains disabled until actual cache/log worker
 access is demonstrated. Exact new-HEAD native execution is required.
+
+Authenticated activation repeat now recognizes a clean already-active
+managed generation with disabled repository routes. It reuses the closed
+owned layout, native syntax/TLS, kernel listener, exact public catalog,
+package and fixed storage verification under the existing lock. The
+installer supplies only the exact unit bytes independently authenticated
+and audited from the release; socket dispatch still uses its embedded unit.
+No bootstrap replacement, reload, daemon restart, storage creation or
+pending journal adoption occurs on this path. Booted tests reauthenticate
+and repeat before and after WAL recovery/reboot and refuse unsafe include
+permissions without altering prior service or resource bytes. Inactive
+managed repair and active repository operation remain separate gates.

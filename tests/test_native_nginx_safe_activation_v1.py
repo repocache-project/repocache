@@ -406,3 +406,47 @@ def test_mount_refusal_compensates_owned_start(monkeypatch):
         host._activate_audited_native_nginx_under_lock(11, "debian", host._BOOTSTRAP_CONFIG)
     assert state["commands"] == ["daemon-reload", "start", "stop", "disable"]
     assert not state["active"] and not state["enabled"]
+
+
+def test_managed_installer_refuses_inactive_without_effects(monkeypatch):
+    state = _setup(monkeypatch)
+    monkeypatch.setattr(host, "_read_v2", lambda *_: ({"state_generation": 1}, b"owned"))
+    with pytest.raises(stage.WorkerStageError, match="NATIVE_ACTIVATION_MANAGED_STATE_REFUSED"):
+        host._activate_audited_native_nginx_under_lock(
+            11, "debian", host._BOOTSTRAP_CONFIG, root_fd=10, unit_bytes=b"signed")
+    assert state["commands"] == [] and state["config_checks"] == 0
+    assert state["storage_preps"] == []
+
+
+def test_managed_installer_reuses_verified_generation_without_bootstrap(monkeypatch):
+    from contextlib import contextmanager
+
+    state = _setup(monkeypatch)
+    state["enabled"] = state["active"] = True
+    monkeypatch.setattr(host, "_read_v2", lambda *_: ({"state_generation": 1}, b"owned"))
+    @contextmanager
+    def layout(root, fd, *, recovering):
+        assert (root, fd, recovering) == (10, 11, False)
+        yield (11, 12, 13, lambda: None)
+    monkeypatch.setattr(host, "_owned_layout_locked", layout)
+    resources = {"catalog.json": b"catalog"}
+    monkeypatch.setattr(host, "_read_owned_resources", lambda *_: resources)
+    monkeypatch.setattr(host, "_validate_owned_resources", lambda _: {"state_generation": 1})
+    monkeypatch.setattr(host, "_owned_socket_require_inactive_routes", lambda _: None)
+    monkeypatch.setattr(host, "_no_conflicting_owned_wal_pending", lambda _: None)
+    def observe(root, *, expected_unit):
+        assert (root, expected_unit) == (10, b"signed")
+        return (1234, (1, 2))
+    monkeypatch.setattr(host, "_owned_live_observe", observe)
+    monkeypatch.setattr(host, "_owned_live_validate", lambda *_: (None, 1, None))
+    def health(*args, **kwargs):
+        assert kwargs == {"publish": True, "expected_unit": b"signed"}
+        assert args[-1] == b"catalog"
+    monkeypatch.setattr(host, "_owned_live_health_bound", health)
+    report = host._activate_audited_native_nginx_under_lock(
+        11, "debian", host._BOOTSTRAP_CONFIG, root_fd=10, unit_bytes=b"signed")
+    assert report["state_generation"] == 1
+    assert report["status"] == "AUTHENTICATED_REPOCACHE_NGINX_ALREADY_ACTIVE"
+    assert state["commands"] == [] and state["config_checks"] == 0
+    assert state["storage_preps"] == [("debian", False), ("debian", False)]
+    assert state["storage_mounts"] == [1234, 1234]

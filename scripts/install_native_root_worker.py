@@ -46,6 +46,9 @@ from repocache.server_native_v2_transaction_v1 import (
     _require_audited_native_package_for_activation,
     _native_syntax_check, _OWNED_BOOTSTRAP_CONFIG,
     _owned_layout_locked, _read_owned_resources, _validate_owned_resources,
+    _owned_live_observe, _owned_live_validate, _owned_live_health_bound,
+    _owned_socket_require_inactive_routes, _no_conflicting_owned_wal_pending,
+    NativeV2TransactionError,
 )
 from repocache.server_native_nginx_effective_unit_v1 import (
     inspect_effective_native_nginx_unit, _observe_systemd_pid1,
@@ -788,20 +791,81 @@ def _nginx_activation_command(action: str) -> None:
         _reject("NATIVE_ACTIVATION_COMMAND_FAILED")
 
 
+def _verify_active_managed_nginx_under_lock(
+    root_fd: int, state_fd: int, distribution: str, unit_bytes: bytes,
+) -> dict:
+    """Same-version active managed no-op; never rewrite or reload resources.
+
+    Called only after the signed installer independently authenticated and
+    audited the exact worker and unit. Retain the existing state lock.
+    Inactive, pending, legacy and active-route cases remain fail closed.
+    """
+    if (_own_systemctl("is-enabled") != (0, b"enabled\n")
+            or _own_systemctl("is-active") != (0, b"active\n")):
+        _reject("NATIVE_ACTIVATION_MANAGED_STATE_REFUSED")
+    try:
+        with _owned_layout_locked(root_fd, state_fd, recovering=False) as layout:
+            _, nginx_fd, public_fd, check = layout
+            old = _read_owned_resources(state_fd, nginx_fd, public_fd)
+            snapshot = _validate_owned_resources(old)
+            if snapshot is None:
+                _reject("NATIVE_ACTIVATION_MANAGED_STATE_REFUSED")
+            _owned_socket_require_inactive_routes(snapshot)
+            storage = prepare_installed_storage(distribution, allow_create=False)
+            identity = _owned_live_observe(root_fd, expected_unit=unit_bytes)
+            verify_service_storage_mounts(identity[0])
+            context = _owned_live_validate(root_fd, state_fd, old)
+            _owned_live_health_bound(root_fd, identity, context, old["catalog.json"],
+                                     publish=True, expected_unit=unit_bytes)
+            check()
+            _no_conflicting_owned_wal_pending(state_fd)
+            _require_audited_native_package_for_activation(state_fd, distribution=distribution)
+            _nginx_inactive_vendor_service(distribution)
+            if (prepare_installed_storage(distribution, allow_create=False) != storage
+                    or _owned_live_observe(root_fd, expected_unit=unit_bytes) != identity
+                    or _read_owned_resources(state_fd, nginx_fd, public_fd) != old
+                    or _owned_live_validate(root_fd, state_fd, old) != context
+                    or _own_systemctl("is-enabled") != (0, b"enabled\n")
+                    or _own_systemctl("is-active") != (0, b"active\n")):
+                _reject("NATIVE_ACTIVATION_MANAGED_STATE_CHANGED")
+            verify_service_storage_mounts(identity[0])
+            _owned_live_health_bound(root_fd, identity, context, old["catalog.json"],
+                                     publish=True, expected_unit=unit_bytes)
+            check()
+            _no_conflicting_owned_wal_pending(state_fd)
+            if _read_owned_resources(state_fd, nginx_fd, public_fd) != old:
+                _reject("NATIVE_ACTIVATION_MANAGED_STATE_CHANGED")
+            return {"status": "AUTHENTICATED_REPOCACHE_NGINX_ALREADY_ACTIVE",
+                    "nginx_active_verified": True, "nginx_enabled_verified": True,
+                    "storage": storage, "service_storage_mounts_verified": True,
+                    "state_generation": snapshot["state_generation"]}
+    except stage.WorkerStageError:
+        raise
+    except (NativeV2TransactionError, EffectiveNginxUnitError, OSError, ValueError, TypeError):
+        _reject("NATIVE_ACTIVATION_MANAGED_STATE_REFUSED")
+
+
 def _activate_audited_native_nginx_under_lock(
-    state_fd: int, distribution: str, config: bytes,
+    state_fd: int, distribution: str, config: bytes, *,
+    root_fd: int | None = None, unit_bytes: bytes | None = None,
 ) -> dict:
     """Start only signed REPOCACHE unit; never start or override vendor NGINX."""
     _require_audited_native_package_for_activation(state_fd, distribution=distribution)
-    _no_conflicting_pending(state_fd)
-    if _read_v2(state_fd, 0)[0] is not None:
+    managed = _read_v2(state_fd, 0)[0] is not None
+    if managed and (root_fd is None or unit_bytes is None):
         _reject("NATIVE_ACTIVATION_MANAGED_STATE_REFUSED")
+    if not managed:
+        _no_conflicting_pending(state_fd)
     # The native distro service is separately verified but MUST stay disabled.
     # An active or enabled foreign daemon is never adopted or stopped.
     _nginx_inactive_vendor_service(distribution)
     if (_nginx_systemctl("is-enabled") != (1, b"disabled\n")
             or _nginx_systemctl("is-active") != (3, b"inactive\n")):
         _reject("NATIVE_ACTIVATION_VENDOR_SERVICE_STATE")
+    if managed:
+        return _verify_active_managed_nginx_under_lock(
+            root_fd, state_fd, distribution, unit_bytes,
+        )
     _place_signed_private_config(config, state_fd)
     current_enabled = _own_systemctl("is-enabled")
     current_active = _own_systemctl("is-active")
@@ -891,9 +955,13 @@ def activate_authenticated_native_nginx(
         with _locked(root, 0) as state:
             # Recheck installed source identity after acquiring shared lock.
             stage._audit_worker_files(Path("/"), payloads)
-            return _activate_audited_native_nginx_under_lock(
-                state, distribution, payloads[stage.CONFIG],
+            result = _activate_audited_native_nginx_under_lock(
+                state, distribution, payloads[stage.CONFIG], root_fd=root,
+                unit_bytes=payloads[_OWN_UNIT],
             )
+            if "state_generation" in result:
+                stage._audit_worker_files(Path("/"), payloads)
+            return result
     finally:
         os.close(root)
 
