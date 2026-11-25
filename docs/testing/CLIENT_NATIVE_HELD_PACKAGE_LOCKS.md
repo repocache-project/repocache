@@ -135,3 +135,61 @@ repository path can contain sensitive identifiers. The separate approval call
 still requires explicit consent to the exact route and independently repeats
 validation. Review itself neither creates an approval nor edits any source.
 The public CLI remains unchanged; no claim of an enabled production writer.
+
+## Native APT source-read ordering
+
+The Debian 13.3 / APT 3.0.3 disposable local root experiment (2026-11-25)
+held POSIX and BSD locks simultaneously on all four fixed APT/dpkg lock
+inodes. With empty sources, actual apt-get update refused the private lists
+lock; with a deliberately malformed private .list it instead refused source
+parsing before reporting any lock error. Restoring the empty file restored
+the lock refusal; releasing the locks permitted the same empty update.
+This demonstrates that these four locks do not exclude early source reads.
+
+The guarded Debian booted privileged-client fixture now repeats that
+sequence under the actual REPOCACHE lock primitive and its full-set
+revalidation callback. APT_CONFIG points to an exclusive disposable
+configuration before APT loads normal config; all status, lists, archives,
+logs and source paths are private, with no repository/network access.
+Neither installed host sources nor packages may change. A lock failure,
+parse error, restored lock failure and post-release success are all required;
+a generic nonzero exit or timeout is insufficient. Actual booted evidence
+is NOT VERIFIED until execution. This is negative synchronization evidence,
+not a new native-writer authorization: publication and rollback must remain
+safe for already-read source snapshots, and lock acquisition alone cannot
+be treated as an exclusion lease. No installed source-write path is added.
+
+
+### Earlier-reader rollback interleaving
+
+A real APT process can retain a parsed source across the interval before it
+acquires the lists lock. The local Debian 13.3 / APT 3.0.3 experiment traced
+only its own direct child at entry to fcntl(F_SETLK) for its private lists
+lock. The parent acquired the actual four-inode REPOCACHE held lock scope,
+atomically restored the source and released every lock before resuming APT.
+Three fresh signed HTTPS fixture cases passed in the local component
+harness (the exact lock module blob was verified):
+
+- Retain the cache+upstream mirror file: the earlier reader succeeds but
+  still reaches the preferred cache.
+- Remove the mirror file after restoring the source: the earlier reader
+  fails with the exact missing mirror / download failure, despite the
+  upstream being available; no origin is reached.
+- Atomically replace the mirror with original upstream-only contents
+  before restoring the source: the earlier reader successfully retrieves
+  signed upstream metadata and makes zero cache-origin requests.
+
+The existing x86-64 Debian booted guest now repeats this deterministic
+interleaving with a bounded child-only ptrace barrier and separate
+disposable signed HTTPS origins. It never attaches to an existing
+process, changes ptrace policy, installs a package or edits host sources.
+Both native acceptance and retained companion lifecycle remain NOT
+VERIFIED. The current sandbox recovery semantics are unchanged. A real
+writer needs a durable owner-bound journal for neutralizing an exposed
+companion, preserving the approved original upstream and trust, refusing
+foreign state, surviving interruptions, avoiding path reuse across
+approvals and retaining earlier-reader safety. Retaining a previous
+cache route unchanged is not a revocation solution. A reader that has
+already fetched the old mirror contents is outside this particular proof.
+Do not remove the production apply guard or claim complete concurrency,
+revocation or power-loss acceptance from this test.
