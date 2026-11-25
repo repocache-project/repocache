@@ -3,81 +3,37 @@ name: PR237 Experimental Native QEMU VMs (non-required)
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-    paths:
-      - '.github/workflows/pr237-booted-native-vm.yml'
-      - 'scripts/ci_pr237_booted_vm.sh'
-      - 'scripts/ci_pr237_guest.sh'
-      - 'scripts/ci_pr237_native_host_integration.py'
-      - 'scripts/ci_pr237_native_journal_reboot.py'
-      - 'scripts/ci_pr237_synthetic_worker_guest.py'
-      - 'scripts/ci_pr237_native_package_guest.py'
-      - 'scripts/ci_pr237_native_socket_guest.py'
-      - 'scripts/ci_v06_native_repository_lifecycle_guest.py'
-      - 'docs/testing/SERVER_V06_NATIVE_LIFECYCLE_VM.md'
-      - 'scripts/ci_pr237_native_package_interrupt_guest.py'
-      - 'docs/testing/PR237_BOOTED_VM.md'
-      - 'docs/testing/V060_NATIVE_VM_COVERAGE_MATRIX.md'
-      - 'scripts/collect_v06_vm_campaign_coverage.py'
-      - 'scripts/ci_v06_vm_nginx_cache_guest.py'
-      - 'scripts/ci_v06_vm_cache_eviction.py'
-      - 'scripts/ci_v06_vm_cache_pressure_guest.py'
-      - 'scripts/ci_server_nginx_enospc_bypass_native.py'
-      - 'docs/testing/SERVER_VM_NATIVE_CACHE_EVICTION.md'
-      - 'scripts/ci_v06_vm_client_cli_guest.py'
-      - 'scripts/ci_v06_vm_signed_client_guest.py'
-      - 'tests/test_v06_vm_campaign_coverage.py'
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  # Disposable development PRs only; keep retries and manual acceptance isolated.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.run_attempt == 1 && format('pr-{0}', github.event.pull_request.number) || format('isolated-{0}-{1}-{2}', github.event_name, github.sha, github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.run_attempt == 1 }}
+
 jobs:
+  impact:
+    uses: ./.github/workflows/supplemental-test-impact.yml
+
   booted-native:
+    needs: impact
+    if: ${{ needs.impact.outputs.vm != 'false' }}
     name: Native VM (${{ matrix.platform }}, ${{ matrix.scenario }})
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        scenario: ${{ fromJSON(needs.impact.outputs.scenarios || '["smoke","native-installer","native-lifecycle","native-package-interruption"]') }}
+        platform: [debian13, almalinux10]
         include:
-          - scenario: smoke
-            platform: debian13
+          - platform: debian13
             image_url: https://cloud.debian.org/images/cloud/trixie/20261001-2618/debian-13-genericcloud-amd64-20261001-2618.qcow2
             image_sha512: f46f0671a6e5bdec5291ab8972bae2f10e5408c2f64a74078f11efc2f06a436a9d0313ed50e0472542eeabf780e9f7c792ac0a314c6c20507fcd9fd81b468c3d
             image_sha256: ''
-          - scenario: smoke
-            platform: almalinux10
-            image_url: https://repo.almalinux.org/almalinux/10/cloud/x86_64/images/AlmaLinux-10-GenericCloud-10.3-20261116.0.x86_64.qcow2
-            image_sha512: ''
-            image_sha256: 845d3a4e41fde973bdbf9763b62a88538c1a1fadc2332a89f6ea01e2c17c78ee
-          - scenario: native-installer
-            platform: debian13
-            image_url: https://cloud.debian.org/images/cloud/trixie/20261001-2618/debian-13-genericcloud-amd64-20261001-2618.qcow2
-            image_sha512: f46f0671a6e5bdec5291ab8972bae2f10e5408c2f64a74078f11efc2f06a436a9d0313ed50e0472542eeabf780e9f7c792ac0a314c6c20507fcd9fd81b468c3d
-            image_sha256: ''
-          - scenario: native-installer
-            platform: almalinux10
-            image_url: https://repo.almalinux.org/almalinux/10/cloud/x86_64/images/AlmaLinux-10-GenericCloud-10.3-20261116.0.x86_64.qcow2
-            image_sha512: ''
-            image_sha256: 845d3a4e41fde973bdbf9763b62a88538c1a1fadc2332a89f6ea01e2c17c78ee
-          # Exact installed-worker repository lifecycle, distinct from #237 recovery.
-          - scenario: native-lifecycle
-            platform: debian13
-            image_url: https://cloud.debian.org/images/cloud/trixie/20261001-2618/debian-13-genericcloud-amd64-20261001-2618.qcow2
-            image_sha512: f46f0671a6e5bdec5291ab8972bae2f10e5408c2f64a74078f11efc2f06a436a9d0313ed50e0472542eeabf780e9f7c792ac0a314c6c20507fcd9fd81b468c3d
-            image_sha256: ''
-          - scenario: native-lifecycle
-            platform: almalinux10
-            image_url: https://repo.almalinux.org/almalinux/10/cloud/x86_64/images/AlmaLinux-10-GenericCloud-10.3-20261116.0.x86_64.qcow2
-            image_sha512: ''
-            image_sha256: 845d3a4e41fde973bdbf9763b62a88538c1a1fadc2332a89f6ea01e2c17c78ee
-          - scenario: native-package-interruption
-            platform: debian13
-            image_url: https://cloud.debian.org/images/cloud/trixie/20261001-2618/debian-13-genericcloud-amd64-20261001-2618.qcow2
-            image_sha512: f46f0671a6e5bdec5291ab8972bae2f10e5408c2f64a74078f11efc2f06a436a9d0313ed50e0472542eeabf780e9f7c792ac0a314c6c20507fcd9fd81b468c3d
-            image_sha256: ''
-          - scenario: native-package-interruption
-            platform: almalinux10
+          - platform: almalinux10
             image_url: https://repo.almalinux.org/almalinux/10/cloud/x86_64/images/AlmaLinux-10-GenericCloud-10.3-20261116.0.x86_64.qcow2
             image_sha512: ''
             image_sha256: 845d3a4e41fde973bdbf9763b62a88538c1a1fadc2332a89f6ea01e2c17c78ee
