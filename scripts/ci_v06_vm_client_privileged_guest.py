@@ -77,8 +77,15 @@ def _debian_fixture(root: Path) -> None:
         assert not prepared["approval_granted"] and not prepared["write_eligible"]
         manifest = state / ("candidate-" + ident + ".json")
         assert not manifest.exists()
+        review = boundary.review_current_candidate(ident, _test_root=root)
+        assert review["source"] == record["source"]
+        assert review["upstream"] == record["upstream"] and review["cache"] == route
+        assert review["route_sha256"] == prepared["route_sha256"]
+        assert review["current_active_catalog_route_matched"]
+        assert not review["approval_issued"] and not review["write_eligible"]
+        assert not manifest.exists() and _snapshot(source) == original
         approved = boundary.approve_current_candidate(
-            ident, prepared["route_sha256"], _test_root=root)
+            ident, review["route_sha256"], _test_root=root)
         assert approved["status"] == "approved" and not approved["write_eligible"]
         assert manifest.is_file() and _snapshot(source) == original
         assert len(backend.hits) >= 2
@@ -87,6 +94,12 @@ def _debian_fixture(root: Path) -> None:
         for mappings in ([], [{"upstream": record["upstream"],
                                 "cache": origin + "/__repocache/repos/changed/"}]):
             catalog.write_text(json.dumps({"schema": 1, "repositories": mappings}))
+            try:
+                boundary.review_current_candidate(ident, _test_root=root)
+            except boundary.BoundaryRefused:
+                pass
+            else:
+                raise AssertionError("Withdrawn or changed route permitted review")
             try:
                 pair.apply_catalog_bound_sandbox(root, ident)
             except pair.PairRefused:

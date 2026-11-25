@@ -408,6 +408,28 @@ def test_prepare_uses_exact_source_and_current_catalog_without_granting_consent(
     snapshot = json.loads(pending.read_text())
     assert snapshot["source_identity"]["inode"] == before.st_ino
     assert snapshot["cache"] == record["cache"]
+    pending_before = pending.read_bytes()
+    pending_stat = pending.stat()
+    review = helper.review_current_candidate(ident, _test_root=tmp_path)
+    assert review == {
+        "schema": 1, "status": "reviewed-read-only", "managed_id": ident,
+        "source": record["source"],
+        "source_kind": "apt-list" if manager == "apt" else "dnf-repo",
+        "source_sha256": record["source_sha256"],
+        "entry_sha256": record["entry_sha256"],
+        "upstream": record["upstream"], "cache": record["cache"],
+        "route_sha256": result["route_sha256"],
+        "proposed_source_sha256": review["proposed_source_sha256"],
+        "companion_required": manager == "apt",
+        "current_active_catalog_route_matched": True,
+        "approval_issued": False, "installed": False, "write_eligible": False,
+    }
+    assert helper.DIGEST.fullmatch(review["proposed_source_sha256"])
+    assert not approved.exists()
+    assert pending.read_bytes() == pending_before
+    assert pending.stat().st_ino == pending_stat.st_ino
+    assert pending.stat().st_mtime_ns == pending_stat.st_mtime_ns
+    assert source.stat().st_ino == before.st_ino
     repeated = helper.prepare_current_candidate(
         record["source_sha256"], record["entry_sha256"], _test_root=tmp_path)
     assert repeated["status"] == "unchanged"
@@ -421,6 +443,8 @@ def test_prepare_uses_exact_source_and_current_catalog_without_granting_consent(
     assert changed["managed_id"] != ident
     assert changed["route_sha256"] != result["route_sha256"]
     assert not changed["approval_granted"]
+    with pytest.raises(helper.BoundaryRefused, match="absent"):
+        helper.review_current_candidate(ident, _test_root=tmp_path)
     with pytest.raises(helper.BoundaryRefused, match="absent"):
         helper.approve_current_candidate(
             ident, result["route_sha256"], _test_root=tmp_path)
@@ -502,3 +526,25 @@ def test_protected_state_bootstrap_refuses_symlink_and_nonempty_lock(tmp_path):
     with pytest.raises(helper.BoundaryRefused):
         helper.bootstrap_protected_state(_test_root=root)
     assert lock.read_bytes() == b"foreign"
+
+def test_review_refuses_nonroot_before_state_access(monkeypatch):
+    monkeypatch.setattr(helper.os, "getresuid", lambda: (1000, 0, 0))
+    monkeypatch.setattr(helper, "_state", lambda *_:
+                        pytest.fail("unprivileged review reached state"))
+    with pytest.raises(helper.BoundaryRefused, match="root authorization"):
+        helper.review_current_candidate(IDENT)
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="Real root-only review fixture")
+def test_review_refuses_foreign_source_inode_and_never_issues_approval(
+        tmp_path, monkeypatch):
+    record, source, pending, approval, _ = _pending_v2(tmp_path)
+    _mock_current_route(monkeypatch)
+    replacement = source.with_name("replacement.list")
+    replacement.write_bytes(source.read_bytes())
+    replacement.chmod(0o644)
+    os.replace(replacement, source)
+    with pytest.raises(helper.BoundaryRefused, match="inode identity"):
+        helper.review_current_candidate(IDENT, _test_root=tmp_path)
+    assert not approval.exists()
+    assert json.loads(pending.read_text()) == record

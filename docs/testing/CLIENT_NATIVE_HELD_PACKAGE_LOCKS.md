@@ -121,3 +121,17 @@ Upstream implementation references:
 https://github.com/rpm-software-management/dnf/blob/master/dnf/lock.py
 and https://github.com/rpm-software-management/dnf5/blob/main/libdnf5/base/transaction.cpp.
 Actual native outcomes at the new HEAD remain NOT VERIFIED until the VM runs.
+
+## Exact local administrator review before consent
+
+The internal `review_current_candidate` operation re-reads the protected
+pending record, exact source inode/digest/attributes and current authenticated
+catalog under the client transaction lock. It returns the exact source
+selection, upstream, cache route and route digest only to the trusted local
+root caller, with proposed source digest and whether a companion is required.
+No original source bytes, key material or attribute values are emitted.
+Do not log the review object or expose it via public status: even a canonical
+repository path can contain sensitive identifiers. The separate approval call
+still requires explicit consent to the exact route and independently repeats
+validation. Review itself neither creates an approval nor edits any source.
+The public CLI remains unchanged; no claim of an enabled production writer.

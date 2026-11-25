@@ -778,11 +778,48 @@ def prepare_current_candidate(source_sha256: str, entry_sha256: str, *,
         raise BoundaryRefused("Protected candidate preparation refused") from exc
 
 
+def review_current_candidate(ident: str, *, _test_root: Path | None = None) -> dict:
+    """Internal, local root-only review of the exact pending proposal.
+
+    No public CLI/status exposure or logging: even a canonical HTTPS path
+    can contain sensitive repository identifiers. The trusted local
+    administrator must compare the selected source and exact destination
+    before explicit consent. No original bytes, attribute values, keys or
+    write recipe leave the protected boundary. Recheck current source and
+    authenticated catalog at review; approval independently rechecks again.
+    """
+    if os.getresuid() != (0, 0, 0) or os.uname().machine != "x86_64":
+        raise BoundaryRefused("Native root authorization required")
+    if type(ident) is not str or not IDENT.fullmatch(ident):
+        raise BoundaryRefused("Invalid protected candidate identifier")
+    root = Path("/") if _test_root is None else Path(_test_root)
+    with _native_metadata_scope(root), _state(root) as (state_fd, owner):
+        with _exclusive_lock(state_fd, owner):
+            record = _manifest(state_fd, ident, pending=True)
+            proposal, origin = _validate_record(
+                root, state_fd, ident, record, pending=True, current_catalog=True)
+            if origin is None or proposal.route_sha256 != record["route_sha256"]:
+                raise BoundaryRefused("Pending review route is unverified")
+            return {
+                "schema": 1, "status": "reviewed-read-only", "managed_id": ident,
+                "source": record["source"], "source_kind": proposal.kind,
+                "source_sha256": record["source_sha256"],
+                "entry_sha256": record["entry_sha256"],
+                "upstream": record["upstream"], "cache": record["cache"],
+                "route_sha256": record["route_sha256"],
+                "proposed_source_sha256": proposal.proposed_sha256,
+                "companion_required": proposal.companion is not None,
+                "current_active_catalog_route_matched": True,
+                "approval_issued": False, "installed": False, "write_eligible": False,
+            }
+
+
 def approve_current_candidate(ident: str, route_sha256: str, *,
                               _test_root: Path | None = None) -> dict:
     """Internal, uninstalled administrative issuance; no package source writes.
 
-    The trusted preparer must have created a root-owned schema-2 pending record.
+    The trusted preparer must have created a root-owned schema-2/3 pending record.
+    The local administrator reviews the exact source and cache URI separately.
     Explicit exact route consent is a digest, not an arbitrary URI or recipe.
     The installed CLI has no entry point to this function.
     """
