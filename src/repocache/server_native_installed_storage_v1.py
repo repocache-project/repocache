@@ -425,14 +425,49 @@ def _create_owned_data(parent, directory, kind, name, marker, stage, uid, gid,
     # A partial stage/leaf/marker is deliberately not deleted or adopted.
 
 
+def _verify_service_data_view(service_root, *, host_directory, segments,
+                              name, kind, expected):
+    """Compare a pinned owned leaf with the live service's mount view.
+
+    The writable managed root itself is the intentional unit bind mount;
+    its children must not introduce further mounts, symlinks or aliases.
+    Neither opening nor checking this view permits a storage write.
+    """
+    with ExitStack() as stack:
+        parent = service_root
+        for segment in segments:
+            fd = os.open(segment, _DIR, dir_fd=parent)
+            stack.callback(os.close, fd)
+            parent = fd
+        if not os.fstatvfs(parent).f_flag & os.ST_RDONLY:
+            _deny("SERVICE_PARENT_WRITABLE")
+        directory = os.open(_LEAF, _DIR, dir_fd=parent)
+        stack.callback(os.close, directory)
+        if (os.fstatvfs(directory).f_flag & os.ST_RDONLY
+                or _identity(os.fstat(directory)) != _identity(os.fstat(host_directory))
+                or _identity(os.stat(_LEAF, dir_fd=parent, follow_symlinks=False))
+                   != _identity(os.fstat(directory))):
+            _deny("SERVICE_STORAGE_IDENTITY_CHANGED")
+        leaf = os.open(name, _DIR if kind == "repository-cache" else _READ,
+                       dir_fd=directory)
+        stack.callback(os.close, leaf)
+        observed = _same(directory, name, leaf)
+        if (_identity(observed) != expected
+                or (kind == "metrics-log" and observed.st_nlink != 1)
+                or os.fstatvfs(leaf).f_flag & os.ST_RDONLY):
+            _deny("SERVICE_DATA_IDENTITY_CHANGED")
+
+
 def _prepare_repository_storage_under_root(root, *, owner, owner_gid, uid,
-                                            gid, labels, document, allow_create):
+                                            gid, labels, document, allow_create,
+                                            service_root=None):
     """Prepare a closed active set under the existing authenticated state lock.
 
     This private descriptor seam does not grant activation, deletion or
     storage repair authority. Never mutate previously owned data.
     """
-    if type(allow_create) is not bool:
+    if (type(allow_create) is not bool
+            or (service_root is not None and (allow_create or type(service_root) is not int))):
         _deny("ARGUMENT_INVALID")
     active, metrics = _repository_storage_intent(document)
     try:
@@ -485,14 +520,28 @@ def _prepare_repository_storage_under_root(root, *, owner, owner_gid, uid,
                 if before is not None and current != before:
                     _deny("DATA_CHANGED")
                 check_roots()
-            for args in plans:
-                _data_identity(*args, allow_missing=False)
+            for args, before in zip(plans, initial):
+                identity = _data_identity(*args, allow_missing=False)
+                if before is not None and identity != before:
+                    _deny("DATA_CHANGED")
+                if service_root is not None:
+                    _, directory, kind, name = args[:4]
+                    _verify_service_data_view(
+                        service_root, host_directory=directory,
+                        segments=_CACHE if kind == "repository-cache" else _LOG,
+                        name=name, kind=kind, expected=identity,
+                    )
+                    if _data_identity(*args, allow_missing=False) != identity:
+                        _deny("DATA_CHANGED")
             check_roots()
         labels.finish()
-        return {"repository_cache_roots_verified": list(active),
-                "metrics_file_verified": metrics,
-                "selinux_enforcing_labels_verified": labels.enforcing,
-                "actual_service_write_verified": False}
+        report = {"repository_cache_roots_verified": list(active),
+                  "metrics_file_verified": metrics,
+                  "selinux_enforcing_labels_verified": labels.enforcing,
+                  "actual_service_write_verified": False}
+        if service_root is not None:
+            report["service_data_mounts_verified"] = True
+        return report
     except InstalledStorageError:
         raise
     except (OSError, ValueError, TypeError, subprocess.SubprocessError):
@@ -562,6 +611,53 @@ def verify_control_storage(distribution):
         raise
     except (OSError, KeyError, ValueError, TypeError, subprocess.SubprocessError):
         _deny("UNVERIFIED")
+
+
+def verify_control_repository_storage(distribution, document, pid):
+    """Read-only active-set proof across PID1 and the signed service view.
+
+    The authenticated caller retains the protected state lock and must
+    independently bind the PID to the exact signed service identity.
+    No namespace entry, creation, relabeling or route activation.
+    """
+    if (os.getresuid() != (0, 0, 0) or os.getresgid() != (0, 0, 0)
+            or distribution not in ("debian", "almalinux")
+            or type(pid) is not int or not 2 <= pid < 2**31):
+        _deny("HOST_UNVERIFIED")
+    _repository_storage_intent(document)
+    try:
+        worker = pwd.getpwnam("www-data" if distribution == "debian" else "nginx")
+        if not (0 < worker.pw_uid < 2**32 - 1 and 0 < worker.pw_gid < 2**32 - 1):
+            _deny("WORKER_IDENTITY_UNVERIFIED")
+        verify_service_storage_mounts(pid)
+        with ExitStack() as stack:
+            host_ns = _identity(os.stat("/proc/1/ns/mnt"))
+            service_ns = _identity(os.stat(f"/proc/{pid}/ns/mnt"))
+            host = os.open("/proc/1/root", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            stack.callback(os.close, host)
+            service = os.open(f"/proc/{pid}/root", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            stack.callback(os.close, service)
+            host_identity = _identity(os.fstat(host))
+            if (host_identity != _identity(os.stat("/"))
+                    or host_identity != _identity(os.fstat(service))
+                    or service_ns == host_ns):
+                _deny("HOST_ROOT_CHANGED")
+            report = _prepare_repository_storage_under_root(
+                host, owner=0, owner_gid=0, uid=worker.pw_uid, gid=worker.pw_gid,
+                labels=_Labels(distribution), document=document, allow_create=False,
+                service_root=service,
+            )
+            verify_service_storage_mounts(pid)
+            if (_identity(os.stat("/proc/1/root")) != host_identity
+                    or _identity(os.stat(f"/proc/{pid}/root")) != host_identity
+                    or _identity(os.stat("/proc/1/ns/mnt")) != host_ns
+                    or _identity(os.stat(f"/proc/{pid}/ns/mnt")) != service_ns):
+                _deny("HOST_ROOT_CHANGED")
+            return report
+    except InstalledStorageError:
+        raise
+    except (OSError, KeyError, ValueError, TypeError, subprocess.SubprocessError):
+        _deny("SERVICE_DATA_UNVERIFIED")
 
 
 def verify_service_storage_mounts(pid):

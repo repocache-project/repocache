@@ -68,3 +68,13 @@ stopped; the fixture restores the original managed include and requires
 the original committed generation, resource hashes and cache/history
 preservation on repeat. This does not exercise authoritative active
 repository APPLY/catalog publication and must not remove that guard.
+
+The read-only active-set verifier additionally binds each marked repository
+cache directory and opt-in metrics inode to the actual dedicated service
+mount view. It pins the PID1 and service roots, requires distinct mount
+namespaces, a read-only shared parent and writable intended leaf mount,
+refuses child mount substitution and verifies the same owner-marked inode
+before and after service-view inspection. It cannot create, adopt, relabel
+or delete data, and reports no worker write proof. The signed booted VM
+fixture exercises it under the state lock before and after the real worker
+cache/metrics exercise. The production APPLY guard remains unchanged.

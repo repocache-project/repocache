@@ -707,8 +707,12 @@ try:
             tx._owned_socket_require_inactive_routes(snapshot)
             identity = tx._owned_live_observe(root)
             storage.verify_service_storage_mounts(identity[0])
+            document = json.load(sys.stdin)
             report = storage.prepare_installed_repository_storage(
-                distribution, json.load(sys.stdin), allow_create=create == "create")
+                distribution, document, allow_create=create == "create")
+            observed = storage.verify_control_repository_storage(
+                distribution, document, identity[0])
+            assert observed == dict(report, service_data_mounts_verified=True)
             layout[3]()
             assert tx._read_owned_resources(state, layout[1], layout[2]) == old
             assert tx._owned_live_observe(root) == identity

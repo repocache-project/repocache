@@ -256,3 +256,75 @@ def test_active_storage_metrics_hardlink_refused_without_truncation(root):
     with pytest.raises(m.InstalledStorageError, match="DATA_METADATA_UNSAFE"):
         _prepare_data(root)
     assert log.read_bytes() == (root / "other").read_bytes() == b"history"
+
+def test_service_view_cannot_be_used_with_creation(root):
+    prepare(root)
+    fd = os.open(root, m._DIR)
+    try:
+        with pytest.raises(m.InstalledStorageError, match="ARGUMENT_INVALID"):
+            m._prepare_repository_storage_under_root(
+                fd, owner=os.getuid(), owner_gid=os.getgid(), uid=os.getuid(),
+                gid=os.getgid(), labels=m._Labels("debian"),
+                document=_data_document(), allow_create=True, service_root=fd)
+        assert not list((root / m.CACHE_ROOT.lstrip("/")).iterdir())
+    finally:
+        os.close(fd)
+
+
+def test_read_only_service_view_is_bound_to_each_marked_leaf(root, monkeypatch):
+    prepare(root)
+    _prepare_data(root)
+    observed = []
+    def inspect(service_root, *, host_directory, segments, name, kind, expected):
+        path = root.joinpath(*segments, m._LEAF, name)
+        assert m._identity(path.lstat()) == expected
+        assert m._identity(path.parent.stat()) == m._identity(os.fstat(host_directory))
+        observed.append((kind, name))
+    monkeypatch.setattr(m, "_verify_service_data_view", inspect)
+    fd = os.open(root, m._DIR)
+    try:
+        report = m._prepare_repository_storage_under_root(
+            fd, owner=os.getuid(), owner_gid=os.getgid(), uid=os.getuid(),
+            gid=os.getgid(), labels=m._Labels("debian"),
+            document=_data_document(), allow_create=False, service_root=fd)
+        assert report["service_data_mounts_verified"] is True
+        assert report["actual_service_write_verified"] is False
+        assert observed == [
+            ("repository-cache", "almalinux-baseos"),
+            ("repository-cache", "debian-trixie-main"),
+            ("metrics-log", "metrics.jsonl"),
+        ]
+    finally:
+        os.close(fd)
+
+
+def test_actual_service_view_rejects_foreign_inode_and_writable_parent(root, monkeypatch):
+    from types import SimpleNamespace
+
+    prepare(root)
+    _prepare_data(root)
+    parent = root / "var/cache/nginx"
+    leaf = parent / m._LEAF / "almalinux-baseos"
+    directory = os.open(leaf.parent, m._DIR)
+    fd = os.open(root, m._DIR)
+    try:
+        # Only mount flags are synthetic here; the descriptor and inode
+        # comparisons use real filesystem objects.
+        monkeypatch.setattr(m.os, "fstatvfs", lambda _: SimpleNamespace(f_flag=0))
+        kw = dict(host_directory=directory, segments=m._CACHE, name=leaf.name,
+                  kind="repository-cache", expected=m._identity(leaf.stat()))
+        with pytest.raises(m.InstalledStorageError, match="SERVICE_PARENT_WRITABLE"):
+            m._verify_service_data_view(fd, **kw)
+        parent_inode = parent.stat().st_ino
+        monkeypatch.setattr(m.os, "fstatvfs", lambda n: SimpleNamespace(
+            f_flag=os.ST_RDONLY if os.fstat(n).st_ino == parent_inode else 0))
+        m._verify_service_data_view(fd, **kw)
+        old = leaf.with_name("retained")
+        leaf.rename(old)
+        leaf.mkdir(mode=0o700)
+        with pytest.raises(m.InstalledStorageError, match="SERVICE_DATA_IDENTITY_CHANGED"):
+            m._verify_service_data_view(fd, **kw)
+        assert old.is_dir() and leaf.is_dir()
+    finally:
+        os.close(fd)
+        os.close(directory)
