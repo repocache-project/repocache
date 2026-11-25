@@ -214,28 +214,36 @@ def bootstrap_protected_state(*, _test_root: Path | None = None) -> dict:
 @contextlib.contextmanager
 def _state(root: Path) -> Iterator[tuple[int, int]]:
     """Read preprovisioned root-owned state; never mkdir/touch."""
-    with _root(root) as (root_fd, owner):
-        current = os.dup(root_fd)
+    with _root(root) as (root_fd, owner), contextlib.ExitStack() as stack:
+        current = root_fd
+        witnesses = []
         try:
             for component, private in (
                 ("var", False), ("lib", False),
                 ("repocache-client", True),
                 ("approved-entries", True),
             ):
-                try:
-                    child = os.open(component, DIR, dir_fd=current)
-                except OSError as exc:
-                    raise BoundaryRefused("Protected client state missing") from exc
-                try:
-                    _checked_directory(child, owner, private=private)
-                except BaseException:
-                    os.close(child)
-                    raise
-                os.close(current)
+                child = os.open(component, DIR, dir_fd=current)
+                stack.callback(os.close, child)
+                witnesses.append((current, component, child, private))
                 current = child
+
+            def recheck() -> None:
+                for parent, component, child, private in witnesses:
+                    _checked_directory(child, owner, private=private)
+                    actual = os.fstat(child)
+                    named = os.stat(component, dir_fd=parent, follow_symlinks=False)
+                    if (actual.st_gid != 0 or
+                            (actual.st_dev, actual.st_ino) != (named.st_dev, named.st_ino)):
+                        raise BoundaryRefused("Protected client directory identity refused")
+                    if private:
+                        metadata.private_state_attributes(child)
+
+            recheck()
             yield current, owner
-        finally:
-            os.close(current)
+            recheck()
+        except (OSError, pre.PreflightError) as exc:
+            raise BoundaryRefused("Protected client state refused") from exc
 
 
 @contextlib.contextmanager

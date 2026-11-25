@@ -20,7 +20,10 @@ under `/var/lib/repocache-client/approved-entries`, opened by anchored
 `O_DIRECTORY|O_NOFOLLOW` file descriptors. It requires pre-provisioned
 private `0700` state, existing `0600` root-owned and single-linked manifest
 and exclusive flock inode, stable pathname/inode metadata, bounded manifest
-bytes and no unknown xattrs. It never creates the state or a lock file. All
+bytes and no unknown xattrs. Registry access checks root group ownership,
+private-directory attributes and retained directory identities before and after
+use, consistent with the bootstrap checks. Validation never creates the state
+or a lock file. All
 filesystem inspection is performed while holding the exclusive lock
 nonblockingly; a competing client operation fails immediately. The lock inode
 and source inode must not carry unreviewed extended attributes; real SELinux

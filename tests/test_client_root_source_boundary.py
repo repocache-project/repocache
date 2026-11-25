@@ -216,6 +216,46 @@ def test_labelled_source_and_lock_xattrs_fail_closed(tmp_path):
         assert helper.validate(IDENT, _test_root=tmp_path)["write_eligible"] is False
 
 
+@pytest.mark.skipif(os.geteuid() != 0, reason="Protected registry requires real root")
+@pytest.mark.parametrize("relative", ["var/lib/repocache-client",
+                                      "var/lib/repocache-client/approved-entries"])
+def test_registry_directory_metadata_matches_bootstrap(tmp_path, relative):
+    _, source, manifest, lock = private_fixture(tmp_path)
+    directory = tmp_path / relative
+    original = source.read_bytes(), manifest.read_bytes(), lock.stat().st_ino
+    assert helper.validate(IDENT, _test_root=tmp_path)["write_eligible"] is False
+    os.chown(directory, 0, 65534)
+    try:
+        with pytest.raises(helper.BoundaryRefused):
+            helper.validate(IDENT, _test_root=tmp_path)
+    finally:
+        os.chown(directory, 0, 0)
+    try:
+        os.setxattr(directory, "user.repocache-ci-boundary", b"label")
+    except (OSError, AttributeError) as exc:
+        pytest.skip(f"Container filesystem does not expose user xattrs: {exc}")
+    try:
+        with pytest.raises(helper.BoundaryRefused):
+            helper.validate(IDENT, _test_root=tmp_path)
+    finally:
+        os.removexattr(directory, "user.repocache-ci-boundary")
+    assert helper.validate(IDENT, _test_root=tmp_path)["write_eligible"] is False
+    assert (source.read_bytes(), manifest.read_bytes(), lock.stat().st_ino) == original
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="Protected registry requires real root")
+def test_registry_directory_identity_rechecked_after_operation(tmp_path):
+    _, _, manifest, _ = private_fixture(tmp_path)
+    directory = manifest.parent
+    renamed = directory.with_name("detached")
+    with pytest.raises(helper.BoundaryRefused):
+        with helper._state(tmp_path):
+            directory.rename(renamed)
+            directory.mkdir(mode=0o700)
+    assert (renamed / manifest.name).is_file()
+    assert not manifest.exists()
+
+
 @pytest.mark.parametrize("mode", [
     "exact", "withdrawn", "changed-path", "different-upstream",
     "prefix-only", "foreign-origin", "legacy", "origin-drift", "offline",
