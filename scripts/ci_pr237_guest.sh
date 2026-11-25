@@ -42,7 +42,12 @@ case "$phase" in
       apt-get update -qq
       DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends python3-cryptography python3-pytest openssl curl gnupg
     else
-      dnf -y -q install python3-cryptography python3-pytest openssl curl gnupg2 createrepo_c
+      dnf -y -q install python3-cryptography python3-pytest openssl curl gnupg2 createrepo_c rpm-build rpm-sign
+      if command -v dnf5 >/dev/null 2>&1; then
+        dnf -y -q install dnf5-plugins
+      else
+        dnf -y -q install dnf-plugins-core
+      fi
     fi
     cd /home/pr237ci/source
     export PYTHONPATH=/home/pr237ci/source/src

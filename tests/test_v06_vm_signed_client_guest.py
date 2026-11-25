@@ -49,8 +49,12 @@ def test_native_manager_selection_preserves_sources_and_packages(
                                 (manager, kwargs)
                             ),
                         ))
+    rpm_calls = []
+    monkeypatch.setitem(sys.modules, "ci_dnf_signed_rpm_fallback",
+                        SimpleNamespace(probe_booted_vm=lambda: rpm_calls.append(True)))
     guest.main(platform)
     assert calls == [expected]
+    assert rpm_calls == ([True] if platform == "almalinux10" else [])
     assert "PASS: booted-native-real-manager-signed-fallback" in capsys.readouterr().out
 
 
