@@ -1,6 +1,18 @@
 # Release acceptance: candidate gates and published smoke
 
-> **Current target alignment (2026-11-02):** The maintainer approved skipping public v0.5.0 and making **v0.6.0 the next public release**, delivering a complete server. All original Stage A/Stage B obligations below, including [#76](https://github.com/teixemf/repocache/issues/76), [#88](https://github.com/teixemf/repocache/issues/88), the genuine official Node24 `release.yml` upload/readback gate transferred from #74, and owner-only signing and publication, remain mandatory without waiver. Test an actual *public v0.4.0 -> final signed v0.6.0* path; any v0.5.0-specific candidate wording below is historical. The currently approved legacy schema-1/offline-wheelhouse eight-asset profile remains the baseline unless separately changed by reviewed maintainer decision. See [v0.6.0 release target](RELEASE_TARGET_V0.6.0.md). This clarification does not authorize a tag, release dispatch, signing, staging, publication or production activation.
+> **Maintainer-approved v0.6.0 first-install exception (2026-11-07):**
+> The complete-server v0.6.0 is the first operational installation.
+> The explicit owner instruction **removes the v0.4.0 -> v0.6.0 upgrade**
+> and old-runtime compatibility gate, replacing it with genuine owner-signed
+> v0.6.0 clean install, same-version repair, failure/rollback, native
+> Debian 13 / AlmaLinux 10 and safe legacy-state refusal. No v0.4.0
+> API redirect repair, migration or old executable execution is required.
+> This is NOT a general waiver of future upgrade safety, #76/#88 security,
+> owner-controlled signing/publishing, or Node24 #74-G4 upload/readback
+> and explicit owner acceptance. The schema-1 eight-asset offline
+> wheelhouse and pinned Ed25519 key remain the signed release baseline.
+> Historical v0.4.0 source/release evidence is preserved immutable.
+> See #25/#76/#88 and [v0.6.0 release target](RELEASE_TARGET_V0.6.0.md).
 
 
 This policy applies to subsequent releases. First-public v0.4.0 is special:
@@ -25,8 +37,10 @@ version-specific signed trust/baseline policy (issue #76).
 
 ## Stage A: release candidate (prepublication, mandatory for v0.5.0 onward)
 
-1. Freeze the reviewed commit, compatibility policy and dependencies. Test
-   an upgrade from the most recent already published stable version.
+1. Freeze the reviewed commit, compatibility policy and dependencies.
+   For v0.6.0 require a clean installation and reject unsupported existing state.
+   Later versions require an explicitly approved compatibility matrix and true
+   upgrade tests for supported prior versions.
 2. Produce reproducible candidate source archive and offline wheelhouse.
    Authenticate the exact FINAL candidate with the genuine offline publisher
    signature and an independently provisioned trust anchor, not a disposable
@@ -34,7 +48,7 @@ version-specific signed trust/baseline policy (issue #76).
 3. Before extracting or running candidate code, verify signatures, source
    digest, signed policy, runtime wheelchain hashes, SBOM and lockfile.
 4. On disposable Debian 13 / Python 3.13 and AlmaLinux 10 / Python 3.12
-   systems: clean install, upgrade from the prior public stable, selected
+   systems: clean install, upgrades where explicitly supported, selected
    version, same-version repair, rootless privileges, journal recovery,
    rollback, concurrency and failure injection. Preserve NGINX/TLS/APT/DNF.
 5. Reject incompatible and unsupported downgrade paths, including all
@@ -51,7 +65,7 @@ Its accepted native-container tests and immutable Actions acceptance
 artifact are prerequisites for the separate operator publication approval.
 
 This workflow and publication guard cannot be declared **end-to-end PASS**
-until a real owner-signed v0.5.0 candidate and Draft Release exist. The
+until a real owner-signed v0.6.0 candidate and Draft Release exist. The
 private draft is not an immutable public endpoint, and a successful
 workflow alone does not prevent an administrator from overriding the
 manual publication process. Any draft asset change after the CI jobs
@@ -64,8 +78,9 @@ invalidates their acceptance.
    approved public asset identities, sizes and SHA-256 hashes.
 3. Download the actual public assets, verify independent public-key fingerprint,
    real Ed25519 manifest/provenance signatures, code and wheelhouse identity.
-4. Run the real REPOCACHE discovery CLI, smoke a disposable native public install
-   or upgrade, and record real exit codes and host identity.
+4. Run the real REPOCACHE discovery CLI and smoke a disposable native public
+   clean installation (v0.6.0) or explicitly supported upgrade for later
+   releases; record real exit codes and host identity.
 5. Report PASS/FAIL/NOT VERIFIED with a concrete workflow/run. If broken,
    investigate and publish a newly reviewed signed version, never rewrite
    immutable release assets or tags.

@@ -1,20 +1,16 @@
 # Roadmap
 
-The initial public milestone is **v0.4.0**: establish a clean Apache-2.0 public source tree, enforce safe GitHub branch/tag rules, verify CI on the exact reviewed head, fix security blockers, rehearse isolated upgrade/rollback for Debian 13 and AlmaLinux 10, and publish an independently signed release **only after explicit maintainer approval**.
+GitHub [milestones](https://github.com/repocache-project/repocache/milestones) and original issue acceptance criteria are the live backlog and delivery record. This page summarizes approved release boundaries, not readiness.
 
-Future work includes complete server provisioning, richer client repository submission/review, operational observability and additional tested recovery scenarios.
+| Version | Approved boundary |
+| --- | --- |
+| v0.4.0 | Published 2026-10-21; existing-NGINX frontend. |
+| v0.5.0 | Historical integration work; no intermediate public release. |
+| v0.6.0 | Next public release: complete CLI-first caching server on clean Debian 13 and AlmaLinux 10. No v0.4.0 upgrade or legacy migration. |
+| v0.7.0 and later | Future work; no new scope or release authorization is implied. |
 
-The historic private project's issue/PR numbers are deliberately **not mirrored** here. Public issues will be created with new acceptance criteria and identifiers.
+## Current delivery
 
-## Current work coordination
+Use the [approved v0.6.0 target](docs/RELEASE_TARGET_V0.6.0.md), [acceptance stages](docs/ACCEPTANCE_STAGES.md), and [release acceptance policy](docs/RELEASE_ACCEPTANCE_POLICY.md). Finish existing approved work before starting unrelated future features. Preserve original applicable criteria, safe legacy-state refusal, same-version repair, recovery, native acceptance and publisher trust.
 
-The description above records the initial public-release plan; it is not a
-live issue-state ledger. Check [GitHub milestones](https://github.com/teixemf/repocache/milestones)
-and current issue acceptance criteria for release ownership and status.
-
-Contributors and AI-assisted sessions should start with [AGENTS.md](AGENTS.md)
-and [the development workflow](docs/DEVELOPMENT_WORKFLOW.md).
-For v0.5.0, consult the [scope and acceptance ledger](docs/RELEASE_SCOPE_V0.5.0.md);
-its proposed freeze and scope corrections are **not adopted decisions** until
-explicitly approved and integrated. The binding candidate and publication gates
-remain in [the release acceptance policy](docs/RELEASE_ACCEPTANCE_POLICY.md).
+Contributors and AI-assisted sessions start with [AGENTS.md](AGENTS.md) and [the development workflow](docs/DEVELOPMENT_WORKFLOW.md). Historical planning remains in [v0.5.0 scope](docs/RELEASE_SCOPE_V0.5.0.md); it is not the current release target.
