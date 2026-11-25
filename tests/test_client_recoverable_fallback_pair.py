@@ -34,7 +34,7 @@ def test_duplicate_journal_keys_cannot_be_accepted():
         lab._no_duplicates([("id", "a"), ("id", "b")])
 
 
-@pytest.mark.parametrize("verb", [lab.apply_sandbox, lab.restore_sandbox,
+@pytest.mark.parametrize("verb", [lab.apply_sandbox, lab.apply_retaining_apt_companion_sandbox, lab.restore_sandbox,
                                   lab.recover_sandbox])
 def test_no_transaction_may_target_real_root(verb):
     with pytest.raises(lab.PairRefused, match="Production root"):
@@ -143,3 +143,9 @@ def test_journal_rejects_recomputed_digests_for_unapproved_proposal(tmp_path, mo
             lab._get_journal(fd, ident)
     finally:
         os.close(fd)
+
+
+def test_retention_bytes_are_original_upstream_not_cache():
+    assert lab._retained_bytes({"approval": {"upstream": "https://example.org/repo/",
+                                            "cache": "https://cache.example.org/repo/"}}) == (
+        b"https://example.org/repo/\tpriority:1\n")

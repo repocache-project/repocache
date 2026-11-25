@@ -104,7 +104,7 @@ def _journal_name(ident: str) -> str:
 
 
 def _source_attrs(journal: dict) -> tuple[tuple[str, bytes], ...]:
-    if journal["schema"] == 2:
+    if journal["schema"] in (2, 4):
         return ()
     encoded = journal["source_attributes"]
     if type(encoded) is not list or len(encoded) > security_metadata.MAX_ATTRS:
@@ -150,10 +150,12 @@ def _get_journal(fd: int, ident: str) -> dict | None:
         "original_digest", "proposed_digest", "mirror_digest",
         "approval", "approval_sha256",
     }
-    if type(j) is dict and j.get("schema") == 3:
+    if type(j) is dict and j.get("schema") in (3, 5):
         required.add("source_attributes")
+    if type(j) is dict and j.get("schema") in (4, 5):
+        required.add("retained_id")
     if (type(j) is not dict or set(j) != required
-            or type(j["schema"]) is not int or j["schema"] not in (2, 3)
+            or type(j["schema"]) is not int or j["schema"] not in (2, 3, 4, 5)
             or type(j["id"]) is not str or j["id"] != ident
             or type(j["approval"]) is not dict
             or type(j["approval_sha256"]) is not str
@@ -179,6 +181,16 @@ def _get_journal(fd: int, ident: str) -> dict | None:
                 type(j["restore_id"]) is not list or len(j["restore_id"]) != 2
                 or any(type(x) is not int or x < 0 for x in j["restore_id"])))):
         raise PairRefused("Unexpected protected journal schema")
+    if j["schema"] in (4, 5):
+        retained = j["retained_id"]
+        if (j["companion"] is None or j["gid"] != 0 or j["mode"] != 0o644
+                or (retained is not None and (
+                    type(retained) is not list or len(retained) != 2
+                    or any(type(x) is not int or x < 0 for x in retained)
+                    or retained == j["mirror_id"]
+                    or j["phase"] in ("armed", "installed")))
+                or (j["restore_id"] is not None and retained is None)):
+            raise PairRefused("Invalid retained companion journal identity")
     original, proposed = _decode(j["original"]), _decode(j["proposed"])
     mirror = _decode(j["mirror"])
     if (_hash(original) != j["original_digest"] or
@@ -204,7 +216,7 @@ def _get_journal(fd: int, ident: str) -> dict | None:
                 or approval["source_sha256"] != j["original_digest"]
                 or _hash(approval["cache"].encode("ascii")) != approval["route_sha256"]):
             raise PairRefused("Journal approval identity mismatch")
-        if (approval["schema"] == 3) != (j["schema"] == 3):
+        if (approval["schema"] == 3) != (j["schema"] in (3, 5)):
             raise PairRefused("Journal attribute schema differs from approval")
         _source_attrs(j)
         if approval["schema"] in (2, 3):
@@ -358,8 +370,22 @@ def apply_catalog_bound_sandbox(root: Path, ident: str, *, crash: str | None = N
     return _apply_sandbox(root, ident, crash=crash, current_catalog=True)
 
 
+def apply_retaining_apt_companion_sandbox(
+        root: Path, ident: str, *, crash: str | None = None,
+        current_catalog: bool = True) -> dict:
+    """New APT-only rollback semantics in marked disposable roots.
+
+    The offline option is exclusively for synthetic root fixtures. Existing
+    lab schemas are not silently migrated; neither entry is installed.
+    """
+    if type(current_catalog) is not bool:
+        raise PairRefused("Invalid fixture catalog mode")
+    return _apply_sandbox(root, ident, crash=crash,
+                          current_catalog=current_catalog, retain_companion=True)
+
+
 def _apply_sandbox(root: Path, ident: str, *, crash: str | None,
-                   current_catalog: bool) -> dict:
+                   current_catalog: bool, retain_companion: bool = False) -> dict:
     root = Path(root)
     if root == Path("/"):
         raise PairRefused("Production root is forbidden")
@@ -372,7 +398,11 @@ def _apply_sandbox(root: Path, ident: str, *, crash: str | None,
                 source = journal["source"] if journal is not None else approved["source"]
                 recheck = scope.enter_context(
                     locks.hold_existing_native_package_locks(_manager(source), root=root, revalidation=True))
+                if retain_companion and _manager(source) != "apt":
+                    raise PairRefused("Retained companion is APT-only")
                 if journal is not None:
+                    if retain_companion != (journal["schema"] in (4, 5)):
+                        raise PairRefused("Existing transaction uses a different rollback contract")
                     if journal["phase"] != "installed":
                         raise PairRefused("Interrupted or restored transaction needs review")
                     approval = boundary._manifest(statefd, ident)
@@ -457,6 +487,11 @@ def _apply_sandbox(root: Path, ident: str, *, crash: str | None,
                 if approval["schema"] == 3:
                     j["schema"] = 3
                     j["source_attributes"] = [[name, _blob(value)] for name, value in attrs]
+                if retain_companion:
+                    if companion is None:
+                        raise PairRefused("Retained companion requires an APT proposal")
+                    j["schema"] += 2
+                    j["retained_id"] = None
                 recheck()
                 _put_journal(statefd, ident, j)
                 _crash(crash, "armed")
@@ -503,6 +538,48 @@ def _apply_sandbox(root: Path, ident: str, *, crash: str | None,
         raise PairRefused("Paired transaction refused") from exc
 
 
+def _retained_bytes(j: dict) -> bytes:
+    # _get_journal has recompiled the exact approval and original source.
+    # Never accept a new URI, user-supplied neutralization bytes or a cache.
+    return (j["approval"]["upstream"] + "\tpriority:1\n").encode("ascii")
+
+
+def _neutralize_companion(root, fdstate, ident, j, *, recheck, crash):
+    """Journal a new inode, publish only original upstream, then restore source."""
+    payload = _retained_bytes(j)
+    mirror = _decode(j["mirror"])
+    with atom._source_directory(root, j["companion"]) as (fd, leaf):
+        current = _read_named(fd, leaf)
+        if j["retained_id"] is not None and _matches(current, payload, j["retained_id"]):
+            _metadata(current[1], j)
+            return
+        if not _matches(current, mirror, j["mirror_id"]):
+            raise PairRefused("Retained companion baseline differs")
+        _metadata(current[1], j)
+        temp = ".repocache-atomic-" + ident
+        if j["retained_id"] is None:
+            recheck()
+            temp, new_id = atom._write_new(fd, leaf, ident, payload, current[1])
+            j["retained_id"] = list(new_id)
+            j["phase"] = "restore-armed"
+            recheck()
+            _put_journal(fdstate, ident, j)
+            _crash(crash, "retention-armed")
+        staged = _read_named(fd, temp)
+        if not _matches(staged, payload, j["retained_id"]):
+            raise PairRefused("Foreign retained companion temporary inode")
+        _metadata(staged[1], j)
+        if _read_named(fd, leaf) != current:
+            raise PairRefused("Companion changed before neutralization")
+        recheck()
+        atom._replace(fd, temp, leaf, tuple(j["mirror_id"]))
+        verified = _read_named(fd, leaf)
+        if not _matches(verified, payload, j["retained_id"]):
+            raise PairRefused("Retained companion readback mismatch")
+        _metadata(verified[1], j)
+        _crash(crash, "companion-neutralized")
+
+
 def _restore_locked(root: Path, fdstate: int, ident: str, j: dict,
                     *, recheck, crash: str | None = None) -> dict:
     recheck()
@@ -520,21 +597,30 @@ def _restore_locked(root: Path, fdstate: int, ident: str, j: dict,
             current, original, j["restore_id"])
         if not (from_original or from_proposed or from_restored):
             raise PairRefused("Foreign source during transaction recovery")
+    retained_contract = j["schema"] in (4, 5)
+    neutral = False
     if j["companion"] is not None:
         with atom._source_directory(root, j["companion"]) as (fd, leaf):
             mirror_state = _read_named(fd, leaf)
-            if (mirror_state is not None and
+            neutral = (retained_contract and j["retained_id"] is not None
+                       and _matches(mirror_state, _retained_bytes(j), j["retained_id"]))
+            if (mirror_state is not None and not neutral and
                     not _matches(mirror_state, mirror, j["mirror_id"])):
                 raise PairRefused("Foreign mirror during transaction recovery")
             if mirror_state is not None:
                 _metadata(mirror_state[1], j)
+            if retained_contract and (from_proposed or j["retained_id"] is not None):
+                if mirror_state is None or (from_restored and not neutral):
+                    raise PairRefused("Required retained companion missing or changed")
     else:
         mirror_state = None
 
     # For successful installations, recover() preserves the committed state
     # unless explicitly asked to restore. For armed partial commits, revert.
     if j["phase"] == "restored":
-        if not (from_original or from_restored) or mirror_state is not None:
+        expected_mirror = (neutral if retained_contract and j["retained_id"] is not None
+                           else mirror_state is None)
+        if not (from_original or from_restored) or not expected_mirror:
             raise PairRefused("Restored transaction modified externally")
         return {"status": "restored", "write_eligible": False}
     if (j["phase"] == "installed" and
@@ -547,6 +633,11 @@ def _restore_locked(root: Path, fdstate: int, ident: str, j: dict,
                                   j["companion"] is not None and
                                   mirror_state is None):
         raise PairRefused("Source committed without its required mirror")
+
+    if retained_contract and mirror_state is not None:
+        # Even an interrupted companion-only publication is retained.
+        # APT may have parsed the old source before the native lists lock.
+        _neutralize_companion(root, fdstate, ident, j, recheck=recheck, crash=crash)
 
     if from_proposed:
         with atom._source_directory(root, j["source"]) as (fd, leaf):
@@ -578,11 +669,12 @@ def _restore_locked(root: Path, fdstate: int, ident: str, j: dict,
             _crash(crash, "source-restored")
     elif not (from_original or from_restored):
         raise PairRefused("Unrecognized restore state")
-    if j["companion"] is not None:
+    if j["companion"] is not None and not retained_contract:
         with atom._source_directory(root, j["companion"]) as (fd, leaf):
             recheck()
             _remove_known(fd, leaf, mirror, j["mirror_id"])
-    _crash(crash, "companion-removed")
+    if not retained_contract:
+        _crash(crash, "companion-removed")
     if from_original:
         # No source replacement happened: only a journalled temp can go.
         with atom._source_directory(root, j["source"]) as (fd, _):
@@ -594,6 +686,16 @@ def _restore_locked(root: Path, fdstate: int, ident: str, j: dict,
             recheck()
             _remove_known(fd, ".repocache-atomic-" + ident,
                           mirror, j["mirror_id"])
+    if retained_contract:
+        with atom._source_directory(root, j["companion"]) as (fd, leaf):
+            observed = _read_named(fd, leaf)
+            if j["retained_id"] is None:
+                if observed is not None:
+                    raise PairRefused("Unexpected companion after cancelled publication")
+            elif not _matches(observed, _retained_bytes(j), j["retained_id"]):
+                raise PairRefused("Retained companion changed before completion")
+            else:
+                _metadata(observed[1], j)
     j["phase"] = "restored"
     recheck()
     _put_journal(fdstate, ident, j)

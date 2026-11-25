@@ -373,6 +373,62 @@ def hostile(manager):
         print(f"{manager}: root-lock and production-root refusal PASS", flush=True)
 
 
+def retained_apt_matrix():
+    """Exercise durable boundaries and real SIGKILL; no installed writer."""
+    upstream = b"https://deb.example.org/debian/\tpriority:1\n"
+    for point in ("armed", "companion", "source", "retention-armed",
+                  "companion-neutralized", "restore-armed", "source-restored", None):
+        with tempfile.TemporaryDirectory(prefix="repocache-retained-apt-") as place:
+            root = Path(place)
+            source, mirror, _, state = build(root, "apt")
+            before = source.read_bytes()
+            apply = lambda **kw: pair.apply_retaining_apt_companion_sandbox(
+                root, IDENT, current_catalog=False, **kw)
+            applying = point in ("armed", "companion", "source")
+            if not applying:
+                assert apply()["status"] == "installed-sandbox"
+                assert apply()["status"] == "unchanged"
+                refuses(lambda: pair.apply_sandbox(root, IDENT),
+                        "Legacy entry must not change new recovery contract")
+            if point is None:
+                assert pair.restore_sandbox(root, IDENT)["status"] == "restored"
+            else:
+                pid = os.fork()
+                if pid == 0:
+                    def kill_at(active, phase):
+                        if active == phase:
+                            os.kill(os.getpid(), signal.SIGKILL)
+                    pair._crash = kill_at
+                    if applying:
+                        apply(crash=point)
+                    else:
+                        pair.restore_sandbox(root, IDENT, crash=point)
+                    os._exit(77)
+                _, status = os.waitpid(pid, 0)
+                assert os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGKILL
+            assert pair.recover_sandbox(root, IDENT)["status"] == "restored"
+            assert source.read_bytes() == before
+            if point == "armed":
+                assert not mirror.exists()
+            else:
+                assert mirror.read_bytes() == upstream
+                assert mirror.stat().st_uid == mirror.stat().st_gid == 0
+                assert mirror.stat().st_mode & 0o777 == 0o644
+                saved = mirror.stat().st_ino
+                assert pair.recover_sandbox(root, IDENT)["status"] == "restored"
+                assert mirror.stat().st_ino == saved
+                # A matching digest in a foreign inode is not ownership.
+                replacement = mirror.with_suffix(".foreign")
+                replacement.write_bytes(upstream)
+                os.replace(replacement, mirror)
+                refuses(lambda: pair.recover_sandbox(root, IDENT),
+                        "Foreign retained inode must be refused")
+                assert mirror.read_bytes() == upstream
+            refuses(apply, "Restored approval ID cannot be reused")
+            assert not list(source.parent.glob(".repocache-atomic-*"))
+            print(f"apt: retained companion recovery {point} PASS", flush=True)
+
+
 if __name__ == "__main__":
     if (len(sys.argv) != 2 or sys.argv[1] not in ("apt", "dnf")
             or os.geteuid() != 0 or
@@ -385,5 +441,7 @@ if __name__ == "__main__":
     sigkill_recovery(manager)
     sigkill_restore(manager)
     hostile(manager)
+    if manager == "apt":
+        retained_apt_matrix()
     print(f"{manager}: paired transaction full disposable-native matrix PASS",
           flush=True)
