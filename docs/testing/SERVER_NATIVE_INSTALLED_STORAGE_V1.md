@@ -90,3 +90,13 @@ the actual distro and refuse a cross-distro worker identity or switch.
 AlmaLinux's prior HTTP 502 remains unresolved pending bounded native
 upstream diagnostics; no SELinux booleans, policy or trust checks are
 relaxed. No active-route guard is removed.
+
+On a failed upstream request the disposable AlmaLinux guest also attempts a
+read-only recent AVC lookup and reports only whether an enforcing NGINX
+worker denial of the fixture TCP connection was observed. Missing audit
+support, unmatched events or excessive output are NOT VERIFIED, not a
+negative security finding. No raw audit records are emitted. On an
+unexpected socket refusal the guest reports only state/WAL file presence
+alongside the existing systemd status; these observations do not establish
+the cause, commit, rollback or recovery. All original assertions remain
+mandatory; diagnostic output cannot convert a failed run to PASS.

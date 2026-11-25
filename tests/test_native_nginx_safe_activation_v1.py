@@ -538,3 +538,28 @@ def test_enabled_inactive_managed_restart_never_stops_replaced_master(monkeypatc
             11, "debian", host._BOOTSTRAP_CONFIG, root_fd=10, unit_bytes=b"signed")
     assert state["commands"] == ["start"]
     assert state["enabled"]
+
+
+def test_fixture_selinux_connect_denied_matches_only_current_enforcing_worker():
+    from scripts.ci_native_nginx_activate_guest import fixture_selinux_connect_denied
+
+    record = ('type=AVC msg=audit(1.0:1): avc:  denied  { name_connect } '
+              'for pid=123 comm="nginx" dest=8008 '
+              'scontext=system_u:system_r:httpd_t:s0 '
+              'tcontext=system_u:object_r:http_port_t:s0 tclass=tcp_socket '
+              'permissive=0')
+    assert fixture_selinux_connect_denied(record, {123})
+    assert not fixture_selinux_connect_denied(record, {124})
+    assert not fixture_selinux_connect_denied(record, set())
+    for old, new in (
+        ("type=AVC", "type=SYSCALL"),
+        ("name_connect", "name_bind"),
+        ('comm="nginx"', 'comm="python"'),
+        ("dest=8008", "dest=8009"),
+        (":httpd_t:", ":unconfined_t:"),
+        ("tclass=tcp_socket", "tclass=udp_socket"),
+        ("permissive=0", "permissive=1"),
+    ):
+        assert not fixture_selinux_connect_denied(record.replace(old, new), {123})
+    assert not fixture_selinux_connect_denied("x" * (1024 * 1024 + 1) + record, {123})
+    assert not fixture_selinux_connect_denied(record.replace(" dest=8008", "\n dest=8008"), {123})

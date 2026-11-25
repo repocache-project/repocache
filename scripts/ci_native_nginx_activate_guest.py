@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import socket
 import subprocess
@@ -26,6 +27,29 @@ OWN = "repocache-nginx.service"
 def run(*cmd: str) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output=True, text=True, timeout=45,
                           check=False)
+
+
+def fixture_selinux_connect_denied(raw: str, worker_pids: set[int]) -> bool:
+    """Match only an enforcing AVC for this disposable upstream fixture."""
+    if len(raw) > 1024 * 1024 or not worker_pids:
+        return False
+    for line in raw.splitlines():
+        if not re.search(r"\btype=AVC\b", line):
+            continue
+        if not re.search(r"\bavc:\s+denied\s+\{\s*name_connect\s*\}", line):
+            continue
+        pid = re.search(r"(?:^|\s)pid=([0-9]{1,10})(?:\s|$)", line)
+        if pid is None or int(pid.group(1)) not in worker_pids:
+            continue
+        if all(re.search(pattern, line) for pattern in (
+            r'(?:^|\s)comm="nginx"(?:\s|$)',
+            r"(?:^|\s)dest=8008(?:\s|$)",
+            r"(?:^|\s)scontext=[^\s:]+:[^\s:]+:httpd_t:[^\s]+",
+            r"(?:^|\s)tclass=tcp_socket(?:\s|$)",
+            r"(?:^|\s)permissive=0(?:\s|$)",
+        )):
+            return True
+    return False
 
 
 def require_status(unit: str, active: bool, enabled: bool) -> None:
@@ -272,6 +296,11 @@ def verify_dedicated_socket(*, bootstrap: bool = False, pending: bool = False) -
                              "-p", "ActiveState", "-p", "SubState", "-p", "Result",
                              "-p", "ExecMainStatus")
                 print("DEDICATED_SOCKET_DIAGNOSTIC: " + status.stdout, flush=True)
+                print("DEDICATED_SOCKET_STATE_PRESENT: "
+                      + str((STATE / "state-v2.json").is_file()), flush=True)
+                print("DEDICATED_SOCKET_WAL_PRESENT: "
+                      + str((STATE / ".state-v2-owned-nginx.pending").is_file()),
+                      flush=True)
                 raise
             assert result["status"] == expected, result["status"]
             assert result["transaction_completed"] is True
@@ -830,6 +859,7 @@ finally:
         verify_service_storage_mounts(master)
         children = Path(f"/proc/{master}/task/{master}/children").read_text().split()
         observed_worker = False
+        worker_pids: set[int] = set()
         for pid in children:
             if not Path(f"/proc/{pid}/cmdline").read_bytes().startswith(b"nginx: worker process"):
                 continue
@@ -840,6 +870,7 @@ finally:
             if distribution == "almalinux":
                 assert b":httpd_t:" in Path(f"/proc/{pid}/attr/current").read_bytes()
             observed_worker = True
+            worker_pids.add(int(pid))
         assert observed_worker
         for path, payload in payloads.items():
             for expected in (b"miss", b"hit"):
@@ -855,6 +886,18 @@ finally:
                         if category in journal.stdout:
                             print("STORAGE_FIXTURE_UPSTREAM_ERROR: " + category, flush=True)
                     if distribution == "almalinux":
+                        # Read-only evidence, no policy change or raw audit output.
+                        try:
+                            audit = run("/usr/sbin/ausearch", "-m", "AVC",
+                                        "-ts", "recent", "--raw")
+                            confirmed = (audit.returncode == 0 and
+                                         fixture_selinux_connect_denied(
+                                             audit.stdout, worker_pids))
+                        except (OSError, subprocess.TimeoutExpired):
+                            confirmed = False
+                        print("STORAGE_FIXTURE_SELINUX_CONNECT_DENIAL: "
+                              + ("OBSERVED" if confirmed else "NOT_VERIFIED"),
+                              flush=True)
                         for boolean in ("httpd_can_network_connect", "httpd_can_network_relay"):
                             observed = run("/usr/sbin/getsebool", boolean)
                             if observed.returncode == 0 and observed.stdout.strip() in (
