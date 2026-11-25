@@ -20,7 +20,10 @@ under `/var/lib/repocache-client/approved-entries`, opened by anchored
 `O_DIRECTORY|O_NOFOLLOW` file descriptors. It requires pre-provisioned
 private `0700` state, existing `0600` root-owned and single-linked manifest
 and exclusive flock inode, stable pathname/inode metadata, bounded manifest
-bytes and no unknown xattrs. It never creates the state or a lock file. All
+bytes and no unknown xattrs. Registry access checks root group ownership,
+private-directory attributes and retained directory identities before and after
+use, consistent with the bootstrap checks. Validation never creates the state
+or a lock file. All
 filesystem inspection is performed while holding the exclusive lock
 nonblockingly; a competing client operation fails immediately. The lock inode
 and source inode must not carry unreviewed extended attributes; real SELinux
@@ -85,3 +88,75 @@ be used on `/` without real UID 0 and is never a production source writer.
 This PR is a non-activating **stage-A subcomponent**. It does not satisfy
 original #24 repeated installed `--apply`, real source writes, rollback,
 signed native fallback, or release native acceptance criteria.
+
+
+## Current native catalog revalidation
+
+Native root validation now requires a fresh HTTPS catalog read using the
+root-owned installed server origin and a fixed supported-distribution CA
+bundle, not a CLI URL or inherited TLS/proxy environment. The approved
+upstream and cache must occur as one exact schema-1 mapping with a native
+active-only route. Changed, withdrawn, prefix-only, legacy or foreign
+routes are refused; the local approval, origin and original source are
+rechecked under the existing exclusive client lock after retrieval.
+Private fixture validation remains offline and explicitly reports
+`current_active_catalog_route_matched=false`. A successful native
+read is only a point-in-time observation of the server's published
+mapping, not attestation of NGINX activation, package trust, fallback or
+permission to write. Private CA support and labelled state remain
+fail-closed until separately validated. No installed helper or source
+mutation is enabled.
+
+
+## Immutable approval issuance (internal, uninstalled)
+
+A protected schema-2 pending record uses the same strict mapping and
+entry/source digests, plus `source_identity` (device, inode, uid, gid,
+mode, size, mtime_ns, ctime_ns). The internal root-only issuance function
+accepts only a candidate identifier and explicit exact-route SHA-256
+consent. It reads `pending-ID.json` in the existing private registry,
+validates current catalog/source identity under the transaction lock,
+and publishes `candidate-ID.json` atomically with Linux RENAME_NOREPLACE.
+A fully revalidated identical approval is an idempotent no-op; a
+different or foreign existing record cannot be overwritten. A crash
+before publication can leave a private, unreferenced temporary file,
+never a valid approval; no automatic orphan deletion is claimed.
+Native validation rejects schema-1 approvals (retained only for private
+historical tests). Equal-content foreign source inodes cannot inherit
+schema-2 consent. No CLI or installer invokes issuance, no package sources
+are written, and the trusted pending-record preparer, SELinux-labelled
+state support, native commit and recovery still require implementation.
+
+
+The existing disposable Debian/Alma helper smoke additionally forks and
+kills a real root child immediately before and after approval publication,
+then retries and verifies exact record identity and unchanged source bytes,
+inode and timestamps. This state-only exercise mocks current-route
+validation; actual loopback TLS trust refusal is tested separately. It
+does not establish power-loss durability, installed helper acceptance or
+SELinux Enforcing source metadata preservation.
+
+
+## Independent pending proposal preparation (internal, uninstalled)
+
+The root-only preparer accepts two exact SHA-256 content selections, not
+a source path or remote URL. It enumerates only fixed native APT or DNF
+source directories through anchored descriptors, refuses ambiguous
+matches and unsupported source metadata, independently parses the
+selected entry, fetches the current catalog using the protected origin,
+and requires one exact native active mapping. It compiles a non-activating
+proposal, rechecks the source inventory/origin/inode, and publishes a
+private schema-2 pending record using the same no-replace primitive.
+Identical pending preparation reuses the random managed identifier.
+Changed routes require new pending identities and separate consent; an
+old route is refused if no longer published. No raw paths or routes are
+returned, and preparation grants no ownership or write authority.
+The installer, operator-facing selection/consent handoff, native source
+commit and recovery, and labelled-state support remain open.
+
+The existing Client Helper Preview Native workflow also executes the three
+root-only registry-directory group, xattr and retained-inode regression
+cases under native OS Python in both disposable distro containers. The
+ordinary unprivileged Python jobs intentionally skip these cases; a skipped
+native regression is not acceptance evidence. No extra workflow or host
+mutation is introduced.

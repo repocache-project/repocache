@@ -42,7 +42,7 @@ def _setup(monkeypatch):
                         lambda: state.__setitem__(
                             "config_checks", state["config_checks"] + 1))
     monkeypatch.setattr(host, "_prepare_own_runtime_directory",
-                        lambda: state.__setitem__(
+                        lambda **_kwargs: state.__setitem__(
                             "runtime_preps", state["runtime_preps"] + 1))
     def storage(distribution, *, allow_create):
         state["storage_preps"].append((distribution, allow_create))
@@ -566,3 +566,23 @@ def test_fixture_selinux_connect_denied_matches_only_current_enforcing_worker():
         assert not fixture_selinux_connect_denied(record.replace(old, new), {123})
     assert not fixture_selinux_connect_denied("x" * (1024 * 1024 + 1) + record, {123})
     assert not fixture_selinux_connect_denied(record.replace(" dest=8008", "\n dest=8008"), {123})
+
+
+def test_fixture_policy_port_context_requires_exact_unambiguous_tcp():
+    from types import SimpleNamespace
+    from scripts.ci_native_nginx_activate_guest import fixture_port_context
+
+    def rule(protocol, low, high, context):
+        return SimpleNamespace(protocol=protocol,
+                               ports=SimpleNamespace(low=low, high=high),
+                               context=context)
+    label = "system_u:object_r:http_port_t:s0"
+    foreign = "system_u:object_r:unreserved_port_t:s0"
+    rules = [rule("tcp", 443, 443, label), rule("tcp", 8008, 8009, label),
+             rule("udp", 8008, 8008, foreign)]
+    assert fixture_port_context(rules, 443) == label
+    assert fixture_port_context(rules, 8008) == label
+    assert fixture_port_context(rules, 8009) is None
+    assert fixture_port_context([rule("tcp", 8009, 8010, label)], 8008) is None
+    assert fixture_port_context(rules + [rule("tcp", 8008, 8008, foreign)], 8008) is None
+    assert fixture_port_context([rule("tcp", 8008, 8008, "unsafe label")], 8008) is None

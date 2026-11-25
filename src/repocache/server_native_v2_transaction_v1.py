@@ -22,6 +22,7 @@ import hashlib
 import ipaddress
 import json
 import os
+import pwd
 import re
 import socket
 import ssl
@@ -45,7 +46,7 @@ from repocache.server_native_nginx_effective_unit_v1 import (
     _inspect_owned_nginx_unit_bytes,
 )
 from repocache.server_native_installed_storage_v1 import (
-    InstalledStorageError, verify_control_storage, verify_service_storage_mounts,
+    InstalledStorageError, verify_control_storage, verify_service_storage_mounts, _mount,
 )
 from repocache.server_native_nginx_package_journal_v1 import (
     _read_completed_native_install_under_lock, NativePackageJournalError,
@@ -163,6 +164,25 @@ _OWNED_MANAGED_CONFIGS = {
         ("almalinux", b"user nginx nginx;\n"),
     )
 }
+# Debian's package builds in /var/lib/nginx temp paths. The bootstrap uses
+# the build-time default worker; switching to www-data in a managed context
+# must never chown/chmod vendor storage through a read-only mount. Use the
+# existing signed runtime domain, whose parent is root-owned. These are
+# transient scratch paths, not repository cache or persistent log storage.
+_OWNED_DEBIAN_TEMP_NAMES = (
+    ("client_body_temp_path", "client-body"),
+    ("proxy_temp_path", "proxy"),
+    ("fastcgi_temp_path", "fastcgi"),
+    ("scgi_temp_path", "scgi"),
+    ("uwsgi_temp_path", "uwsgi"),
+)
+_OWNED_MANAGED_CONFIGS["debian"] = _OWNED_MANAGED_CONFIGS["debian"].replace(
+    b"http {\n    access_log off;\n",
+    b"http {\n    access_log off;\n" + b"".join(
+        f"    {directive} /run/repocache-nginx/{name};\n".encode("ascii")
+        for directive, name in _OWNED_DEBIAN_TEMP_NAMES
+    ),
+)
 # Default only for pure Debian filesystem/parser fixtures, never native selection.
 _OWNED_MANAGED_CONFIG = _OWNED_MANAGED_CONFIGS["debian"]
 
@@ -225,6 +245,7 @@ _AUDIT_FAILURE_CODES = frozenset({
     "NATIVE_V2_OWNED_CONTEXT_FILE_DRIFT",
     "NATIVE_V2_OWNED_CONTEXT_LAYOUT_UNSUPPORTED",
     "NATIVE_V2_OWNED_CONTEXT_PROBE_REFUSED",
+    "NATIVE_V2_OWNED_CONTEXT_RUNTIME_TEMP_UNVERIFIED",
     "NATIVE_V2_OWNED_CONTEXT_VENDOR_TEMP_READ_ONLY",
     "NATIVE_V2_OWNED_CONTEXT_VENDOR_TEMP_PERMISSION",
     "NATIVE_V2_OWNED_CONTEXT_VENDOR_TEMP_MISSING",
@@ -1294,6 +1315,85 @@ def _owned_config_marker_identity(state_fd: int) -> tuple[int, ...]:
         _deny("OWNED_CONTEXT_CLAIM_REQUIRED")
 
 
+def _owned_debian_runtime_temps(root_fd: int, *, require_all: bool,
+                                inactive: bool = False) -> tuple:
+    """Observe the fixed private runtime paths before/after native nginx -T.
+
+    NGINX itself creates the missing paths under a root-owned parent. A
+    worker cannot replace a direct child or mount over it. Reject symlinks,
+    aliases/mounts, foreign owners and unexpected xattrs before root invokes
+    NGINX. Inactive repair may reuse only empty, correctly owned scratch
+    directories (or an empty root-owned partial mkdir from the same runtime).
+    No persistent cache, vendor path or caller-supplied path is changed.
+    """
+    def identity(info):
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)
+
+    def empty(fd):
+        with os.scandir(fd) as entries:
+            return next(entries, None) is None
+
+    try:
+        worker = pwd.getpwnam("www-data")
+        if not 0 < worker.pw_uid < 2**32 - 1:
+            _deny("OWNED_CONTEXT_RUNTIME_TEMP_UNVERIFIED")
+        with ExitStack() as stack:
+            run = os.open("run", _DIRECTORY_FLAGS, dir_fd=root_fd)
+            stack.callback(os.close, run)
+            runtime = os.open("repocache-nginx", _DIRECTORY_FLAGS, dir_fd=run)
+            stack.callback(os.close, runtime)
+            parent = os.fstat(run)
+            info = os.fstat(runtime)
+            if (parent.st_uid != 0 or parent.st_gid != 0 or parent.st_mode & 0o022
+                    or info.st_uid != 0 or info.st_gid != 0
+                    or stat.S_IMODE(info.st_mode) != 0o755
+                    or os.listxattr(runtime)
+                    or os.fstatvfs(runtime).f_flag & os.ST_RDONLY
+                    or identity(os.stat("repocache-nginx", dir_fd=run,
+                                        follow_symlinks=False)) != identity(info)):
+                _deny("OWNED_CONTEXT_RUNTIME_TEMP_UNVERIFIED")
+            runtime_mount = _mount(runtime)
+            names = {name for _, name in _OWNED_DEBIAN_TEMP_NAMES}
+            if inactive:
+                with os.scandir(runtime) as entries:
+                    if any(entry.name not in names for entry in entries):
+                        _deny("OWNED_CONTEXT_RUNTIME_TEMP_UNVERIFIED")
+            observed = {}
+            for name in sorted(names):
+                try:
+                    fd = os.open(name, _DIRECTORY_FLAGS, dir_fd=runtime)
+                except FileNotFoundError:
+                    if require_all:
+                        _deny("OWNED_CONTEXT_RUNTIME_TEMP_UNVERIFIED")
+                    continue
+                stack.callback(os.close, fd)
+                child = os.fstat(fd)
+                # Allow only the fixed worker, or an empty root-owned
+                # partial mkdir under the protected runtime before a probe.
+                correct_owner = (child.st_uid == worker.pw_uid or
+                                 (not require_all and child.st_uid == 0 and empty(fd)))
+                if (not stat.S_ISDIR(child.st_mode) or child.st_gid != 0
+                        or stat.S_IMODE(child.st_mode) != 0o700 or not correct_owner
+                        or os.listxattr(fd) or _mount(fd) != runtime_mount
+                        or os.fstatvfs(fd).f_flag & os.ST_RDONLY
+                        or identity(os.stat(name, dir_fd=runtime,
+                                            follow_symlinks=False)) != identity(child)
+                        or (inactive and not empty(fd))):
+                    _deny("OWNED_CONTEXT_RUNTIME_TEMP_UNVERIFIED")
+                observed[name] = identity(child)
+            if (identity(os.fstat(runtime)) != identity(info)
+                    or identity(os.stat("repocache-nginx", dir_fd=run,
+                                        follow_symlinks=False)) != identity(info)
+                    or identity(os.stat("run", dir_fd=root_fd,
+                                        follow_symlinks=False)) != identity(parent)):
+                _deny("OWNED_CONTEXT_RUNTIME_TEMP_UNVERIFIED")
+            return identity(info), observed
+    except NativeV2TransactionError:
+        raise
+    except (InstalledStorageError, OSError, ValueError, KeyError, TypeError):
+        _deny("OWNED_CONTEXT_RUNTIME_TEMP_UNVERIFIED")
+
+
 def _probe_owned_context_locked(
     root_fd: int, state_fd: int, include: bytes | None, *,
     managed_main: bytes | None = None,
@@ -1333,7 +1433,24 @@ def _probe_owned_context_locked(
                     _deny("OWNED_CONTEXT_CLAIM_CHANGED")
 
             verify_bytes()
+            debian_runtime = (include is not None
+                              and managed_main == _OWNED_MANAGED_CONFIGS["debian"])
+            if debian_runtime:
+                runtime_before, temp_before = _owned_debian_runtime_temps(
+                    root_fd, require_all=False,
+                )
             dump = _capture_owned_nginx_dump_private(managed=include is not None)
+            if debian_runtime:
+                runtime_after, temp_after = _owned_debian_runtime_temps(
+                    root_fd, require_all=True,
+                )
+                # New directories and NGINX's root-to-worker chown of a
+                # partial empty directory are expected; inode replacement is not.
+                if (runtime_before != runtime_after
+                        or any(temp_after[name][:3] != prior[:3]
+                               or temp_after[name][4] != prior[4]
+                               for name, prior in temp_before.items())):
+                    _deny("OWNED_CONTEXT_RUNTIME_TEMP_UNVERIFIED")
             _verify_owned_context_dump(dump, include, managed_main=managed_main)
             verify_bytes()
             _verify_current_root_fd(root_fd)

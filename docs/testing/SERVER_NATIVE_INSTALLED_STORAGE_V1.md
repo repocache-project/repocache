@@ -123,3 +123,40 @@ categories. The legacy vendor probe still discards stderr. No raw child
 stderr reaches the journal or client. The socket remains generic and
 all syntax, exact dump, provenance, rollback and confinement gates remain
 unchanged. No SELinux or filesystem permission change is introduced.
+
+### Debian managed-context scratch paths
+
+The Debian booted worker refused first APPLY with a read-only filesystem
+error at `c2be994` and safely restored the bootstrap. The Debian 13 native
+NGINX binary emits `chown("path", uid) failed`, not just the earlier generic
+classifier shape. Native syntax checks initialize the compiled-in temporary
+directories, including ownership changes when the managed context switches
+from the package build-time default user to www-data. The exact failing path
+in that older run was not captured; this change removes the identified
+dependency on vendor temporary directories for the Debian managed context.
+
+The five fixed HTTP scratch paths use the existing root-owned, writable
+`/run/repocache-nginx` domain. No new writable mount, vendor ownership change,
+SELinux change, signed bootstrap change or caller-selectable path is added.
+The probe checks runtime/child metadata, same-mount identity and xattrs
+before/after the native command; inactive installer retry permits only empty
+fixed scratch directories and otherwise refuses. Runtime data are transient,
+not repository cache/log data; systemd owns cleanup. The actual socket still
+refuses active repository routes. Before activating real Debian cache routes,
+verify bounded buffering and disk-backed cache behavior; do not treat tmpfs
+as package cache storage. AlmaLinux managed bytes are unchanged. The guest
+checks vendor temp metadata before and after failed reload compensation and
+confined APPLY. Native validation of this increment remains required.
+
+The prior exact AlmaLinux native activation completed all confined inactive
+route apply/reload/reboot/repair scenarios, but its actual HTTPS storage
+fixture still failed with 502/EACCES and no matched AVC. Both stock httpd
+network booleans were off. The disposable AlmaLinux activation guest now
+uses the distro's SETools Python package (test-only) to obtain an unambiguous
+TCP port context from the loaded kernel policy and the libselinux public
+access-decision API to observe name_connect for the actual enforcing NGINX
+worker context, both fixture port 8008 and production HTTPS port 443. This
+reports only ALLOW/DENY/NOT_VERIFIED, not raw contexts or policy text, and
+is not a substitute for the matching kernel AVC or successful upstream
+traffic. No policy module, port label, boolean, privilege or production
+dependency change is authorized or introduced.

@@ -13,6 +13,7 @@ import fcntl
 import os
 import re
 import stat
+import threading
 from pathlib import Path
 
 APT = (
@@ -31,6 +32,12 @@ _LINE = re.compile(
     r"(?:-?\d+)\s+([0-9a-fA-F]+):([0-9a-fA-F]+):([0-9]+)\s+"
     r"(?:\d+|EOF)\s+(?:\d+|EOF)\s*$"
 )
+
+
+# Traditional POSIX record locks are process-owned: closing *any* FD for
+# an inode can release this process's locks on it, even when a nested
+# acquisition failed. Serialize helper scopes before opening any lock FD.
+_HELD_SCOPE = threading.Lock()
 
 
 class LockInspectionRefused(ValueError):
@@ -144,7 +151,7 @@ def inspect_native_locks(manager: str, *, root: Path = Path("/"),
 
 @contextlib.contextmanager
 def hold_existing_native_package_locks(
-    manager: str, *, root: Path = Path("/"),
+    manager: str, *, root: Path = Path("/"), revalidation: bool = False,
 ):
     """Hold real nonblocking POSIX and BSD locks on fixed existing inodes.
 
@@ -178,6 +185,35 @@ def hold_existing_native_package_locks(
     flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
     held: list[int] = []
     identities: set[tuple[int, int]] = set()
+    witnesses: list[tuple[str, int, tuple[int, ...]]] = []
+    active = False
+    scope_pid = os.getpid()
+
+    def fingerprint(info: os.stat_result) -> tuple[int, ...]:
+        return (info.st_dev, info.st_ino, info.st_uid, info.st_gid,
+                info.st_mode, info.st_nlink, info.st_size,
+                info.st_mtime_ns, info.st_ctime_ns)
+
+    def recheck_all() -> None:
+        # Re-resolve every canonical pathname from the trusted root, not
+        # the directory FDs used during acquisition. stat does not open a
+        # second descriptor on a POSIX-locked inode (closing such an FD
+        # in this process could drop the POSIX lock).
+        if not active or os.getpid() != scope_pid:
+            raise LockInspectionRefused("Native package lock scope expired")
+        try:
+            for relative, lockfd, expected in witnesses:
+                if (fingerprint(os.fstat(lockfd)) != expected
+                        or fingerprint(_pinned_lock_stat(
+                            root, relative, owner=expected_owner)) != expected):
+                    raise LockInspectionRefused("Native package lock scope drift")
+        except (OSError, OverflowError, TypeError) as exc:
+            raise LockInspectionRefused("Native package lock scope drift") from exc
+
+    # A failed nested or concurrent acquisition must not open and close a
+    # descriptor for an inode already POSIX-locked by this process.
+    if not _HELD_SCOPE.acquire(blocking=False):
+        raise LockInspectionRefused("Native package lock scope already active in process")
     try:
         for relative in targets:
             parents: list[int] = []
@@ -227,24 +263,38 @@ def hold_existing_native_package_locks(
                         before.st_size)
                     or (named_after.st_dev, named_after.st_ino) != identity):
                     raise LockInspectionRefused("Native lock inode changed")
+                witnesses.append((relative, lockfd, fingerprint(after)))
             finally:
                 for parent in reversed(parents):
                     os.close(parent)
+        # An earlier pathname may have changed while a later lock was
+        # acquired. Never enter the scope on this stale lock set.
+        active = True
+        recheck_all()
     except (OSError, OverflowError, TypeError) as exc:
         raise LockInspectionRefused("Native package lock scope unavailable") from exc
     else:
         # Do not return an eternal write_eligible token. The only proof
         # of locks is their lifetime inside this context manager. Keep
         # caller exceptions untouched; only acquisition errors are mapped.
-        yield
+        # The transaction can revalidate all pinned identities immediately
+        # before each durable transition, without reopening any lock inode.
+        yield recheck_all if revalidation else None
+        # Successful scope completion must not hide a replaced inode or
+        # unsafe parent. This detects drift, not a race-free commit lease.
+        recheck_all()
     finally:
+        active = False
         # Closing each fd releases both of its kernel lock families.
         # Attempt every close even if one fails; never leak held lock FDs.
         close_error = False
-        for lockfd in reversed(held):
-            try:
-                os.close(lockfd)
-            except OSError:
-                close_error = True
+        try:
+            for lockfd in reversed(held):
+                try:
+                    os.close(lockfd)
+                except OSError:
+                    close_error = True
+        finally:
+            _HELD_SCOPE.release()
         if close_error:
             raise LockInspectionRefused("Native package lock release unverified")

@@ -415,14 +415,18 @@ def _strict_catalog_pairs(pairs: list[tuple[str, object]]) -> dict:
     return result
 
 
-def _fetch_json(url: str, *, max_bytes: int):
+def _fetch_json(url: str, *, max_bytes: int, context: ssl.SSLContext | None = None):
     # Never follow redirects or allow ambient proxy settings to redirect a
     # versioned local server catalog to an untrusted HTTP(S) destination.
     # Standard OS CA validation and hostname checking remain compulsory.
+    if context is not None and (context.verify_mode != ssl.CERT_REQUIRED
+                                or not context.check_hostname):
+        raise ClientError("Catalog TLS verification is required")
     req = Request(url, headers={"Accept": "application/json",
                                 "User-Agent": "repocache-client/0.4"})
     opener = build_opener(ProxyHandler({}), _RejectRedirects(),
-                          HTTPSHandler(context=ssl.create_default_context()))
+                          HTTPSHandler(context=(context if context is not None
+                                                else ssl.create_default_context())))
     with opener.open(req, timeout=5) as response:
         if response.url != url or response.status != 200:
             raise ClientError("Catalog response origin or status is invalid")
@@ -435,12 +439,20 @@ def _fetch_json(url: str, *, max_bytes: int):
                           ClientError("Non-finite catalog value")))
 
 
-def _catalog(server: str) -> dict:
+def _catalog(server: str, *, context: ssl.SSLContext | None = None) -> dict:
     try:
-        doc = _fetch_json(server + "/.well-known/repocache/catalog.json",
-                          max_bytes=MAX_CATALOG_BYTES)
+        url = server + "/.well-known/repocache/catalog.json"
+        if context is None:
+            doc = _fetch_json(url, max_bytes=MAX_CATALOG_BYTES)
+        else:
+            doc = _fetch_json(url, max_bytes=MAX_CATALOG_BYTES, context=context)
     except (OSError, ValueError, RecursionError):
         raise ClientError("Catalog unavailable or invalid") from None
+    return _validate_catalog(server, doc)
+
+
+def _validate_catalog(server: str, doc: object) -> dict:
+    """Validate the shared strict schema independently of the transport."""
     if (type(doc) is not dict or set(doc) != {"schema", "repositories"}
             or type(doc["schema"]) is not int or doc["schema"] != 1):
         raise ClientError("Unsupported catalog schema")

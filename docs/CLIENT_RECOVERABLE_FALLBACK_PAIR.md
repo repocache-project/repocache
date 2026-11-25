@@ -76,3 +76,78 @@ readiness. Ordinary Linux `rename` is not compare-and-swap.
 
 The original #24 issue remains OPEN; none of these production tasks is
 passed by a sandbox, even with green GitHub CI.
+
+
+## Exact approval binding and local recovery
+
+New test-root journals use schema 2 and retain a private strict approval
+snapshot and its canonical digest. Loading a journal re-compiles the
+original source and verifies the exact proposed bytes, mirror and bound
+schema-2 source inode identity. A changed approval (even one with a
+recomputed route digest) cannot authorize an installed no-op replay.
+An unavailable, withdrawn or deleted approval/catalog does not block
+restoration of exact journal-owned resources to the prior direct upstream;
+it does not authorize new source writes. The first journal and APT mirror
+publication use atomic no-replace, and replay checks metadata. Old
+experimental schema-1 journals are refused, not silently migrated.
+This remains a disposable test-root transaction; no native writer is
+enabled and same-privilege source replacement races remain a separate gate.
+
+
+The booted QEMU smoke also exercises the new privileged fixture: Debian 13
+uses actual loopback HTTPS catalog verification (wrong fixture CA refused),
+distinct root-only pending preparation/consent and real SIGKILL between
+source commit and journal completion, then offline rollback in a marked
+private root. AlmaLinux 10 must remain SELinux Enforcing and refuse its
+genuinely labelled source/state fixture while preserving identities, bytes
+and labels. Both compare actual host source and installed package inventories
+before/after. These are not installed native writer acceptance or positive
+SELinux label preservation. The disposable distro smoke additionally covers
+real SIGKILL at each rollback phase.
+
+
+Schema-3 approved source metadata binds bounded user attributes, POSIX
+access ACL and (in an explicit native metadata scope) the actual SELinux
+context through a canonical digest. The private journal stores the exact
+attribute snapshot and verifies it against consent, including during
+replay and interrupted rollback. Source temp and installed readback
+verify bytes, inode and attributes; the APT companion must remain
+readable and never inherit arbitrary source xattrs. Unknown security
+namespaces and unreviewed labels still fail closed. The new AlmaLinux
+booted guest test uses only a freshly marked private fixture, Enforcing
+policy and a real SIGKILL; it does not relabel or modify host sources.
+No result is claimed before execution.
+
+
+The catalog-bound sandbox rehearsal checks the fresh authenticated exact
+route while holding both client and package locks, before staging and
+again after durable intent but before publication. The booted Debian
+fixture rejects withdrawn and changed routes with no staging or source
+changes; it then interrupts a valid transaction and recovers offline.
+The offline historical laboratory entry remains private-test-only.
+Neither entry accepts the production root.
+
+AlmaLinux booted positive fixture: native raw file-context lookup returned
+ENOENT on the arbitrary /tmp and /var/tmp fixture marker. The disposable
+VM alone now installs a local file-context mapping to tmp_t for the exact
+random private fixture subtree, restores those fixture labels and removes
+the rule in a finally block, checking the local mapping list is restored.
+The stock source paths, domain permissions and SELinux Enforcing state are
+unchanged; the production raw lookup and fail-closed behavior are unchanged.
+This is labelled private-fixture recovery evidence only, not proof of stock
+/etc source policy or installed native source mutation. The existing negative
+unreviewed-label case runs without the local fixture mapping. Exact-head
+native execution remains required.
+
+The next enforcing native smoke reached real approval publication after
+successfully resolving the fixture path policy, but rejected a newly
+created approval inode whose transition label differed from its pathname
+policy. Exclusive fresh approval and journal files now receive only the
+exact raw policy label, and exclusive source staging files only the exact
+already-approved source label, through the retained descriptor. Temporary
+and final path policy role/type/range must agree. Empty single-link
+root-private file identity is checked before and after assignment; existing
+files remain strict read-only label checks, never automatically relabelled.
+No SELinux permission or enforcement change, new production writer, or
+actual native PASS is inferred. Re-execute the native positive and negative
+recovery paths on the new source HEAD.

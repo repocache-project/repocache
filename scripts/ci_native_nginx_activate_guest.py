@@ -52,6 +52,98 @@ def fixture_selinux_connect_denied(raw: str, worker_pids: set[int]) -> bool:
     return False
 
 
+def fixture_port_context(rules, port: int) -> str | None:
+    """Select only an unambiguous TCP port label from the loaded policy."""
+    if port not in (443, 8008):
+        return None
+    contexts = set()
+    for rule in rules:
+        if str(rule.protocol) == "tcp" and rule.ports.low <= port <= rule.ports.high:
+            contexts.add(str(rule.context))
+    if len(contexts) != 1:
+        return None
+    context = contexts.pop()
+    if (not 1 <= len(context) <= 1024
+            or re.fullmatch(r"[A-Za-z0-9_:.\-,]+", context) is None
+            or len(context.split(":", 3)) != 4):
+        return None
+    return context
+
+
+def fixture_selinux_policy_connect(worker_pids: set[int]) -> dict[int, str]:
+    """Observe loaded kernel access decisions; never change policy or booleans.
+
+    The fixture connects to 8008; 443 is the actual HTTPS upstream port.
+    This observation is distinct from an AVC for the failed connection.
+    Only static decision categories leave this disposable guest.
+    """
+    result = {443: "NOT_VERIFIED", 8008: "NOT_VERIFIED"}
+    try:
+        import ctypes
+        import setools
+
+        if not worker_pids or len(worker_pids) > 32:
+            return result
+
+        def contexts():
+            return {Path(f"/proc/{pid}/attr/current").read_bytes().rstrip(b"\0\n")
+                    for pid in worker_pids}
+
+        sources = contexts()
+        if len(sources) != 1:
+            return result
+        source = next(iter(sources))
+        if len(source) > 1024 or source.split(b":", 3)[2:3] != [b"httpd_t"]:
+            return result
+
+        class Decision(ctypes.Structure):
+            # libselinux public av_decision ABI; unsigned int access vectors.
+            _fields_ = [(key, ctypes.c_uint) for key in
+                        ("allowed", "decided", "auditallow", "auditdeny", "seqno", "flags")]
+
+        library = ctypes.CDLL("libselinux.so.1")
+        library.security_getenforce.argtypes = ()
+        library.security_getenforce.restype = ctypes.c_int
+        library.string_to_security_class.argtypes = (ctypes.c_char_p,)
+        library.string_to_security_class.restype = ctypes.c_ushort
+        library.string_to_av_perm.argtypes = (ctypes.c_ushort, ctypes.c_char_p)
+        library.string_to_av_perm.restype = ctypes.c_uint
+        library.security_compute_av_flags_raw.argtypes = (
+            ctypes.c_char_p, ctypes.c_char_p, ctypes.c_ushort, ctypes.c_uint,
+            ctypes.POINTER(Decision),
+        )
+        library.security_compute_av_flags_raw.restype = ctypes.c_int
+        if library.security_getenforce() != 1:
+            return result
+        klass = library.string_to_security_class(b"tcp_socket")
+        perm = library.string_to_av_perm(klass, b"name_connect") if klass else 0
+        if not perm:
+            return result
+
+        policy = setools.SELinuxPolicy("/sys/fs/selinux/policy")
+        seqnos = set()
+        observed = dict(result)
+        for port in result:
+            target = fixture_port_context(policy.portcons(), port)
+            if target is None:
+                continue
+            decision = Decision()
+            if (library.security_compute_av_flags_raw(
+                    source, target.encode("ascii"), klass, perm,
+                    ctypes.byref(decision)) != 0
+                    or decision.flags & 1):  # SELINUX_AVD_FLAGS_PERMISSIVE
+                continue
+            seqnos.add(decision.seqno)
+            observed[port] = "ALLOW" if decision.allowed & perm else "DENY"
+        if library.security_getenforce() != 1 or contexts() != sources or len(seqnos) != 1:
+            return result
+        return observed
+    except Exception:
+        # Optional diagnosis cannot conceal the original failed fixture or
+        # expose policy, process labels, package details or library errors.
+        return result
+
+
 def require_status(unit: str, active: bool, enabled: bool) -> None:
     state = run("/usr/bin/systemctl", "is-active", unit)
     policy = run("/usr/bin/systemctl", "is-enabled", unit)
@@ -530,6 +622,16 @@ def prepare_and_interrupt_live_wal(distribution: str, native, assets, pins) -> N
     )
     assert staged["expected_generation"] == 0
     bootstrap = OWN_CONFIG.read_bytes()
+    def vendor_temp_identity():
+        if distribution != "debian":
+            return {}
+        result = {}
+        for name in ("body", "proxy", "fastcgi", "scgi", "uwsgi"):
+            info = Path("/var/lib/nginx", name).lstat()
+            result[name] = (info.st_dev, info.st_ino, info.st_mode,
+                            info.st_uid, info.st_gid)
+        return result
+    vendor_temps = vendor_temp_identity()
     run_live_wal(distribution, "fail-reload")
     assert OWN_CONFIG.read_bytes() == bootstrap
     assert not (STATE / "state-v2.json").exists()
@@ -537,7 +639,18 @@ def prepare_and_interrupt_live_wal(distribution: str, native, assets, pins) -> N
     loopback_response()
     print("PASS: actual dedicated WAL failure compensation restores private bootstrap", flush=True)
 
+    assert vendor_temp_identity() == vendor_temps
     verify_dedicated_socket(bootstrap=True)
+    assert vendor_temp_identity() == vendor_temps
+    if distribution == "debian":
+        from repocache.server_native_v2_transaction_v1 import _owned_debian_runtime_temps
+        root = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            _, scratch = _owned_debian_runtime_temps(root, require_all=True)
+            assert len(scratch) == 5
+        finally:
+            os.close(root)
+        print("PASS: Debian managed syntax and confined APPLY preserve vendor temp metadata and use five private runtime paths", flush=True)
     old = live_wal_resource_hashes()
     run_live_wal(distribution, "repeat")
     run_live_wal(distribution, "reload")
@@ -898,6 +1011,8 @@ finally:
                         if category in journal.stdout:
                             print("STORAGE_FIXTURE_UPSTREAM_ERROR: " + category, flush=True)
                     if distribution == "almalinux":
+                        if "connect() failed (13: Permission denied) while connecting to upstream" in journal.stdout:
+                            print("STORAGE_FIXTURE_UPSTREAM_CONNECT_EACCES: OBSERVED", flush=True)
                         # Read-only evidence, no policy change or raw audit output.
                         try:
                             audit = run("/usr/sbin/ausearch", "-m", "AVC",
@@ -923,6 +1038,8 @@ finally:
                         print("STORAGE_FIXTURE_SELINUX_CONNECT_DENIAL: "
                               + ("OBSERVED" if confirmed else "NOT_VERIFIED"),
                               flush=True)
+                        for port, decision in fixture_selinux_policy_connect(worker_pids).items():
+                            print(f"STORAGE_FIXTURE_SELINUX_POLICY_TCP_{port}: {decision}", flush=True)
                         for boolean in ("httpd_can_network_connect", "httpd_can_network_relay"):
                             observed = run("/usr/sbin/getsebool", boolean)
                             if observed.returncode == 0 and observed.stdout.strip() in (

@@ -1,0 +1,428 @@
+#!/usr/bin/env python3
+"""Booted native privileged client fixture; never writes host sources."""
+from __future__ import annotations
+
+import contextlib
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import signal
+import ssl
+import subprocess
+import sys
+import tempfile
+import time
+
+from ci_v06_vm_signed_client_guest import (
+    guarded_native_guest, installed_packages, installed_sources,
+)
+from ci_client_native_fallback import HTTPBackend, temporary_tls_identity
+from smoke_client_recoverable_pair import build, IDENT, sha
+import root_source_boundary as boundary
+import recoverable_fallback_pair_lab as pair
+
+
+def _snapshot(path: Path):
+    info = path.lstat()
+    attrs = tuple(sorted((name, os.getxattr(path, name, follow_symlinks=False))
+                         for name in os.listxattr(path, follow_symlinks=False)))
+    return (path.read_bytes(), info.st_dev, info.st_ino, info.st_uid,
+            info.st_gid, info.st_mode, info.st_mtime_ns, info.st_ctime_ns, attrs)
+
+
+def _debian_fixture(root: Path) -> None:
+    source, _, lock, state = build(root, "apt")
+    original = _snapshot(source)
+    old = state / ("candidate-" + IDENT + ".json")
+    record = json.loads(old.read_text())
+    old.unlink()
+    (root / "etc/os-release").write_text('ID=debian\nVERSION_ID="13"\n')
+    config = root / "etc/repocache-client"
+    config.mkdir(mode=0o755)
+    www = root / "www"
+    catalog = www / ".well-known/repocache/catalog.json"
+    catalog.parent.mkdir(parents=True)
+    certificate, private_key = temporary_tls_identity(root, "approved-catalog")
+    foreign, _ = temporary_tls_identity(root, "foreign-catalog")
+    backend = HTTPBackend(www, certificate=certificate, key=private_key)
+    original_context = boundary._native_tls_context
+    try:
+        origin = backend.origin.removesuffix("/repo/")
+        route = origin + "/__repocache/repos/approved/"
+        (config / "config.json").write_text(json.dumps({"server": origin}))
+        (config / "config.json").chmod(0o644)
+        catalog.write_text(json.dumps({"schema": 1, "repositories": [
+            {"upstream": record["upstream"], "cache": route}]}))
+        # Guest-local fixture CA; the actual transport and verifier execute.
+        wrong = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        wrong.load_verify_locations(cafile=str(foreign))
+        boundary._native_tls_context = lambda: wrong
+        try:
+            boundary.prepare_current_candidate(
+                record["source_sha256"], record["entry_sha256"], _test_root=root)
+        except boundary.BoundaryRefused:
+            pass
+        else:
+            raise AssertionError("Foreign fixture CA was accepted")
+        assert not list(state.glob("pending-*.json")) and not backend.hits
+        trusted = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        trusted.load_verify_locations(cafile=str(certificate))
+        boundary._native_tls_context = lambda: trusted
+        prepared = boundary.prepare_current_candidate(
+            record["source_sha256"], record["entry_sha256"], _test_root=root)
+        ident = prepared["managed_id"]
+        assert prepared["route_sha256"] == sha(route.encode("ascii"))
+        assert not prepared["approval_granted"] and not prepared["write_eligible"]
+        manifest = state / ("candidate-" + ident + ".json")
+        assert not manifest.exists()
+        review = boundary.review_current_candidate(ident, _test_root=root)
+        assert review["source"] == record["source"]
+        assert review["upstream"] == record["upstream"] and review["cache"] == route
+        assert review["route_sha256"] == prepared["route_sha256"]
+        assert review["current_active_catalog_route_matched"]
+        assert not review["approval_issued"] and not review["write_eligible"]
+        assert not manifest.exists() and _snapshot(source) == original
+        approved = boundary.approve_current_candidate(
+            ident, review["route_sha256"], _test_root=root)
+        assert approved["status"] == "approved" and not approved["write_eligible"]
+        assert manifest.is_file() and _snapshot(source) == original
+        assert len(backend.hits) >= 2
+        # A withdrawn or changed route must refuse before any stage or source
+        # modification, even when the root-owned consent remains on disk.
+        for mappings in ([], [{"upstream": record["upstream"],
+                                "cache": origin + "/__repocache/repos/changed/"}]):
+            catalog.write_text(json.dumps({"schema": 1, "repositories": mappings}))
+            try:
+                boundary.review_current_candidate(ident, _test_root=root)
+            except boundary.BoundaryRefused:
+                pass
+            else:
+                raise AssertionError("Withdrawn or changed route permitted review")
+            try:
+                pair.apply_catalog_bound_sandbox(root, ident)
+            except pair.PairRefused:
+                pass
+            else:
+                raise AssertionError("Withdrawn or changed route permitted commit")
+            assert _snapshot(source) == original
+            assert not list(state.glob("pair-*.json"))
+            assert not list(source.parent.glob(".repocache-atomic-*"))
+        catalog.write_text(json.dumps({"schema": 1, "repositories": [
+            {"upstream": record["upstream"], "cache": route}]}))
+        # Kill after actual private source publication while both authenticated
+        # route checks succeeded. The parent will recover with server offline.
+        pid = os.fork()
+        if pid == 0:
+            def kill_at(active, phase):
+                if active == phase:
+                    os.kill(os.getpid(), signal.SIGKILL)
+            pair._crash = kill_at
+            pair.apply_catalog_bound_sandbox(root, ident, crash="source")
+            os._exit(77)
+        _, status = os.waitpid(pid, 0)
+        assert os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGKILL
+        assert _snapshot(source)[0] != original[0]
+        print("PASS: current authenticated catalog under locks; withdrawn/changed route refused")
+    finally:
+        boundary._native_tls_context = original_context
+        backend.close()
+    # Native apt-get must observe the same POSIX lists lock that the
+    # transaction holds. Use no configured repositories and private dirs;
+    # no host cache/source changes or package operations are permitted.
+    lists = root / "var/lib/apt/lists"
+    (lists / "partial").mkdir(mode=0o700, exist_ok=True)
+    empty = root / "etc/apt/empty.list"
+    empty.write_text("")
+    empty_parts = root / "etc/apt/empty-parts"
+    empty_parts.mkdir()
+    with pair.locks.hold_existing_native_package_locks("apt", root=root):
+        command = [
+            "/usr/bin/apt-get",
+            "-o", "Dir::State::lists=" + str(lists),
+            "-o", "Dir::State::status=/var/lib/dpkg/status",
+            "-o", "Dir::Cache=" + str(root / "var/cache/apt"),
+            "-o", "Dir::Etc::sourcelist=" + str(empty),
+            "-o", "Dir::Etc::sourceparts=" + str(empty_parts),
+            "-o", "Dir::Etc::parts=-", "-o", "Dir::Etc::main=/dev/null",
+            "-o", "APT::Update::Error-Mode=any",
+            "-o", "Acquire::Retries=0", "update",
+        ]
+        refused = subprocess.run(command, check=False, capture_output=True,
+                                 text=True, timeout=30, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
+        assert refused.returncode != 0 and "Could not get lock" in refused.stderr
+        assert str(lists / "lock") in refused.stderr
+    print("PASS: native apt-get respects held transaction lists lock")
+
+    # The catalog is offline. All changes are in the marked private lab root.
+    mirror = root / ("etc/apt/mirrors/repocache-" + ident + ".list")
+    assert pair.recover_sandbox(root, ident)["status"] == "restored"
+    restored = _snapshot(source)
+    assert restored[0] == original[0]
+    assert restored[3:6] == original[3:6] and restored[-1] == original[-1]
+    assert not mirror.exists()
+    print("PASS: Debian booted root exact HTTPS preparation/approval and sandbox SIGKILL restore")
+
+
+def _alma_label_refusal(root: Path) -> None:
+    source, _, lock, state = build(root, "dnf")
+    before = _snapshot(source)
+    lock_before = _snapshot(lock)
+    assert os.getxattr(source, "security.selinux")
+    assert os.getxattr(lock, "security.selinux")
+    record = json.loads((state / ("candidate-" + IDENT + ".json")).read_text())
+    assert boundary.pre.inspect_source(record["source"], root=root)[
+        "extended_attributes_present"]
+    (root / "etc/os-release").write_text('ID=almalinux\nVERSION_ID="10"\n')
+    try:
+        boundary.prepare_current_candidate(
+            record["source_sha256"], record["entry_sha256"], _test_root=root)
+    except boundary.BoundaryRefused:
+        pass
+    else:
+        raise AssertionError("Unreviewed labelled fixture preparation was accepted")
+    try:
+        pair.apply_sandbox(root, IDENT)
+    except pair.PairRefused:
+        pass
+    else:
+        raise AssertionError("Unreviewed labelled transaction was accepted")
+    assert _snapshot(source) == before and _snapshot(lock) == lock_before
+    assert not list(state.glob("pending-*.json")) and not list(state.glob("pair-*.json"))
+    print("PASS: AlmaLinux enforcing unreviewed labels refused; source and lock labels intact")
+
+
+@contextlib.contextmanager
+def _alma_fixture_file_context(root: Path):
+    """Local pathname mapping for this disposable VM fixture only.
+
+    Stock policy need not map arbitrary /tmp or /var/tmp descendants.
+    Never change domain permissions, enforcement, host source mappings or
+    production lookup behavior. Keep the exact random path rule ephemeral.
+    """
+    guarded_native_guest("almalinux10")
+    assert os.getresuid() == (0, 0, 0)
+    assert root.parent == Path("/var/tmp")
+    assert re.fullmatch(r"repocache-booted-label-[a-z0-9_]+", root.name)
+    assert root.resolve(strict=True) == root
+    assert root.stat().st_uid == 0 and root.stat().st_mode & 0o777 == 0o700
+    rule = re.escape(str(root)) + "(/.*)?"
+    def semanage(*args):
+        return subprocess.run(
+            ["/usr/sbin/semanage", "fcontext", *args], check=True,
+            capture_output=True, text=True, timeout=60,
+            env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"},
+        ).stdout
+    before = semanage("-l", "-C")
+    assert str(root) not in before and rule not in before
+    semanage("-a", "-t", "tmp_t", rule)
+    try:
+        assert rule in semanage("-l", "-C")
+        yield
+    finally:
+        semanage("-d", rule)
+        assert semanage("-l", "-C") == before
+        guarded_native_guest("almalinux10")
+
+
+def _alma_label_roundtrip(root: Path) -> None:
+    source, _, lock, state = build(root, "dnf")
+    old = state / ("candidate-" + IDENT + ".json")
+    record = json.loads(old.read_text())
+    old.unlink()
+    (root / "etc/os-release").write_text('ID=almalinux\nVERSION_ID="10"\n')
+    # Only this freshly created private VM fixture may be normalized to
+    # native default labels, never any real host source or trust directory.
+    assert root.parent == Path("/var/tmp") and root.name.startswith("repocache-booted-label-")
+    subprocess.run(["/usr/sbin/restorecon", "-RF", str(root)], check=True,
+                   timeout=30, capture_output=True)
+    # Verify the actual raw policy lookup for every initial private control
+    # file before attempting approval. Diagnostic names are fixture-only.
+    with boundary.metadata.native_metadata_scope(root):
+        for path in (root / boundary.MARKER, lock, source):
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            try:
+                boundary.metadata._policy_label(fd)
+            except boundary.pre.PreflightError as exc:
+                cause = exc.__cause__
+                detail = (" errno=" + str(cause.errno)
+                          if isinstance(cause, OSError) else "")
+                raise AssertionError("Fixture policy lookup refused " + path.name + detail) from exc
+            finally:
+                os.close(fd)
+    os.setxattr(source, "user.repocache-ci", b"preserve")
+    baseline = _snapshot(source)
+    origin = "https://cache.example.org"
+    original_catalog = boundary.client._catalog
+    original_config = boundary.client._installed_server_config
+    original_context = boundary._native_tls_context
+    boundary.client._catalog = lambda *_a, **_kw: {
+        "schema": 1, "repositories": [{"upstream": record["upstream"],
+                                       "cache": record["cache"]}]}
+    boundary.client._installed_server_config = lambda *_: origin
+    boundary._native_tls_context = lambda: object()
+    try:
+        with boundary.metadata.native_metadata_scope(root):
+            proposal = boundary.prepare_current_candidate(
+                record["source_sha256"], record["entry_sha256"], _test_root=root)
+            ident = proposal["managed_id"]
+            boundary.approve_current_candidate(
+                ident, proposal["route_sha256"], _test_root=root)
+            approved = json.loads((state / ("candidate-" + ident + ".json")).read_text())
+            assert approved["schema"] == 3 and approved["source_attributes_sha256"]
+            assert boundary.validate(ident, _test_root=root)["source_attributes_matched"]
+            pid = os.fork()
+            if pid == 0:
+                def kill_at(active, phase):
+                    if active == phase:
+                        os.kill(os.getpid(), signal.SIGKILL)
+                pair._crash = kill_at
+                pair.apply_sandbox(root, ident, crash="source")
+                os._exit(77)
+            _, status = os.waitpid(pid, 0)
+            assert os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGKILL
+            changed = _snapshot(source)
+            assert changed[0] != baseline[0] and changed[-1] == baseline[-1]
+            assert pair.recover_sandbox(root, ident)["status"] == "restored"
+            restored = _snapshot(source)
+            assert restored[0] == baseline[0]
+            assert restored[3:6] == baseline[3:6] and restored[-1] == baseline[-1]
+            assert pair.recover_sandbox(root, ident)["status"] == "restored"
+    finally:
+        boundary.client._catalog = original_catalog
+        boundary.client._installed_server_config = original_config
+        boundary._native_tls_context = original_context
+    print("PASS: AlmaLinux Enforcing schema-3 source label/user-xattr SIGKILL recovery; private fixture")
+
+
+def _signed_helper_placement(platform: str) -> None:
+    """Actual fixed root-owned helper placement with synthetic Ed25519 trust."""
+    checkout = Path("/home/pr237ci/source")
+    sys.path[:0] = [str(checkout / "src"), str(checkout), str(checkout / "tests")]
+    from repocache import signatures
+    from scripts import build_release, stage_native_client_helper as stage
+    from test_v06_release_source_inventory import _candidate_source
+
+    target = Path("/usr/libexec/repocache-client") / stage.HELPER
+    registry = Path("/var/lib/repocache-client/approved-entries")
+    lock = registry / ".transaction.lock"
+    assert not os.path.lexists(registry.parent)
+    assert not os.path.lexists(target) and not os.path.lexists(target.parent)
+    with tempfile.TemporaryDirectory(prefix="repocache-client-signed-", dir="/root") as work:
+        root = Path(work)
+        source = _candidate_source(root)
+        prior_root = build_release.ROOT
+        try:
+            build_release.ROOT = source
+            archive, _ = build_release.build_release(root / "assets", "v0.6.0")
+        finally:
+            build_release.ROOT = prior_root
+        digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+        # Synthetic fixture identity, NOT a claim of a publisher Git commit.
+        # The outer QEMU artifact independently records the exact source HEAD.
+        pin = digest[:40]
+        now = int(time.time())
+        manifest = archive.with_name(archive.name + ".manifest.json")
+        manifest.write_text(json.dumps({
+            "schema": 1, "repository": "repocache-project/repocache",
+            "key_id": "client-vm-fixture", "channel": "stable", "version": "0.6.0",
+            "commit": pin, "archive": archive.name, "archive_sha256": digest,
+            "policy_sha256": hashlib.sha256((source / "release-policy.json").read_bytes()).hexdigest(),
+            "wheelhouse_sha256": "b" * 64, "issued_at": now - 30, "expires_at": now + 3600,
+        }, sort_keys=True, separators=(",", ":")) + "\n")
+        trust = root / "etc/repocache/trust.d"
+        trust.mkdir(parents=True, mode=0o700)
+        key = root / "fixture-key.pem"
+        public = trust / "client-vm-fixture.pem"
+        detached = manifest.with_name(manifest.name + ".sig")
+        for args in (
+            ["genpkey", "-algorithm", "Ed25519", "-out", str(key)],
+            ["pkey", "-in", str(key), "-pubout", "-out", str(public)],
+            ["pkeyutl", "-sign", "-inkey", str(key), "-rawin", "-in", str(manifest), "-out", str(detached)],
+        ):
+            subprocess.run(["/usr/bin/openssl", *args], check=True,
+                           capture_output=True, timeout=20)
+        key.unlink()
+        original_trust = signatures.TRUST_DIR
+        signatures.TRUST_DIR = trust
+        options = {"platform": platform, "commit": pin, "archive_sha256": digest}
+        signed = detached.read_bytes()
+        try:
+            detached.write_bytes(b"\0" * 64)
+            try:
+                stage.install_authenticated_fixture(archive.parent, **options)
+            except signatures.SignatureError:
+                pass
+            else:
+                raise AssertionError("Invalid signature placed a client helper")
+            assert not os.path.lexists(target.parent)
+            assert not os.path.lexists(registry.parent)
+            detached.write_bytes(signed)
+            placed = stage.install_authenticated_fixture(archive.parent, **options)
+            assert placed["placement"] == "placed" and not placed["source_writer_installed"]
+            assert placed["registry"] == "created" and placed["protected_state_ready"]
+            assert set(p.name for p in registry.iterdir()) == {".transaction.lock"}
+            for directory in (registry.parent, registry):
+                assert directory.stat().st_uid == directory.stat().st_gid == 0
+                assert directory.stat().st_mode & 0o777 == 0o700
+            lock_before = _snapshot(lock)
+            before = _snapshot(target)
+            repeat = stage.install_authenticated_fixture(archive.parent, **options)
+            assert repeat["placement"] == "unchanged" and _snapshot(target) == before
+            assert repeat["registry"] == "unchanged" and _snapshot(lock) == lock_before
+            assert lock.stat().st_mode & 0o777 == 0o600
+            assert lock_before[0] == b""
+            if platform == "almalinux10":
+                assert os.getxattr(lock, "security.selinux")
+            print("PASS: root-private native registry and lock provisioned after signature verification")
+            assert hashlib.sha256(before[0]).hexdigest() == placed["helper_sha256"]
+            assert target.stat().st_uid == target.stat().st_gid == 0
+            assert target.stat().st_mode & 0o777 == 0o700
+            status = subprocess.run([str(target), "--json", "status"],
+                                    check=True, capture_output=True, timeout=15)
+            report = json.loads(status.stdout)
+            assert not report["write_eligible"] and not report["commit_available"]
+            try:
+                subprocess.run([str(target), "--json", "status"],
+                               user=65534, group=65534, extra_groups=[],
+                               cwd="/", capture_output=True, timeout=15)
+            except PermissionError:
+                pass
+            else:
+                raise AssertionError("Unprivileged execution reached the root-only helper")
+        finally:
+            signatures.TRUST_DIR = original_trust
+    print("PASS: synthetic Ed25519 authenticated fixed root-only client helper placement and idempotence")
+
+
+def main(platform: str) -> None:
+    guarded_native_guest(platform)
+    before_sources = installed_sources(platform)
+    before_packages = installed_packages(platform)
+    _signed_helper_placement(platform)
+    with tempfile.TemporaryDirectory(prefix="repocache-booted-approval-") as work:
+        root = Path(work)
+        if platform == "debian13":
+            _debian_fixture(root)
+        else:
+            _alma_label_refusal(root)
+    if platform == "almalinux10":
+        # Native raw lookup returned ENOENT on both private temp locations.
+        # Use a test-only local file-context rule, not a production bypass.
+        with tempfile.TemporaryDirectory(prefix="repocache-booted-label-", dir="/var/tmp") as work:
+            root = Path(work)
+            with _alma_fixture_file_context(root):
+                _alma_label_roundtrip(root)
+    assert installed_sources(platform) == before_sources
+    assert installed_packages(platform) == before_packages
+    guarded_native_guest(platform)
+    print("PASS: booted-native-client-privileged-fixture " + platform)
+    print("NOT VERIFIED: installed root source writer, complete native locks, "
+          "installed SELinux-labelled transactions, publisher identity")
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        raise SystemExit("Only the two fixed VM targets are supported")
+    main(sys.argv[1])

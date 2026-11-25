@@ -48,6 +48,7 @@ from repocache.server_native_v2_transaction_v1 import (
     _owned_layout_locked, _read_owned_resources, _validate_owned_resources,
     _owned_live_observe, _owned_live_validate, _owned_live_health_bound,
     _owned_socket_require_inactive_routes, _no_conflicting_owned_wal_pending,
+    _owned_debian_runtime_temps,
     NativeV2TransactionError,
 )
 from repocache.server_native_nginx_effective_unit_v1 import (
@@ -642,8 +643,8 @@ def _cleanup_own_nginx_syntax_pid() -> None:
         _reject("NATIVE_RUNTIME_PID_UNVERIFIED")
 
 
-def _prepare_own_runtime_directory() -> None:
-    """Make a bounded empty /run directory before pre-start nginx -t.
+def _prepare_own_runtime_directory(*, managed_debian: bool = False) -> None:
+    """Make a bounded /run directory before pre-start nginx -t.
 
     PID1 will independently own and clean RuntimeDirectory at service startup.
     Never adopt a foreign/linked directory or a leftover master PID file.
@@ -665,7 +666,12 @@ def _prepare_own_runtime_directory() -> None:
                 _reject("NATIVE_RUNTIME_DIRECTORY_UNSAFE")
             _unlink_inert_nginx_syntax_pid(own)
             if os.listdir(own):
-                _reject("NATIVE_RUNTIME_DIRECTORY_UNSAFE")
+                if not managed_debian:
+                    _reject("NATIVE_RUNTIME_DIRECTORY_UNSAFE")
+                # Retry an interrupted inactive syntax check only with the
+                # exact empty scratch names and safe metadata. Never delete
+                # or adopt foreign content; systemd owns runtime cleanup.
+                _owned_debian_runtime_temps(root, require_all=False, inactive=True)
             if stat.S_IMODE(os.fstat(own).st_mode) == 0o700:
                 os.fchmod(own, 0o755)
             os.fsync(run)
@@ -885,7 +891,7 @@ def _repair_inactive_managed_nginx_under_lock(
                     _reject("NATIVE_ACTIVATION_MANAGED_STATE_CHANGED")
 
             clean()
-            _prepare_own_runtime_directory()
+            _prepare_own_runtime_directory(managed_debian=distribution == "debian")
             # nginx -T may create an inert PID file while inactive.
             # Never remove it unless the exact unit is still inactive.
             try:

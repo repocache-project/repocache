@@ -77,6 +77,7 @@ V06_EXTRA_FILES = frozenset((
     "scripts/inspect_native_vm_nginx_prerequisites.py",
     "scripts/install_native_root_worker.py",
     "scripts/server_v06_preflight.py",
+    "scripts/stage_native_client_helper.py",
     "scripts/stage_native_root_worker.py",
     "src/repocache/intake.py",
     "src/repocache/intake_service.py",

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import select
 import stat
 import subprocess
@@ -101,9 +102,14 @@ _VENDOR_TEMP_PATHS = tuple(
 def _owned_probe_failure(stderr: bytes) -> str:
     """Reduce bounded native failures to static categories, never raw text."""
     for line in stderr.splitlines():
-        if any(operation + b' "' + path + b'" failed' in line
-               for operation in (b"mkdir()", b"chown()", b"chmod()")
-               for path in _VENDOR_TEMP_PATHS):
+        if any(
+            operation + b' "' + path + b'" failed' in line
+            for operation in (b"mkdir()", b"chown()", b"chmod()")
+            for path in _VENDOR_TEMP_PATHS
+        ) or any(
+            re.search(rb'chown\("' + re.escape(path) + rb'", [0-9]{1,10}\) failed', line)
+            for path in _VENDOR_TEMP_PATHS
+        ):
             for errno, code in (
                 (b"(30: Read-only file system)", "OWNED_CONTEXT_VENDOR_TEMP_READ_ONLY"),
                 (b"(13: Permission denied)", "OWNED_CONTEXT_VENDOR_TEMP_PERMISSION"),

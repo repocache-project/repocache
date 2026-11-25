@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import signal
+import struct
 import sys
 import tempfile
 from pathlib import Path
@@ -72,6 +73,13 @@ def build(root: Path, manager: str):
     item = state / ("candidate-" + IDENT + ".json")
     item.write_text(json.dumps(approval, sort_keys=True))
     item.chmod(0o600)
+    # Fixed private native lock paths; never create host lock files.
+    native_locks = pair.locks.APT if manager == "apt" else pair.locks.DNF5
+    for name in native_locks:
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"")
+        path.chmod(0o600)
     mirror = root / ("etc/apt/mirrors/repocache-" + IDENT + ".list")
     return source, mirror, lock, state
 
@@ -169,6 +177,33 @@ def sigkill_recovery(manager):
             print(f"{manager}: real SIGKILL at {point} recovered PASS", flush=True)
 
 
+def sigkill_restore(manager):
+    for point in ("restore-armed", "source-restored", "companion-removed"):
+        with tempfile.TemporaryDirectory(prefix="repocache-restore-kill-ci-") as place:
+            root = Path(place)
+            src, mirror, lock, state = build(root, manager)
+            before = src.read_bytes()
+            metadata = src.stat()
+            pair.apply_sandbox(root, IDENT)
+            pid = os.fork()
+            if pid == 0:
+                def kill_at(active, current):
+                    if active == current:
+                        os.kill(os.getpid(), signal.SIGKILL)
+                pair._crash = kill_at
+                pair.restore_sandbox(root, IDENT, crash=point)
+                os._exit(77)
+            _, status = os.waitpid(pid, 0)
+            assert os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGKILL
+            assert pair.recover_sandbox(root, IDENT)["status"] == "restored"
+            assert src.read_bytes() == before and not mirror.exists()
+            after = src.stat()
+            assert (after.st_uid, after.st_gid, after.st_mode) == (
+                metadata.st_uid, metadata.st_gid, metadata.st_mode)
+            print(f"{manager}: real SIGKILL during rollback {point} recovered PASS",
+                  flush=True)
+
+
 def hostile(manager):
     with tempfile.TemporaryDirectory(prefix="repocache-pair-foreign-ci-") as place:
         root = Path(place)
@@ -200,7 +235,20 @@ def hostile(manager):
         manifest.write_text(json.dumps(approval))
         refuses(lambda: pair.apply_sandbox(root, IDENT),
                 "Stale route must not be idempotently accepted")
-        print(f"{manager}: no-op replay requires authentic route binding PASS",
+        # A completely self-consistent changed cache and digest must also
+        # fail; the original protected journal binds exact consent.
+        approval["cache"] = "https://cache.example.org/__repocache/repos/changed/"
+        approval["route_sha256"] = sha(approval["cache"].encode("ascii"))
+        manifest.write_text(json.dumps(approval))
+        refuses(lambda: pair.apply_sandbox(root, IDENT),
+                "A different self-consistent approval cannot authorize replay")
+        # Recovery is local and may restore exact original resources even
+        # when current approval is gone or no longer published.
+        manifest.unlink()
+        assert pair.restore_sandbox(root, IDENT)["status"] == "restored"
+        assert src.read_bytes() == (APT if manager == "apt" else DNF)
+        assert not mirror.exists()
+        print(f"{manager}: exact approval replay refusal and independent restore PASS",
               flush=True)
 
     if manager == "apt":
@@ -231,6 +279,86 @@ def hostile(manager):
             assert src.read_bytes() == proposed and mirror.exists()
             print("apt: foreign equal-content mirror inode refused PASS", flush=True)
 
+    with tempfile.TemporaryDirectory(prefix="repocache-pair-v2-ci-") as place:
+        root = Path(place)
+        src, mirror, lock, state = build(root, manager)
+        original = src.read_bytes()
+        manifest = state / ("candidate-" + IDENT + ".json")
+        approval = json.loads(manifest.read_text())
+        snapshot = boundary.pre.inspect_source(approval["source"], root=root)
+        approval["schema"] = 2
+        approval["source_identity"] = {
+            key: snapshot[key] for key in boundary.SOURCE_IDENTITY_FIELDS
+        }
+        manifest.write_text(json.dumps(approval))
+        assert pair.apply_sandbox(root, IDENT)["status"] == "installed-sandbox"
+        assert pair.apply_sandbox(root, IDENT)["status"] == "unchanged"
+        assert pair.restore_sandbox(root, IDENT)["status"] == "restored"
+        assert src.read_bytes() == original and not mirror.exists()
+        print(f"{manager}: schema-2 approved plan bound to journal/restore PASS", flush=True)
+
+    with tempfile.TemporaryDirectory(prefix="repocache-pair-attrs-ci-") as place:
+        root = Path(place)
+        src, mirror, lock, state = build(root, manager)
+        os.setxattr(src, "user.repocache-ci", b"exact-private-metadata")
+        # Linux POSIX ACL xattr format v2: explicit read-only named user,
+        # owner rw, group/mask/other r. No widened write authority.
+        acl = struct.pack("<I", 2) + b"".join(
+            struct.pack("<HHI", tag, perms, uid)
+            for tag, perms, uid in ((1, 6, 0xffffffff), (2, 4, 65534),
+                                    (4, 4, 0xffffffff), (16, 4, 0xffffffff),
+                                    (32, 4, 0xffffffff)))
+        os.setxattr(src, "system.posix_acl_access", acl)
+        fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            identity, attrs = boundary.metadata._metadata(fd)
+        finally:
+            os.close(fd)
+        assert {name for name, _ in attrs} == {"user.repocache-ci", "system.posix_acl_access"}
+        manifest = state / ("candidate-" + IDENT + ".json")
+        approval = json.loads(manifest.read_text())
+        approval["schema"] = 3
+        approval["source_identity"] = identity
+        approval["source_attributes_sha256"] = boundary.metadata.attribute_digest(attrs)
+        manifest.write_text(json.dumps(approval))
+        before = src.read_bytes()
+        assert pair.apply_sandbox(root, IDENT)["status"] == "installed-sandbox"
+        assert pair.apply_sandbox(root, IDENT)["status"] == "unchanged"
+        assert tuple(sorted((name, os.getxattr(src, name)) for name in os.listxattr(src))) == attrs
+        os.setxattr(src, "user.repocache-ci", b"foreign")
+        refuses(lambda: pair.restore_sandbox(root, IDENT),
+                "Changed approved metadata cannot authorize rollback")
+        os.setxattr(src, "user.repocache-ci", b"exact-private-metadata")
+        assert pair.restore_sandbox(root, IDENT)["status"] == "restored"
+        assert src.read_bytes() == before
+        assert tuple(sorted((name, os.getxattr(src, name)) for name in os.listxattr(src))) == attrs
+        print(f"{manager}: schema-3 ACL/xattr apply, drift refusal and restore PASS", flush=True)
+
+    with tempfile.TemporaryDirectory(prefix="repocache-pair-native-lock-ci-") as place:
+        root = Path(place)
+        src, mirror, lock, state = build(root, manager)
+        name = (pair.locks.APT if manager == "apt" else pair.locks.DNF5)[0]
+        before = src.stat()
+        # flock and POSIX locks are independent: another process holds the
+        # former; the transaction cannot stage or publish anything.
+        with (root / name).open("r+b") as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            refuses(lambda: pair.apply_sandbox(root, IDENT),
+                    "Competing native lock must refuse source transaction")
+            fcntl.flock(held, fcntl.LOCK_UN)
+        assert src.stat().st_ino == before.st_ino
+        assert not list(state.glob("pair-*.json")) and not mirror.exists()
+        pair.apply_sandbox(root, IDENT)
+        installed = src.read_bytes()
+        with (root / name).open("r+b") as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            refuses(lambda: pair.restore_sandbox(root, IDENT),
+                    "Competing native lock must refuse rollback")
+            fcntl.flock(held, fcntl.LOCK_UN)
+        assert src.read_bytes() == installed
+        assert pair.restore_sandbox(root, IDENT)["status"] == "restored"
+        print(f"{manager}: native lock interlock across apply/restore PASS", flush=True)
+
     with tempfile.TemporaryDirectory(prefix="repocache-pair-lock-ci-") as place:
         root = Path(place)
         src, mirror, lock, state = build(root, manager)
@@ -255,6 +383,7 @@ if __name__ == "__main__":
         exercise(manager, Path(p))
     recovery_matrix(manager)
     sigkill_recovery(manager)
+    sigkill_restore(manager)
     hostile(manager)
     print(f"{manager}: paired transaction full disposable-native matrix PASS",
           flush=True)

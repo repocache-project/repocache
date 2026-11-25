@@ -198,6 +198,10 @@ def test_owned_context_bootstrap_refuses_even_dangling_include(monkeypatch):
 @pytest.mark.parametrize("message, expected", [
     ('chown() "/var/lib/nginx/body" failed (30: Read-only file system)',
      "OWNED_CONTEXT_VENDOR_TEMP_READ_ONLY"),
+    ('chown("/var/lib/nginx/body", 33) failed (30: Read-only file system)',
+     "OWNED_CONTEXT_VENDOR_TEMP_READ_ONLY"),
+    ('chown("/var/lib/nginx/body-foreign", 33) failed (30: Read-only file system)',
+     "OWNED_CONTEXT_CHECK_READ_ONLY"),
     ('mkdir() "/var/cache/nginx/proxy_temp" failed (13: Permission denied)',
      "OWNED_CONTEXT_VENDOR_TEMP_PERMISSION"),
     ('mkdir() "/var/lib/nginx/scgi" failed (2: No such file or directory)',

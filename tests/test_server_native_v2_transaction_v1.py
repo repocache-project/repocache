@@ -1640,6 +1640,8 @@ def test_owned_context_native_probe_requires_exact_files_and_claim(
         return _owned_dump(expected)
 
     monkeypatch.setattr(native, "_capture_owned_nginx_dump_private", capture)
+    monkeypatch.setattr(native, "_owned_debian_runtime_temps",
+                        lambda *_args, **_kwargs: ((1,), {}))
     rfd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
     sfd = os.open(state, os.O_RDONLY | os.O_DIRECTORY)
     try:
@@ -2795,3 +2797,72 @@ def test_bootstrap_wal_binds_selected_distro_and_managed_wal_refuses_switch():
     with pytest.raises(native.NativeV2TransactionError,
                        match="OWNED_WAL_MANAGED_IDENTITY_CHANGED"):
         native._owned_wal_record(alma, next_generation, live=True)
+
+
+def test_debian_managed_context_explicit_private_temp_paths():
+    main = native._owned_managed_config("debian")
+    for directive, name in native._OWNED_DEBIAN_TEMP_NAMES:
+        assert main.count(f"{directive} /run/repocache-nginx/{name};".encode("ascii")) == 1
+        assert directive.encode("ascii") not in native._owned_managed_config("almalinux")
+        assert directive.encode("ascii") not in native._OWNED_BOOTSTRAP_CONFIG
+    assert b"/var/lib/nginx" not in main
+
+
+@pytest.mark.parametrize("fault", ["none", "missing", "symlink", "mode", "group",
+                                  "owner", "nonempty", "extra", "xattr"])
+def test_debian_runtime_scratch_is_fixed_and_safe(tmp_path, monkeypatch, fault):
+    import stat
+    from types import SimpleNamespace
+    # Use actual root-owned disposable paths; independent of distro passwd DB.
+    monkeypatch.setattr(native.pwd, "getpwnam", lambda _: SimpleNamespace(pw_uid=33))
+    runtime = tmp_path / "run/repocache-nginx"
+    runtime.mkdir(parents=True, mode=0o755)
+    runtime.chmod(0o755)
+    for _, name in native._OWNED_DEBIAN_TEMP_NAMES:
+        path = runtime / name
+        path.mkdir(mode=0o700)
+        os.chown(path, 33, 0)
+    first = runtime / native._OWNED_DEBIAN_TEMP_NAMES[0][1]
+    if fault == "missing":
+        first.rmdir()
+    elif fault == "symlink":
+        first.rmdir()
+        first.symlink_to(tmp_path, target_is_directory=True)
+    elif fault == "mode":
+        first.chmod(0o770)
+    elif fault == "group":
+        os.chown(first, 33, 33)
+    elif fault == "owner":
+        os.chown(first, 65534, 0)
+    elif fault == "nonempty":
+        (first / "foreign").write_bytes(b"retain")
+    elif fault == "extra":
+        (runtime / "foreign").mkdir()
+    elif fault == "xattr":
+        os.setxattr(first, "user.repocache-ci", b"retain")
+    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        if fault in ("none", "missing"):
+            _, found = native._owned_debian_runtime_temps(
+                fd, require_all=fault == "none", inactive=True,
+            )
+            assert len(found) == (5 if fault == "none" else 4)
+            if fault == "missing":
+                with pytest.raises(native.NativeV2TransactionError,
+                                   match="OWNED_CONTEXT_RUNTIME_TEMP_UNVERIFIED"):
+                    native._owned_debian_runtime_temps(fd, require_all=True)
+        else:
+            with pytest.raises(native.NativeV2TransactionError,
+                               match="OWNED_CONTEXT_RUNTIME_TEMP_UNVERIFIED"):
+                native._owned_debian_runtime_temps(fd, require_all=True, inactive=True)
+        if fault == "none":
+            # Recoverable partial mkdir: root-owned and empty before nginx
+            # chown, but never acceptable as a completed native observation.
+            os.chown(first, 0, 0)
+            native._owned_debian_runtime_temps(fd, require_all=False, inactive=True)
+            with pytest.raises(native.NativeV2TransactionError,
+                               match="OWNED_CONTEXT_RUNTIME_TEMP_UNVERIFIED"):
+                native._owned_debian_runtime_temps(fd, require_all=True)
+            assert stat.S_IMODE(first.stat().st_mode) == 0o700
+    finally:
+        os.close(fd)

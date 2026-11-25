@@ -148,6 +148,11 @@ sshguest 'mkdir -p ~/source && tar -xf ~/source.tar.gz -C ~/source'
 if test "$scenario" = native-installer || test "$scenario" = native-package-interruption || test "$scenario" = native-lifecycle || test "$scenario" = native-activation; then
   stage=prepare-fresh-native-installer-guest
   sshguest "sudo bash /home/pr237ci/source/scripts/ci_pr237_guest.sh '$PR237_PLATFORM' prepare-installer" > "$out/installer-prerequisites.txt" 2>&1 || { cat "$out/installer-prerequisites.txt"; exit 1; }
+  # Diagnostic dependency is only for the disposable AlmaLinux activation
+  # campaign, never for a product install or its signed dependency contract.
+  if test "$scenario" = native-activation && test "$PR237_PLATFORM" = almalinux10; then
+    sshguest 'sudo dnf -y -q install python3-setools' >> "$out/installer-prerequisites.txt" 2>&1 || { cat "$out/installer-prerequisites.txt"; exit 1; }
+  fi
   prepare_pinned_synthetic_source
   stage=synthetic-worker-native-placement
   sshguest "sudo /usr/bin/python3 -B /home/pr237ci/source/scripts/ci_pr237_synthetic_worker_guest.py /home/pr237ci/combined '$combined_sha'" > "$out/synthetic-installed-worker.txt" 2>&1 || { cat "$out/synthetic-installed-worker.txt"; exit 1; }
