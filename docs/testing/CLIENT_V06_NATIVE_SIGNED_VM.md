@@ -71,3 +71,23 @@ The subsequent disposable VM probe allocates the database directly under
 removes it on exit. The fixture repository remains in `/tmp`. Initialization
 failure reports bounded directory contexts without changing SELinux policy.
 This correction requires fresh booted-native acceptance evidence.
+
+## Actual read-only native client commands (#24)
+
+The prior native CLI guard exercised help and disabled apply refusal, not
+all three real read-only commands. The guarded booted guest now runs actual
+non-root check, repos list and default repos sync against a disposable
+loopback HTTPS catalog. Its test certificate is selected only in the
+child's SSL_CERT_FILE environment; the host trust store is untouched.
+A valid empty catalog requires successful TLS/catalog checks, unchanged
+inventory, dry_run=true, planned_changes=0 and no write-eligible plan.
+An unsupported catalog schema and foreign CA must refuse sync and report
+the expected check status; list never contacts the server. No actual
+repository origins are contacted. Snapshot the supported native source
+files (including APT mirror companions when present) before the probe and
+after every invocation, comparing exact file set, device/inode, owner,
+mode, links, size, mtime, ctime and SHA-256. A wrong outcome, unexpected
+stderr, malformed JSON or source drift fails the test. Native execution
+remains NOT VERIFIED until the exact-HEAD booted Debian and AlmaLinux
+campaign completes; no installed source writer, active catalog or real
+publisher acceptance is claimed.
