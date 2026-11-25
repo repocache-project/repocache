@@ -135,3 +135,26 @@ repository path can contain sensitive identifiers. The separate approval call
 still requires explicit consent to the exact route and independently repeats
 validation. Review itself neither creates an approval nor edits any source.
 The public CLI remains unchanged; no claim of an enabled production writer.
+
+## Native APT source-read ordering
+
+The Debian 13.3 / APT 3.0.3 disposable local root experiment (2026-11-25)
+held POSIX and BSD locks simultaneously on all four fixed APT/dpkg lock
+inodes. With empty sources, actual apt-get update refused the private lists
+lock; with a deliberately malformed private .list it instead refused source
+parsing before reporting any lock error. Restoring the empty file restored
+the lock refusal; releasing the locks permitted the same empty update.
+This demonstrates that these four locks do not exclude early source reads.
+
+The guarded Debian booted privileged-client fixture now repeats that
+sequence under the actual REPOCACHE lock primitive and its full-set
+revalidation callback. APT_CONFIG points to an exclusive disposable
+configuration before APT loads normal config; all status, lists, archives,
+logs and source paths are private, with no repository/network access.
+Neither installed host sources nor packages may change. A lock failure,
+parse error, restored lock failure and post-release success are all required;
+a generic nonzero exit or timeout is insufficient. Actual booted evidence
+is NOT VERIFIED until execution. This is negative synchronization evidence,
+not a new native-writer authorization: publication and rollback must remain
+safe for already-read source snapshots, and lock acquisition alone cannot
+be treated as an exclusion lease. No installed source-write path is added.

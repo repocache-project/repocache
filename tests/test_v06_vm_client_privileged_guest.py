@@ -61,3 +61,12 @@ def test_fixture_context_removes_exact_rule_on_failure(monkeypatch, tmp_path):
             raise RuntimeError("test interruption")
     assert entries == []
     assert calls[1][-1] == calls[-2][-1]
+
+
+@pytest.mark.parametrize("path", ["/etc", "/tmp", "/tmp/unrelated", "/var/tmp/repocache-booted-approval-test"])
+def test_apt_read_order_rejects_nonfixture_before_native_command(monkeypatch, path):
+    monkeypatch.setattr(Path, "resolve", lambda self, **_kw: self)
+    monkeypatch.setattr(guest.subprocess, "run", lambda *_a, **_kw:
+                        pytest.fail("APT invoked outside fixture"))
+    with pytest.raises(AssertionError):
+        guest._apt_source_read_order(Path(path))

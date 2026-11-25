@@ -32,6 +32,76 @@ def _snapshot(path: Path):
             info.st_gid, info.st_mode, info.st_mtime_ns, info.st_ctime_ns, attrs)
 
 
+def _apt_source_read_order(root: Path) -> None:
+    """Exercise real APT parsing before the full existing native lock set.
+
+    The guarded booted guest supplies its marked disposable root. Isolate
+    apt.conf loading *before* APT reads its normal configuration, as well
+    as lists, archives, status, logs and sources. No network repositories.
+    """
+    assert root.is_absolute() and root.resolve(strict=True) == root
+    assert root.parent == Path("/tmp") and root.name.startswith("repocache-booted-approval-")
+    assert re.fullmatch(r"[A-Za-z0-9_/-]+", str(root))
+    assert root.stat().st_uid == 0 and root.stat().st_mode & 0o777 == 0o700
+    etc = root / "etc/apt"
+    lists = root / "var/lib/apt/lists"
+    for directory in (lists / "partial", root / "var/cache/apt/archives/partial",
+                      root / "var/log/apt", etc / "empty-parts", etc / "apt.conf.d"):
+        directory.mkdir(mode=0o700, parents=True)
+    status = root / "var/lib/dpkg/status"
+    empty = etc / "empty.list"
+    for path in (status, empty, etc / "apt.conf"):
+        with path.open("x"):
+            pass
+    config = etc / "fixture.conf"
+    with config.open("x") as handle:
+        handle.write(
+            f'Dir "{root}/";\n'
+            'Dir::Etc "etc/apt";\n'
+            'Dir::Etc::main "apt.conf";\n'
+            'Dir::Etc::parts "apt.conf.d";\n'
+            'Dir::Etc::sourcelist "empty.list";\n'
+            'Dir::Etc::sourceparts "empty-parts";\n'
+            'Dir::State "var/lib/apt";\n'
+            f'Dir::State::status "{status}";\n'
+            'Dir::Cache "var/cache/apt";\n'
+            'Dir::Log "var/log/apt";\n'
+            'APT::Update::Error-Mode "any";\n'
+            'Acquire::Retries "0";\n'
+        )
+    env = {"PATH": "/usr/bin:/bin", "LC_ALL": "C", "APT_CONFIG": str(config)}
+
+    def update():
+        return subprocess.run(["/usr/bin/apt-get", "update"], check=False,
+                              capture_output=True, text=True, timeout=30, env=env)
+
+    def require_lock_refusal():
+        refused = update()
+        assert refused.returncode == 100 and "Could not get lock" in refused.stderr
+        assert str(lists / "lock") in refused.stderr
+
+    with pair.locks.hold_existing_native_package_locks(
+            "apt", root=root, revalidation=True) as recheck:
+        require_lock_refusal()
+        recheck()
+        try:
+            empty.write_text("repocache-invalid-source\n")
+            malformed = update()
+            assert malformed.returncode == 100
+            assert f"Malformed line 1 in source list {empty}" in malformed.stderr
+            assert "The list of sources could not be read" in malformed.stderr
+            assert "Could not get lock" not in malformed.stderr
+            recheck()
+        finally:
+            empty.write_text("")
+        require_lock_refusal()
+        recheck()
+    assert update().returncode == 0
+    assert status.read_bytes() == b"" and empty.read_bytes() == b""
+    print("PASS: native apt-get reads sources before the held lists lock, "
+          "even with all four transaction locks held; release succeeds")
+
+
 def _debian_fixture(root: Path) -> None:
     source, _, lock, state = build(root, "apt")
     original = _snapshot(source)
@@ -128,32 +198,7 @@ def _debian_fixture(root: Path) -> None:
     finally:
         boundary._native_tls_context = original_context
         backend.close()
-    # Native apt-get must observe the same POSIX lists lock that the
-    # transaction holds. Use no configured repositories and private dirs;
-    # no host cache/source changes or package operations are permitted.
-    lists = root / "var/lib/apt/lists"
-    (lists / "partial").mkdir(mode=0o700, exist_ok=True)
-    empty = root / "etc/apt/empty.list"
-    empty.write_text("")
-    empty_parts = root / "etc/apt/empty-parts"
-    empty_parts.mkdir()
-    with pair.locks.hold_existing_native_package_locks("apt", root=root):
-        command = [
-            "/usr/bin/apt-get",
-            "-o", "Dir::State::lists=" + str(lists),
-            "-o", "Dir::State::status=/var/lib/dpkg/status",
-            "-o", "Dir::Cache=" + str(root / "var/cache/apt"),
-            "-o", "Dir::Etc::sourcelist=" + str(empty),
-            "-o", "Dir::Etc::sourceparts=" + str(empty_parts),
-            "-o", "Dir::Etc::parts=-", "-o", "Dir::Etc::main=/dev/null",
-            "-o", "APT::Update::Error-Mode=any",
-            "-o", "Acquire::Retries=0", "update",
-        ]
-        refused = subprocess.run(command, check=False, capture_output=True,
-                                 text=True, timeout=30, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
-        assert refused.returncode != 0 and "Could not get lock" in refused.stderr
-        assert str(lists / "lock") in refused.stderr
-    print("PASS: native apt-get respects held transaction lists lock")
+    _apt_source_read_order(root)
 
     # The catalog is offline. All changes are in the marked private lab root.
     mirror = root / ("etc/apt/mirrors/repocache-" + ident + ".list")
@@ -401,7 +446,7 @@ def main(platform: str) -> None:
     before_sources = installed_sources(platform)
     before_packages = installed_packages(platform)
     _signed_helper_placement(platform)
-    with tempfile.TemporaryDirectory(prefix="repocache-booted-approval-") as work:
+    with tempfile.TemporaryDirectory(prefix="repocache-booted-approval-", dir="/tmp") as work:
         root = Path(work)
         if platform == "debian13":
             _debian_fixture(root)
