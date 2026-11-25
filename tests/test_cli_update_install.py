@@ -60,6 +60,23 @@ def test_malformed_version_refused_before_updater_invocation(
     assert not result.stderr
 
 
+@pytest.mark.parametrize("argv", [
+    ["--json", "update", "install"],
+    ["update", "install", "--json"],
+])
+def test_missing_version_emits_versioned_json_without_backend(monkeypatch, argv):
+    monkeypatch.setattr(updater, "apply", lambda **kw:
+                        pytest.fail("Missing version reached authenticated update"))
+    result = CliRunner().invoke(cli.app, argv)
+    assert result.exit_code == 2, result.output
+    response = json.loads(result.stdout)
+    assert response["schema_version"] == 1
+    assert response["ok"] is False
+    assert response["error"]["code"] == "INVALID_ARGUMENT"
+    assert response["error"]["message"]
+    assert not result.stderr
+
+
 def test_missing_positional_version_never_calls_backend(monkeypatch):
     monkeypatch.setattr(updater, "apply", lambda **kw:
                         pytest.fail("Required version missing but updater called"))

@@ -370,3 +370,40 @@ def test_canonical_diagnostics_object_help_never_probes_host(monkeypatch):
 def test_preserved_existing_cli_contract_anchors():
     assert {"check", "repos list", "repos submit", "repos sync"} <= _client_paths()
     assert {"update list", "update check", "update install", "repos list", "repos show"} <= _server_paths()
+
+
+@pytest.mark.parametrize("argv,stdin_tty,stdout_tty,expect_tui", [
+    ([], True, True, True),
+    ([], False, True, False),
+    ([], True, False, False),
+    ([], False, False, False),
+    (["--json"], True, True, False),
+    (["--json"], False, False, False),
+])
+def test_root_entry_preserves_bare_tui_but_explicit_json_is_noninteractive(
+        monkeypatch, argv, stdin_tty, stdout_tty, expect_tui):
+    from types import SimpleNamespace
+
+    # Model the CLI's terminal observations, not CliRunner's own streams.
+    monkeypatch.setattr(cli, "sys", SimpleNamespace(
+        stdin=SimpleNamespace(isatty=lambda: stdin_tty),
+        stdout=SimpleNamespace(isatty=lambda: stdout_tty),
+        argv=["repocache", *argv],
+    ))
+    calls = []
+    monkeypatch.setattr(cli, "tui_launch", lambda: calls.append("tui"))
+    monkeypatch.setattr(cli, "settings", lambda: None)
+    monkeypatch.setattr(cli, "snapshot", lambda _: calls.append("status") or {
+        "ok": True, "service": "fixture",
+    })
+    result = CliRunner().invoke(cli.app, argv)
+    assert result.exit_code == 0, result.output
+    assert not result.stderr
+    if expect_tui:
+        assert calls == ["tui"]
+        assert not result.stdout
+    else:
+        assert calls == ["status"]
+        assert json.loads(result.stdout) == {
+            "schema_version": 1, "ok": True, "service": "fixture",
+        }

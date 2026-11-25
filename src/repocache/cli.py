@@ -176,7 +176,7 @@ def main(ctx: typer.Context,
         console.print(f"REPOCACHE Control Center {__version__}")
         raise typer.Exit()
     if ctx.invoked_subcommand is None:
-        if sys.stdout.isatty() and sys.stdin.isatty():
+        if not json_output and sys.stdout.isatty() and sys.stdin.isatty():
             tui_launch()
         else:
             show_status(ctx, json_output=True)
