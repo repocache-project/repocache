@@ -225,6 +225,12 @@ _AUDIT_FAILURE_CODES = frozenset({
     "NATIVE_V2_OWNED_CONTEXT_FILE_DRIFT",
     "NATIVE_V2_OWNED_CONTEXT_LAYOUT_UNSUPPORTED",
     "NATIVE_V2_OWNED_CONTEXT_PROBE_REFUSED",
+    "NATIVE_V2_OWNED_CONTEXT_VENDOR_TEMP_READ_ONLY",
+    "NATIVE_V2_OWNED_CONTEXT_VENDOR_TEMP_PERMISSION",
+    "NATIVE_V2_OWNED_CONTEXT_VENDOR_TEMP_MISSING",
+    "NATIVE_V2_OWNED_CONTEXT_CHECK_PERMISSION",
+    "NATIVE_V2_OWNED_CONTEXT_CHECK_READ_ONLY",
+    "NATIVE_V2_OWNED_CONTEXT_DIAGNOSTIC_LIMIT",
     "NATIVE_V2_OWNED_DIRECTORY_FOREIGN_ENTRY",
     "NATIVE_V2_OWNED_DIRECTORY_MODE_UNSAFE",
     "NATIVE_V2_OWNED_LIVE_APPLY_RECOVERY_REQUIRED",
@@ -1334,7 +1340,15 @@ def _probe_owned_context_locked(
             return dump
     except NativeV2TransactionError:
         raise
-    except (OSError, ValueError, TypeError, FixedNginxFullContextError):
+    except FixedNginxFullContextError as exc:
+        # Accept only the closed native probe categories; all other
+        # diagnostic text remains generic and never reaches the socket.
+        from repocache.server_root_control_full_context_v1 import _OWNED_PROBE_FAILURE_CODES
+        for code in _OWNED_PROBE_FAILURE_CODES:
+            if exc.args == ("NATIVE_NGINX_FULL_CONTEXT_" + code,):
+                _deny(code)
+        _deny("OWNED_CONTEXT_PROBE_REFUSED")
+    except (OSError, ValueError, TypeError):
         _deny("OWNED_CONTEXT_PROBE_REFUSED")
 
 

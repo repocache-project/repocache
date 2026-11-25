@@ -111,3 +111,15 @@ an enforcing AVC, the guest also checks the current boot's kernel journal
 for the request interval, accepting only the matching worker PID, TCP
 port, domain and enforcing denial. No policy, boolean or service permissions
 are changed, and missing evidence is still NOT VERIFIED.
+
+At `cb8b4aa`, the confined Debian first APPLY failed in the native
+owned-context probe and rolled back. NGINX -T initializes temporary
+paths, including the distribution's compiled-in defaults; a read-only
+vendor path is one hypothesis, not yet the established native cause.
+The fixed owned probe now drains stdout and stderr independently under
+one deadline, with a separate 16 KiB stderr limit, and maps failures
+only to closed permission/read-only or exact vendor temporary-path
+categories. The legacy vendor probe still discards stderr. No raw child
+stderr reaches the journal or client. The socket remains generic and
+all syntax, exact dump, provenance, rollback and confinement gates remain
+unchanged. No SELinux or filesystem permission change is introduced.

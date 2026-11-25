@@ -144,7 +144,7 @@ def test_owned_context_uses_only_fixed_private_command(monkeypatch, managed):
         "/usr/sbin/nginx", "-T", "-c", "/etc/nginx/repocache.d/repocache.conf",
     )
     assert calls[0][1]["shell"] is False
-    assert calls[0][1]["stderr"] == subprocess.DEVNULL
+    assert calls[0][1]["stderr"] == subprocess.PIPE
 
 
 @pytest.mark.parametrize("managed", [False, True])
@@ -193,3 +193,39 @@ def test_owned_context_bootstrap_refuses_even_dangling_include(monkeypatch):
     with pytest.raises(observed.FixedNginxFullContextError,
                        match="FIXED_FILES_UNVERIFIED"):
         observed._trusted_owned_fixed_files(False)
+
+
+@pytest.mark.parametrize("message, expected", [
+    ('chown() "/var/lib/nginx/body" failed (30: Read-only file system)',
+     "OWNED_CONTEXT_VENDOR_TEMP_READ_ONLY"),
+    ('mkdir() "/var/cache/nginx/proxy_temp" failed (13: Permission denied)',
+     "OWNED_CONTEXT_VENDOR_TEMP_PERMISSION"),
+    ('mkdir() "/var/lib/nginx/scgi" failed (2: No such file or directory)',
+     "OWNED_CONTEXT_VENDOR_TEMP_MISSING"),
+    ('open() "/private/path" failed (13: Permission denied)',
+     "OWNED_CONTEXT_CHECK_PERMISSION"),
+    ('chown() "/var/lib/nginx/body-foreign" failed (30: Read-only file system)',
+     "OWNED_CONTEXT_CHECK_READ_ONLY"),
+    ('arbitrary secret diagnostic', "CHECK_FAILED"),
+])
+def test_owned_native_failure_classification_never_emits_private_stderr(
+        monkeypatch, capsys, message, expected):
+    monkeypatch.setattr(observed.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(observed, "_trusted_owned_fixed_files",
+                        lambda _: ((1,), (2,)))
+    _child_with_output(monkeypatch, "import sys;sys.stderr.write("
+                       + repr(message) + ");sys.exit(1)")
+    with pytest.raises(observed.FixedNginxFullContextError) as err:
+        observed._capture_owned_nginx_dump_private(managed=True)
+    assert str(err.value) == "NATIVE_NGINX_FULL_CONTEXT_" + expected
+    assert capsys.readouterr() == ("", "")
+
+
+def test_owned_native_stderr_is_bounded_even_on_success(monkeypatch):
+    monkeypatch.setattr(observed.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(observed, "_trusted_owned_fixed_files",
+                        lambda _: ((1,), (2,)))
+    _child_with_output(monkeypatch, "import sys;sys.stderr.write('x'*16385);print('dump')")
+    with pytest.raises(observed.FixedNginxFullContextError,
+                       match="OWNED_CONTEXT_DIAGNOSTIC_LIMIT"):
+        observed._capture_owned_nginx_dump_private(managed=True)
