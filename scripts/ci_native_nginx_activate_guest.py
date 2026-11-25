@@ -811,6 +811,12 @@ finally:
         os.fsync(fd)
 
     try:
+        # Prove the fixture origin's exact native CA/hostname handshake
+        # independently, without weakening the production proxy checks.
+        upstream_tls = ssl.create_default_context(cafile=ca)
+        with socket.create_connection(("127.0.0.1", 8008), timeout=5) as channel:
+            with upstream_tls.wrap_socket(channel, server_hostname="cache.example.invalid"):
+                pass
         assert run("/usr/bin/systemctl", "stop", OWN).returncode == 0
         require_status(OWN, False, True)
         replace_include(fixture)

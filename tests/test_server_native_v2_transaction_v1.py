@@ -2638,7 +2638,7 @@ def test_owned_socket_active_candidate_refused_before_wal(filesystem, monkeypatc
     monkeypatch.setattr(native, "_owned_socket_recheck_write_boundary", lambda *_: None)
     monkeypatch.setattr(native, "_read_owned_resources",
                         lambda *_: {native.V2_STATE: None})
-    monkeypatch.setattr(native, "_validate_owned_resources", lambda *_: None)
+    monkeypatch.setattr(native, "_validate_owned_resources", lambda *_a, **_kw: None)
     candidate = _owned_generation(active=True)[V2_STATE]
     monkeypatch.setattr(native, "_load_private_under_root",
                         lambda *_a, **_kw: ({"expected_generation": 0}, candidate))
@@ -2774,3 +2774,24 @@ def test_owned_managed_worker_identity_not_caller_selectable():
     for value in ("root", "nginx", "www-data", "", None):
         with pytest.raises(native.NativeV2TransactionError, match="DISTRIBUTION_UNSUPPORTED"):
             native._owned_managed_config(value)
+
+def test_bootstrap_wal_binds_selected_distro_and_managed_wal_refuses_switch():
+    old = _owned_bootstrap_resources()
+    debian = _owned_generation(active=False)
+    alma = dict(debian)
+    alma[native._OWNED_MAIN] = native._owned_managed_config("almalinux")
+    alma[native._OWNED_MANIFEST] = native._owned_manifest_for(
+        alma[V2_STATE], alma[native._OWNED_MAIN],
+        alma[native._INCLUDE], alma[native._CATALOG],
+    )
+    assert native._validate_owned_resources(alma, distribution="almalinux")
+    with pytest.raises(native.NativeV2TransactionError, match="OWNED_WAL_MANIFEST_DRIFT"):
+        native._validate_owned_resources(alma, distribution="debian")
+    raw = native._owned_wal_record(old, alma, live=True)
+    assert native._decode_owned_wal(raw, distribution="almalinux")[0] == old
+    with pytest.raises(native.NativeV2TransactionError, match="OWNED_WAL_INVALID"):
+        native._decode_owned_wal(raw, distribution="debian")
+    next_generation = _owned_generation(2, previous=json.loads(alma[V2_STATE]), active=False)
+    with pytest.raises(native.NativeV2TransactionError,
+                       match="OWNED_WAL_MANAGED_IDENTITY_CHANGED"):
+        native._owned_wal_record(alma, next_generation, live=True)

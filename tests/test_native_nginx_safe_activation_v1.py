@@ -431,7 +431,7 @@ def test_managed_installer_reuses_verified_generation_without_bootstrap(monkeypa
     monkeypatch.setattr(host, "_owned_layout_locked", layout)
     resources = {"catalog.json": b"catalog"}
     monkeypatch.setattr(host, "_read_owned_resources", lambda *_: resources)
-    monkeypatch.setattr(host, "_validate_owned_resources", lambda _: {"state_generation": 1})
+    monkeypatch.setattr(host, "_validate_owned_resources", lambda *_a, **_kw: {"state_generation": 1})
     monkeypatch.setattr(host, "_owned_socket_require_inactive_routes", lambda _: None)
     monkeypatch.setattr(host, "_no_conflicting_owned_wal_pending", lambda _: None)
     def observe(root, *, expected_unit):
@@ -463,7 +463,7 @@ def _inactive_managed(monkeypatch):
         yield (11, 12, 13, lambda: None)
     monkeypatch.setattr(host, "_owned_layout_locked", layout)
     monkeypatch.setattr(host, "_read_owned_resources", lambda *_: {"catalog.json": b"catalog"})
-    monkeypatch.setattr(host, "_validate_owned_resources", lambda _: {"state_generation": 1})
+    monkeypatch.setattr(host, "_validate_owned_resources", lambda *_a, **_kw: {"state_generation": 1})
     monkeypatch.setattr(host, "_owned_socket_require_inactive_routes", lambda _: None)
     monkeypatch.setattr(host, "_no_conflicting_owned_wal_pending", lambda _: None)
     monkeypatch.setattr(host, "_read_exact_owned_unit_at",
