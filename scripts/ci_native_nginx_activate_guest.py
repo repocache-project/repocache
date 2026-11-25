@@ -14,6 +14,7 @@ from pathlib import Path
 import socket
 import subprocess
 import sys
+import time
 
 ROOT = Path("/root/pr237-synthetic-fixture")
 STATE = Path("/var/lib/repocache/server")
@@ -397,6 +398,38 @@ def live_wal_resource_hashes() -> dict[str, str]:
 
 
 
+def require_control_worker_idle(timeout: float = 20.0) -> None:
+    """Observe clean oneshot exit; never reset or stop a failing worker."""
+    fields = ("LoadState", "ActiveState", "SubState", "Result",
+              "MainPID", "ControlPID", "ExecMainStatus")
+    deadline = time.monotonic() + timeout
+    while True:
+        status = run("/usr/bin/systemctl", "show", "repocache-control.service",
+                     *("-p" + field for field in fields))
+        observed = {}
+        for line in status.stdout.splitlines():
+            key, sep, value = line.partition("=")
+            if not sep or key not in fields or key in observed:
+                raise AssertionError("Control worker state malformed")
+            observed[key] = value
+        if (status.returncode != 0 or set(observed) != set(fields)
+                or observed["LoadState"] != "loaded"):
+            raise AssertionError("Control worker state unavailable")
+        if observed["Result"] != "success":
+            raise AssertionError("Control worker result not successful")
+        if observed["ActiveState"] == "inactive":
+            if observed["SubState"] == "dead" and all(
+                    observed[field] == "0" for field in
+                    ("MainPID", "ControlPID", "ExecMainStatus")):
+                return
+            raise AssertionError("Control worker inactive state not clean")
+        if observed["ActiveState"] not in ("activating", "deactivating"):
+            raise AssertionError("Control worker unexpected active state")
+        if time.monotonic() >= deadline:
+            raise AssertionError("Control worker did not finish within deadline")
+        time.sleep(0.1)
+
+
 def verify_dedicated_socket(*, bootstrap: bool = False, pending: bool = False) -> None:
     """Exercise the actual installed broker through its kernel-authenticated socket.
 
@@ -451,6 +484,7 @@ def verify_dedicated_socket(*, bootstrap: bool = False, pending: bool = False) -
             if expected in ("APPLIED", "RELOADED", "UNCHANGED"):
                 assert result["state_generation"] == 1
 
+    completed = False
     try:
         if pending:
             wal = STATE / ".state-v2-owned-nginx.pending"
@@ -459,6 +493,7 @@ def verify_dedicated_socket(*, bootstrap: bool = False, pending: bool = False) -
             call("RECOVER_V2", "RECOVERED")
             assert not wal.exists()
             print("PASS: confined socket recovered pending WAL after reboot", flush=True)
+            completed = True
             return
         if bootstrap:
             before = OWN_CONFIG.read_bytes()
@@ -469,6 +504,7 @@ def verify_dedicated_socket(*, bootstrap: bool = False, pending: bool = False) -
             assert (STATE / "state-v2.json").is_file()
             assert not (STATE / ".state-v2-owned-nginx.pending").exists()
             print("PASS: authenticated dedicated socket applied first generation through live WAL", flush=True)
+            completed = True
             return
 
         before = live_wal_resource_hashes()
@@ -559,8 +595,16 @@ def verify_dedicated_socket(*, bootstrap: bool = False, pending: bool = False) -
         call("RELOAD_V2", "RELOADED")
         assert live_wal_resource_hashes() == before
         print("PASS: actual confined dedicated socket clean/replay/reload, non-root operator, service UID and placement receipt refusal", flush=True)
+        completed = True
     finally:
-        command("/usr/bin/systemctl", "stop", "repocache-control.socket")
+        try:
+            if completed:
+                require_control_worker_idle()
+        finally:
+            command("/usr/bin/systemctl", "stop", "repocache-control.socket")
+        if completed:
+            require_control_worker_idle()
+            print("PASS: control worker completed before socket teardown and remained idle", flush=True)
 
 
 def verify_managed_installer_repeat(distribution, native, assets, pins):
@@ -852,7 +896,7 @@ def verify_owned_service_data_fixture(distribution, native, assets, pins) -> Non
     require_status(OWN, True, True)
     require_status(VENDOR, False, False)
     assert run("/usr/bin/systemctl", "is-active", "repocache-control.socket").stdout.strip() == "inactive"
-    assert run("/usr/bin/systemctl", "is-active", "repocache-control.service").stdout.strip() == "inactive"
+    require_control_worker_idle()
     if distribution == "almalinux":
         assert run("/usr/sbin/getenforce").stdout.strip() == "Enforcing"
     verified = native.stage.verify_installed_worker(assets, **pins)

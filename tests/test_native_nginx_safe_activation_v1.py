@@ -610,3 +610,49 @@ def test_fixture_upstream_eacces_matches_current_worker_and_exact_endpoint():
     ):
         assert not fixture_upstream_connect_eacces(record.replace(old, new), {123})
     assert not fixture_upstream_connect_eacces("x" * (1024 * 1024 + 1) + record, {123})
+
+
+def test_fixture_control_worker_waits_for_clean_exit(monkeypatch):
+    from scripts import ci_native_nginx_activate_guest as guest
+
+    def state(active, sub, pid):
+        return SimpleNamespace(returncode=0, stdout=(
+            f"LoadState=loaded\nActiveState={active}\nSubState={sub}\n"
+            f"Result=success\nMainPID={pid}\nControlPID=0\nExecMainStatus=0\n"))
+    observations = iter([state("activating", "start", 123),
+                         state("inactive", "dead", 0)])
+    calls = []
+    def run(*args):
+        calls.append(args)
+        return next(observations)
+    monkeypatch.setattr(guest, "run", run)
+    monkeypatch.setattr(guest.time, "sleep", lambda _: None)
+    guest.require_control_worker_idle()
+    assert len(calls) == 2
+    assert all(call[:3] == ("/usr/bin/systemctl", "show",
+                            "repocache-control.service") for call in calls)
+
+
+@pytest.mark.parametrize("change", [
+    "ActiveState=failed", "Result=exit-code", "ExecMainStatus=1",
+    "MainPID=123", "ControlPID=123", "SubState=exited",
+    "ActiveState=active", "ActiveState=activating", "LoadState=not-found",
+    "missing", "duplicate", "command-failed",
+])
+def test_fixture_control_worker_refuses_unclean_or_unavailable_state(monkeypatch, change):
+    from scripts import ci_native_nginx_activate_guest as guest
+
+    fields = dict(LoadState="loaded", ActiveState="inactive", SubState="dead",
+                  Result="success", MainPID="0", ControlPID="0", ExecMainStatus="0")
+    if "=" in change:
+        key, value = change.split("=")
+        fields[key] = value
+    elif change == "missing":
+        del fields["Result"]
+    raw = "\n".join(f"{key}={value}" for key, value in fields.items())
+    if change == "duplicate":
+        raw += "\nResult=success"
+    monkeypatch.setattr(guest, "run", lambda *args: SimpleNamespace(
+        returncode=1 if change == "command-failed" else 0, stdout=raw))
+    with pytest.raises(AssertionError):
+        guest.require_control_worker_idle(timeout=0)
