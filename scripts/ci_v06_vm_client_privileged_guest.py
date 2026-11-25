@@ -2,10 +2,12 @@
 """Booted native privileged client fixture; never writes host sources."""
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import ssl
 import subprocess
@@ -176,6 +178,39 @@ def _alma_label_refusal(root: Path) -> None:
     assert _snapshot(source) == before and _snapshot(lock) == lock_before
     assert not list(state.glob("pending-*.json")) and not list(state.glob("pair-*.json"))
     print("PASS: AlmaLinux enforcing unreviewed labels refused; source and lock labels intact")
+
+
+@contextlib.contextmanager
+def _alma_fixture_file_context(root: Path):
+    """Local pathname mapping for this disposable VM fixture only.
+
+    Stock policy need not map arbitrary /tmp or /var/tmp descendants.
+    Never change domain permissions, enforcement, host source mappings or
+    production lookup behavior. Keep the exact random path rule ephemeral.
+    """
+    guarded_native_guest("almalinux10")
+    assert os.getresuid() == (0, 0, 0)
+    assert root.parent == Path("/var/tmp")
+    assert re.fullmatch(r"repocache-booted-label-[a-z0-9_]+", root.name)
+    assert root.resolve(strict=True) == root
+    assert root.stat().st_uid == 0 and root.stat().st_mode & 0o777 == 0o700
+    rule = re.escape(str(root)) + "(/.*)?"
+    def semanage(*args):
+        return subprocess.run(
+            ["/usr/sbin/semanage", "fcontext", *args], check=True,
+            capture_output=True, text=True, timeout=60,
+            env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"},
+        ).stdout
+    before = semanage("-l", "-C")
+    assert str(root) not in before and rule not in before
+    semanage("-a", "-t", "tmp_t", rule)
+    try:
+        assert rule in semanage("-l", "-C")
+        yield
+    finally:
+        semanage("-d", rule)
+        assert semanage("-l", "-C") == before
+        guarded_native_guest("almalinux10")
 
 
 def _alma_label_roundtrip(root: Path) -> None:
@@ -360,11 +395,12 @@ def main(platform: str) -> None:
         else:
             _alma_label_refusal(root)
     if platform == "almalinux10":
-        # /tmp may explicitly have no default file context in targeted policy.
-        # Use the other already-authorized private fixture root; the positive
-        # test still requires actual native path-policy matches for all files.
+        # Native raw lookup returned ENOENT on both private temp locations.
+        # Use a test-only local file-context rule, not a production bypass.
         with tempfile.TemporaryDirectory(prefix="repocache-booted-label-", dir="/var/tmp") as work:
-            _alma_label_roundtrip(Path(work))
+            root = Path(work)
+            with _alma_fixture_file_context(root):
+                _alma_label_roundtrip(root)
     assert installed_sources(platform) == before_sources
     assert installed_packages(platform) == before_packages
     guarded_native_guest(platform)

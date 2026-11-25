@@ -27,3 +27,17 @@ UID/GID 65534 on throwaway Debian 13 and AlmaLinux 10 containers.
 Original host SELinux enforcing, root-owned installation, TLS,
 true disk exhaustion, signed APT/DNF upstream fallback and
 booted native systemd recovery remain NOT VERIFIED under #97/#19.
+
+## Independent native inactivity expiry
+
+The same two-distro workflow also runs a separate bounded test of native
+inactivity. Two private 8 MiB cache zones each contain one small immutable
+object. The idle zone uses a three-second inactivity policy; the independent
+control zone uses 600 seconds. Both HTTP freshness periods are 600 seconds.
+The test requires real MISS/HIT, allocated bytes strictly below capacity,
+no requests while the native manager removes the idle object, preserved
+control-zone HIT, and exact response bytes plus origin fetch counts after
+repopulation. The timeout is 45 seconds; the measured manager delay is
+reported rather than promising expiry at exactly three seconds.
+This is an isolated Stage-A runtime observation, not an installed policy
+application or booted SELinux acceptance.

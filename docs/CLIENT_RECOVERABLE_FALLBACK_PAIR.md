@@ -126,3 +126,15 @@ fixture rejects withdrawn and changed routes with no staging or source
 changes; it then interrupts a valid transaction and recovers offline.
 The offline historical laboratory entry remains private-test-only.
 Neither entry accepts the production root.
+
+AlmaLinux booted positive fixture: native raw file-context lookup returned
+ENOENT on the arbitrary /tmp and /var/tmp fixture marker. The disposable
+VM alone now installs a local file-context mapping to tmp_t for the exact
+random private fixture subtree, restores those fixture labels and removes
+the rule in a finally block, checking the local mapping list is restored.
+The stock source paths, domain permissions and SELinux Enforcing state are
+unchanged; the production raw lookup and fail-closed behavior are unchanged.
+This is labelled private-fixture recovery evidence only, not proof of stock
+/etc source policy or installed native source mutation. The existing negative
+unreviewed-label case runs without the local fixture mapping. Exact-head
+native execution remains required.

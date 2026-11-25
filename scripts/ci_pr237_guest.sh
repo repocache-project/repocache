@@ -42,7 +42,7 @@ case "$phase" in
       apt-get update -qq
       DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends python3-cryptography python3-pytest openssl curl gnupg
     else
-      dnf -y -q install python3-cryptography python3-pytest openssl curl gnupg2 createrepo_c rpm-build rpm-sign
+      dnf -y -q install python3-cryptography python3-pytest openssl curl gnupg2 createrepo_c rpm-build rpm-sign policycoreutils-python-utils
       if command -v dnf5 >/dev/null 2>&1; then
         dnf -y -q install dnf5-plugins
       else
