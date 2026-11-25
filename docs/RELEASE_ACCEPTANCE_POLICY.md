@@ -91,17 +91,19 @@ be exercised before the original public publication.
 
 ## Automation and trust boundary
 
-- .github/workflows/public-release-acceptance.yml: read-only published v0.4.0
-  verification, including actual signed downloads and disposable native Linux
-  containers. Workflow dispatch/PR smoke; no automatic release publishing.
+- .github/workflows/public-release-acceptance.yml: historical v0.4.0 signed
+  asset readback by explicit dispatch. The old executable's API redirect
+  failure is not PASS. The approved v0.6.0 clean-install candidate matrix
+  replaces the obsolete prior-runtime smoke; final v0.6.0 publisher and
+  postpublication acceptance remain mandatory.
 - scripts/public_release_targets.json: pinned independent reviewed asset ID,
   hash, commit and publisher fingerprint. Future versions must be separately
   approved via PR and explicitly selectable from the workflow inputs.
 - scripts/public_release_acceptance.py: anonymous HTTPS API and CDN reads;
   check immutable release, exact tag/run, all local hashes and detached
   signatures before extraction or any publisher-supplied code execution.
-- scripts/ci_public_release_native.py: disposable native bootstrap/installation
-  and same-version repair, negative checks and preservation sentinels.
+- scripts/ci_public_release_native.py: historical v0.4.0 native acceptance
+  harness retained for provenance; not a v0.6.0 release prerequisite.
 - tests/test_public_release_acceptance.py: mock-only parser and refusal tests;
   these NEVER count as successful native/real-network acceptance.
 
