@@ -127,3 +127,16 @@ and existing error statuses remain unchanged.
 7. Obtain explicit maintainer merge authorization after all mandatory gates are PASS.
 
 **Not a security audit:** A syntactic inventory test catches unnoticed additions and removals, but does not authenticate command execution or replace independent security/operational acceptance requirements.
+
+
+## Root entry mode and explicit JSON (#107)
+
+A bare `repocache` with interactive input and output retains the existing
+TUI startup. Non-TTY invocations retain the existing finite JSON status
+behavior. Explicit `repocache --json` always selects noninteractive status,
+even on a TTY; it never starts the TUI. The regression gate also checks
+that a missing `update install VERSION` produces one versioned
+`INVALID_ARGUMENT` document, exit 2, empty stderr and no updater call
+with either approved JSON option placement. This reconciles the useful
+test-only coverage from draft #139 without restoring its obsolete stack.
+No new commands, updater paths or privilege changes are introduced.
