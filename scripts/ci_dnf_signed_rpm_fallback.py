@@ -206,6 +206,17 @@ def _import_under_native_lock(rpmdb: Path, public_key: Path) -> None:
           flush=True)
 
 
+def _native_dnf_transaction_variant() -> tuple[str, str]:
+    """Select the installed distro command, never install a test dependency."""
+    if Path("/usr/bin/dnf5").is_file():
+        return "/usr/bin/dnf5", "dnf5"
+    if Path("/usr/bin/dnf").is_file():
+        version = _run(["/usr/bin/dnf", "--version"]).splitlines()
+        if version and version[0].strip().startswith("4."):
+            return "/usr/bin/dnf", "dnf4"
+    raise RuntimeError("Unsupported native DNF executable/version")
+
+
 def _dnf_transaction_test_command(root: Path, package: Path) -> list[str]:
     """Only the fixed local signed fixture, with RPM transaction TEST mode."""
     if (root.parent != Path("/var/lib")
@@ -215,13 +226,13 @@ def _dnf_transaction_test_command(root: Path, package: Path) -> list[str]:
             or package.name != _RPM_NAME or not package.is_file()
             or package.is_symlink()):
         raise RuntimeError("Unsafe isolated DNF transaction test")
-    executable = Path("/usr/bin/dnf5")
-    if not executable.is_file():
-        raise RuntimeError("Native DNF5 executable missing")
+    executable, variant = _native_dnf_transaction_variant()
+    disable = "--disable-repo=*" if variant == "dnf5" else "--disablerepo=*"
+    lock_options = [] if variant == "dnf5" else ["--setopt=exit_on_lock=1"]
     return [
-        str(executable), "--installroot=" + str(root), "--releasever=10",
+        executable, "--installroot=" + str(root), "--releasever=10",
         "--config=" + str(root / "etc/dnf/dnf.conf"),
-        "--setopt=plugins=0", "--disable-repo=*",
+        "--setopt=plugins=0", disable, *lock_options,
         "--setopt=localpkg_gpgcheck=1",
         "--setopt=tsflags=test,noscripts,notriggers,noplugins",
         "--assumeyes", "install", str(package),
@@ -229,11 +240,11 @@ def _dnf_transaction_test_command(root: Path, package: Path) -> list[str]:
 
 
 def _probe_dnf_transaction_lock(package: Path, public_key: Path) -> None:
-    """Actual DNF5 transaction TEST; isolated RPMDB, no package installation.
+    """Actual installed DNF transaction TEST; isolated RPMDB, no install.
 
-    DNF5's transaction lock is separate from librpm's .rpm.lock and may
-    be removed on normal release. Measure the native lock lifecycle, never
-    infer coverage of earlier repository/config reads from this test.
+    DNF4 uses a live-PID ProcessLock under persistdir; DNF5 uses a
+    separate kernel transaction lock. Neither demonstrates exclusion of
+    earlier repository/config reads. Never claim the wrong lock family.
     """
     from ci_v06_vm_signed_client_guest import guarded_native_guest
 
@@ -243,6 +254,7 @@ def _probe_dnf_transaction_lock(package: Path, public_key: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="repocache-ci-dnf-root-", dir="/var/lib") as folder:
         root = Path(folder)
         argv = _dnf_transaction_test_command(root, package)
+        variant = "dnf5" if argv[0] == "/usr/bin/dnf5" else "dnf4"
         # Only new, private installroot paths. No host config or package
         # store is used; the fixture's exact key is imported in this DB.
         db = root / "usr/lib/sysimage/rpm"
@@ -257,50 +269,70 @@ def _probe_dnf_transaction_lock(package: Path, public_key: Path) -> None:
         conf = root / "etc/dnf/dnf.conf"
         conf.parent.mkdir(parents=True)
         (root / "etc/yum.repos.d").mkdir()
-        conf.write_text("[main]\\nreposdir=/etc/yum.repos.d\\nplugins=0\\n"
-                        "localpkg_gpgcheck=1\\n", encoding="ascii")
-        lock = root / "run/dnf/rpmtransaction.lock"
+        conf.write_text("[main]\nreposdir=/etc/yum.repos.d\nplugins=0\n"
+                        "localpkg_gpgcheck=1\npersistdir=/var/lib/dnf\n"
+                        "cachedir=/var/cache/dnf\nlogdir=/var/log\n",
+                        encoding="ascii")
+        lock = root / ("run/dnf/rpmtransaction.lock" if variant == "dnf5"
+                       else "var/lib/dnf/rpmdb_lock.pid")
         lock.parent.mkdir(parents=True, mode=0o700)
         env = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"}
         fd = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
                      | os.O_CLOEXEC | os.O_NONBLOCK, 0o600)
         try:
             info = os.fstat(fd)
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if variant == "dnf5":
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            else:
+                # DNF4 uses a live PID under a short-lived flock; holding
+                # flock indefinitely would test a different protocol.
+                pid_bytes = str(os.getpid()).encode("ascii")
+                assert os.write(fd, pid_bytes) == len(pid_bytes)
+                os.fsync(fd)
             refused = subprocess.run(argv, stdin=subprocess.DEVNULL,
                                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                      text=True, env=env, timeout=90, check=False)
             output = refused.stdout.lower()
-            if (refused.returncode == 0 or "rpm transaction lock" not in output
-                    or "another transaction is in progress" not in output):
-                raise RuntimeError("Native DNF5 lock-specific refusal not proven: "
+            if variant == "dnf5":
+                denied = (refused.returncode != 0 and "rpm transaction lock" in output
+                          and "another transaction is in progress" in output)
+            else:
+                denied = (refused.returncode == 200
+                          and f"rpmdb already locked by {os.getpid()}" in output
+                          and os.pread(fd, 32, 0) == pid_bytes)
+            if not denied:
+                raise RuntimeError("Native " + variant + " lock-specific refusal not proven: "
                                    + refused.stdout[-1800:])
             named = lock.lstat()
             if ((named.st_dev, named.st_ino, named.st_nlink)
                     != (info.st_dev, info.st_ino, 1)):
-                raise RuntimeError("DNF5 replaced a held native transaction lock")
+                raise RuntimeError("DNF replaced a held native transaction lock")
+            if variant == "dnf4":
+                # Release only our private PID record after the child
+                # exits and exact inode and bytes have been rechecked.
+                lock.unlink()
         finally:
             os.close(fd)
         positive = subprocess.run(argv, stdin=subprocess.DEVNULL,
                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                   text=True, env=env, timeout=90, check=False)
         if positive.returncode != 0:
-            raise RuntimeError("Native DNF5 TEST transaction failed after release: "
+            raise RuntimeError("Native DNF TEST transaction failed after release: "
                                + positive.stdout[-1800:])
         if (_run(rpm + ["-qa", "--qf", "%{NAME}-%{VERSION}-%{RELEASE}\\n"]) != baseline
                 or (root / "usr/share/doc/repocache-ci-rpm-probe").exists()):
-            raise RuntimeError("DNF5 TEST unexpectedly changed isolated packages")
+            raise RuntimeError("DNF TEST unexpectedly changed isolated packages")
         if os.path.lexists(lock):
             named = lock.lstat()
             lifecycle = ("retained" if (named.st_dev, named.st_ino)
                          == (info.st_dev, info.st_ino) else "replaced")
         else:
             lifecycle = "removed"
-        print("PASS: actual DNF5 TEST transaction excluded by held private "
-              "rpmtransaction lock; succeeds after release; lock lifecycle="
+        print("PASS: actual " + variant + " TEST transaction excluded by private "
+              + lock.name + "; succeeds after release; lock lifecycle="
               + lifecycle, flush=True)
-        print("DNF5 fixture version: " + _run(["/usr/bin/dnf5", "--version"]).splitlines()[0],
+        print("DNF fixture version: " + _run([argv[0], "--version"]).splitlines()[0],
               flush=True)
 
 

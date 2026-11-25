@@ -99,20 +99,25 @@ package. This establishes only the RPMDB lock interaction, not DNF5's
 complete lock graph, path lifecycle or installed source-writer exclusion.
 The actual booted execution is required before claiming PASS.
 
-## DNF5 transaction lock lifecycle (booted AlmaLinux fixture)
+## Installed DNF transaction lock lifecycle (booted AlmaLinux fixture)
 
-The native DNF5 executable is additionally exercised in a completely
-private installroot with the same signed, no-script fixture RPM and
-disposable key. The transaction uses RPM TEST mode, with local package
-signature checking and no repositories or plugins enabled. Both the
-private RPMDB package inventory and absence of the fixture payload must
-remain unchanged. The held DNF5 transaction lock must produce a
-lock-specific refusal and retain the same inode while held; after
-release, the identical transaction check must succeed. Record whether the
-lock inode is retained, removed or replaced on normal completion and the
-actual DNF5 version. No host package installation or source modification.
-The DNF5 transaction lock is acquired during the transaction, not before
-all repository/configuration reads; even positive native exclusion is
-not complete DNF5 source-writer authorization. Upstream implementation
-reference: https://github.com/rpm-software-management/dnf5/blob/main/libdnf5/base/transaction.cpp
-and the DNF5 documented RPM TEST transaction flag.
+The booted AlmaLinux image used in run 45603393341 did not provide
+`/usr/bin/dnf5`. Do not install a different manager or call DNF4 evidence
+DNF5 evidence. Select the native executable and identify the version.
+DNF4 uses its actual live-PID `rpmdb_lock.pid` under the isolated
+persistdir, with `exit_on_lock=1`; require exit 200 and the exact live
+owner PID, unchanged lock inode and PID bytes. DNF5, where installed,
+uses `run/dnf/rpmtransaction.lock` and the held BSD/POSIX inode locks;
+require native lock-specific refusal and unchanged inode. Release only
+the fixture's own lock and rerun the same signed local RPM transaction
+in RPM TEST mode with all repositories and plugins disabled. The private
+RPMDB package inventory and absent payload must remain unchanged.
+Record actual manager version and lock lifecycle. Neither probe installs
+packages, changes host package sources or trusts publisher keys.
+
+These transaction locks do not prove exclusion of earlier configuration
+or repository reads. The production source-writer remains unapproved.
+Upstream implementation references:
+https://github.com/rpm-software-management/dnf/blob/master/dnf/lock.py
+and https://github.com/rpm-software-management/dnf5/blob/main/libdnf5/base/transaction.cpp.
+Actual native outcomes at the new HEAD remain NOT VERIFIED until the VM runs.

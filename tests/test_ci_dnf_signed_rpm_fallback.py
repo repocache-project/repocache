@@ -175,3 +175,31 @@ def test_dnf_transaction_test_requires_booted_guard(monkeypatch):
                         pytest.fail("command reached before guard"))
     with pytest.raises(AssertionError, match="guard"):
         rpm_probe._probe_dnf_transaction_lock(Path("/tmp/rpm"), Path("/tmp/key"))
+
+@pytest.mark.parametrize("variant,command,disable,exit_on_lock", [
+    ("dnf4", "/usr/bin/dnf", "--disablerepo=*", True),
+    ("dnf5", "/usr/bin/dnf5", "--disable-repo=*", False),
+])
+def test_native_transaction_command_retains_private_test_only_flags(
+        monkeypatch, tmp_path, variant, command, disable, exit_on_lock):
+    from types import SimpleNamespace
+
+    root = Path("/var/lib/repocache-ci-dnf-root-fixture")
+    package = tmp_path / rpm_probe._RPM_NAME
+    package.write_bytes(b"fixture")
+    monkeypatch.setattr(Path, "resolve", lambda self, **kw: self)
+    original_stat = Path.stat
+    monkeypatch.setattr(Path, "stat", lambda self, **kw:
+                        SimpleNamespace(st_uid=0, st_mode=0o40700)
+                        if self == root else original_stat(self, **kw))
+    monkeypatch.setattr(rpm_probe, "_native_dnf_transaction_variant",
+                        lambda: (command, variant))
+    argv = rpm_probe._dnf_transaction_test_command(root, package)
+    assert argv[0] == command
+    assert "--installroot=" + str(root) in argv
+    assert "--config=" + str(root / "etc/dnf/dnf.conf") in argv
+    assert disable in argv
+    assert ("--setopt=exit_on_lock=1" in argv) == exit_on_lock
+    assert "--setopt=tsflags=test,noscripts,notriggers,noplugins" in argv
+    assert "--setopt=localpkg_gpgcheck=1" in argv
+    assert argv[-2:] == ["install", str(package)]
