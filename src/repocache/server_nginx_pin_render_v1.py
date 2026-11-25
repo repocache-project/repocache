@@ -136,6 +136,11 @@ def render_pinned_upstream_fragments(
         "    proxy_cache_methods GET HEAD;",
         "    proxy_cache_lock on;",
         "    proxy_buffering on;",
+        # Non-cacheable or cache-off responses must not spill large
+        # packages into the confined service's transient proxy temp path.
+        # This native limit does not apply to responses saved in the
+        # cache (use_temp_path=off above); slow readers use backpressure.
+        "    proxy_max_temp_file_size 0;",
         "    proxy_cache_valid 200 60s;",
         '    proxy_cache_key "$scheme|$proxy_host|$request_uri";',
         "    proxy_cache_bypass $http_authorization $http_cookie;",

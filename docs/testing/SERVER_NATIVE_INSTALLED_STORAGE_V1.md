@@ -187,3 +187,28 @@ No production permission/policy change, active-route enablement or test
 acceptance waiver is introduced. A confirmed stock-policy denial requires
 an explicitly reviewed least-privilege operational design; do not globally
 enable httpd network booleans as an installer workaround.
+
+### Large uncached responses and transient scratch
+
+A disposable local Debian 13.3 / packaged NGINX 1.26.3 experiment used a
+10 MiB object, a slow loopback reader, explicit private temporary paths,
+proxy buffering, the renderer's cookie bypass and disk cache configured
+with use_temp_path=off. With the stock default proxy temp limit, the
+BYPASS response logged a proxy temporary-file spill. With
+proxy_max_temp_file_size 0, the same BYPASS response completed without
+that spill; normal MISS/HIT also delivered identical SHA-256 bytes and
+persisted the large cache object on disk (10486290 bytes including NGINX
+metadata). Both runs preserved exact payload bytes. This is a component
+experiment, not confined systemd/SELinux or a real package signature test.
+
+The inert route renderer now emits this fixed native limit in every
+repository location, including cache-off recovery. No new writable path
+or permission is needed; slow uncached responses use backpressure rather
+than unbounded temporary package spooling into /run. Cacheable objects
+still use their own marked disk-backed repository root, as required by
+use_temp_path=off. The generated HTTPS runtime regression denies proxy
+scratch writes, transfers exact 10 MiB BYPASS/MISS/HIT/cache-off responses,
+checks actual cache bytes and exact upstream count. Native CI evidence
+for this change remains NOT VERIFIED. This does not bound every HTTP
+request body, overall memory/connection pressure, upstream timeout, disk
+cache pressure or authorize active-route publication.

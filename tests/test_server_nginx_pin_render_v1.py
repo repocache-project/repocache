@@ -47,6 +47,9 @@ def test_numeric_pins_are_only_nginx_upstream_servers():
     assert "proxy_set_header Host mirror.example.invalid;" in loc
     assert "proxy_ssl_name mirror.example.invalid;" in loc
     assert "proxy_ssl_server_name on;" in loc
+    assert "use_temp_path=off;" in upstream
+    assert loc.count("    proxy_max_temp_file_size 0;") == 1
+    assert "    proxy_buffering on;" in loc
     assert "proxy_ssl_verify on;" in loc
     assert f"proxy_ssl_trusted_certificate {CA};" in loc
     assert "proxy_intercept_errors on;" in loc

@@ -63,6 +63,8 @@ def test_only_one_approved_active_repository_stops_using_cache():
     assert recovery["authorizes_catalog_publication"] is False
     assert "    proxy_cache repocache_cache_almalinux_baseos;" in exact
     assert exact.count("    proxy_cache off;") == 1
+    assert exact.count("    proxy_max_temp_file_size 0;") == 2
+    assert before["http_upstream_fragment"].count("use_temp_path=off;") == 2
 
 
 def test_empty_bypass_keeps_legacy_config_identical():
