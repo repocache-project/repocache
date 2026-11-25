@@ -807,7 +807,7 @@ def _verify_active_managed_nginx_under_lock(
         with _owned_layout_locked(root_fd, state_fd, recovering=False) as layout:
             _, nginx_fd, public_fd, check = layout
             old = _read_owned_resources(state_fd, nginx_fd, public_fd)
-            snapshot = _validate_owned_resources(old)
+            snapshot = _validate_owned_resources(old, distribution=distribution)
             if snapshot is None:
                 _reject("NATIVE_ACTIVATION_MANAGED_STATE_REFUSED")
             _owned_socket_require_inactive_routes(snapshot)
@@ -868,7 +868,7 @@ def _repair_inactive_managed_nginx_under_lock(
         with _owned_layout_locked(root_fd, state_fd, recovering=False) as layout:
             _, nginx_fd, public_fd, check = layout
             old = _read_owned_resources(state_fd, nginx_fd, public_fd)
-            snapshot = _validate_owned_resources(old)
+            snapshot = _validate_owned_resources(old, distribution=distribution)
             if snapshot is None:
                 _reject("NATIVE_ACTIVATION_MANAGED_STATE_REFUSED")
             _owned_socket_require_inactive_routes(snapshot)

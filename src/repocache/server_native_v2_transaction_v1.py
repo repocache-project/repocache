@@ -143,8 +143,7 @@ _UNIT = "nginx.service"
 # The bootstrap bytes are also the exact signed archive member used by the
 # installer. Never change them without an explicit signed ownership migration.
 _OWNED_BOOTSTRAP_CONFIG = "# Authenticated bootstrap only. Never include the vendor's nginx.conf.\n# The fixed local endpoint has no repository routes, TLS or external listener.\n# Full managed TLS/route activation remains a separate guarded transaction.\npid /run/repocache-nginx/nginx.pid;\nerror_log stderr warn;\nworker_processes 1;\nevents {\n    worker_connections 128;\n}\nhttp {\n    access_log off;\n    server {\n        listen 127.0.0.1:8008;\n        server_name localhost;\n        location = /__repocache/private {\n            return 204;\n        }\n        location / {\n            return 404;\n        }\n    }\n}\n".encode("ascii")
-_OWNED_MANAGED_CONFIG = (
-    b"# REPOCACHE dedicated managed NGINX context v1\n"
+_OWNED_MANAGED_CONTEXT = (
     b"pid /run/repocache-nginx/nginx.pid;\n"
     b"error_log stderr warn;\n"
     b"worker_processes 1;\n"
@@ -152,6 +151,27 @@ _OWNED_MANAGED_CONFIG = (
     b"http {\n    access_log off;\n"
     b"    include /etc/nginx/repocache.d/repocache-managed.conf;\n}\n"
 )
+# The distro package's build-time default can be nobody instead of the
+# stock service account. Bind the same fixed non-root user/group as storage.
+# Keep signed loopback bootstrap bytes unchanged; managed context is WAL-bound.
+_OWNED_MANAGED_CONFIGS = {
+    distribution: (b"# REPOCACHE dedicated managed NGINX context v1\n"
+                   + directive + _OWNED_MANAGED_CONTEXT)
+    for distribution, directive in (
+        ("debian", b"user www-data www-data;\n"),
+        ("almalinux", b"user nginx nginx;\n"),
+    )
+}
+# Default only for pure Debian filesystem/parser fixtures, never native selection.
+_OWNED_MANAGED_CONFIG = _OWNED_MANAGED_CONFIGS["debian"]
+
+
+def _owned_managed_config(distribution: str) -> bytes:
+    if type(distribution) is not str or distribution not in _OWNED_MANAGED_CONFIGS:
+        _deny("DISTRIBUTION_UNSUPPORTED")
+    return _OWNED_MANAGED_CONFIGS[distribution]
+
+
 _ENV = {"PATH": "/usr/sbin:/usr/bin:/bin", "LC_ALL": "C"}
 _HEALTH = "/__repocache/healthz"
 _DNS_CHILD_ID = 65534  # Unprivileged nobody identity on both supported distros.
@@ -1065,14 +1085,15 @@ def _render_owned_managed_candidate(
         include, catalog, _, _ = _render_using_pins(
             validated, next_generation, distribution, pins, bundle,
         )
-        return _OWNED_MANAGED_CONFIG, include, catalog
+        return _owned_managed_config(distribution), include, catalog
     except NativeV2TransactionError:
         raise
     except (ValueError, TypeError, KeyError, OverflowError, RecursionError):
         _deny("OWNED_CONTEXT_CANDIDATE_INVALID")
 
 
-def _verify_owned_context_dump(dump: bytes, include: bytes | None) -> None:
+def _verify_owned_context_dump(dump: bytes, include: bytes | None, *,
+                               managed_main: bytes | None = None) -> None:
     """Check the entire fixed main/include dump against exact expected bytes.
 
     None represents the original signed loopback bootstrap. A managed
@@ -1091,7 +1112,11 @@ def _verify_owned_context_dump(dump: bytes, include: bytes | None) -> None:
             or b"\x00" in include or b"\r" in include
             or b"# configuration file " in include):
         _deny("OWNED_CONTEXT_DUMP_INVALID")
-    main = (_OWNED_BOOTSTRAP_CONFIG if include is None else _OWNED_MANAGED_CONFIG)
+    if managed_main is None:
+        managed_main = _OWNED_MANAGED_CONFIG
+    if managed_main not in _OWNED_MANAGED_CONFIGS.values():
+        _deny("OWNED_CONTEXT_DUMP_INVALID")
+    main = (_OWNED_BOOTSTRAP_CONFIG if include is None else managed_main)
     head = b"# configuration file " + _OWNED_MAIN_PATH.encode("ascii") + b":\n"
     first = head + main
     if include is None:
@@ -1130,7 +1155,8 @@ def _owned_config_marker_identity(state_fd: int) -> tuple[int, ...]:
 
 
 def _probe_owned_context_locked(
-    root_fd: int, state_fd: int, include: bytes | None,
+    root_fd: int, state_fd: int, include: bytes | None, *,
+    managed_main: bytes | None = None,
 ) -> bytes:
     """Verify exact fixed private files and perform a bounded native syntax dump.
 
@@ -1138,8 +1164,11 @@ def _probe_owned_context_locked(
     only renderer- or WAL-verified include bytes. This is a prerequisite for
     reload, not a reload authorization. Never expose the private dump.
     """
-    expected_main = (_OWNED_BOOTSTRAP_CONFIG if include is None
-                     else _OWNED_MANAGED_CONFIG)
+    if managed_main is None:
+        managed_main = _OWNED_MANAGED_CONFIG
+    if managed_main not in _OWNED_MANAGED_CONFIGS.values():
+        _deny("OWNED_CONTEXT_DUMP_INVALID")
+    expected_main = (_OWNED_BOOTSTRAP_CONFIG if include is None else managed_main)
     # Validate bounds and expected section shape before invoking native nginx.
     synthetic = (b"# configuration file " + _OWNED_MAIN_PATH.encode("ascii")
                  + b":\n" + expected_main)
@@ -1148,7 +1177,7 @@ def _probe_owned_context_locked(
             _deny("OWNED_CONTEXT_DUMP_INVALID")
         synthetic += (b"# configuration file " + _OWNED_INCLUDE_PATH.encode("ascii")
                       + b":\n" + include)
-    _verify_owned_context_dump(synthetic, include)
+    _verify_owned_context_dump(synthetic, include, managed_main=managed_main)
     try:
         _verify_current_root_fd(root_fd)
         with ExitStack() as stack:
@@ -1165,7 +1194,7 @@ def _probe_owned_context_locked(
 
             verify_bytes()
             dump = _capture_owned_nginx_dump_private(managed=include is not None)
-            _verify_owned_context_dump(dump, include)
+            _verify_owned_context_dump(dump, include, managed_main=managed_main)
             verify_bytes()
             _verify_current_root_fd(root_fd)
             return dump
@@ -1189,7 +1218,8 @@ def _owned_manifest_for(state: bytes, main: bytes, include: bytes,
     }, limit=_OWNED_LIMIT[_OWNED_MANIFEST])
 
 
-def _validate_owned_resources(resources: dict[str, bytes | None]) -> dict | None:
+def _validate_owned_resources(resources: dict[str, bytes | None], *,
+                              distribution: str | None = None) -> dict | None:
     """Validate closed bootstrap/managed snapshot without claiming runtime."""
     try:
         if type(resources) is not dict or set(resources) != set(_OWNED_ORDER):
@@ -1209,7 +1239,9 @@ def _validate_owned_resources(resources: dict[str, bytes | None]) -> dict | None
                     or catalog is not None or manifest is not None):
                 _deny("OWNED_WAL_BOOTSTRAP_DRIFT")
             return None
-        if (main != _OWNED_MANAGED_CONFIG or include is None or catalog is None
+        allowed_main = (_OWNED_MANAGED_CONFIGS.values() if distribution is None
+                        else (_owned_managed_config(distribution),))
+        if (main not in allowed_main or include is None or catalog is None
                 or manifest != _owned_manifest_for(state, main, include, catalog)):
             _deny("OWNED_WAL_MANIFEST_DRIFT")
         # Reuse closed state and active-only catalog semantics without
@@ -1233,7 +1265,7 @@ def _validate_owned_resources(resources: dict[str, bytes | None]) -> dict | None
         dump = (b"# configuration file " + _OWNED_MAIN_PATH.encode("ascii")
                 + b":\n" + main + b"\n# configuration file "
                 + _OWNED_INCLUDE_PATH.encode("ascii") + b":\n" + include)
-        _verify_owned_context_dump(dump, include)
+        _verify_owned_context_dump(dump, include, managed_main=main)
         return snapshot
     except NativeV2TransactionError:
         raise
@@ -1248,6 +1280,8 @@ def _owned_wal_record(old: dict[str, bytes | None],
     candidate = _validate_owned_resources(new)
     if candidate is None:
         _deny("OWNED_WAL_CANDIDATE_REQUIRED")
+    if previous is not None and old[_OWNED_MAIN] != new[_OWNED_MAIN]:
+        _deny("OWNED_WAL_MANAGED_IDENTITY_CHANGED")
     generation = 0 if previous is None else previous["state_generation"]
     try:
         transition = preview_proposed_v2_state_transition(
@@ -1271,7 +1305,7 @@ def _owned_wal_record(old: dict[str, bytes | None],
         _deny("OWNED_WAL_GENERATION_INVALID")
 
 
-def _decode_owned_wal(raw: bytes) -> tuple[dict, dict]:
+def _decode_owned_wal(raw: bytes, *, distribution: str | None = None) -> tuple[dict, dict]:
     """Never interpret an old vendor journal as a private main-config WAL."""
     try:
         if type(raw) is not bytes:
@@ -1293,9 +1327,18 @@ def _decode_owned_wal(raw: bytes) -> tuple[dict, dict]:
         if (any(data["old_sha256"][name] != _hash(old[name])
                 or not _valid_sha(data["new_sha256"][name])
                 for name in _OWNED_ORDER)
-                or data["new_sha256"][_OWNED_MAIN] != _hash(_OWNED_MANAGED_CONFIG)):
+                ):
             _deny("OWNED_WAL_INVALID")
-        _validate_owned_resources(old)
+        snapshot = _validate_owned_resources(old, distribution=distribution)
+        # A managed predecessor fixes the exact worker identity for the
+        # successor. For bootstrap, the trusted host selects its distro.
+        allowed_main = (
+            (old[_OWNED_MAIN],) if snapshot is not None
+            else tuple(_OWNED_MANAGED_CONFIGS.values()) if distribution is None
+            else (_owned_managed_config(distribution),)
+        )
+        if data["new_sha256"][_OWNED_MAIN] not in {_hash(value) for value in allowed_main}:
+            _deny("OWNED_WAL_INVALID")
         return old, data["new_sha256"]
     except NativeV2TransactionError:
         raise
@@ -1673,7 +1716,8 @@ def _owned_live_validate(root_fd: int, state_fd: int, resources: dict) -> tuple:
         for_apply=True,
     )
     leaf = _verify_tls_pair(root_fd, document, verify_identity=True)
-    _probe_owned_context_locked(root_fd, state_fd, resources[_INCLUDE])
+    _probe_owned_context_locked(root_fd, state_fd, resources[_INCLUDE],
+                                managed_main=resources[_OWNED_MAIN])
     if _verify_tls_pair(root_fd, document, verify_identity=True) != leaf:
         _deny("OWNED_LIVE_TLS_CHANGED")
     return document, snapshot["state_generation"], leaf
@@ -2076,7 +2120,7 @@ def _prepare_owned_live_candidate_locked(root_fd: int, state_fd: int,
     separately by verified committed-generation reload/no-change.
     """
     old = _read_owned_resources(state_fd, nginx_fd, public_fd)
-    previous = _validate_owned_resources(old)
+    previous = _validate_owned_resources(old, distribution=distribution)
     generation = 0 if previous is None else previous["state_generation"]
     report, candidate = _load_private_under_root(root_fd, owner_uid=0, owner_gid=0)
     if (report["expected_generation"] != generation
@@ -2105,7 +2149,7 @@ def _prepare_owned_live_candidate_locked(root_fd: int, state_fd: int,
             _CATALOG: catalog,
             _OWNED_MANIFEST: _owned_manifest_for(candidate, main, include, catalog),
         }
-        _validate_owned_resources(new)
+        _validate_owned_resources(new, distribution=distribution)
     except NativeV2TransactionError:
         raise
     except (ValueError, TypeError, KeyError, OverflowError):
@@ -2123,7 +2167,7 @@ def _apply_prepared_owned_live_locked(root_fd: int, state_fd: int, nginx_fd: int
     """Fixed intake, CAS preparation and live transaction under one lock."""
     check_layout()
     previous = _read_owned_resources(state_fd, nginx_fd, public_fd)
-    snapshot = _validate_owned_resources(previous)
+    snapshot = _validate_owned_resources(previous, distribution=distribution)
     report, candidate = _load_private_under_root(root_fd, owner_uid=0, owner_gid=0)
     if (snapshot is not None and candidate == previous[V2_STATE]
             and report["expected_generation"] == snapshot["state_generation"] - 1):
@@ -2528,10 +2572,13 @@ def _owned_socket_operation_locked(root_fd: int, state_fd: int,
             wal = _read_file(state_fd, _OWNED_WAL, 0, _MAX_WAL)
             temporary = _read_file(state_fd, _OWNED_WAL_TMP, 0, _MAX_WAL)
             if wal is not None or temporary is not None:
-                old, _ = _decode_owned_wal(wal if wal is not None else temporary)
-                _owned_socket_require_inactive_routes(_validate_owned_resources(old))
+                old, _ = _decode_owned_wal(wal if wal is not None else temporary,
+                                           distribution=distribution)
+                _owned_socket_require_inactive_routes(
+                    _validate_owned_resources(old, distribution=distribution))
             else:
-                _owned_socket_require_inactive_routes(_validate_owned_resources(current))
+                _owned_socket_require_inactive_routes(
+                    _validate_owned_resources(current, distribution=distribution))
             result = _recover_owned_live_locked(root_fd, *layout)
             mapping = {
                 "OWNED_LIVE_CLEAN_OBSERVED": "NATIVE_V2_CLEAN",
@@ -2541,7 +2588,7 @@ def _owned_socket_operation_locked(root_fd: int, state_fd: int,
             if result.get("status") not in mapping or result.get("recovery_required") is not False:
                 _deny("OWNED_SOCKET_RECOVERY_UNVERIFIED")
             return {"status": mapping[result["status"]]}
-        snapshot = _validate_owned_resources(current)
+        snapshot = _validate_owned_resources(current, distribution=distribution)
         _owned_socket_require_inactive_routes(snapshot)
         if operation == "APPLY_V2":
             report, candidate = _load_private_under_root(root_fd, owner_uid=0, owner_gid=0)
@@ -2574,7 +2621,8 @@ def _owned_socket_operation_locked(root_fd: int, state_fd: int,
         if result.get("status") not in mapping:
             _deny("OWNED_SOCKET_RESULT_UNVERIFIED")
         committed = _validate_owned_resources(
-            _read_owned_resources(state_fd, nginx_fd, public_fd))
+            _read_owned_resources(state_fd, nginx_fd, public_fd),
+            distribution=distribution)
         if (committed is None
                 or result.get("state_generation") != committed["state_generation"]):
             _deny("OWNED_SOCKET_RESULT_UNVERIFIED")

@@ -703,7 +703,7 @@ try:
         tx._require_audited_native_package_for_activation(state, distribution=distribution)
         with tx._owned_layout_locked(root, state, recovering=False) as layout:
             old = tx._read_owned_resources(state, layout[1], layout[2])
-            snapshot = tx._validate_owned_resources(old)
+            snapshot = tx._validate_owned_resources(old, distribution=distribution)
             tx._owned_socket_require_inactive_routes(snapshot)
             identity = tx._owned_live_observe(root)
             storage.verify_service_storage_mounts(identity[0])
@@ -829,8 +829,8 @@ finally:
                 continue
             fields = dict(line.split(":", 1) for line in
                           Path(f"/proc/{pid}/status").read_text().splitlines() if ":" in line)
-            assert set(fields["Uid"].split()) == {str(worker.pw_uid)}
-            assert set(fields["Gid"].split()) == {str(worker.pw_gid)}
+            assert set(fields["Uid"].split()) == {str(worker.pw_uid)}, "Unexpected worker UID"
+            assert set(fields["Gid"].split()) == {str(worker.pw_gid)}, "Unexpected worker GID"
             if distribution == "almalinux":
                 assert b":httpd_t:" in Path(f"/proc/{pid}/attr/current").read_bytes()
             observed_worker = True
@@ -839,7 +839,23 @@ finally:
             for expected in (b"miss", b"hit"):
                 response = https_response("/__repocache/repos" + path)
                 header, body = response.split(b"\r\n\r\n", 1)
-                assert header.startswith(b"HTTP/1.1 200 "), header[:160]
+                if not header.startswith(b"HTTP/1.1 200 "):
+                    # Capture bounded diagnostic categories, not URLs, keys
+                    # or raw log lines. No SELinux workaround is permitted.
+                    journal = run("/usr/bin/journalctl", "-u", OWN, "-n", "50", "--no-pager")
+                    for category in ("Permission denied", "certificate verify failed",
+                                     "certificate does not match", "Connection refused",
+                                     "upstream timed out", "SSL_do_handshake() failed"):
+                        if category in journal.stdout:
+                            print("STORAGE_FIXTURE_UPSTREAM_ERROR: " + category, flush=True)
+                    if distribution == "almalinux":
+                        for boolean in ("httpd_can_network_connect", "httpd_can_network_relay"):
+                            observed = run("/usr/sbin/getsebool", boolean)
+                            if observed.returncode == 0 and observed.stdout.strip() in (
+                                    boolean + " --> on", boolean + " --> off"):
+                                print("STORAGE_FIXTURE_POLICY: " + observed.stdout.strip(), flush=True)
+                    raise AssertionError("Dedicated NGINX upstream fixture failed: "
+                                         + header.split(b"\r\n", 1)[0].decode("ascii"))
                 assert b"x-repocache-smoke: " + expected in header.lower()
                 assert body == payload
             assert hits[path] == 1

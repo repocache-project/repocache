@@ -1174,7 +1174,7 @@ def test_generated_complete_managed_nginx_server_passes_real_distro_parser(
     ).replace(own_pid, b"/run/repocache-nginx/nginx.pid").replace(
         fixture_cache, fixed_cache,
     )
-    native._verify_owned_context_dump(normalized, owned_include)
+    native._verify_owned_context_dump(normalized, owned_include, managed_main=main)
 
 
 @pytest.mark.parametrize("resource", ["public_include", "private_state"])
@@ -1500,9 +1500,9 @@ def test_owned_marker_scan_failure_refuses_legacy_vendor_mode(monkeypatch):
                        match="^NATIVE_V2_NGINX_OWNERSHIP_UNVERIFIED$"):
         native._refuse_legacy_vendor_mode_after_owned_claim(123)
 
-def _owned_dump(include=None):
+def _owned_dump(include=None, *, distribution="debian"):
     main = (native._OWNED_BOOTSTRAP_CONFIG if include is None
-            else native._OWNED_MANAGED_CONFIG)
+            else native._owned_managed_config(distribution))
     result = b"# configuration file /etc/nginx/repocache.d/repocache.conf:\n" + main + b"\n"
     if include is not None:
         result += (b"# configuration file /etc/nginx/repocache.d/repocache-managed.conf:\n"
@@ -2747,3 +2747,30 @@ def test_owned_active_candidate_refuses_unbound_storage_paths(key):
         native._render_owned_managed_candidate(
             cfg, 1, "debian", {"repo-0": {"mirror0.example.invalid": ["8.8.8.8"]}},
         )
+
+@pytest.mark.parametrize(("distribution", "directive", "other"), [
+    ("debian", b"user www-data www-data;", "almalinux"),
+    ("almalinux", b"user nginx nginx;", "debian"),
+])
+def test_managed_main_requires_exact_fixed_distro_worker(distribution, directive, other):
+    cfg = document(1)
+    cfg["expected_state_generation"] = 1
+    cfg["deployment"]["paths"]["generated_include"] = native._OWNED_INCLUDE_PATH
+    cfg["repositories"][0]["desired_state"] = "disabled"
+    main, include, catalog = native._render_owned_managed_candidate(cfg, 1, distribution, {})
+    assert main.splitlines()[1] == directive
+    assert main == native._owned_managed_config(distribution)
+    native._verify_owned_context_dump(_owned_dump(include, distribution=distribution),
+                                      include, managed_main=main)
+    with pytest.raises(native.NativeV2TransactionError, match="OWNED_CONTEXT_DUMP_MISMATCH"):
+        native._verify_owned_context_dump(_owned_dump(include, distribution=other),
+                                          include, managed_main=main)
+    with pytest.raises(native.NativeV2TransactionError, match="OWNED_CONTEXT_DUMP_INVALID"):
+        native._verify_owned_context_dump(_owned_dump(include, distribution=distribution),
+                                          include, managed_main=main.replace(directive, b"user root;"))
+
+
+def test_owned_managed_worker_identity_not_caller_selectable():
+    for value in ("root", "nginx", "www-data", "", None):
+        with pytest.raises(native.NativeV2TransactionError, match="DISTRIBUTION_UNSUPPORTED"):
+            native._owned_managed_config(value)

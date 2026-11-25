@@ -78,3 +78,15 @@ before and after service-view inspection. It cannot create, adopt, relabel
 or delete data, and reports no worker write proof. The signed booted VM
 fixture exercises it under the state lock before and after the real worker
 cache/metrics exercise. The production APPLY guard remains unchanged.
+
+The managed main context explicitly selects the distro's fixed packaged
+worker and group (`www-data www-data` on Debian, `nginx nginx` on
+AlmaLinux), matching the storage owner. The build-time default is not
+sufficient: the booted Debian test at b8fb7ce observed a UID mismatch.
+The signed bootstrap file and ownership marker remain unchanged.
+Only the two closed deterministic managed main byte sequences are
+recognized; the native dispatcher, installer, and recovery journal bind
+the actual distro and refuse a cross-distro worker identity or switch.
+AlmaLinux's prior HTTP 502 remains unresolved pending bounded native
+upstream diagnostics; no SELinux booleans, policy or trust checks are
+relaxed. No active-route guard is removed.
