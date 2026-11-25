@@ -1140,14 +1140,19 @@ def test_generated_complete_managed_nginx_server_passes_real_distro_parser(
     assert len(observed_catalog["repositories"]) == int(active)
 
     # The new dedicated context must also pass the real distro parser.
-    # Substitute ONLY the fixed include and runtime PID paths with private
-    # disposable fixture paths; never write the live /etc/nginx directory.
+    # Render the fixed production layout first, then substitute only the
+    # include, runtime PID and cache paths in the disposable parser fixture.
     cfg["deployment"]["paths"]["generated_include"] = native._OWNED_INCLUDE_PATH
+    fixed_cache = b"/var/cache/nginx/repocache-managed"
+    fixture_cache = str(tmp_path / "cache").encode("ascii")
+    cfg["deployment"]["paths"]["cache_root"] = fixed_cache.decode("ascii")
+    cfg["deployment"]["paths"]["log_root"] = "/var/log/nginx/repocache-managed"
     distro = "debian" if "ca-certificates" in ca else "almalinux"
     main, owned_include, owned_catalog = native._render_owned_managed_candidate(
         cfg, 1, distro, pins,
     )
-    assert owned_include == source and owned_catalog == catalog
+    assert owned_include.replace(fixed_cache, fixture_cache) == source
+    assert owned_catalog == catalog
     owned_config = tmp_path / "repocache.conf"
     own_pid = str(tmp_path / "owned-nginx.pid").encode("ascii")
     fixture_main = main.replace(b"/run/repocache-nginx/nginx.pid", own_pid).replace(
@@ -1166,7 +1171,9 @@ def test_generated_complete_managed_nginx_server_passes_real_distro_parser(
         b"# configuration file " + str(owned_config).encode("ascii") + b":",
         b"# configuration file " + native._OWNED_MAIN_PATH.encode("ascii") + b":",
     ).replace(str(candidate).encode("ascii"), native._OWNED_INCLUDE_PATH.encode("ascii")
-    ).replace(own_pid, b"/run/repocache-nginx/nginx.pid")
+    ).replace(own_pid, b"/run/repocache-nginx/nginx.pid").replace(
+        fixture_cache, fixed_cache,
+    )
     native._verify_owned_context_dump(normalized, owned_include)
 
 
