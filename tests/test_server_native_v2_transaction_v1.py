@@ -2133,13 +2133,16 @@ def test_owned_files_fixture_real_sigkill_then_interrupted_recovery_retries(
     _assert_owned_fixture_clean(filesystem, paths)
 
 @pytest.mark.parametrize("kind", ["symlink", "hardlink", "writable"])
-def test_owned_files_fixture_refuses_unsafe_stage_inode(filesystem, kind):
+def test_owned_files_fixture_refuses_unsafe_stage_inode(filesystem, tmp_path, kind):
     old = _owned_bootstrap_resources()
     paths = _owned_fixture_paths(filesystem, old)
     fd, state, _, _, _ = filesystem
     wal = native._publish_owned_wal_fixture(fd, _owned_generation())
     stage = paths[native._INCLUDE].parent / native._OWNED_STAGES[native._INCLUDE]
-    foreign = stage.parent / "unrelated-file"
+    # Keep the link target outside the strictly allowlisted owned directory.
+    # Otherwise the directory guard refuses the fixture before the stage-inode
+    # guard is exercised. The foreign-entry guard has its own regression test.
+    foreign = tmp_path / "unrelated-file"
     foreign.write_bytes(b"unrelated")
     foreign.chmod(0o644)
     if kind == "symlink":
