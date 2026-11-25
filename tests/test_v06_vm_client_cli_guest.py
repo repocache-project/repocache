@@ -37,6 +37,7 @@ def test_readonly_observation_requires_exact_snapshot(monkeypatch):
     (1, "", {"schema_version": 1, "ok": False}),
     (0, "unexpected", {"schema_version": 1, "ok": True}),
     (0, "", {"schema_version": 2, "ok": True}),
+    (0, "", {"schema_version": True, "ok": True}),
     (0, "", {"schema_version": 1, "ok": False}),
     (0, "", {"schema_version": 1, "ok": 1}),
     (0, "", []),

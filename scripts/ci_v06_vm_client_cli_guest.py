@@ -86,7 +86,8 @@ def checked_readonly_call(platform, before, args, ca, expected_codes):
         payload = json.loads(proc.stdout)
     except json.JSONDecodeError:
         raise AssertionError("invalid native read-only CLI JSON") from None
-    if (type(payload) is not dict or payload.get("schema_version") != 1
+    if (type(payload) is not dict or type(payload.get("schema_version")) is not int
+            or payload.get("schema_version") != 1
             or payload.get("ok") is not (proc.returncode == 0)):
         raise AssertionError("native read-only CLI JSON contract changed")
     return payload, proc.returncode
