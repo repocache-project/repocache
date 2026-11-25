@@ -805,3 +805,14 @@ are verified in a combined candidate. Installer repeat of an existing
 managed generation and recovery from an inactive dedicated service remain
 separate gates. No production deployment, genuine publisher signature, or
 exact-new-HEAD native PASS is claimed until those results exist.
+
+The maintainer reconfirmed the isolated path contract on 2026-11-25
+in the trusted project conversation (recorded in #451). The combined
+#450/#451 booted activation rehearsal asserts storage reports for initial
+and repeated activation, refuses a deliberately unsafe ownership-marker
+mode in the disposable guest without changing the running master or
+storage root, restores only the fixture marker mode, and checks native
+storage and service mount identity again after actual reboot and WAL
+recovery. These are ownership/mount/continuity checks, not actual cache
+worker write or active-route acceptance. No live active-route guard is
+removed by this increment. Exact new-HEAD execution is required.

@@ -448,6 +448,82 @@ def recover_live_wal_after_reboot(distribution: str) -> None:
     print("PASS: actual dedicated WAL recovery after kernel reboot restores prior TLS generation and catalog", flush=True)
 
 
+def verify_storage_report(report: dict, distribution: str) -> None:
+    assert report["storage"] == {
+        "cache_root_verified": True,
+        "log_root_verified": True,
+        "selinux_enforcing_labels_verified": distribution == "almalinux",
+        "actual_service_write_verified": False,
+    }
+    assert report["service_storage_mounts_verified"] is True
+
+
+def verify_storage_marker_refusal(native, assets, pins, expected_pid: int) -> None:
+    """Only on this disposable booted guest: refuse drift without restarting."""
+    import stat
+    from repocache.server_native_installed_storage_v1 import InstalledStorageError
+
+    marker = Path("/var/cache/nginx/.repocache-managed.owner-v1")
+    leaf = marker.parent / "repocache-managed"
+    fd = os.open(marker, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        before = os.fstat(fd)
+        assert stat.S_ISREG(before.st_mode)
+        assert (before.st_uid, before.st_gid, before.st_nlink,
+                stat.S_IMODE(before.st_mode)) == (0, 0, 1, 0o600)
+        data = os.read(fd, 1025)
+        assert 1 <= len(data) <= 1024
+        root_before = leaf.lstat()
+        try:
+            os.fchmod(fd, 0o644)
+            try:
+                native.activate_authenticated_native_nginx(assets, **pins)
+            except InstalledStorageError as exc:
+                assert str(exc) == "INSTALLED_NGINX_STORAGE_MARKER_UNSAFE"
+            else:
+                raise AssertionError("Unsafe storage ownership marker accepted")
+            assert native._own_service_observation(active=True)["main_pid_observed"] == expected_pid
+            require_status(OWN, True, True)
+            require_status(VENDOR, False, False)
+            loopback_response()
+            assert leaf.lstat() == root_before
+            assert os.pread(fd, 1025, 0) == data
+            assert stat.S_IMODE(os.fstat(fd).st_mode) == 0o644
+        finally:
+            os.fchmod(fd, 0o600)
+        assert marker.lstat().st_ino == before.st_ino
+        assert os.pread(fd, 1025, 0) == data
+    finally:
+        os.close(fd)
+    print("PASS: actual owned storage marker drift refused without service restart or root adoption", flush=True)
+
+
+def verify_storage_after_recovery(distribution: str, native) -> None:
+    """Read-only installed-storage and actual service namespace recheck."""
+    from repocache.server_native_installed_storage_v1 import (
+        prepare_installed_storage, verify_service_storage_mounts,
+    )
+    from repocache.server_protected_state_store_v1 import _locked
+    from repocache.server_protected_state_inspect_v1 import _DIRECTORY_FLAGS
+
+    root = os.open("/", _DIRECTORY_FLAGS)
+    try:
+        with _locked(root, 0) as state:
+            native._require_audited_native_package_for_activation(
+                state, distribution=distribution,
+            )
+            observed = native._own_service_observation(active=True)
+            storage = prepare_installed_storage(distribution, allow_create=False)
+            verify_service_storage_mounts(observed["main_pid_observed"])
+            assert native._own_service_observation(active=True) == observed
+            verify_storage_report({"storage": storage,
+                                   "service_storage_mounts_verified": True},
+                                  distribution)
+    finally:
+        os.close(root)
+    print("PASS: owned storage metadata and actual NGINX mount boundaries verified after WAL recovery and reboot", flush=True)
+
+
 def verify_guest(distribution: str, phase: str) -> None:
     assert os.getresuid() == (0, 0, 0)
     assert Path("/proc/1/comm").read_text().strip() == "systemd"
@@ -546,6 +622,7 @@ def verify_guest(distribution: str, phase: str) -> None:
 
         activated = native.activate_authenticated_native_nginx(assets, **pins)
         assert activated["status"] == "AUTHENTICATED_REPOCACHE_NGINX_ACTIVE"
+        verify_storage_report(activated, distribution)
         assert native._own_service_observation(active=True)["main_pid_observed"] > 1
         require_status(OWN, True, True)
         require_status(VENDOR, False, False)
@@ -556,8 +633,10 @@ def verify_guest(distribution: str, phase: str) -> None:
         verify_signed_runtime_mode_refusal(signed_pid)
         assert stage.verify_installed_worker(assets, **pins)[
             "status"] == "AUTHENTICATED_WORKER_FILES_MATCH"
+        verify_storage_marker_refusal(native, assets, pins, signed_pid)
         repeated = native.activate_authenticated_native_nginx(assets, **pins)
         assert repeated["status"] == "AUTHENTICATED_REPOCACHE_NGINX_ALREADY_ACTIVE"
+        verify_storage_report(repeated, distribution)
 
         # The signed, owned NGINX service must retain its last working
         # in-memory configuration when a foreign invalid config is injected.
@@ -606,6 +685,7 @@ def verify_guest(distribution: str, phase: str) -> None:
         require_status(VENDOR, False, False)
         assert native._own_service_observation(active=True)["main_pid_observed"] > 1
         recover_live_wal_after_reboot(distribution)
+        verify_storage_after_recovery(distribution, native)
         require_status(OWN, True, True)
         require_status(VENDOR, False, False)
         assert hashlib.sha256(VENDOR_CONFIG.read_bytes()).hexdigest() == original["vendor_config_sha256"]
