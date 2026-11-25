@@ -97,7 +97,12 @@ def _expected_file_context(path: Path, mode: int) -> bytes:
         try:
             result = ctypes.c_char_p()
             if lib.selabel_lookup_raw(handle, ctypes.byref(result), os.fsencode(path), mode) != 0:
-                raise pre.PreflightError("Native SELinux file policy lookup failed")
+                # Preserve the native failure reason for controlled VM diagnostics;
+                # the public refusal message and fail-closed decision are unchanged.
+                error = ctypes.get_errno()
+                raise pre.PreflightError("Native SELinux file policy lookup failed") from OSError(
+                    error, "SELinux file-context lookup refused",
+                )
             try:
                 raw = result.value
                 if raw is None or not 1 <= len(raw) <= 512:

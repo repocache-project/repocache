@@ -186,7 +186,7 @@ def _alma_label_roundtrip(root: Path) -> None:
     (root / "etc/os-release").write_text('ID=almalinux\nVERSION_ID="10"\n')
     # Only this freshly created private VM fixture may be normalized to
     # native default labels, never any real host source or trust directory.
-    assert root.parent == Path("/tmp") and root.name.startswith("repocache-booted-label-")
+    assert root.parent == Path("/var/tmp") and root.name.startswith("repocache-booted-label-")
     subprocess.run(["/usr/sbin/restorecon", "-RF", str(root)], check=True,
                    timeout=30, capture_output=True)
     # Verify the actual raw policy lookup for every initial private control
@@ -197,7 +197,10 @@ def _alma_label_roundtrip(root: Path) -> None:
             try:
                 boundary.metadata._policy_label(fd)
             except boundary.pre.PreflightError as exc:
-                raise AssertionError("Fixture policy lookup refused " + path.name) from exc
+                cause = exc.__cause__
+                detail = (" errno=" + str(cause.errno)
+                          if isinstance(cause, OSError) else "")
+                raise AssertionError("Fixture policy lookup refused " + path.name + detail) from exc
             finally:
                 os.close(fd)
     os.setxattr(source, "user.repocache-ci", b"preserve")
@@ -357,7 +360,10 @@ def main(platform: str) -> None:
         else:
             _alma_label_refusal(root)
     if platform == "almalinux10":
-        with tempfile.TemporaryDirectory(prefix="repocache-booted-label-", dir="/tmp") as work:
+        # /tmp may explicitly have no default file context in targeted policy.
+        # Use the other already-authorized private fixture root; the positive
+        # test still requires actual native path-policy matches for all files.
+        with tempfile.TemporaryDirectory(prefix="repocache-booted-label-", dir="/var/tmp") as work:
             _alma_label_roundtrip(Path(work))
     assert installed_sources(platform) == before_sources
     assert installed_packages(platform) == before_packages
