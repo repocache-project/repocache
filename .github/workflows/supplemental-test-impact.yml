@@ -1,0 +1,42 @@
+name: Supplemental test impact (read only)
+
+on:
+  workflow_call:
+    outputs:
+      client:
+        value: ${{ jobs.select.outputs.client }}
+      vm:
+        value: ${{ jobs.select.outputs.vm }}
+      scenarios:
+        value: ${{ jobs.select.outputs.scenarios }}
+      activation:
+        value: ${{ jobs.select.outputs.activation }}
+
+permissions:
+  contents: read
+
+jobs:
+  select:
+    name: Select optional CI from complete exact-head diff
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      client: ${{ steps.impact.outputs.client }}
+      vm: ${{ steps.impact.outputs.vm }}
+      scenarios: ${{ steps.impact.outputs.scenarios }}
+      activation: ${{ steps.impact.outputs.activation }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Select reviewed scenarios or full campaign on uncertainty
+        id: impact
+        env:
+          IMPACT_EVENT: ${{ github.event_name }}
+          IMPACT_BASE: ${{ github.event.pull_request.base.sha }}
+          IMPACT_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          IMPACT_BASE_REF: ${{ github.base_ref }}
+          IMPACT_HEAD_REF: ${{ github.head_ref }}
+        run: python3 -B scripts/ci_supplemental_test_impact.py
