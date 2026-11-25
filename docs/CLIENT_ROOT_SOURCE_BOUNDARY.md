@@ -153,3 +153,10 @@ old route is refused if no longer published. No raw paths or routes are
 returned, and preparation grants no ownership or write authority.
 The installer, operator-facing selection/consent handoff, native source
 commit and recovery, and labelled-state support remain open.
+
+The existing Client Helper Preview Native workflow also executes the three
+root-only registry-directory group, xattr and retained-inode regression
+cases under native OS Python in both disposable distro containers. The
+ordinary unprivileged Python jobs intentionally skip these cases; a skipped
+native regression is not acceptance evidence. No extra workflow or host
+mutation is introduced.
