@@ -54,7 +54,7 @@ from repocache.server_native_nginx_effective_unit_v1 import (
     inspect_effective_native_nginx_unit, _observe_systemd_pid1,
     _safe_native_systemctl, _FIXED_ARGS as _EFFECTIVE_SYSTEMCTL_ARGS,
     EffectiveNginxUnitError, inspect_effective_owned_nginx_unit,
-    OWNED_NGINX_CONFIG_MARKER_PREFIX,
+    OWNED_NGINX_CONFIG_MARKER_PREFIX, _read_exact_owned_unit_at,
 )
 from repocache.server_root_control_full_context_v1 import _capture_default_nginx_dump_private
 from repocache.server_proposed_state_v2_store import _read_v2
@@ -798,7 +798,7 @@ def _verify_active_managed_nginx_under_lock(
 
     Called only after the signed installer independently authenticated and
     audited the exact worker and unit. Retain the existing state lock.
-    Inactive, pending, legacy and active-route cases remain fail closed.
+    Pending, legacy and active-route cases remain fail closed here.
     """
     if (_own_systemctl("is-enabled") != (0, b"enabled\n")
             or _own_systemctl("is-active") != (0, b"active\n")):
@@ -845,6 +845,106 @@ def _verify_active_managed_nginx_under_lock(
         _reject("NATIVE_ACTIVATION_MANAGED_STATE_REFUSED")
 
 
+def _repair_inactive_managed_nginx_under_lock(
+    root_fd: int, state_fd: int, distribution: str, unit_bytes: bytes,
+) -> dict:
+    """Restart only the exact enabled, inactive, clean managed generation.
+
+    No configuration, catalog, storage or enablement changes are authorized.
+    The explicit signed installer invocation and original lock are required.
+    A disabled service is not implicitly enabled; pending WAL, foreign
+    state and active repositories remain refused.
+    """
+    def inactive_identity():
+        before = _read_exact_owned_unit_at(root_fd, unit_bytes, owner_uid=0, owner_gid=0)
+        if (_own_systemctl("is-enabled") != (0, b"enabled\n")
+                or _own_systemctl("is-active") != (3, b"inactive\n")
+                or _own_service_observation(active=False)["main_pid_observed"] != 0
+                or _read_exact_owned_unit_at(root_fd, unit_bytes, owner_uid=0, owner_gid=0) != before):
+            _reject("NATIVE_ACTIVATION_MANAGED_STATE_REFUSED")
+        return before
+
+    try:
+        with _owned_layout_locked(root_fd, state_fd, recovering=False) as layout:
+            _, nginx_fd, public_fd, check = layout
+            old = _read_owned_resources(state_fd, nginx_fd, public_fd)
+            snapshot = _validate_owned_resources(old)
+            if snapshot is None:
+                _reject("NATIVE_ACTIVATION_MANAGED_STATE_REFUSED")
+            _owned_socket_require_inactive_routes(snapshot)
+            unit_identity = inactive_identity()
+            storage = prepare_installed_storage(distribution, allow_create=False)
+
+            def clean():
+                check()
+                _no_conflicting_owned_wal_pending(state_fd)
+                if (_read_owned_resources(state_fd, nginx_fd, public_fd) != old
+                        or prepare_installed_storage(distribution, allow_create=False) != storage
+                        or _read_exact_owned_unit_at(root_fd, unit_bytes, owner_uid=0,
+                                                     owner_gid=0) != unit_identity):
+                    _reject("NATIVE_ACTIVATION_MANAGED_STATE_CHANGED")
+
+            clean()
+            _prepare_own_runtime_directory()
+            # nginx -T may create an inert PID file while inactive.
+            # Never remove it unless the exact unit is still inactive.
+            try:
+                context = _owned_live_validate(root_fd, state_fd, old)
+            finally:
+                if inactive_identity() != unit_identity:
+                    _reject("NATIVE_ACTIVATION_MANAGED_STATE_CHANGED")
+                _cleanup_own_nginx_syntax_pid()
+            _require_audited_native_package_for_activation(state_fd, distribution=distribution)
+            _nginx_inactive_vendor_service(distribution)
+            clean()
+            if inactive_identity() != unit_identity:
+                _reject("NATIVE_ACTIVATION_MANAGED_STATE_CHANGED")
+            identity = None
+            try:
+                _nginx_activation_command("start")
+                identity = _owned_live_observe(root_fd, expected_unit=unit_bytes)
+                if identity[1] != unit_identity:
+                    _reject("NATIVE_ACTIVATION_MANAGED_STATE_CHANGED")
+                verify_service_storage_mounts(identity[0])
+                _owned_live_health_bound(root_fd, identity, context, old["catalog.json"],
+                                         publish=True, expected_unit=unit_bytes)
+                # Reuse the complete active repeat assessment, retaining
+                # the original lock and exact pre-start resource snapshot.
+                result = _verify_active_managed_nginx_under_lock(
+                    root_fd, state_fd, distribution, unit_bytes,
+                )
+                clean()
+                if (_owned_live_observe(root_fd, expected_unit=unit_bytes) != identity
+                        or result["state_generation"] != snapshot["state_generation"]):
+                    _reject("NATIVE_ACTIVATION_MANAGED_STATE_CHANGED")
+                return {**result, "status": "AUTHENTICATED_REPOCACHE_NGINX_ACTIVE"}
+            except Exception:
+                # Restore the original inactive/enabled state only when
+                # the exact unit and unchanged resources still establish
+                # our authority. Never stop an unverified process.
+                try:
+                    clean()
+                    current = _own_systemctl("is-active")
+                    if current == (0, b"active\n"):
+                        current_identity = _owned_live_observe(root_fd, expected_unit=unit_bytes)
+                        if (current_identity[1] != unit_identity
+                                or (identity is not None and current_identity != identity)):
+                            _reject("NATIVE_ACTIVATION_RECOVERY_REQUIRED")
+                        _nginx_activation_command("stop")
+                    elif current != (3, b"inactive\n"):
+                        _reject("NATIVE_ACTIVATION_RECOVERY_REQUIRED")
+                    if inactive_identity() != unit_identity:
+                        _reject("NATIVE_ACTIVATION_RECOVERY_REQUIRED")
+                    clean()
+                except Exception:
+                    _reject("NATIVE_ACTIVATION_RECOVERY_REQUIRED")
+                _reject("NATIVE_ACTIVATION_FAILED_ROLLED_BACK")
+    except stage.WorkerStageError:
+        raise
+    except (NativeV2TransactionError, EffectiveNginxUnitError, OSError, ValueError, TypeError):
+        _reject("NATIVE_ACTIVATION_MANAGED_STATE_REFUSED")
+
+
 def _activate_audited_native_nginx_under_lock(
     state_fd: int, distribution: str, config: bytes, *,
     root_fd: int | None = None, unit_bytes: bytes | None = None,
@@ -863,6 +963,11 @@ def _activate_audited_native_nginx_under_lock(
             or _nginx_systemctl("is-active") != (3, b"inactive\n")):
         _reject("NATIVE_ACTIVATION_VENDOR_SERVICE_STATE")
     if managed:
+        if (_own_systemctl("is-enabled") == (0, b"enabled\n")
+                and _own_systemctl("is-active") == (3, b"inactive\n")):
+            return _repair_inactive_managed_nginx_under_lock(
+                root_fd, state_fd, distribution, unit_bytes,
+            )
         return _verify_active_managed_nginx_under_lock(
             root_fd, state_fd, distribution, unit_bytes,
         )

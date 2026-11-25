@@ -429,6 +429,47 @@ def verify_managed_installer_repeat(distribution, native, assets, pins):
     print("PASS: signed managed installer repeat and unsafe include refusal preserve exact prior service and generation", flush=True)
 
 
+def verify_inactive_managed_repair(distribution, native, assets, pins) -> None:
+    """Same signed installed generation, enabled but stopped, no resource rewrite."""
+    from scripts.stage_native_root_worker import WorkerStageError
+    from repocache.server_native_installed_storage_v1 import InstalledStorageError
+    from scripts.ci_pr237_native_socket_guest import https_response
+
+    before = live_wal_resource_hashes()
+    stopped = run("/usr/bin/systemctl", "stop", OWN)
+    assert stopped.returncode == 0
+    require_status(OWN, False, True)
+    require_status(VENDOR, False, False)
+    # Inject only the post-start acceptance failure. The service start and
+    # compensating stop are real, on the actual signed installed unit.
+    original = native.verify_service_storage_mounts
+    def fail(_pid):
+        raise InstalledStorageError("INSTALLED_NGINX_STORAGE_DISPOSABLE_MOUNT_FAULT")
+    native.verify_service_storage_mounts = fail
+    try:
+        try:
+            native.activate_authenticated_native_nginx(assets, **pins)
+        except WorkerStageError as exc:
+            assert str(exc) == "WORKER_PLACEMENT_NATIVE_ACTIVATION_FAILED_ROLLED_BACK", str(exc)
+        else:
+            raise AssertionError("Injected post-start failure accepted")
+    finally:
+        native.verify_service_storage_mounts = original
+    require_status(OWN, False, True)
+    assert live_wal_resource_hashes() == before
+    result = native.activate_authenticated_native_nginx(assets, **pins)
+    assert result["status"] == "AUTHENTICATED_REPOCACHE_NGINX_ACTIVE"
+    assert result["state_generation"] == 1
+    verify_storage_report(result, distribution)
+    require_status(OWN, True, True)
+    require_status(VENDOR, False, False)
+    assert live_wal_resource_hashes() == before
+    assert b"x-repocache-generation: 1" in https_response("/__repocache/healthz").lower()
+    catalog = Path("/var/lib/repocache/public/catalog.json").read_bytes()
+    assert https_response("/.well-known/repocache/catalog.json").endswith(catalog)
+    print("PASS: authenticated inactive managed repair and real start/stop compensation preserve generation and enablement", flush=True)
+
+
 def prepare_and_interrupt_live_wal(distribution: str, native, assets, pins) -> None:
     import base64
     from scripts.ci_pr237_native_socket_guest import synthetic_local_tls, https_response
@@ -752,6 +793,7 @@ def verify_guest(distribution: str, phase: str) -> None:
         recover_live_wal_after_reboot(distribution)
         verify_storage_after_recovery(distribution, native)
         verify_managed_installer_repeat(distribution, native, assets, pins)
+        verify_inactive_managed_repair(distribution, native, assets, pins)
         require_status(OWN, True, True)
         require_status(VENDOR, False, False)
         assert hashlib.sha256(VENDOR_CONFIG.read_bytes()).hexdigest() == original["vendor_config_sha256"]
@@ -759,7 +801,7 @@ def verify_guest(distribution: str, phase: str) -> None:
         assert inspect_stock_nginx_package_file_integrity()[
             "native_package_file_integrity_verified"] is True
         print("PASS: separate REPOCACHE service survives real reboot with vendor service disabled and package integrity intact", flush=True)
-        print("NOT VERIFIED: active repository routes/storage, inactive managed service repair, final publisher-signed release", flush=True)
+        print("NOT VERIFIED: active repository routes/storage, pending-WAL inactive recovery, final publisher-signed release", flush=True)
     else:
         raise AssertionError("invalid test phase")
 

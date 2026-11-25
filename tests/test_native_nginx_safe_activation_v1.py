@@ -450,3 +450,91 @@ def test_managed_installer_reuses_verified_generation_without_bootstrap(monkeypa
     assert state["commands"] == [] and state["config_checks"] == 0
     assert state["storage_preps"] == [("debian", False), ("debian", False)]
     assert state["storage_mounts"] == [1234, 1234]
+
+def _inactive_managed(monkeypatch):
+    from contextlib import contextmanager
+
+    state = _setup(monkeypatch)
+    state["enabled"] = True
+    monkeypatch.setattr(host, "_read_v2", lambda *_: ({"state_generation": 1}, b"owned"))
+    @contextmanager
+    def layout(root, fd, *, recovering):
+        assert (root, fd, recovering) == (10, 11, False)
+        yield (11, 12, 13, lambda: None)
+    monkeypatch.setattr(host, "_owned_layout_locked", layout)
+    monkeypatch.setattr(host, "_read_owned_resources", lambda *_: {"catalog.json": b"catalog"})
+    monkeypatch.setattr(host, "_validate_owned_resources", lambda _: {"state_generation": 1})
+    monkeypatch.setattr(host, "_owned_socket_require_inactive_routes", lambda _: None)
+    monkeypatch.setattr(host, "_no_conflicting_owned_wal_pending", lambda _: None)
+    monkeypatch.setattr(host, "_read_exact_owned_unit_at",
+                        lambda *a, **kw: (1, 2))
+    def observe(root, *, expected_unit):
+        assert state["active"] and (root, expected_unit) == (10, b"signed")
+        return (1234, (1, 2))
+    monkeypatch.setattr(host, "_owned_live_observe", observe)
+    monkeypatch.setattr(host, "_owned_live_validate", lambda *_: (None, 1, None))
+    monkeypatch.setattr(host, "_owned_live_health_bound", lambda *a, **kw: None)
+    monkeypatch.setattr(host, "_cleanup_own_nginx_syntax_pid", lambda: None)
+    return state
+
+
+def test_enabled_inactive_managed_restart_preserves_generation_and_enablement(monkeypatch):
+    state = _inactive_managed(monkeypatch)
+    result = host._activate_audited_native_nginx_under_lock(
+        11, "debian", host._BOOTSTRAP_CONFIG, root_fd=10, unit_bytes=b"signed")
+    assert result["status"] == "AUTHENTICATED_REPOCACHE_NGINX_ACTIVE"
+    assert result["state_generation"] == 1
+    assert state["commands"] == ["start"]
+    assert state["active"] and state["enabled"] and state["config_checks"] == 0
+    assert state["runtime_preps"] == 1
+    assert all(not create for _, create in state["storage_preps"])
+
+
+def test_enabled_inactive_managed_restart_compensates_post_start_failure(monkeypatch):
+    state = _inactive_managed(monkeypatch)
+    from repocache.server_native_installed_storage_v1 import InstalledStorageError
+    def refuse(_pid):
+        raise InstalledStorageError("INSTALLED_NGINX_STORAGE_SERVICE_PARENT_WRITABLE")
+    monkeypatch.setattr(host, "verify_service_storage_mounts", refuse)
+    with pytest.raises(stage.WorkerStageError, match="NATIVE_ACTIVATION_FAILED_ROLLED_BACK"):
+        host._activate_audited_native_nginx_under_lock(
+            11, "debian", host._BOOTSTRAP_CONFIG, root_fd=10, unit_bytes=b"signed")
+    assert state["commands"] == ["start", "stop"]
+    assert not state["active"] and state["enabled"] and state["config_checks"] == 0
+
+
+def test_enabled_inactive_managed_restart_never_stops_unverified_master(monkeypatch):
+    state = _inactive_managed(monkeypatch)
+    def refuse(*a, **kw):
+        raise host.NativeV2TransactionError("NATIVE_V2_OWNED_LIVE_UNIT_UNVERIFIED")
+    monkeypatch.setattr(host, "_owned_live_observe", refuse)
+    with pytest.raises(stage.WorkerStageError, match="NATIVE_ACTIVATION_RECOVERY_REQUIRED"):
+        host._activate_audited_native_nginx_under_lock(
+            11, "debian", host._BOOTSTRAP_CONFIG, root_fd=10, unit_bytes=b"signed")
+    assert state["commands"] == ["start"]
+    assert state["enabled"]
+
+
+def test_enabled_inactive_managed_pending_refused_before_start(monkeypatch):
+    state = _inactive_managed(monkeypatch)
+    def pending(_fd):
+        raise host.NativeV2TransactionError("NATIVE_V2_OWNED_WAL_DOMAIN_REQUIRED")
+    monkeypatch.setattr(host, "_no_conflicting_owned_wal_pending", pending)
+    with pytest.raises(stage.WorkerStageError, match="NATIVE_ACTIVATION_MANAGED_STATE_REFUSED"):
+        host._activate_audited_native_nginx_under_lock(
+            11, "debian", host._BOOTSTRAP_CONFIG, root_fd=10, unit_bytes=b"signed")
+    assert state["commands"] == [] and state["runtime_preps"] == 0
+
+def test_enabled_inactive_managed_restart_never_stops_replaced_master(monkeypatch):
+    state = _inactive_managed(monkeypatch)
+    from repocache.server_native_installed_storage_v1 import InstalledStorageError
+    observed = iter(((1234, (1, 2)), (1235, (1, 2))))
+    monkeypatch.setattr(host, "_owned_live_observe", lambda *a, **kw: next(observed))
+    def refuse(_pid):
+        raise InstalledStorageError("INSTALLED_NGINX_STORAGE_SERVICE_PARENT_WRITABLE")
+    monkeypatch.setattr(host, "verify_service_storage_mounts", refuse)
+    with pytest.raises(stage.WorkerStageError, match="NATIVE_ACTIVATION_RECOVERY_REQUIRED"):
+        host._activate_audited_native_nginx_under_lock(
+            11, "debian", host._BOOTSTRAP_CONFIG, root_fd=10, unit_bytes=b"signed")
+    assert state["commands"] == ["start"]
+    assert state["enabled"]

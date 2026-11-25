@@ -839,3 +839,25 @@ pending journal adoption occurs on this path. Booted tests reauthenticate
 and repeat before and after WAL recovery/reboot and refuse unsafe include
 permissions without altering prior service or resource bytes. Inactive
 managed repair and active repository operation remain separate gates.
+
+### Authenticated repair of an enabled but inactive managed service
+
+The existing explicit signed installer activation path may now restart an
+already enabled, exactly authenticated and inactive dedicated service with
+a clean committed disabled-repository generation. It verifies the inactive
+effective unit and exact signed unit inode, retained layout and closed
+resource snapshot, native package and storage, syntax and TLS identity
+before starting only the dedicated unit. It cleans only the inert native
+syntax PID file while the unit remains verified inactive. After startup it
+requires the exact kernel listener, TLS generation, catalog, storage mounts
+and the existing active-repeat verification. The same generation and
+enablement must be preserved; no resource or storage creation occurs.
+A failed post-start check compensates by stopping only the exact
+authenticated service if the original resource and unit identities remain
+intact, and verifies the original inactive/enabled state. Unknown process,
+unit or resource drift reports recovery required instead of stopping an
+unverified master. Disabled service, active repositories, pending WAL and
+foreign/legacy cases remain refused. Booted VM tests inject a post-start
+fault, require real stop compensation, then reauthenticate and restart the
+unchanged generation after actual reboot. New exact-HEAD evidence is
+required; this is not active-repository or publisher acceptance.
