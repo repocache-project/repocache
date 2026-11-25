@@ -29,8 +29,8 @@ ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"}
 PORT = 8443
 PAYLOAD = b"REPOCACHE isolated SELinux egress fixture\n" * 32
 
-# Fixed origin process inside the new namespace; three independent listeners.
-# The database-port listener and other-address listener are negative canaries.
+# Fixed origins and negative canaries inside the new namespace.
+# The custom HTTPS port is tested without changing stock port labels.
 ORIGIN = r"""
 import http.server, ssl, sys, threading
 from pathlib import Path
@@ -51,7 +51,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 servers = []
-for address in (('127.0.0.1', 443), ('127.0.0.2', 443), ('127.0.0.1', 5432)):
+for address in (('127.0.0.1', 443), ('127.0.0.2', 443), ('127.0.0.1', 5432),
+                ('127.0.0.2', 8008), ('127.0.0.1', 8008)):
     server = http.server.ThreadingHTTPServer(address, Handler)
     server.socket = ctx.wrap_socket(server.socket, server_side=True)
     servers.append(server)
@@ -87,7 +88,7 @@ def installed_modules():
     return command("/usr/sbin/semodule", "-l").stdout
 
 
-def nft_rules(uid, *, negative_port_probe=False):
+def nft_rules(uid, *, negative_port_probe=False, custom_https=False):
     """The namespace has no external links; deny new nonapproved UID flows.
 
     5432 is intentionally allowed by the independent packet filter ONLY
@@ -96,13 +97,17 @@ def nft_rules(uid, *, negative_port_probe=False):
     """
     assert type(uid) is int and 0 < uid < 2**31
     assert type(negative_port_probe) is bool
+    assert type(custom_https) is bool
     ports = "{443,5432}" if negative_port_probe else "443"
+    custom_rule = (f"meta skuid {uid} ip daddr 127.0.0.2 tcp dport 8008 accept"
+                   if custom_https else "")
     return f"""table inet repocache_ci {{
         counter denied {{ }}
         chain output {{
             type filter hook output priority 0; policy accept;
             meta skuid {uid} ct state established,related accept
             meta skuid {uid} ip daddr 127.0.0.1 tcp dport {ports} accept
+            {custom_rule}
             meta skuid {uid} counter name denied reject
         }}
     }}
@@ -110,7 +115,8 @@ def nft_rules(uid, *, negative_port_probe=False):
 
 
 def request(root, path):
-    assert path in ("allowed", "other-address", "other-port")
+    assert path in ("allowed", "other-address", "other-port", "custom",
+                    "wrong-pair", "custom-after-withdrawal")
     result = command("/usr/sbin/ip", "netns", "exec", NS, "/usr/bin/curl",
                      "--silent", "--show-error", "--max-time", "8",
                      "--noproxy", "*", "--cacert", str(root / "cert.pem"),
@@ -166,7 +172,10 @@ def probe():
         locations = ""
         for name, target in (("allowed", "127.0.0.1:443"),
                              ("other-address", "127.0.0.2:443"),
-                             ("other-port", "127.0.0.1:5432")):
+                             ("other-port", "127.0.0.1:5432"),
+                             ("custom", "127.0.0.2:8008"),
+                             ("wrong-pair", "127.0.0.1:8008"),
+                             ("custom-after-withdrawal", "127.0.0.2:8008")):
             locations += f"""
 location = /{name} {{
     proxy_pass https://{target}/fixture;
@@ -177,7 +186,7 @@ location = /{name} {{
     proxy_connect_timeout 2s;
     proxy_read_timeout 5s;
     proxy_max_temp_file_size 0;
-    proxy_cache {'fixture' if name == 'allowed' else 'off'};
+    proxy_cache {'fixture' if name in ('allowed', 'custom') else 'off'};
     proxy_cache_valid 200 60s;
     add_header X-Cache $upstream_cache_status always;
 }}
@@ -297,6 +306,38 @@ location = /health {{ return 204; }}
                 assert request(root, "other-address")[0] == 502
                 assert request(root, "other-port")[0] == 502
                 assert (root / "origin-counts").read_text().splitlines() == ["127.0.0.1:443"]
+                # Add exactly one custom HTTPS endpoint, not the Cartesian
+                # product of approved addresses and ports. No SELinux changes.
+                assert request(root, "custom")[0] == 502
+                command("/usr/sbin/ip", "netns", "exec", NS, "/usr/sbin/nft",
+                        "-f", "-", input_text="delete table inet repocache_ci\n"
+                        + nft_rules(account.pw_uid, custom_https=True))
+                custom_first = request(root, "custom")
+                custom_second = request(root, "custom")
+                assert custom_first[:2] == custom_second[:2] == (200, PAYLOAD)
+                assert "x-cache: miss" in custom_first[2] and "x-cache: hit" in custom_second[2]
+                assert request(root, "wrong-pair")[0] == 502
+                assert request(root, "other-address")[0] == 502
+                assert (root / "origin-counts").read_text().splitlines() == [
+                    "127.0.0.1:443", "127.0.0.2:8008"]
+                # An invalid replacement must leave the existing table intact.
+                invalid = command("/usr/sbin/ip", "netns", "exec", NS, "/usr/sbin/nft",
+                                  "-f", "-", input_text="delete table inet repocache_ci\n"
+                                  + "add rule inet repocache_ci missing_chain accept\n",
+                                  check=False)
+                assert invalid.returncode != 0
+                assert request(root, "wrong-pair")[0] == 502
+                # Withdraw the custom tuple. The uncached location tests a
+                # fresh upstream connect, not the already cached response.
+                command("/usr/sbin/ip", "netns", "exec", NS, "/usr/sbin/nft",
+                        "-f", "-", input_text="delete table inet repocache_ci\n"
+                        + nft_rules(account.pw_uid))
+                assert request(root, "custom-after-withdrawal")[0] == 502
+                assert request(root, "allowed")[:2] == (200, PAYLOAD)
+                assert (root / "origin-counts").read_text().splitlines() == [
+                    "127.0.0.1:443", "127.0.0.2:8008"]
+                print("PASS: isolated custom HTTPS tuple add, MISS/HIT, crossed tuple refusal, "
+                      "failed replacement and fresh-connect withdrawal", flush=True)
                 assert any(p.is_file() for p in (writable / "cache").rglob("*"))
                 assert command("/usr/sbin/getenforce").stdout.strip() == "Enforcing"
                 print("PASS: dedicated enforcing NGINX domain, verified HTTPS MISS/HIT, "
@@ -325,7 +366,7 @@ location = /health {{ return 204; }}
         guard()
         print("PASS: isolated SELinux module and netns removed; stock booleans and vendor unchanged",
               flush=True)
-        print("NOT VERIFIED: signed dedicated service transition, custom HTTPS port lifecycle, "
+        print("NOT VERIFIED: signed dedicated service transition, arbitrary custom port labels, "
               "production egress transaction and actual installed cache acceptance", flush=True)
 
 

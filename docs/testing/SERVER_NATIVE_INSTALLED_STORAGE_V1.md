@@ -240,3 +240,14 @@ new outbound connections to exact approved IP/port tuples while preserving
 client ingress, journal policy/generation changes and validate recovery,
 reboot, withdrawal, repair and foreign-service noninterference. No
 production activation or global network-policy change authorized.
+
+
+The next isolated experiment adds a second HTTPS endpoint at `127.0.0.2:8008`
+under unchanged stock SELinux port labels. The namespace-local packet filter
+must reject it before approval, allow only its exact address/port tuple after
+an atomic replacement, and reject crossed address/port pairs. A deliberately
+invalid replacement must leave the prior rules effective. Withdrawal must
+reject a fresh uncached upstream connection while preserving the original
+endpoint. This does not revoke cached data or already-established flows and
+does not establish support for arbitrary SELinux port types. The installed
+service remains unchanged; this new experiment requires exact-head native CI.
