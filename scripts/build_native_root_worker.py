@@ -62,6 +62,18 @@ def build(source: Path) -> bytes:
     data.seek(0, io.SEEK_END)
     with zipfile.ZipFile(data, "w", compression=zipfile.ZIP_STORED) as archive:
         archive.writestr(zipfile.ZipInfo("__main__.py"), ENTRYPOINT)
+        # Bind the exact dedicated unit from the authenticated source into
+        # the deterministic worker. This is not a separate trust anchor.
+        unit = source / "docs" / "examples" / "systemd" / "repocache-nginx.service"
+        if any(parent.is_symlink() for parent in (
+                unit, unit.parent, unit.parent.parent, unit.parent.parent.parent)):
+            raise ValueError("Unexpected symlink in dedicated NGINX unit source")
+        if not unit.is_file():
+            raise ValueError("Missing dedicated NGINX unit source")
+        unit_bytes = unit.read_bytes()
+        if not 1 <= len(unit_bytes) <= 16384:
+            raise ValueError("Invalid dedicated NGINX unit size")
+        archive.writestr(zipfile.ZipInfo("repocache/_signed-owned-nginx.service"), unit_bytes)
         for module in MODULES:
             filename = module + ".py"
             path = package / filename

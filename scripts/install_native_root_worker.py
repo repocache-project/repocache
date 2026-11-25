@@ -26,6 +26,9 @@ if __name__ == "__main__":
 
 from repocache import signatures, upgrade
 from repocache.server_install_v1 import MAX_DOCUMENT_BYTES, parse_install_bytes
+from repocache.server_native_installed_storage_v1 import (
+    _Labels, prepare_installed_storage, verify_service_storage_mounts,
+)
 from repocache.server_native_nginx_local_boundary_v1 import inspect_native_nginx_local_boundary
 from repocache.server_native_nginx_ownership_v1 import inspect_fresh_nginx_footprint
 from repocache.server_native_nginx_package_journal_v1 import _retain_native_package_journal_lock_under_root
@@ -405,7 +408,9 @@ def _native_workspace_is_root_owned(work: Path) -> bool:
             and stat.S_ISDIR(info.st_mode))
 
 
-def _ensure_fixed_nginx_cache_parent_under_root(root_fd: int, *, owner_uid: int = 0) -> None:
+def _ensure_fixed_nginx_cache_parent_under_root(
+    root_fd: int, *, owner_uid: int = 0, distribution: str | None = None,
+) -> None:
     """Provision only the missing native systemd ReadWritePaths cache parent.
 
     The stock APT/DNF package may not create /var/cache/nginx. Both the signed
@@ -432,6 +437,10 @@ def _ensure_fixed_nginx_cache_parent_under_root(root_fd: int, *, owner_uid: int 
     try:
         with ExitStack() as stack:
             root = checked(root_fd)
+            real_root = os.stat("/", follow_symlinks=False)
+            labels = (_Labels(distribution) if distribution == "almalinux"
+                      and (root.st_dev, root.st_ino) == (real_root.st_dev, real_root.st_ino)
+                      else None)
             directory = root_fd
             for name in ("var", "cache"):
                 nxt = os.open(name, flags, dir_fd=directory)
@@ -454,11 +463,16 @@ def _ensure_fixed_nginx_cache_parent_under_root(root_fd: int, *, owner_uid: int 
                         or created.st_dev != os.fstat(parent).st_dev
                         or stat.S_IMODE(created.st_mode) != 0o700):
                     _reject("NATIVE_CACHE_PARENT_UNSAFE")
+                if labels is not None:
+                    labels.check(fd, "/var/cache/nginx", b"httpd_cache_t", fresh=True)
                 os.fchmod(fd, 0o755)
                 os.fsync(fd)
                 os.fsync(parent)
             else:
                 stack.callback(os.close, fd)
+            if labels is not None:
+                labels.check(fd, "/var/cache/nginx", b"httpd_cache_t")
+                labels.finish()
             leaf = checked(fd, parent_dev=os.fstat(parent).st_dev)
             if stat.S_IMODE(leaf.st_mode) != 0o755:
                 _reject("NATIVE_CACHE_PARENT_UNSAFE")
@@ -752,11 +766,17 @@ def _activate_audited_native_nginx_under_lock(
     current_active = _own_systemctl("is-active")
     if current_enabled == (0, b"enabled\n") and current_active == (0, b"active\n"):
         _private_config_present()
-        _own_service_observation(active=True)
+        storage = prepare_installed_storage(distribution, allow_create=False)
+        observed = _own_service_observation(active=True)
+        verify_service_storage_mounts(observed["main_pid_observed"])
+        if _own_service_observation(active=True) != observed:
+            _reject("NATIVE_ACTIVATION_SERVICE_CHANGED")
         return {"status": "AUTHENTICATED_REPOCACHE_NGINX_ALREADY_ACTIVE",
-                "nginx_active_verified": True, "nginx_enabled_verified": True}
+                "nginx_active_verified": True, "nginx_enabled_verified": True,
+                "storage": storage, "service_storage_mounts_verified": True}
     if current_enabled != (1, b"disabled\n") or current_active != (3, b"inactive\n"):
         _reject("NATIVE_ACTIVATION_FOREIGN_SERVICE_STATE")
+    storage = prepare_installed_storage(distribution, allow_create=True)
     _prepare_own_runtime_directory()
     _require_private_nginx_listeners()
     # The signed unit may have been placed before the distro NGINX package;
@@ -766,6 +786,7 @@ def _activate_audited_native_nginx_under_lock(
     try:
         _nginx_activation_command("start")
         before = _own_service_observation(active=True)
+        verify_service_storage_mounts(before["main_pid_observed"])
         _private_config_present()
         _nginx_activation_command("enable")
         after = _own_service_observation(active=True)
@@ -776,8 +797,13 @@ def _activate_audited_native_nginx_under_lock(
         _private_config_present()
         _require_audited_native_package_for_activation(state_fd, distribution=distribution)
         _nginx_inactive_vendor_service(distribution)
+        storage = prepare_installed_storage(distribution, allow_create=False)
+        verify_service_storage_mounts(after["main_pid_observed"])
+        if _own_service_observation(active=True) != after:
+            _reject("NATIVE_ACTIVATION_SERVICE_CHANGED")
         return {"status": "AUTHENTICATED_REPOCACHE_NGINX_ACTIVE",
-                "nginx_active_verified": True, "nginx_enabled_verified": True}
+                "nginx_active_verified": True, "nginx_enabled_verified": True,
+                "storage": storage, "service_storage_mounts_verified": True}
     except Exception:
         # systemctl start may time out after spawning a process. Never kill
         # an unknown master; only stop our exactly authenticated active unit.
@@ -905,7 +931,9 @@ def _execute_native_nginx_install_locked(
             # The signed control unit requires this fixed ReadWritePaths
             # directory. Some native nginx packages do not provision it.
             # Complete the package receipt only after its owned parent is safe.
-            _ensure_fixed_nginx_cache_parent_under_root(root_fd, owner_uid=owner_uid)
+            _ensure_fixed_nginx_cache_parent_under_root(
+                root_fd, owner_uid=owner_uid, distribution=distribution,
+            )
             # The atomic completion primitive independently repeats the
             # protected-state, package, file and vendor-unit checks.
             result = transaction["_complete_under_lock"]()
