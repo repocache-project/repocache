@@ -9,13 +9,16 @@ A production client writer remains disabled and #24 host gates remain OPEN.
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import hashlib
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ci_client_native_fallback as native
@@ -113,6 +116,91 @@ def _label_isolated_rpmdb(rpmdb: Path) -> None:
         raise RuntimeError("Isolated RPMDB label verification failed")
 
 
+def _rpm_waiter(table: str, pid: int, info: os.stat_result) -> bool:
+    """Require a kernel-reported POSIX waiter on the exact RPMDB lock."""
+    if len(table) > 1_000_000:
+        raise RuntimeError("Unexpected native lock table size")
+    expected = (os.major(info.st_dev), os.minor(info.st_dev), info.st_ino)
+    for line in table.splitlines():
+        parts = line.split()
+        if (len(parts) != 9 or parts[1:4] != ["->", "POSIX", "ADVISORY"]
+                or parts[4] not in ("READ", "WRITE") or parts[5] != str(pid)):
+            continue
+        try:
+            major, minor, inode = parts[6].split(":")
+            identity = (int(major, 16), int(minor, 16), int(inode))
+        except ValueError:
+            continue
+        if identity == expected:
+            return True
+    return False
+
+
+def _import_under_native_lock(rpmdb: Path, public_key: Path) -> None:
+    """Exercise real RPM contention only against the isolated booted-VM DB.
+
+    No host DB, no package installation, no change to system trust. The
+    positive import happens only after our two kernel locks are released.
+    """
+    from ci_v06_vm_signed_client_guest import guarded_native_guest
+
+    guarded_native_guest("almalinux10")
+    if (rpmdb.parent != Path("/var/lib")
+            or not rpmdb.name.startswith("repocache-ci-rpmdb-")
+            or rpmdb.resolve(strict=True) != rpmdb
+            or rpmdb.stat().st_uid != 0
+            or rpmdb.stat().st_mode & 0o077):
+        raise RuntimeError("Unsafe isolated RPMDB contention target")
+    lock = rpmdb / ".rpm.lock"
+    fd = os.open(lock, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    try:
+        info = os.fstat(fd)
+        named = lock.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or info.st_uid != 0 or info.st_mode & 0o022
+                or (info.st_dev, info.st_ino) != (named.st_dev, named.st_ino)):
+            raise RuntimeError("Unsafe isolated RPMDB lock inode")
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        argv = ["/usr/bin/rpm", "--dbpath", str(rpmdb), "--import", str(public_key)]
+        with subprocess.Popen(
+            argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True,
+            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+        ) as child:
+            try:
+                deadline = time.monotonic() + 10
+                observed_wait = False
+                while child.poll() is None and time.monotonic() < deadline:
+                    with Path("/proc/locks").open(encoding="ascii") as table:
+                        observed_wait = _rpm_waiter(table.read(1_000_001), child.pid, info)
+                    if observed_wait:
+                        break
+                    time.sleep(0.05)
+                if not observed_wait:
+                    if child.poll() is None:
+                        raise RuntimeError("RPM blocking reason not proven by kernel lock table")
+                    output, _ = child.communicate(timeout=2)
+                    if (child.returncode == 0 or "transaction lock" not in output.lower()
+                            or str(lock) not in output
+                            or "resource temporarily unavailable" not in output.lower()):
+                        raise RuntimeError("RPM did not refuse the exact held transaction lock")
+                # If it waits, terminate and reap it BEFORE releasing our
+                # lock; no positive import may be inferred from a timeout.
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                child.communicate(timeout=5)
+        named = lock.lstat()
+        if (named.st_dev, named.st_ino) != (info.st_dev, info.st_ino):
+            raise RuntimeError("RPMDB lock pathname changed during contention")
+    finally:
+        os.close(fd)
+    _run(argv, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
+    print("PASS: real RPM import excluded by held isolated RPMDB lock; succeeds after release",
+          flush=True)
+
+
 def _signed_fixture(base: Path, *, isolated_rpmdb: Path | None = None) -> tuple[Path, Path, bytes, Path]:
     """Build no-script RPM, sign with *ephemeral CI* key, sign generated repodata."""
     public_key = native.dnf_repository(base, signed=True)
@@ -177,7 +265,10 @@ def _signed_fixture(base: Path, *, isolated_rpmdb: Path | None = None) -> tuple[
             + "; output=" + init.stdout[-2000:]
             + "; directory contexts=" + diagnostic.stdout[-1000:]
         )
-    _run(["rpm", "--dbpath", str(rpmdb), "--import", str(public_key)])
+    if isolated_rpmdb is not None:
+        _import_under_native_lock(rpmdb, public_key)
+    else:
+        _run(["rpm", "--dbpath", str(rpmdb), "--import", str(public_key)])
     check = _run(["rpm", "--dbpath", str(rpmdb), "-Kv", str(package)])
     if not _rpm_signature_verified(check):
         raise RuntimeError("Signed RPM fixture is not trusted by isolated RPMDB")

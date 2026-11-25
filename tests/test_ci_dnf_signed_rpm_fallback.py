@@ -117,3 +117,42 @@ def test_isolated_rpmdb_label_refuses_host_database_before_commands(monkeypatch)
                         pytest.fail("unsafe label target reached command"))
     with pytest.raises(RuntimeError, match="Unsafe isolated"):
         rpm_probe._label_isolated_rpmdb(Path("/usr/lib/sysimage/rpm"))
+
+def test_rpm_contention_refuses_host_database_before_open(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setitem(sys.modules, "ci_v06_vm_signed_client_guest",
+                        SimpleNamespace(guarded_native_guest=lambda _: None))
+    monkeypatch.setattr(rpm_probe.os, "open", lambda *_a, **_kw:
+                        pytest.fail("host lock reached"))
+    with pytest.raises(RuntimeError, match="Unsafe isolated RPMDB"):
+        rpm_probe._import_under_native_lock(Path("/usr/lib/sysimage/rpm"), Path("/tmp/key"))
+
+
+def test_rpm_contention_requires_booted_guard_before_open(monkeypatch):
+    from types import SimpleNamespace
+
+    def deny(_):
+        raise AssertionError("guard")
+    monkeypatch.setitem(sys.modules, "ci_v06_vm_signed_client_guest",
+                        SimpleNamespace(guarded_native_guest=deny))
+    monkeypatch.setattr(rpm_probe.os, "open", lambda *_a, **_kw:
+                        pytest.fail("lock reached before guard"))
+    with pytest.raises(AssertionError, match="guard"):
+        rpm_probe._import_under_native_lock(Path("/var/lib/repocache-ci-rpmdb-fixture"),
+                                            Path("/tmp/key"))
+
+
+def test_rpm_waiter_requires_exact_pid_inode_and_blocked_record(tmp_path):
+    target = tmp_path / "lock"
+    target.touch()
+    info = target.stat()
+    identity = f"{os.major(info.st_dev):x}:{os.minor(info.st_dev):x}:{info.st_ino}"
+    owner = f"3: POSIX ADVISORY WRITE 123 {identity} 0 EOF"
+    waiter = f"3: -> POSIX ADVISORY WRITE 456 {identity} 0 EOF"
+    assert rpm_probe._rpm_waiter(owner + "\n" + waiter, 456, info)
+    assert not rpm_probe._rpm_waiter(owner, 456, info)
+    assert not rpm_probe._rpm_waiter(waiter, 457, info)
+    assert not rpm_probe._rpm_waiter(waiter.replace(identity, "00:00:1"), 456, info)
+    assert not rpm_probe._rpm_waiter(waiter.replace("POSIX", "FLOCK"), 456, info)
+    assert not rpm_probe._rpm_waiter(waiter.replace(identity, "malformed"), 456, info)

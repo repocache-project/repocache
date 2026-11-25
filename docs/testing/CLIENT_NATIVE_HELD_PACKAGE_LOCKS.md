@@ -82,3 +82,19 @@ The caller must not independently open and close any of the held native
 lock inodes in the same process or transfer the scope across fork.
 This change does not attest the actual DNF/APT lock graph or authorize
 host source writes.
+
+## Native RPMDB contention (booted AlmaLinux fixture)
+
+The existing signed-RPM fallback VM exercise now holds both POSIX and BSD
+locks on the RPM-created transaction lock of its isolated RPMDB before
+attempting the disposable OpenPGP key import using the actual native RPM
+binary. A positive exclusion result requires either a kernel-reported
+blocked POSIX waiter matching the child PID and exact device/inode, or a
+lock-specific native refusal naming that lock and the contention error.
+A mere timeout or unrelated SELinux/command failure is not accepted.
+The child is reaped before releasing the lock; the same key import must
+then succeed and native RPM must verify the signed fixture. The guarded
+fixture does not use the host RPMDB, change system trust or install a
+package. This establishes only the RPMDB lock interaction, not DNF5's
+complete lock graph, path lifecycle or installed source-writer exclusion.
+The actual booted execution is required before claiming PASS.
