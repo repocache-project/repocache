@@ -19,7 +19,7 @@ jobs:
 
   read-only-helper:
     needs: impact
-    if: ${{ needs.impact.outputs.client == 'true' }}
+    if: ${{ needs.impact.outputs.client != 'false' }}
     name: Read-only helper scope + real UID denial (${{ matrix.image }})
     runs-on: ubuntu-latest
     timeout-minutes: 30

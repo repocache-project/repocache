@@ -125,3 +125,21 @@ def test_new_symlink_and_executable_mode_change_are_full(repository):
     (root / "README.md").chmod(0o755)
     changed = commit(root, "mode")
     assert decide(root, head, changed).scenarios == impact.SCENARIOS
+
+def test_manual_and_missing_event_outputs_are_closed_and_complete(tmp_path, monkeypatch):
+    import json
+
+    output = tmp_path / "output"
+    summary = tmp_path / "summary"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    monkeypatch.setenv("IMPACT_EVENT", "workflow_dispatch")
+    for key in ("IMPACT_BASE", "IMPACT_HEAD", "IMPACT_BASE_REF", "IMPACT_HEAD_REF"):
+        monkeypatch.delenv(key, raising=False)
+    impact.main()
+    result = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    assert result == {
+        "client": "true", "vm": "true", "activation": "true",
+        "scenarios": json.dumps(impact.SCENARIOS),
+    }
+    assert "not PASS evidence" in summary.read_text()

@@ -19,7 +19,7 @@ jobs:
 
   shared-entry-atomic:
     needs: impact
-    if: ${{ needs.impact.outputs.client == 'true' }}
+    if: ${{ needs.impact.outputs.client != 'false' }}
     name: Multi-entry APT DNF atomic rollback (${{ matrix.image }})
     runs-on: ubuntu-latest
     timeout-minutes: 30

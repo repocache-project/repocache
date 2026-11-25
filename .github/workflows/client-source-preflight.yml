@@ -19,7 +19,7 @@ jobs:
 
   source-preflight:
     needs: impact
-    if: ${{ needs.impact.outputs.client == 'true' }}
+    if: ${{ needs.impact.outputs.client != 'false' }}
     name: Read-only source preflight (${{ matrix.image }})
     runs-on: ubuntu-latest
     timeout-minutes: 25

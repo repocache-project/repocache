@@ -19,7 +19,7 @@ jobs:
 
   entry-approval:
     needs: impact
-    if: ${{ needs.impact.outputs.client == 'true' }}
+    if: ${{ needs.impact.outputs.client != 'false' }}
     name: Explicit root approval and byte-only preview (${{ matrix.image }})
     runs-on: ubuntu-latest
     timeout-minutes: 30

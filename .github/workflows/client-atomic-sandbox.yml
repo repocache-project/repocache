@@ -19,7 +19,7 @@ jobs:
 
   native-atomic-sandbox:
     needs: impact
-    if: ${{ needs.impact.outputs.client == 'true' }}
+    if: ${{ needs.impact.outputs.client != 'false' }}
     name: Atomic sandbox + SIGKILL (${{ matrix.image }})
     runs-on: ubuntu-latest
     timeout-minutes: 25

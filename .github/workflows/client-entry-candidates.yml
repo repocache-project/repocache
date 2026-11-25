@@ -19,7 +19,7 @@ jobs:
 
   entry-candidates:
     needs: impact
-    if: ${{ needs.impact.outputs.client == 'true' }}
+    if: ${{ needs.impact.outputs.client != 'false' }}
     name: Mixed-source per-entry candidate smoke (${{ matrix.image }})
     runs-on: ubuntu-latest
     timeout-minutes: 30

@@ -19,7 +19,7 @@ jobs:
 
   booted-native-activation:
     needs: impact
-    if: ${{ needs.impact.outputs.activation == 'true' }}
+    if: ${{ needs.impact.outputs.activation != 'false' }}
     name: Signed test-worker activation (${{ matrix.platform }})
     runs-on: ubuntu-24.04
     timeout-minutes: 60

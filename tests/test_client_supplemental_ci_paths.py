@@ -31,13 +31,14 @@ def test_optional_workflows_use_exact_diff_selection_and_isolated_dispatch(name)
     assert "needs: impact" in source
     flag = ("vm" if name.startswith("pr237") else "activation"
             if name.startswith("server") else "client")
-    assert "needs.impact.outputs." + flag + " == 'true'" in source
+    assert "needs.impact.outputs." + flag + " != 'false'" in source
     assert "permissions:\n  contents: read" in source
     assert "persist-credentials: false" in source
     assert "github.run_attempt == 1" in source
     assert "cancel-in-progress:" in source
     if flag == "vm":
-        assert "scenario: ${{ fromJSON(needs.impact.outputs.scenarios) }}" in source
+        assert "scenario: ${{ fromJSON(needs.impact.outputs.scenarios || " in source
+        assert '["smoke","native-installer","native-lifecycle","native-package-interruption"]' in source
         assert "platform: [debian13, almalinux10]" in source
 
 

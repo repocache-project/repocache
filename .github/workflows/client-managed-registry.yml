@@ -19,7 +19,7 @@ jobs:
 
   managed-registry:
     needs: impact
-    if: ${{ needs.impact.outputs.client == 'true' }}
+    if: ${{ needs.impact.outputs.client != 'false' }}
     name: Protected candidate registry (${{ matrix.image }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
