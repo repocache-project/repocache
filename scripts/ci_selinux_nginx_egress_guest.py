@@ -15,6 +15,7 @@ import re
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import tempfile
 import time
@@ -116,7 +117,7 @@ def nft_rules(uid, *, negative_port_probe=False, custom_https=False):
 
 def request(root, path):
     assert path in ("allowed", "other-address", "other-port", "custom",
-                    "wrong-pair", "custom-after-withdrawal")
+                    "wrong-pair", "custom-live", "custom-after-withdrawal")
     result = command("/usr/sbin/ip", "netns", "exec", NS, "/usr/bin/curl",
                      "--silent", "--show-error", "--max-time", "8",
                      "--noproxy", "*", "--cacert", str(root / "cert.pem"),
@@ -128,6 +129,42 @@ def request(root, path):
             (root / "headers").read_text().lower())
 
 
+def process_identity(pid, executable, uid, gid):
+    """Bind the observed fixture process to its copied package executable."""
+    assert type(pid) is int and pid > 1
+    proc = Path("/proc") / str(pid)
+    expected = executable.stat()
+    observed = (proc / "exe").stat()
+    assert (observed.st_dev, observed.st_ino) == (expected.st_dev, expected.st_ino)
+    context = (proc / "attr/current").read_text().strip("\0\n")
+    assert context.split(":", 3)[2] == DOMAIN
+    fields = dict(line.split(":", 1) for line in
+                  (proc / "status").read_text().splitlines() if ":" in line)
+    assert fields["NoNewPrivs"].strip() == "1"
+    assert int(fields["CapEff"].strip(), 16) == 0
+    assert int(fields["CapPrm"].strip(), 16) == 0
+    assert set(fields["Uid"].split()) == {str(uid)}
+    assert set(fields["Gid"].split()) == {str(gid)}
+    assert (proc / "ns/net").stat().st_ino == Path("/run/netns", NS).stat().st_ino
+    # stat field 22 (starttime), after the parenthesized comm field.
+    return (pid, (proc / "stat").read_text().rsplit(")", 1)[1].split()[19])
+
+
+def workers(master, executable, uid, gid):
+    children = (Path("/proc") / str(master) / "task" / str(master) / "children")
+    result = set()
+    for item in children.read_text().split():
+        pid = int(item)
+        try:
+            if (Path("/proc") / item / "cmdline").read_bytes().startswith(
+                    b"nginx: worker process"):
+                result.add(process_identity(pid, executable, uid, gid))
+        except FileNotFoundError:
+            # A worker can exit while its replacement starts. Poll again.
+            continue
+    return result
+
+
 def probe():
     guard()
     modules_before = installed_modules()
@@ -136,7 +173,12 @@ def probe():
     assert command("/usr/bin/systemctl", "show", "-p", "LoadState",
                    "--value", UNIT, check=False).stdout.strip() == "not-found"
     booleans = command("/usr/sbin/getsebool", "-a").stdout
-    original = (VENDOR.stat(), hashlib.sha256(VENDOR.read_bytes()).hexdigest(),
+    owner = command("/usr/bin/rpm", "-qf", "--queryformat=%{NAME}\\n", str(VENDOR))
+    assert owner.stdout.strip() == "nginx-core"
+    vendor_info = VENDOR.lstat()
+    assert stat.S_ISREG(vendor_info.st_mode) and vendor_info.st_uid == 0
+    assert vendor_info.st_nlink == 1 and not vendor_info.st_mode & 0o022
+    original = (vendor_info, hashlib.sha256(VENDOR.read_bytes()).hexdigest(),
                 os.getxattr(VENDOR, "security.selinux"))
     account = pwd.getpwnam("nginx")
     assert account.pw_uid != 0 and account.pw_gid != 0
@@ -175,6 +217,7 @@ def probe():
                              ("other-port", "127.0.0.1:5432"),
                              ("custom", "127.0.0.2:8008"),
                              ("wrong-pair", "127.0.0.1:8008"),
+                             ("custom-live", "127.0.0.2:8008"),
                              ("custom-after-withdrawal", "127.0.0.2:8008")):
             locations += f"""
 location = /{name} {{
@@ -193,7 +236,7 @@ location = /{name} {{
 """
         conf.write_text(f"""
 daemon off;
-master_process off;
+master_process on;
 worker_processes 1;
 pid {writable}/nginx.pid;
 error_log {writable}/error.log notice;
@@ -276,14 +319,15 @@ location = /health {{ return 204; }}
                                                    if (writable / "error.log").is_file() else ""))
                 pid = int(command("/usr/bin/systemctl", "show", "--value",
                                   "-p", "MainPID", UNIT).stdout)
-                assert pid > 1
-                context = Path(f"/proc/{pid}/attr/current").read_text().strip("\0\n")
-                assert context.split(":", 3)[2] == DOMAIN
-                status = Path(f"/proc/{pid}/status").read_text()
-                assert re.search(r"^NoNewPrivs:\s+1$", status, re.M)
-                assert re.search(r"^CapEff:\s+0+$", status, re.M)
-                assert re.search(r"^Uid:\s+" + str(account.pw_uid) + r"\s", status, re.M)
-                assert os.stat(f"/proc/{pid}/ns/net").st_ino == Path("/run/netns", NS).stat().st_ino
+                master = process_identity(pid, executable, account.pw_uid, account.pw_gid)
+                assert Path(f"/proc/{pid}/cmdline").read_bytes().startswith(b"nginx: master process")
+                for _ in range(100):
+                    previous_workers = workers(pid, executable, account.pw_uid, account.pw_gid)
+                    if len(previous_workers) == 1:
+                        break
+                    time.sleep(0.1)
+                else:
+                    raise AssertionError("Expected one confined worker")
                 first, second = request(root, "allowed"), request(root, "allowed")
                 assert first[:2] == second[:2] == (200, PAYLOAD)
                 assert "x-cache: miss" in first[2] and "x-cache: hit" in second[2]
@@ -327,6 +371,31 @@ location = /health {{ return 204; }}
                                   check=False)
                 assert invalid.returncode != 0
                 assert request(root, "wrong-pair")[0] == 502
+                # A fresh positive connection must still succeed: a cached
+                # HIT or a negative alone cannot establish atomic rollback.
+                assert request(root, "custom-live")[:2] == (200, PAYLOAD)
+                assert (root / "origin-counts").read_text().splitlines() == [
+                    "127.0.0.1:443", "127.0.0.2:8008", "127.0.0.2:8008"]
+                # Exercise the real master/worker reload without changing
+                # executable, domain, capabilities, namespace or filter.
+                command("/usr/bin/systemctl", "kill", "--kill-whom=main",
+                        "--signal=HUP", UNIT)
+                for _ in range(100):
+                    assert process_identity(pid, executable, account.pw_uid,
+                                            account.pw_gid) == master
+                    current_workers = workers(pid, executable, account.pw_uid, account.pw_gid)
+                    if len(current_workers) == 1 and not current_workers & previous_workers:
+                        break
+                    time.sleep(0.1)
+                else:
+                    raise AssertionError("Confined worker generation did not converge")
+                assert request(root, "custom-live")[:2] == (200, PAYLOAD)
+                assert request(root, "wrong-pair")[0] == 502
+                assert (root / "origin-counts").read_text().splitlines() == [
+                    "127.0.0.1:443", "127.0.0.2:8008", "127.0.0.2:8008",
+                    "127.0.0.2:8008"]
+                print("PASS: confined nonroot NGINX master/worker reload, executable inode "
+                      "and domain continuity; fresh positive/negative egress", flush=True)
                 # Withdraw the custom tuple. The uncached location tests a
                 # fresh upstream connect, not the already cached response.
                 command("/usr/sbin/ip", "netns", "exec", NS, "/usr/sbin/nft",
@@ -335,7 +404,8 @@ location = /health {{ return 204; }}
                 assert request(root, "custom-after-withdrawal")[0] == 502
                 assert request(root, "allowed")[:2] == (200, PAYLOAD)
                 assert (root / "origin-counts").read_text().splitlines() == [
-                    "127.0.0.1:443", "127.0.0.2:8008"]
+                    "127.0.0.1:443", "127.0.0.2:8008", "127.0.0.2:8008",
+                    "127.0.0.2:8008"]
                 print("PASS: isolated custom HTTPS tuple add, MISS/HIT, crossed tuple refusal, "
                       "failed replacement and fresh-connect withdrawal", flush=True)
                 assert any(p.is_file() for p in (writable / "cache").rglob("*"))

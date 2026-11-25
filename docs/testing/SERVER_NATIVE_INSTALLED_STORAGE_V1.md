@@ -251,3 +251,15 @@ reject a fresh uncached upstream connection while preserving the original
 endpoint. This does not revoke cached data or already-established flows and
 does not establish support for arbitrary SELinux port types. The installed
 service remains unchanged; this new experiment requires exact-head native CI.
+
+The following isolated increment uses an actual non-root NGINX master and
+worker instead of single-process mode. It observes the expected native RPM
+owner and verifies the copied executable inode, process start identity,
+UID/GID, SELinux domain, no effective/permitted capabilities, NoNewPrivileges
+and network namespace for both processes. A real HUP reload must preserve
+the master identity and converge to a new confined worker. Fresh uncached
+positive and negative connections after a failed packet-filter replacement
+and after reload must preserve the exact approved tuple. This is a stronger
+fixture only; RPM owner observation is not independent signature proof.
+The production root-master unit, authenticated executable placement,
+transactional policy installation and installed cache egress remain unaccepted.
