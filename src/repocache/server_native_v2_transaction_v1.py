@@ -42,6 +42,9 @@ from repocache.server_native_nginx_effective_unit_v1 import (
     OWNED_NGINX_CONFIG_MARKER_PREFIX,
     inspect_signed_owned_nginx_unit, require_owned_bootstrap_health,
 )
+from repocache.server_native_installed_storage_v1 import (
+    InstalledStorageError, verify_control_storage, verify_service_storage_mounts,
+)
 from repocache.server_native_nginx_package_journal_v1 import (
     _read_completed_native_install_under_lock, NativePackageJournalError,
 )
@@ -2365,6 +2368,12 @@ def _owned_socket_host_boundary(root_fd: int, state_fd: int,
                 ("/etc/nginx/repocache.d/repocache.conf", stat.S_IFREG),
                 ("/run/repocache-nginx", stat.S_IFDIR),
                 ("/etc/systemd/system", stat.S_IFDIR),
+                ("/var/cache/nginx", stat.S_IFDIR),
+                ("/var/cache/nginx/repocache-managed", stat.S_IFDIR),
+                ("/var/cache/nginx/.repocache-managed.owner-v1", stat.S_IFREG),
+                ("/var/log/nginx", stat.S_IFDIR),
+                ("/var/log/nginx/repocache-managed", stat.S_IFDIR),
+                ("/var/log/nginx/.repocache-managed.owner-v1", stat.S_IFREG),
             ):
                 reference = _path_snapshot(host, path, leaf_type=kind)
                 if (_path_snapshot(root_fd, path, leaf_type=kind) != reference
@@ -2401,8 +2410,23 @@ def _owned_socket_host_boundary(root_fd: int, state_fd: int,
                     if (distribution == "almalinux"
                             and os.getxattr(fd, "security.selinux").split(b":")[2:3] != [b"httpd_config_t"]):
                         _deny("OWNED_SOCKET_CONFIG_LABEL_UNVERIFIED")
+        # Reuse the installer's descriptor-pinned storage verifier in PID1's
+        # original view. This is observation only; no storage is created by
+        # a socket request. Bind the same fixed roots to the actual signed
+        # NGINX master's mount namespace before any WAL mutation or reload.
+        observed = _owned_live_observe(root_fd)
+        storage = verify_control_storage(distribution)
+        if storage != {"cache_root_verified": True, "log_root_verified": True,
+                       "selinux_enforcing_labels_verified": distribution == "almalinux",
+                       "actual_service_write_verified": False}:
+            _deny("OWNED_SOCKET_STORAGE_UNVERIFIED")
+        verify_service_storage_mounts(observed[0])
+        if _owned_live_observe(root_fd) != observed:
+            _deny("OWNED_SOCKET_STORAGE_UNVERIFIED")
     except NativeV2TransactionError:
         raise
+    except InstalledStorageError:
+        _deny("OWNED_SOCKET_STORAGE_UNVERIFIED")
     except (RootControlWorkerError, OSError, ValueError, TypeError,
             subprocess.SubprocessError):
         _deny("OWNED_SOCKET_HOST_BOUNDARY_REFUSED")

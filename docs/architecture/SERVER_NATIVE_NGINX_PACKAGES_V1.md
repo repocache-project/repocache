@@ -816,3 +816,14 @@ storage and service mount identity again after actual reboot and WAL
 recovery. These are ownership/mount/continuity checks, not actual cache
 worker write or active-route acceptance. No live active-route guard is
 removed by this increment. Exact new-HEAD execution is required.
+
+The confined dedicated broker now checks the exact fixed cache/log roots
+and markers against PID1's mount view, reuses the existing installer
+storage verifier with creation disabled in that original view, and binds
+the two leaves to the authenticated active NGINX master's writable leaf
+mounts and read-only parent mounts before any fixed operation. No new
+writable paths, protocol or general namespace access are granted. Storage
+marker drift refuses APPLY/RELOAD/RECOVER before effects; the booted VM
+checks exact managed resource hashes and prior TLS generation continuity.
+Active-route activation remains disabled until actual cache/log worker
+access is demonstrated. Exact new-HEAD native execution is required.

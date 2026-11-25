@@ -98,3 +98,42 @@ def test_service_self_namespace_refused():
         pytest.skip('root-only observation')
     with pytest.raises(m.InstalledStorageError, match='SERVICE_MOUNT_NAMESPACE_UNVERIFIED'):
         m.verify_service_storage_mounts(os.getpid())
+
+
+def test_control_storage_refuses_nonroot_before_host_lookup(monkeypatch):
+    from types import SimpleNamespace
+    monkeypatch.setattr(m, "os", SimpleNamespace(getresuid=lambda: (0, 1000, 0)))
+    with pytest.raises(m.InstalledStorageError, match="HOST_UNVERIFIED"):
+        m.verify_control_storage("debian")
+
+
+def test_control_storage_uses_only_fixed_read_only_host_root(monkeypatch):
+    from types import SimpleNamespace
+    calls = []
+    root_stat = SimpleNamespace(st_dev=1, st_ino=2, st_mode=0o40755,
+                                st_uid=0, st_gid=0)
+    ns_stat = SimpleNamespace(st_dev=3, st_ino=4, st_mode=0o100444,
+                              st_uid=0, st_gid=0)
+    def opened(path, flags):
+        assert path == "/proc/1/root"
+        assert flags == os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+        calls.append("open")
+        return 71
+    monkeypatch.setattr(m, "os", SimpleNamespace(
+        getresuid=lambda: (0, 0, 0), getresgid=lambda: (0, 0, 0),
+        stat=lambda path: ns_stat if path == "/proc/1/ns/mnt" else root_stat,
+        fstat=lambda fd: root_stat, open=opened,
+        close=lambda fd: calls.append(("close", fd)),
+        O_RDONLY=os.O_RDONLY, O_DIRECTORY=os.O_DIRECTORY, O_CLOEXEC=os.O_CLOEXEC,
+    ))
+    monkeypatch.setattr(m.pwd, "getpwnam", lambda name:
+                        SimpleNamespace(pw_uid=33, pw_gid=33))
+    def verify(fd, **kw):
+        assert fd == 71
+        assert kw["allow_create"] is False
+        assert (kw["owner"], kw["owner_gid"], kw["uid"], kw["gid"]) == (0, 0, 33, 33)
+        calls.append("verify")
+        return {"verified": True}
+    monkeypatch.setattr(m, "_prepare_under_root", verify)
+    assert m.verify_control_storage("debian") == {"verified": True}
+    assert calls == ["open", "verify", ("close", 71)]

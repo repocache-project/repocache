@@ -299,6 +299,31 @@ def verify_dedicated_socket(*, bootstrap: bool = False, pending: bool = False) -
             return
 
         before = live_wal_resource_hashes()
+        # Actual installed confined broker must reject storage drift before
+        # any mutation or reload, not just the root installer.
+        import stat
+        marker = Path("/var/cache/nginx/.repocache-managed.owner-v1")
+        fd = os.open(marker, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            original = os.fstat(fd)
+            assert stat.S_IMODE(original.st_mode) == 0o600
+            marker_bytes = os.read(fd, 1025)
+            try:
+                os.fchmod(fd, 0o644)
+                for operation in ("APPLY_V2", "RELOAD_V2", "RECOVER_V2"):
+                    call(operation, "DENIED")
+                    assert live_wal_resource_hashes() == before
+                    assert not (STATE / ".state-v2-owned-nginx.pending").exists()
+                    assert stat.S_IMODE(os.fstat(fd).st_mode) == 0o644
+                    assert os.pread(fd, 1025, 0) == marker_bytes
+                from scripts.ci_pr237_native_socket_guest import https_response
+                assert b"x-repocache-generation: 1" in https_response(
+                    "/__repocache/healthz").lower()
+            finally:
+                os.fchmod(fd, 0o600)
+        finally:
+            os.close(fd)
+        print("PASS: confined broker refused all fixed operations on unsafe storage marker without mutation", flush=True)
         call("RECOVER_V2", "CLEAN")
         call("APPLY_V2", "UNCHANGED")
         call("RELOAD_V2", "RELOADED")

@@ -268,6 +268,45 @@ def prepare_installed_storage(distribution, *, allow_create):
         _deny("UNVERIFIED")
 
 
+def verify_control_storage(distribution):
+    """Read-only fixed storage proof for the authenticated confined broker.
+
+    The caller retains the original state lock and has already authenticated
+    initial-root, installed worker/unit and package provenance. The broker's
+    bind-mounted view is not the installer's original mount namespace.
+    Never enter another namespace, create, relabel or adopt storage here.
+    """
+    if (os.getresuid() != (0, 0, 0) or os.getresgid() != (0, 0, 0)
+            or distribution not in ("debian", "almalinux")):
+        _deny("HOST_UNVERIFIED")
+    try:
+        worker = pwd.getpwnam("www-data" if distribution == "debian" else "nginx")
+        if not (0 < worker.pw_uid < 2**32 - 1 and 0 < worker.pw_gid < 2**32 - 1):
+            _deny("WORKER_IDENTITY_UNVERIFIED")
+        labels = _Labels(distribution)
+        namespace = _identity(os.stat("/proc/1/ns/mnt"))
+        # The one fixed kernel-owned proc link is intentionally followed.
+        # All descendants are opened through _walk/_verify without symlinks.
+        fd = os.open("/proc/1/root", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            if _identity(os.fstat(fd)) != _identity(os.stat("/")):
+                _deny("HOST_ROOT_CHANGED")
+            result = _prepare_under_root(
+                fd, owner=0, owner_gid=0, uid=worker.pw_uid,
+                gid=worker.pw_gid, labels=labels, allow_create=False,
+            )
+            if (_identity(os.stat("/proc/1/root")) != _identity(os.fstat(fd))
+                    or _identity(os.stat("/proc/1/ns/mnt")) != namespace):
+                _deny("HOST_ROOT_CHANGED")
+            return result
+        finally:
+            os.close(fd)
+    except InstalledStorageError:
+        raise
+    except (OSError, KeyError, ValueError, TypeError, subprocess.SubprocessError):
+        _deny("UNVERIFIED")
+
+
 def verify_service_storage_mounts(pid):
     """Confirm the owned master's view of fixed paths, without entering its namespace."""
     if type(pid) is not int or not 2 <= pid < 2**31 or os.getresuid() != (0, 0, 0):

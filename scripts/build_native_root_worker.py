@@ -27,6 +27,7 @@ MODULES = (
     "server_locked_manifest_reconcile_v1",
     "server_managed_include_fd_v1",
     "server_managed_include_v1",
+    "server_native_installed_storage_v1",
     "server_native_nginx_effective_unit_v1",
     "server_native_nginx_package_journal_v1",
     "server_native_package_effects_observe_v1",
