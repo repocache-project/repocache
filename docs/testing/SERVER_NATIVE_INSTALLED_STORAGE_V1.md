@@ -212,3 +212,31 @@ checks actual cache bytes and exact upstream count. Native CI evidence
 for this change remains NOT VERIFIED. This does not bound every HTTP
 request body, overall memory/connection pressure, upstream timeout, disk
 cache pressure or authorize active-route publication.
+
+### Maintainer-authorized isolated SELinux egress experiment (2026-11-25)
+
+The explicit 19:32 UTC decision authorizes implementation, review and
+validation in isolated environments only. The dedicated test policy uses
+an independently labelled byte-identical copy of the packaged NGINX,
+separate read-only and writable fixture types, and the native init
+transition under NoNewPrivileges. It does not add permissions to httpd_t,
+change global booleans or relabel the vendor executable. SELinux HTTP
+port-type permission is not an endpoint allowlist; exact-address/port
+restriction is independently exercised with nftables ONLY in a fresh
+loopback-only network namespace. A non-HTTP-port negative canary is
+intentionally admitted by the packet layer to test SELinux independently;
+a second address on the permitted port must be blocked by the packet layer.
+Require actual confined PID, no effective capabilities, verified TLS,
+MISS/HIT and exact bytes, both negative canaries untouched, and cleanup
+with unchanged stock booleans/vendor identity. No rule is installed by
+the production installer. Native execution NOT VERIFIED until CI.
+
+This is a first scoped experiment, not a completed production SELinux
+architecture. The signed actual dedicated service remains unchanged and
+its stock-policy egress failure is not waived. Future work must bind
+service-specific executable provenance to the signed package, support
+validated custom HTTPS ports without global port relabels, constrain
+new outbound connections to exact approved IP/port tuples while preserving
+client ingress, journal policy/generation changes and validate recovery,
+reboot, withdrawal, repair and foreign-service noninterference. No
+production activation or global network-policy change authorized.
