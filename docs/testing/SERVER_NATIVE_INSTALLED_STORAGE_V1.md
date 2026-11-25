@@ -100,3 +100,14 @@ unexpected socket refusal the guest reports only state/WAL file presence
 alongside the existing systemd status; these observations do not establish
 the cause, commit, rollback or recovery. All original assertions remain
 mandatory; diagnostic output cannot convert a failed run to PASS.
+
+The fixed worker now records a closed set of native transaction refusal codes
+locally in the service journal, including the original live-apply failure
+before compensation. Unknown exceptions are mapped to a generic code;
+no raw exception, path, NGINX output or request contents are emitted. The
+socket reply and exit semantics are unchanged. Disposable guest diagnostics
+accept only these exact codes. If recent auditd lookup does not establish
+an enforcing AVC, the guest also checks the current boot's kernel journal
+for the request interval, accepting only the matching worker PID, TCP
+port, domain and enforcing denial. No policy, boolean or service permissions
+are changed, and missing evidence is still NOT VERIFIED.

@@ -34,7 +34,7 @@ def fixture_selinux_connect_denied(raw: str, worker_pids: set[int]) -> bool:
     if len(raw) > 1024 * 1024 or not worker_pids:
         return False
     for line in raw.splitlines():
-        if not re.search(r"\btype=AVC\b", line):
+        if not re.search(r"\btype=(?:AVC|1400)\b", line):
             continue
         if not re.search(r"\bavc:\s+denied\s+\{\s*name_connect\s*\}", line):
             continue
@@ -301,6 +301,16 @@ def verify_dedicated_socket(*, bootstrap: bool = False, pending: bool = False) -
                 print("DEDICATED_SOCKET_WAL_PRESENT: "
                       + str((STATE / ".state-v2-owned-nginx.pending").is_file()),
                       flush=True)
+                journal = run("/usr/bin/journalctl", "-u", "repocache-control.service",
+                              "-n", "50", "--no-pager", "-o", "cat")
+                from repocache.server_native_v2_transaction_v1 import _AUDIT_FAILURE_CODES
+                prefix = "REPOCACHE_FIXED_TRANSACTION_REFUSAL: "
+                known = _AUDIT_FAILURE_CODES | {"NATIVE_V2_OTHER_REFUSAL"}
+                if journal.returncode == 0:
+                    for line in journal.stdout.splitlines():
+                        if line.startswith(prefix) and line[len(prefix):] in known:
+                            print("DEDICATED_SOCKET_REFUSAL: " + line[len(prefix):],
+                                  flush=True)
                 raise
             assert result["status"] == expected, result["status"]
             assert result["transaction_completed"] is True
@@ -673,6 +683,7 @@ def verify_owned_service_data_fixture(distribution, native, assets, pins) -> Non
     import ssl
     import stat
     import threading
+    import time
     from scripts.ci_pr237_native_socket_guest import https_response
     from repocache.server_nginx_metrics_bundle_join_v1 import render_repository_nginx_metrics_join
     from repocache.server_nginx_tls_listener_candidate_v1 import render_native_tls_listener_candidate
@@ -874,6 +885,7 @@ finally:
         assert observed_worker
         for path, payload in payloads.items():
             for expected in (b"miss", b"hit"):
+                request_started = int(time.time())
                 response = https_response("/__repocache/repos" + path)
                 header, body = response.split(b"\r\n\r\n", 1)
                 if not header.startswith(b"HTTP/1.1 200 "):
@@ -895,6 +907,19 @@ finally:
                                              audit.stdout, worker_pids))
                         except (OSError, subprocess.TimeoutExpired):
                             confirmed = False
+                        if not confirmed:
+                            # The kernel audit record may be in journald rather
+                            # than auditd's log. Observe only the current guest
+                            # boot and this request's bounded time interval.
+                            try:
+                                kernel = run("/usr/bin/journalctl", "-k", "-b",
+                                             "--since", "@" + str(request_started),
+                                             "-n", "1000", "--no-pager", "-o", "cat")
+                                confirmed = (kernel.returncode == 0 and
+                                             fixture_selinux_connect_denied(
+                                                 kernel.stdout, worker_pids))
+                            except (OSError, subprocess.TimeoutExpired):
+                                confirmed = False
                         print("STORAGE_FIXTURE_SELINUX_CONNECT_DENIAL: "
                               + ("OBSERVED" if confirmed else "NOT_VERIFIED"),
                               flush=True)

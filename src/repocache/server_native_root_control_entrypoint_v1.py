@@ -20,6 +20,7 @@ from repocache.server_install_v1 import validate_os_identity, validate_server_ar
 from repocache.server_preflight_v1 import _native_python_identity
 from repocache.server_native_v2_transaction_v1 import (
     NativeV2TransactionError, execute_native_fixed_v2_transaction,
+    _audit_native_failure,
 )
 from repocache.server_root_control_protocol_v1 import (
     FixedRootControlError, authorize_fixed_root_request,
@@ -156,7 +157,10 @@ def serve_one_native_fixed_request() -> dict[str, Any]:
                     operation, distribution,
                 )
                 reply = _exact_reply(operation, outcome)
-            except (NativeV2TransactionError, NativeControlDispatchError):
+            except (NativeV2TransactionError, NativeControlDispatchError) as exc:
+                # The reply remains generic. Only closed local audit codes
+                # may reach the service journal, never private details.
+                _audit_native_failure(exc)
                 # Never leak private NGINX, TLS, state or host exception text.
                 reply = {
                     "schema_version": 1,

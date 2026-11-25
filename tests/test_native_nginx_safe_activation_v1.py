@@ -549,6 +549,9 @@ def test_fixture_selinux_connect_denied_matches_only_current_enforcing_worker():
               'tcontext=system_u:object_r:http_port_t:s0 tclass=tcp_socket '
               'permissive=0')
     assert fixture_selinux_connect_denied(record, {123})
+    assert fixture_selinux_connect_denied(
+        "audit: " + record.replace("type=AVC", "type=1400"), {123})
+    assert not fixture_selinux_connect_denied(record.replace("type=AVC", "type=1300"), {123})
     assert not fixture_selinux_connect_denied(record, {124})
     assert not fixture_selinux_connect_denied(record, set())
     for old, new in (
