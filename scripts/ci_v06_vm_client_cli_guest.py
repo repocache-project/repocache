@@ -80,6 +80,27 @@ def main(platform: str) -> None:
     after = source_snapshot(platform)
     if before != after:
         raise AssertionError("native APT/DNF sources changed during read-only CLI probe")
+    # Root-bound approval/journal fixture in the same disposable guest.
+    privileged_guest = ROOT / "scripts/ci_v06_vm_client_privileged_guest.py"
+    if not privileged_guest.is_file() or privileged_guest.is_symlink():
+        raise AssertionError("privileged client guest probe absent")
+    privileged = subprocess.run(
+        ["/usr/bin/sudo", "-n", "/usr/bin/python3", "-B", str(privileged_guest), platform],
+        cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        stdin=subprocess.DEVNULL, text=True, timeout=180,
+        env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C",
+             "PYTHONDONTWRITEBYTECODE": "1", "HTTP_PROXY": "", "HTTPS_PROXY": "",
+             "NO_PROXY": "*"}, check=False,
+    )
+    if (privileged.returncode != 0 or
+            "PASS: booted-native-client-privileged-fixture " + platform
+            not in privileged.stdout):
+        raise AssertionError("privileged client guest failed: "
+                             + privileged.stdout[-3000:] + privileged.stderr[-9000:])
+    print(privileged.stdout[-10000:], flush=True)
+    if source_snapshot(platform) != before:
+        raise AssertionError("native sources modified by privileged fixture")
+
     # Explicit privileged test-only real-manager probe in this disposable VM.
     # The probe uses isolated /tmp APT/DNF source+cache paths and independently
     # test-signed metadata through the native package manager, never --apply

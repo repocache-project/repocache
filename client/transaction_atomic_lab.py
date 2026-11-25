@@ -221,6 +221,13 @@ def _write_new(directory_fd: int, leaf: str, ident: str,
         if (metadata["uid"] != os.geteuid()
                 or metadata["gid"] != os.getegid()):
             raise staging.StageError("Source owner/group preservation is unavailable")
+        labels = [value for name, value in expected_attrs if name == "security.selinux"]
+        if labels:
+            if len(labels) != 1:
+                raise staging.StageError("Ambiguous approved SELinux context")
+            attributes.initialize_exclusive_file_context(
+                fd, directory_fd, temp, leaf, approved=labels[0],
+            )
         with os.fdopen(fd, "wb", closefd=False) as stream:
             stream.write(data)
             stream.flush()
@@ -228,6 +235,17 @@ def _write_new(directory_fd: int, leaf: str, ident: str,
         try:
             for name, value in expected_attrs:
                 if name != "system.posix_acl_access":
+                    # Preserve the exact original label; avoid relabelling
+                    # a correctly inherited context. The bounded policy
+                    # snapshot and post-write check reject a foreign type.
+                    if name == "security.selinux":
+                        if not attributes.policy_active():
+                            raise staging.StageError("Unreviewed native security label")
+                        inherited = attributes._policy_label(fd)
+                        if inherited.rstrip(b"\0").split(b":", 3)[1:] != value.rstrip(b"\0").split(b":", 3)[1:]:
+                            raise staging.StageError("Approved SELinux context differs from native policy")
+                        if inherited == value:
+                            continue
                     os.setxattr(fd, name, value)
             for name, value in expected_attrs:
                 if name == "system.posix_acl_access":

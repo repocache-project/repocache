@@ -117,3 +117,89 @@ def test_isolated_rpmdb_label_refuses_host_database_before_commands(monkeypatch)
                         pytest.fail("unsafe label target reached command"))
     with pytest.raises(RuntimeError, match="Unsafe isolated"):
         rpm_probe._label_isolated_rpmdb(Path("/usr/lib/sysimage/rpm"))
+
+def test_rpm_contention_refuses_host_database_before_open(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setitem(sys.modules, "ci_v06_vm_signed_client_guest",
+                        SimpleNamespace(guarded_native_guest=lambda _: None))
+    monkeypatch.setattr(rpm_probe.os, "open", lambda *_a, **_kw:
+                        pytest.fail("host lock reached"))
+    with pytest.raises(RuntimeError, match="Unsafe isolated RPMDB"):
+        rpm_probe._import_under_native_lock(Path("/usr/lib/sysimage/rpm"), Path("/tmp/key"))
+
+
+def test_rpm_contention_requires_booted_guard_before_open(monkeypatch):
+    from types import SimpleNamespace
+
+    def deny(_):
+        raise AssertionError("guard")
+    monkeypatch.setitem(sys.modules, "ci_v06_vm_signed_client_guest",
+                        SimpleNamespace(guarded_native_guest=deny))
+    monkeypatch.setattr(rpm_probe.os, "open", lambda *_a, **_kw:
+                        pytest.fail("lock reached before guard"))
+    with pytest.raises(AssertionError, match="guard"):
+        rpm_probe._import_under_native_lock(Path("/var/lib/repocache-ci-rpmdb-fixture"),
+                                            Path("/tmp/key"))
+
+
+def test_rpm_waiter_requires_exact_pid_inode_and_blocked_record(tmp_path):
+    target = tmp_path / "lock"
+    target.touch()
+    info = target.stat()
+    identity = f"{os.major(info.st_dev):x}:{os.minor(info.st_dev):x}:{info.st_ino}"
+    owner = f"3: POSIX ADVISORY WRITE 123 {identity} 0 EOF"
+    waiter = f"3: -> POSIX ADVISORY WRITE 456 {identity} 0 EOF"
+    assert rpm_probe._rpm_waiter(owner + "\n" + waiter, 456, info)
+    assert not rpm_probe._rpm_waiter(owner, 456, info)
+    assert not rpm_probe._rpm_waiter(waiter, 457, info)
+    assert not rpm_probe._rpm_waiter(waiter.replace(identity, "00:00:1"), 456, info)
+    assert not rpm_probe._rpm_waiter(waiter.replace("POSIX", "FLOCK"), 456, info)
+    assert not rpm_probe._rpm_waiter(waiter.replace(identity, "malformed"), 456, info)
+
+def test_dnf_transaction_test_refuses_host_installroot_before_command(tmp_path):
+    package = tmp_path / rpm_probe._RPM_NAME
+    package.write_bytes(b"fixture")
+    with pytest.raises(RuntimeError, match="Unsafe isolated DNF"):
+        rpm_probe._dnf_transaction_test_command(Path("/"), package)
+
+
+def test_dnf_transaction_test_requires_booted_guard(monkeypatch):
+    from types import SimpleNamespace
+
+    def deny(_):
+        raise AssertionError("guard")
+    monkeypatch.setitem(sys.modules, "ci_v06_vm_signed_client_guest",
+                        SimpleNamespace(guarded_native_guest=deny))
+    monkeypatch.setattr(rpm_probe, "_run", lambda *a, **kw:
+                        pytest.fail("command reached before guard"))
+    with pytest.raises(AssertionError, match="guard"):
+        rpm_probe._probe_dnf_transaction_lock(Path("/tmp/rpm"), Path("/tmp/key"))
+
+@pytest.mark.parametrize("variant,command,disable,exit_on_lock", [
+    ("dnf4", "/usr/bin/dnf", "--disablerepo=*", True),
+    ("dnf5", "/usr/bin/dnf5", "--disable-repo=*", False),
+])
+def test_native_transaction_command_retains_private_test_only_flags(
+        monkeypatch, tmp_path, variant, command, disable, exit_on_lock):
+    from types import SimpleNamespace
+
+    root = Path("/var/lib/repocache-ci-dnf-root-fixture")
+    package = tmp_path / rpm_probe._RPM_NAME
+    package.write_bytes(b"fixture")
+    monkeypatch.setattr(Path, "resolve", lambda self, **kw: self)
+    original_stat = Path.stat
+    monkeypatch.setattr(Path, "stat", lambda self, **kw:
+                        SimpleNamespace(st_uid=0, st_mode=0o40700)
+                        if self == root else original_stat(self, **kw))
+    monkeypatch.setattr(rpm_probe, "_native_dnf_transaction_variant",
+                        lambda: (command, variant))
+    argv = rpm_probe._dnf_transaction_test_command(root, package)
+    assert argv[0] == command
+    assert "--installroot=" + str(root) in argv
+    assert "--config=" + str(root / "etc/dnf/dnf.conf") in argv
+    assert disable in argv
+    assert ("--setopt=exit_on_lock=1" in argv) == exit_on_lock
+    assert "--setopt=tsflags=test,noscripts,notriggers,noplugins" in argv
+    assert "--setopt=localpkg_gpgcheck=1" in argv
+    assert argv[-2:] == ["install", str(package)]

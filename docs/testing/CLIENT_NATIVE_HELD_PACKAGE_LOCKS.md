@@ -35,3 +35,103 @@ exclusion across an actual source commit, client root operator consent,
 protected multi-resource source/mirror transaction, SELinux enforcing
 and final signed v0.6.0 Debian 13 / AlmaLinux 10 booted VM campaign.
 This Stage-A increment is not the real client writer and cannot close #24.
+
+
+## Full lock-set pathname revalidation
+
+After acquiring every lock, the primitive re-resolves all canonical
+pathnames from the trusted root and compares each named inode and its
+metadata with the held descriptor. A clean scope exit repeats that check.
+An earlier lock replaced during acquisition of a later one cannot reach
+the caller; a replacement or unsafe parent during the scope cannot
+report clean completion. Failure releases the held locks without opening,
+creating or deleting any replacement. Caller exceptions remain intact.
+
+These are conservative drift detection checks, **not a race-free lease
+against arbitrary same-privilege writers** and not authorization to
+modify host sources. No second descriptor on the held file is opened
+during the recheck, avoiding POSIX lock release on close. The actual
+privileged commit and its native package-manager exclusion remain
+separate mandatory acceptance gates.
+
+
+The paired transaction fixture now obtains all fixed package-manager
+lock inodes in its private tree under the client transaction lock, and
+revalidates the complete set before durable journal, source/mirror
+publication, rollback and cleanup transitions. Busy locks refuse
+apply and restore before staging. The Debian booted guest invokes real
+apt-get update with empty isolated sources and private lists/cache paths
+and requires a lock-specific denial. This demonstrates one actual APT
+lock-family interaction, not proof of the entire installed APT/DNF lock
+graph or all possible concurrent administrators. The real host writer
+and DNF process exclusion remain unaccepted.
+
+## Process-local scope exclusion
+
+Traditional POSIX record locks belong to the process, not an individual
+file descriptor. Closing a second descriptor for the same inode can drop
+the outer POSIX lock even if a nested BSD lock acquisition was refused.
+The helper therefore rejects nested or concurrent scopes in the same
+process before opening any lock file; its guard is released only after
+descriptor cleanup. Revalidation also refuses use by a different process
+(e.g. an inherited callback after fork). Regression tests exercise actual
+cross-process POSIX and BSD contention after nested refusal and verify
+normal acquisition after exit.
+
+The caller must not independently open and close any of the held native
+lock inodes in the same process or transfer the scope across fork.
+This change does not attest the actual DNF/APT lock graph or authorize
+host source writes.
+
+## Native RPMDB contention (booted AlmaLinux fixture)
+
+The existing signed-RPM fallback VM exercise now holds both POSIX and BSD
+locks on the RPM-created transaction lock of its isolated RPMDB before
+attempting the disposable OpenPGP key import using the actual native RPM
+binary. A positive exclusion result requires either a kernel-reported
+blocked POSIX waiter matching the child PID and exact device/inode, or a
+lock-specific native refusal naming that lock and the contention error.
+A mere timeout or unrelated SELinux/command failure is not accepted.
+The child is reaped before releasing the lock; the same key import must
+then succeed and native RPM must verify the signed fixture. The guarded
+fixture does not use the host RPMDB, change system trust or install a
+package. This establishes only the RPMDB lock interaction, not DNF5's
+complete lock graph, path lifecycle or installed source-writer exclusion.
+The actual booted execution is required before claiming PASS.
+
+## Installed DNF transaction lock lifecycle (booted AlmaLinux fixture)
+
+The booted AlmaLinux image used in run 45603393341 did not provide
+`/usr/bin/dnf5`. Do not install a different manager or call DNF4 evidence
+DNF5 evidence. Select the native executable and identify the version.
+DNF4 uses its actual live-PID `rpmdb_lock.pid` under the isolated
+persistdir, with `exit_on_lock=1`; require exit 200 and the exact live
+owner PID, unchanged lock inode and PID bytes. DNF5, where installed,
+uses `run/dnf/rpmtransaction.lock` and the held BSD/POSIX inode locks;
+require native lock-specific refusal and unchanged inode. Release only
+the fixture's own lock and rerun the same signed local RPM transaction
+in RPM TEST mode with all repositories and plugins disabled. The private
+RPMDB package inventory and absent payload must remain unchanged.
+Record actual manager version and lock lifecycle. Neither probe installs
+packages, changes host package sources or trusts publisher keys.
+
+These transaction locks do not prove exclusion of earlier configuration
+or repository reads. The production source-writer remains unapproved.
+Upstream implementation references:
+https://github.com/rpm-software-management/dnf/blob/master/dnf/lock.py
+and https://github.com/rpm-software-management/dnf5/blob/main/libdnf5/base/transaction.cpp.
+Actual native outcomes at the new HEAD remain NOT VERIFIED until the VM runs.
+
+## Exact local administrator review before consent
+
+The internal `review_current_candidate` operation re-reads the protected
+pending record, exact source inode/digest/attributes and current authenticated
+catalog under the client transaction lock. It returns the exact source
+selection, upstream, cache route and route digest only to the trusted local
+root caller, with proposed source digest and whether a companion is required.
+No original source bytes, key material or attribute values are emitted.
+Do not log the review object or expose it via public status: even a canonical
+repository path can contain sensitive identifiers. The separate approval call
+still requires explicit consent to the exact route and independently repeats
+validation. Review itself neither creates an approval nor edits any source.
+The public CLI remains unchanged; no claim of an enabled production writer.

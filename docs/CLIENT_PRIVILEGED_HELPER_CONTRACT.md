@@ -117,3 +117,77 @@ catalog retrieval, network access or changes. The refusal preserves the
 existing CLI error code and JSON contract and does **not** imply that
 `--apply` is implemented. An unprivileged consent flag never grants root
 authority; the complete original #24 installed-native acceptance remains open.
+
+
+## Root-bound current catalog check
+
+The source-only root validator now independently fetches the current
+catalog from the protected installed HTTPS origin, with fixed native
+system CA trust and exact UC-45 upstream/cache equality. It rejects
+legacy or changed routes and rechecks local approval/origin/source under
+the client transaction lock. This is a non-activating validation step:
+it neither issues administrative consent nor establishes live server
+activation, native fallback, source ownership or transaction authority.
+The protected approval issuance and native writer remain outstanding.
+
+
+The internal, uninstalled issuance primitive additionally requires an
+explicit exact-route digest and protected schema-2 pending proposal
+binding source inode and metadata. It publishes immutable consent with
+atomic no-replace semantics and durable directory fsync. It has no
+installed CLI entry point; trusted pending proposal preparation,
+labelled-state handling, native commit/recovery and full acceptance
+remain open. Legacy schema-1 lab approvals cannot satisfy native
+validation.
+
+
+A root-only internal preparer now builds that pending proposal from an
+exact file/entry digest selection resolved independently in fixed native
+source directories. It validates the exact active mapping, source
+identity and compiler result without accepting caller-supplied URLs or
+paths. Preparation and explicit approval are separate state transitions;
+no public command or installed writer is enabled. A route change
+requires new consent; previous records are not overwritten.
+
+
+## Authenticated client helper candidate
+
+The independent trusted-checkout staging tool
+`scripts/stage_native_client_helper.py` authenticates the v0.6 archive
+through the existing Ed25519 verifier and closed source extractor,
+including exact commit/archive pins and dependency policy. It builds
+a deterministic isolated OS-Python executable with only the fixed
+client validation modules, no server authority or sandbox writer.
+The stage is private, no-replace and includes a content receipt;
+there is no unsigned path or install/activation operation. Tests
+exercise disposable signatures, bad signatures/pins, closed module
+inventory and ambient import isolation. The trusted-checkout tool
+still requires release-inventory reconciliation before publication.
+Installed native helper placement and source mutation remain disabled.
+
+
+The booted guest now exercises actual fixed root-only placement of this
+non-activating executable, using a freshly generated disposable Ed25519
+identity and the unchanged verifier with a private fixture trust directory.
+Bad signature must precede placement; identical retry must preserve inode,
+bytes and timestamps; the executable must deny non-root execution.
+This placement entry is VM-guarded and not in the production installer.
+It is not installation or acceptance of the real source writer.
+
+
+The authenticated VM placement additionally provisions the fixed
+`/var/lib/repocache-client/approved-entries` registry and an empty,
+root-owned 0600 transaction lock only after signature verification and
+executable readback. Bootstrap uses nofollow dirfds, exact private modes,
+policy-checked attributes, durable directory/lock creation and repeated
+inode checks. It never replaces an existing lock or recreates a missing
+lock beside transaction evidence. Retry is idempotent; unsafe existing
+state is retained and refused. The test-only installer still grants no
+production write authority. Native application, consent handoff and
+release installation remain separate gates.
+
+
+The v0.6-only closed release source inventory now includes the trusted
+client staging tool in both the builder and verifier. Historical release
+inventories remain unchanged. This includes a non-activating tool, not
+an installed source writer or a production activation permission.

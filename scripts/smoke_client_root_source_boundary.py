@@ -10,6 +10,7 @@ import fcntl
 import hashlib
 import json
 import os
+import signal
 import sys
 import tempfile
 from pathlib import Path
@@ -148,6 +149,90 @@ def smoke(manager: str):
         print(f"{manager}: unreviewed xattrs refused (where supported)", flush=True)
 
 
+def approval_interruption_smoke(manager: str):
+    """Real root/kernel kill and no-replace publication, private state only."""
+    if os.getresuid() != (0, 0, 0) or not Path("/.dockerenv").exists():
+        raise RuntimeError("Only disposable root Docker accepts approval smoke")
+    original_route = boundary._current_route
+    original_config = boundary.client._installed_server_config
+    original_catalog = boundary.client._catalog
+    original_context = boundary._native_tls_context
+    # This test isolates the state transaction from transport. No host trust
+    # or active server route claim is made from the fixture.
+    boundary._current_route = lambda *_: "https://cache.example.org"
+    boundary.client._installed_server_config = lambda *_: "https://cache.example.org"
+    boundary._native_tls_context = lambda: object()
+    try:
+        with tempfile.TemporaryDirectory(prefix="repocache-prepare-root-") as work:
+            root = Path(work)
+            record, source, manifest, lock = create(root, manager=manager)
+            manifest.unlink()
+            (root / "etc/os-release").write_text(
+                'ID=debian\nVERSION_ID="13"\n' if manager == "apt"
+                else 'ID=almalinux\nVERSION_ID="10"\n')
+            boundary.client._catalog = lambda *_, **kw: {
+                "schema": 1, "repositories": [{"upstream": record["upstream"],
+                                               "cache": record["cache"]}]}
+            prepared = boundary.prepare_current_candidate(
+                record["source_sha256"], record["entry_sha256"], _test_root=root)
+            ident = prepared["managed_id"]
+            assert prepared["status"] == "prepared" and not prepared["approval_granted"]
+            assert not (manifest.parent / ("candidate-" + ident + ".json")).exists()
+            approved = boundary.approve_current_candidate(
+                ident, prepared["route_sha256"], _test_root=root)
+            assert approved["status"] == "approved" and not approved["write_eligible"]
+            assert source.read_bytes() == (APT if manager == "apt" else DNF)
+            print(f"{manager}: root preparation and separate exact consent PASS", flush=True)
+        for phase in ("before-rename", "after-rename"):
+            with tempfile.TemporaryDirectory(prefix="repocache-approval-kill-") as work:
+                root = Path(work)
+                record, source, manifest, lock = create(root, manager=manager)
+                before = source.stat()
+                original = source.read_bytes()
+                record["schema"] = 2
+                snapshot = boundary.pre.inspect_source(record["source"], root=root)
+                record["source_identity"] = {
+                    key: snapshot[key] for key in boundary.SOURCE_IDENTITY_FIELDS
+                }
+                pending = manifest.with_name("pending-" + IDENT + ".json")
+                manifest.rename(pending)
+                pending.write_text(json.dumps(record, sort_keys=True))
+                pending.chmod(0o600)
+                child = os.fork()
+                if child == 0:
+                    real_rename = boundary._rename_noreplace
+                    def kill_during_publication(fd, temporary, target):
+                        if phase == "after-rename":
+                            real_rename(fd, temporary, target)
+                        os.kill(os.getpid(), signal.SIGKILL)
+                    boundary._rename_noreplace = kill_during_publication
+                    boundary.approve_current_candidate(
+                        IDENT, record["route_sha256"], _test_root=root)
+                    os._exit(77)
+                _, status = os.waitpid(child, 0)
+                assert os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGKILL
+                assert manifest.exists() is (phase == "after-rename")
+                result = boundary.approve_current_candidate(
+                    IDENT, record["route_sha256"], _test_root=root)
+                expected = "approved" if phase == "before-rename" else "unchanged"
+                assert result["status"] == expected and not result["write_eligible"]
+                assert json.loads(manifest.read_text()) == record
+                assert manifest.stat().st_nlink == 1
+                assert boundary.validate(IDENT, _test_root=root)["source_inode_identity_matched"]
+                after = source.stat()
+                assert source.read_bytes() == original
+                assert (before.st_ino, before.st_mtime_ns, before.st_ctime_ns) == (
+                    after.st_ino, after.st_mtime_ns, after.st_ctime_ns)
+                print(f"{manager}: real SIGKILL {phase}; approval retry PASS; sources intact",
+                      flush=True)
+    finally:
+        boundary._current_route = original_route
+        boundary.client._installed_server_config = original_config
+        boundary.client._catalog = original_catalog
+        boundary._native_tls_context = original_context
+
+
 if __name__ == "__main__":
     # Tests exactly both supported format boundaries on native OS Python.
     smoke(sys.argv[1])
+    approval_interruption_smoke(sys.argv[1])
