@@ -23,7 +23,7 @@ MODULE = "repocache_ci_nginx"
 DOMAIN = MODULE + "_t"
 UNIT = "repocache-ci-nginx-egress.service"
 NS = "repocache-ci-nginx-egress"
-PREFIX = "/var/lib/repocache-ci-selinux-"
+PREFIX = "repocache-ci-selinux-"
 VENDOR = Path("/usr/sbin/nginx")
 ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"}
 PORT = 8443
@@ -87,7 +87,7 @@ def installed_modules():
     return command("/usr/sbin/semodule", "-l").stdout
 
 
-def nft_rules(uid):
+def nft_rules(uid, *, negative_port_probe=False):
     """The namespace has no external links; deny new nonapproved UID flows.
 
     5432 is intentionally allowed by the independent packet filter ONLY
@@ -95,12 +95,14 @@ def nft_rules(uid):
     All other fresh connections by the fixture UID are rejected.
     """
     assert type(uid) is int and 0 < uid < 2**31
+    assert type(negative_port_probe) is bool
+    ports = "{443,5432}" if negative_port_probe else "443"
     return f"""table inet repocache_ci {{
         counter denied {{ }}
         chain output {{
             type filter hook output priority 0; policy accept;
             meta skuid {uid} ct state established,related accept
-            meta skuid {uid} ip daddr 127.0.0.1 tcp dport {{443,5432}} accept
+            meta skuid {uid} ip daddr 127.0.0.1 tcp dport {ports} accept
             meta skuid {uid} counter name denied reject
         }}
     }}
@@ -126,7 +128,7 @@ def probe():
     assert MODULE not in {line.split()[0] for line in modules_before.splitlines() if line}
     assert not Path("/run/netns", NS).exists()
     assert command("/usr/bin/systemctl", "show", "-p", "LoadState",
-                   "--value", UNIT).stdout.strip() == "not-found"
+                   "--value", UNIT, check=False).stdout.strip() == "not-found"
     booleans = command("/usr/sbin/getsebool", "-a").stdout
     original = (VENDOR.stat(), hashlib.sha256(VENDOR.read_bytes()).hexdigest(),
                 os.getxattr(VENDOR, "security.selinux"))
@@ -136,10 +138,9 @@ def probe():
     namespace = False
     started = False
     origin = None
-    with tempfile.TemporaryDirectory(prefix=PREFIX) as place:
+    with tempfile.TemporaryDirectory(prefix=PREFIX, dir="/var/lib") as place:
         root = Path(place)
-        # tempfile supports an absolute prefix; verify the actual private path.
-        assert root.parent == Path("/var/lib") and root.name.startswith(Path(PREFIX).name)
+        assert root.parent == Path("/var/lib") and root.name.startswith(PREFIX)
         assert root.resolve(strict=True) == root and root.stat().st_uid == 0
         root.chmod(0o755)
         writable = root / "runtime"
@@ -223,7 +224,7 @@ location = /health {{ return 204; }}
                 namespace = True
                 command("/usr/sbin/ip", "-n", NS, "link", "set", "lo", "up")
                 command("/usr/sbin/ip", "netns", "exec", NS, "/usr/sbin/nft",
-                        "-f", "-", input_text=nft_rules(account.pw_uid))
+                        "-f", "-", input_text=nft_rules(account.pw_uid, negative_port_probe=True))
                 origin = subprocess.Popen(
                     ["/usr/sbin/ip", "netns", "exec", NS, "/usr/bin/python3",
                      "-I", "-c", ORIGIN, str(root)], env=ENV,
@@ -287,6 +288,15 @@ location = /health {{ return 204; }}
                                                "inet", "repocache_ci", "denied").stdout)
                 assert any(row.get("counter", {}).get("packets", 0) > 0
                            for row in counters["nftables"])
+                # Return the packet layer to its exact permitted endpoint
+                # in one atomic namespace-local nft transaction.
+                command("/usr/sbin/ip", "netns", "exec", NS, "/usr/sbin/nft",
+                        "-f", "-", input_text="delete table inet repocache_ci\n"
+                        + nft_rules(account.pw_uid))
+                assert request(root, "allowed")[:2] == (200, PAYLOAD)
+                assert request(root, "other-address")[0] == 502
+                assert request(root, "other-port")[0] == 502
+                assert (root / "origin-counts").read_text().splitlines() == ["127.0.0.1:443"]
                 assert any(p.is_file() for p in (writable / "cache").rglob("*"))
                 assert command("/usr/sbin/getenforce").stdout.strip() == "Enforcing"
                 print("PASS: dedicated enforcing NGINX domain, verified HTTPS MISS/HIT, "

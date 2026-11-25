@@ -656,3 +656,27 @@ def test_fixture_control_worker_refuses_unclean_or_unavailable_state(monkeypatch
         returncode=1 if change == "command-failed" else 0, stdout=raw))
     with pytest.raises(AssertionError):
         guest.require_control_worker_idle(timeout=0)
+
+
+def test_isolated_selinux_egress_rules_have_exact_default_and_separate_negative_probe():
+    from scripts import ci_selinux_nginx_egress_guest as guest
+    normal = guest.nft_rules(987)
+    negative = guest.nft_rules(987, negative_port_probe=True)
+    assert "ip daddr 127.0.0.1 tcp dport 443 accept" in normal
+    assert "5432" not in normal
+    assert negative.replace("{443,5432}", "443") == normal
+    assert "meta skuid 987 counter name denied reject" in normal
+    for invalid in (0, -1, True, "987", 2**31):
+        with pytest.raises(AssertionError):
+            guest.nft_rules(invalid)
+
+
+def test_isolated_selinux_egress_guard_precedes_policy_and_network(monkeypatch):
+    from scripts import ci_selinux_nginx_egress_guest as guest
+    def refuse():
+        raise AssertionError("not the authorized VM")
+    monkeypatch.setattr(guest, "guard", refuse)
+    monkeypatch.setattr(guest, "command", lambda *_a, **_kw:
+                        pytest.fail("mutation before native guard"))
+    with pytest.raises(AssertionError, match="authorized VM"):
+        guest.probe()

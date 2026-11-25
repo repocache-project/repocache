@@ -175,8 +175,9 @@ if test "$scenario" = native-installer || test "$scenario" = native-package-inte
   sshguest "sudo /usr/bin/python3 -B /home/pr237ci/source/scripts/ci_pr237_native_package_guest.py '$PR237_PLATFORM_ID' install" > "$out/native-install.txt" 2>&1 || { cat "$out/native-install.txt"; exit 1; }
   if test "$scenario" = native-activation; then
     stage=signed-repocache-own-nginx-service
+    isolated_selinux_result=0
     if test "$PR237_PLATFORM" = almalinux10; then
-      sshguest 'sudo /usr/bin/python3 -B /home/pr237ci/source/scripts/ci_selinux_nginx_egress_guest.py' > "$out/isolated-selinux-egress.txt" 2>&1 || { cat "$out/isolated-selinux-egress.txt"; exit 1; }
+      sshguest 'sudo /usr/bin/python3 -B /home/pr237ci/source/scripts/ci_selinux_nginx_egress_guest.py' > "$out/isolated-selinux-egress.txt" 2>&1 || isolated_selinux_result=$?
       cat "$out/isolated-selinux-egress.txt"
     fi
     sshguest "sudo /usr/bin/python3 -B /home/pr237ci/source/scripts/ci_native_nginx_activate_guest.py '$PR237_PLATFORM_ID' activate" > "$out/native-activation.txt" 2>&1 || { cat "$out/native-activation.txt"; exit 1; }
@@ -189,6 +190,10 @@ if test "$scenario" = native-installer || test "$scenario" = native-package-inte
     printf 'before=%s\nafter=%s\n' "$boot_before" "$boot_after" > "$out/activation-reboot-ids.txt"
     stage=owned-service-post-reboot
     sshguest "sudo /usr/bin/python3 -B /home/pr237ci/source/scripts/ci_native_nginx_activate_guest.py '$PR237_PLATFORM_ID' after" > "$out/native-activation-after-reboot.txt" 2>&1 || { cat "$out/native-activation-after-reboot.txt"; exit 1; }
+    if test "$isolated_selinux_result" != 0; then
+      stage=isolated-selinux-egress-failed
+      exit "$isolated_selinux_result"
+    fi
     stage=complete
     exit 0
   fi
