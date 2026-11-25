@@ -674,7 +674,7 @@ def test_synthetic_signed_candidate_enters_exact_native_journal_once(
     system = None if _combined() else {"ID": "debian", "VERSION_ID": "13"}
     sysroot = tmp_path / "isolated-host"
     sysroot.mkdir(mode=0o700)
-    source_payloads, _ = stage._authenticated_payloads(
+    source_payloads, placement_receipt = stage._authenticated_payloads(
         archive.parent, commit=commit, archive_sha256=digest, system=system,
     )
     for parent, names, mode in (
@@ -695,6 +695,12 @@ def test_synthetic_signed_candidate_enters_exact_native_journal_once(
     (sysroot / "var" / "cache").mkdir(parents=True, mode=0o755)
     (state / LOCK_NAME).write_bytes(b"")
     (state / LOCK_NAME).chmod(0o600)
+    receipt_raw = stage._json_line(placement_receipt)
+    receipt_path = state / install._RUNTIME_RECEIPT
+    receipt_path.write_bytes(receipt_raw)
+    receipt_path.chmod(0o600)
+    marker = state / (install._MARKER + "complete-" + hashlib.sha256(receipt_raw).hexdigest())
+    marker.touch(mode=0o600)
     install_document = tmp_path / "reviewed-native-install.json"
     install_document.write_bytes(
         (json.dumps(document(count=1, generation=0), sort_keys=True, separators=(",", ":")) + "\n").encode()

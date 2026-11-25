@@ -91,6 +91,7 @@ def _no_pending_native_effects(directory: int, owner_uid: int) -> None:
 def _prepare_native_journal_under_lock(
     directory: int, *, owner_uid: int, distribution: str,
     inject_fault: Callable[[str], None] | None = None,
+    expected_worker_receipt: bytes | None = None,
 ) -> dict[str, Any]:
     """Persist fixed native package effects marker while #31 lock is held.
 
@@ -121,7 +122,23 @@ def _prepare_native_journal_under_lock(
         r"\.native-worker-placement\.complete-[0-9a-f]{64}\Z", re.ASCII,
     )
     owner_gid = os.fstat(directory).st_gid
-    for entry in os.listdir(directory):
+    entries = set(os.listdir(directory))
+    receipt_name = ".native-worker-receipt-v1.json"
+    # Only the authenticated installer's exact re-derived placement receipt
+    # may coexist with the journal. Never allowlist arbitrary receipt bytes.
+    if expected_worker_receipt is not None:
+        marker = ".native-worker-placement.complete-" + hashlib.sha256(
+            expected_worker_receipt,
+        ).hexdigest()
+        if entries != {LOCK_NAME, marker, receipt_name}:
+            _deny("NATIVE_FOREIGN_PROTECTED_STATE")
+        receipt_info = os.stat(receipt_name, dir_fd=directory, follow_symlinks=False)
+        if (receipt_info.st_gid != owner_gid
+                or _read_file(directory, receipt_name, owner_uid, 8192)
+                != expected_worker_receipt):
+            _deny("NATIVE_FOREIGN_PROTECTED_STATE")
+        entries.remove(receipt_name)
+    for entry in entries:
         if entry == LOCK_NAME:
             continue
         if worker_marker.fullmatch(entry) is not None:
@@ -270,6 +287,7 @@ def _retain_native_package_journal_lock_under_root(
     allow_native_package_parent_changes: bool = False,
     expose_audited_completion: bool = False,
     preflight_before_journal: Callable[[], None] | None = None,
+    expected_worker_receipt: bytes | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Private same-lock scope for the authenticated installer and CI fixtures.
 
@@ -294,6 +312,9 @@ def _retain_native_package_journal_lock_under_root(
             or (inject_fault is not None and not callable(inject_fault))
             or type(allow_native_package_parent_changes) is not bool
             or type(expose_audited_completion) is not bool
+            or (expected_worker_receipt is not None and (
+                type(expected_worker_receipt) is not bytes
+                or not 1 <= len(expected_worker_receipt) <= 8192))
             or (preflight_before_journal is not None
                 and not callable(preflight_before_journal))):
         _deny("NATIVE_JOURNAL_ARGUMENT_INVALID")
@@ -318,6 +339,7 @@ def _retain_native_package_journal_lock_under_root(
                 prepared = _prepare_native_journal_under_lock(
                     directory, owner_uid=owner_uid,
                     distribution=distribution, inject_fault=inject_fault,
+                    expected_worker_receipt=expected_worker_receipt,
                 )
             except NativePackageJournalError:
                 raise

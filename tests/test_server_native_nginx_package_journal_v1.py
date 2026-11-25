@@ -707,6 +707,56 @@ def test_fresh_native_package_can_follow_exact_authenticated_worker_placement_re
     assert marker.exists() and (state / NATIVE_PENDING_NAME).is_file()
 
 
+@pytest.mark.parametrize("fault", [
+    None, "absent", "mismatch", "wrong_marker", "extra_marker",
+    "symlink", "hardlink", "writable", "unpinned",
+])
+def test_native_package_journal_requires_exact_pinned_worker_receipt(protected_root, fault):
+    from repocache.server_native_nginx_package_journal_v1 import (
+        _retain_native_package_journal_lock_under_root,
+    )
+    import hashlib
+
+    root, state, owner = protected_root
+    raw = b'{"fixture":"authenticated-placement"}\n'
+    receipt = state / ".native-worker-receipt-v1.json"
+    marker = state / (".native-worker-placement.complete-" + hashlib.sha256(raw).hexdigest())
+    if fault == "wrong_marker":
+        marker = state / (".native-worker-placement.complete-" + "a" * 64)
+    marker.touch(mode=0o600)
+    if fault == "extra_marker":
+        (state / (".native-worker-placement.complete-" + "b" * 64)).touch(mode=0o600)
+    if fault != "absent":
+        if fault in ("symlink", "hardlink"):
+            foreign = state.parent / "foreign-receipt"
+            foreign.write_bytes(raw)
+            foreign.chmod(0o600)
+            if fault == "symlink":
+                receipt.symlink_to(foreign)
+            else:
+                os.link(foreign, receipt)
+        else:
+            receipt.write_bytes(b"changed" if fault == "mismatch" else raw)
+            receipt.chmod(0o666 if fault == "writable" else 0o600)
+    def prepare():
+        return _retain_native_package_journal_lock_under_root(
+            root, owner_uid=owner, distribution="debian",
+            expected_worker_receipt=None if fault == "unpinned" else raw,
+        )
+    if fault is None:
+        with prepare() as prepared:
+            assert prepared["status"] == "NATIVE_PACKAGE_EFFECTS_JOURNAL_DURABLE"
+        assert receipt.read_bytes() == raw
+        assert (state / NATIVE_PENDING_NAME).is_file()
+    else:
+        with pytest.raises(NativePackageJournalError,
+                           match="NATIVE_(?:FOREIGN_PROTECTED_STATE|JOURNAL_STATE_UNVERIFIED)"):
+            with prepare():
+                pytest.fail("unsafe placement receipt authorized journal creation")
+        assert not (state / NATIVE_PENDING_NAME).exists()
+        assert marker.exists()
+
+
 @pytest.mark.parametrize("distribution", ["debian", "almalinux"])
 @pytest.mark.parametrize("action", ["mask", "disable", "unmask", "is-enabled", "is-active"])
 @pytest.mark.parametrize("failure", ["reported_error", "raised_error"])

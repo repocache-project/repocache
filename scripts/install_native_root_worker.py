@@ -874,7 +874,7 @@ def activate_authenticated_native_nginx(
 
 def _execute_native_nginx_install_locked(
     root_fd: int, *, distribution: str, document: dict, os_release: str,
-    owner_uid: int = 0,
+    owner_uid: int = 0, expected_worker_receipt: bytes | None = None,
 ) -> dict:
     """Host APT/DNF; one durable marker and lock across signed-source install.
 
@@ -894,6 +894,7 @@ def _execute_native_nginx_install_locked(
         root_fd, owner_uid=owner_uid, distribution=distribution,
         allow_native_package_parent_changes=True, expose_audited_completion=True,
         preflight_before_journal=refuse_stable_foreign_host_before_journal,
+        expected_worker_receipt=expected_worker_receipt,
     ) as transaction:
         if (transaction.get("status") != "NATIVE_PACKAGE_EFFECTS_JOURNAL_DURABLE"
                 or transaction.get("authorizes_package_installation") is not False
@@ -1012,6 +1013,9 @@ def install_authenticated_native_nginx(
         stack.callback(os.close, root)
         return _execute_native_nginx_install_locked(
             root, distribution=distribution, document=parsed, os_release=os_release,
+            expected_worker_receipt=stage._json_line({
+                **attested, "status": "AUTHENTICATED_WORKER_STAGED",
+            }),
         )
 
 
