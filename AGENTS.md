@@ -21,6 +21,8 @@ GitHub is the source of truth for *state*; accepted specifications and decisions
 
 ## 2. Release scope and issue discipline
 
+**Maintainer-approved delivery policy (2026-11-25):** prioritize completion of v0.6.0, with at most two active engineering streams and one exceptional auxiliary stream for integration, testing or a demonstrated critical-path unblock. Pause new v0.7.0 features until v0.6.0 is delivered. Preserve existing future work and history; this is a scheduling decision, not acceptance or scope removal. Follow the [fast path](docs/DEVELOPMENT_FAST_PATH.md) for work-in-progress accounting and incremental simplification. After v0.6.0, favor smaller independently useful releases with expressly approved scope. No changed public contract, material architecture/security boundary, release operation or protection change is implicitly authorized.
+
 - **Close approved requirements before expanding scope.** A discovered improvement is not automatically a requirement of the current release.
 - First add an observation and evidence to an existing relevant issue/PR. Do not create a child issue merely because a pre-merge and post-merge test are separate activities.
 - Propose a new issue only if the work is truly independently owned or acceptance needs an independent unit; check for duplicates first, record dependencies and propose a release target. Do not silently assign work to a frozen milestone.
