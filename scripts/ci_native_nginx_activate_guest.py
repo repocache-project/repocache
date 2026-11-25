@@ -53,21 +53,41 @@ def fixture_selinux_connect_denied(raw: str, worker_pids: set[int]) -> bool:
 
 
 def fixture_port_context(rules, port: int) -> str | None:
-    """Select only an unambiguous TCP port label from the loaded policy."""
+    """First matching TCP portcon in the loaded binary policy's order.
+
+    Linux security_port_sid walks OCON_PORT from its head and stops at
+    the first match. SETools SELinuxPolicy.portcons() uses the same
+    linked-list order; do not sort, deduplicate or prefer the narrowest
+    interval (generic reserved/unreserved ranges can overlap).
+    """
     if port not in (443, 8008):
         return None
-    contexts = set()
     for rule in rules:
-        if str(rule.protocol) == "tcp" and rule.ports.low <= port <= rule.ports.high:
-            contexts.add(str(rule.context))
-    if len(contexts) != 1:
-        return None
-    context = contexts.pop()
-    if (not 1 <= len(context) <= 1024
-            or re.fullmatch(r"[A-Za-z0-9_:.\-,]+", context) is None
-            or len(context.split(":", 3)) != 4):
-        return None
-    return context
+        if str(rule.protocol) != "tcp" or not rule.ports.low <= port <= rule.ports.high:
+            continue
+        context = str(rule.context)
+        if (not 1 <= len(context) <= 1024
+                or re.fullmatch(r"[A-Za-z0-9_:.\-,]+", context) is None
+                or len(context.split(":", 3)) != 4):
+            return None
+        return context
+    return None
+
+
+def fixture_upstream_connect_eacces(raw: str, worker_pids: set[int]) -> bool:
+    """Require the specific NGINX worker, fixed fixture endpoint and errno."""
+    if len(raw) > 1024 * 1024 or not worker_pids:
+        return False
+    pattern = re.compile(
+        r"\[(?:crit|error)\] ([0-9]{1,10})#[0-9]{1,10}: \*[0-9]+ "
+        r"connect\(\) to 127\.0\.0\.1:8008 failed "
+        r"\(13: Permission denied\) while connecting to upstream(?:,|$)"
+    )
+    for line in raw.splitlines():
+        match = pattern.search(line)
+        if match and int(match[1]) in worker_pids:
+            return True
+    return False
 
 
 def fixture_selinux_policy_connect(worker_pids: set[int]) -> dict[int, str]:
@@ -78,12 +98,17 @@ def fixture_selinux_policy_connect(worker_pids: set[int]) -> dict[int, str]:
     Only static decision categories leave this disposable guest.
     """
     result = {443: "NOT_VERIFIED", 8008: "NOT_VERIFIED"}
+    stage = "IMPORT"
+    def unavailable(reason):
+        print("STORAGE_FIXTURE_SELINUX_POLICY_UNAVAILABLE: " + reason, flush=True)
+        return result
     try:
         import ctypes
         import setools
+        stage = "WORKER_CONTEXT"
 
         if not worker_pids or len(worker_pids) > 32:
-            return result
+            return unavailable(stage)
 
         def contexts():
             return {Path(f"/proc/{pid}/attr/current").read_bytes().rstrip(b"\0\n")
@@ -91,10 +116,11 @@ def fixture_selinux_policy_connect(worker_pids: set[int]) -> dict[int, str]:
 
         sources = contexts()
         if len(sources) != 1:
-            return result
+            return unavailable(stage)
         source = next(iter(sources))
         if len(source) > 1024 or source.split(b":", 3)[2:3] != [b"httpd_t"]:
-            return result
+            return unavailable(stage)
+        stage = "LIBSELINUX"
 
         class Decision(ctypes.Structure):
             # libselinux public av_decision ABI; unsigned int access vectors.
@@ -113,35 +139,51 @@ def fixture_selinux_policy_connect(worker_pids: set[int]) -> dict[int, str]:
             ctypes.POINTER(Decision),
         )
         library.security_compute_av_flags_raw.restype = ctypes.c_int
+        stage = "ENFORCEMENT"
         if library.security_getenforce() != 1:
-            return result
+            return unavailable(stage)
+        stage = "PERMISSION_MAPPING"
         klass = library.string_to_security_class(b"tcp_socket")
         perm = library.string_to_av_perm(klass, b"name_connect") if klass else 0
         if not perm:
-            return result
+            return unavailable(stage)
 
+        stage = "POLICY_LOAD"
         policy = setools.SELinuxPolicy("/sys/fs/selinux/policy")
+        targets = {}
         seqnos = set()
         observed = dict(result)
         for port in result:
+            stage = "PORT_CONTEXT"
             target = fixture_port_context(policy.portcons(), port)
             if target is None:
+                unavailable(stage)
                 continue
+            targets[port] = target
+            stage = "ACCESS_DECISION"
             decision = Decision()
-            if (library.security_compute_av_flags_raw(
+            if library.security_compute_av_flags_raw(
                     source, target.encode("ascii"), klass, perm,
-                    ctypes.byref(decision)) != 0
-                    or decision.flags & 1):  # SELINUX_AVD_FLAGS_PERMISSIVE
+                    ctypes.byref(decision)) != 0:
+                unavailable(stage)
+                continue
+            if decision.flags & 1:  # SELINUX_AVD_FLAGS_PERMISSIVE
+                unavailable("DOMAIN_PERMISSIVE")
                 continue
             seqnos.add(decision.seqno)
             observed[port] = "ALLOW" if decision.allowed & perm else "DENY"
-        if library.security_getenforce() != 1 or contexts() != sources or len(seqnos) != 1:
-            return result
+        stage = "POLICY_RECHECK"
+        current = setools.SELinuxPolicy("/sys/fs/selinux/policy")
+        if (library.security_getenforce() != 1 or contexts() != sources
+                or len(seqnos) != 1
+                or any(fixture_port_context(current.portcons(), port) != label
+                       for port, label in targets.items())):
+            return unavailable(stage)
         return observed
     except Exception:
         # Optional diagnosis cannot conceal the original failed fixture or
         # expose policy, process labels, package details or library errors.
-        return result
+        return unavailable(stage)
 
 
 def require_status(unit: str, active: bool, enabled: bool) -> None:
@@ -1011,8 +1053,13 @@ finally:
                         if category in journal.stdout:
                             print("STORAGE_FIXTURE_UPSTREAM_ERROR: " + category, flush=True)
                     if distribution == "almalinux":
-                        if "connect() failed (13: Permission denied) while connecting to upstream" in journal.stdout:
-                            print("STORAGE_FIXTURE_UPSTREAM_CONNECT_EACCES: OBSERVED", flush=True)
+                        recent = run("/usr/bin/journalctl", "-u", OWN, "-b",
+                                     "--since", "@" + str(request_started),
+                                     "-n", "50", "--no-pager", "-o", "cat")
+                        matched = (recent.returncode == 0 and
+                                   fixture_upstream_connect_eacces(recent.stdout, worker_pids))
+                        print("STORAGE_FIXTURE_UPSTREAM_CONNECT_EACCES: "
+                              + ("OBSERVED" if matched else "NOT_VERIFIED"), flush=True)
                         # Read-only evidence, no policy change or raw audit output.
                         try:
                             audit = run("/usr/sbin/ausearch", "-m", "AVC",

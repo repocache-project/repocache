@@ -160,3 +160,30 @@ reports only ALLOW/DENY/NOT_VERIFIED, not raw contexts or policy text, and
 is not a substitute for the matching kernel AVC or successful upstream
 traffic. No policy module, port label, boolean, privilege or production
 dependency change is authorized or introduced.
+
+### Booted evidence and SELinux port-policy lookup
+
+At exact HEAD 04f6b0237ed69ccfd7ca8a6c5a4bb4ad25f964ab the Debian 13 VM
+([activation job](https://github.com/repocache-project/repocache/actions/runs/45668019622/job/139395641801)) passed the confined first APPLY, vendor temporary-directory
+identity preservation, repeat/reload, negative authorization/storage cases,
+WAL interruption/reboot recovery, inactive repair, actual MISS/HIT and
+retained cache/metrics fixture. This does not establish authoritative active
+route publication. The AlmaLinux 10.3 enforcing VM
+([activation job](https://github.com/repocache-project/repocache/actions/runs/45668019622/job/139395641739)) passed the corresponding inactive-route and recovery
+cases, but again failed the HTTPS storage fixture with 502/EACCES.
+Both port decisions and the matching AVC were NOT VERIFIED.
+
+The diagnostic now follows the actual first-match ordering of the loaded
+binary policy instead of incorrectly rejecting overlapping generic and
+specific port ranges. Linux security_port_sid traverses OCON_PORT in order;
+SETools SELinuxPolicy.portcons() walks the same linked list. See
+https://code.googlesource.com/linux/torvalds/linux/+/72116efd6307077546c93e0432a197876cedff70/security/selinux/ss/services.c
+and https://sources.debian.org/src/setools/4.5.1-1.1/setools/policyrep/selinuxpolicy.pxi/ .
+The guest reports bounded diagnostic stages on unavailable observations,
+rechecks the selected contexts, worker identity and enforcing mode, and
+matches the actual NGINX connect-to-endpoint errno format with the worker
+PID and request interval. No raw labels or journal contents are reported.
+No production permission/policy change, active-route enablement or test
+acceptance waiver is introduced. A confirmed stock-policy denial requires
+an explicitly reviewed least-privilege operational design; do not globally
+enable httpd network booleans as an installer workaround.

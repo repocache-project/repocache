@@ -568,7 +568,7 @@ def test_fixture_selinux_connect_denied_matches_only_current_enforcing_worker():
     assert not fixture_selinux_connect_denied(record.replace(" dest=8008", "\n dest=8008"), {123})
 
 
-def test_fixture_policy_port_context_requires_exact_unambiguous_tcp():
+def test_fixture_policy_port_context_matches_kernel_first_tcp_interval():
     from types import SimpleNamespace
     from scripts.ci_native_nginx_activate_guest import fixture_port_context
 
@@ -584,5 +584,29 @@ def test_fixture_policy_port_context_requires_exact_unambiguous_tcp():
     assert fixture_port_context(rules, 8008) == label
     assert fixture_port_context(rules, 8009) is None
     assert fixture_port_context([rule("tcp", 8009, 8010, label)], 8008) is None
-    assert fixture_port_context(rules + [rule("tcp", 8008, 8008, foreign)], 8008) is None
+    # The actual kernel lookup follows policy order even when intervals overlap.
+    assert fixture_port_context(rules + [rule("tcp", 1024, 65535, foreign)], 8008) == label
+    assert fixture_port_context([rule("tcp", 1024, 65535, foreign)] + rules, 8008) == foreign
+    assert fixture_port_context([rule("tcp", 1, 511, foreign)] + rules, 443) == foreign
+    assert fixture_port_context([rule("tcp", 8008, 8008, "unsafe label")] + rules, 8008) is None
     assert fixture_port_context([rule("tcp", 8008, 8008, "unsafe label")], 8008) is None
+
+
+def test_fixture_upstream_eacces_matches_current_worker_and_exact_endpoint():
+    from scripts.ci_native_nginx_activate_guest import fixture_upstream_connect_eacces
+
+    record = ("2026/11/25 18:00:00 [crit] 123#123: *7 "
+              "connect() to 127.0.0.1:8008 failed (13: Permission denied) "
+              "while connecting to upstream, client: fixture")
+    assert fixture_upstream_connect_eacces(record, {123})
+    assert not fixture_upstream_connect_eacces(record, {124})
+    assert not fixture_upstream_connect_eacces(record, set())
+    for old, new in (
+        ("127.0.0.1:8008", "127.0.0.1:443"),
+        ("127.0.0.1:8008", "127.0.0.1:80080"),
+        ("13: Permission denied", "111: Connection refused"),
+        ("connect()", "open()"),
+        ("while connecting to upstream", "while reading upstream"),
+    ):
+        assert not fixture_upstream_connect_eacces(record.replace(old, new), {123})
+    assert not fixture_upstream_connect_eacces("x" * (1024 * 1024 + 1) + record, {123})
