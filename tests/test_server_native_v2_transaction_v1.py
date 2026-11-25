@@ -1158,6 +1158,18 @@ def test_generated_complete_managed_nginx_server_passes_real_distro_parser(
     fixture_main = main.replace(b"/run/repocache-nginx/nginx.pid", own_pid).replace(
         native._OWNED_INCLUDE_PATH.encode("ascii"), str(candidate).encode("ascii"),
     )
+    # Redirect only the fixed Debian scratch paths for this disposable parser.
+    # The production path is exercised separately inside the confined VM.
+    scratch_pairs = []
+    if distro == "debian":
+        scratch = tmp_path / "owned-runtime"
+        scratch.mkdir(mode=0o755)
+        for directive, leaf in native._OWNED_DEBIAN_TEMP_NAMES:
+            fixed = f"/run/repocache-nginx/{leaf}".encode("ascii")
+            fixture = str(scratch / leaf).encode("ascii")
+            assert directive.encode("ascii") + b" " + fixed + b";" in fixture_main
+            fixture_main = fixture_main.replace(fixed + b";", fixture + b";")
+            scratch_pairs.append((fixture, fixed))
     owned_config.write_bytes(fixture_main)
     completed = subprocess.run(
         [nginx, "-T", "-c", str(owned_config), "-p", str(tmp_path)],
@@ -1165,7 +1177,7 @@ def test_generated_complete_managed_nginx_server_passes_real_distro_parser(
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
     )
     assert completed.returncode == 0, "dedicated managed NGINX context rejected"
-    # Normalize the two test-only paths back to the production constants
+    # Normalize the test-only paths back to the production constants
     # before exercising exact complete-context comparison.
     normalized = completed.stdout.replace(
         b"# configuration file " + str(owned_config).encode("ascii") + b":",
@@ -1174,6 +1186,8 @@ def test_generated_complete_managed_nginx_server_passes_real_distro_parser(
     ).replace(own_pid, b"/run/repocache-nginx/nginx.pid").replace(
         fixture_cache, fixed_cache,
     )
+    for fixture, fixed in scratch_pairs:
+        normalized = normalized.replace(fixture + b";", fixed + b";")
     native._verify_owned_context_dump(normalized, owned_include, managed_main=main)
 
 
