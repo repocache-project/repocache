@@ -20,7 +20,7 @@ configuration, installed package or production signing trust is changed.
 | OS | Real package manager | Required observed checks |
 | --- | --- | --- |
 | Debian 13 | `apt-get` | Test-signed `InRelease`, real synthetic `.deb` download and exact SHA-256; preferred cache endpoint, HTTP 503 fallback, recovery, both unavailable, wrong TLS CA, modified `InRelease` and tampered `.deb` refusal |
-| AlmaLinux 10 | `dnf5` | Test-signed `repomd.xml` verified against isolated guest-local OpenPGP key; preferred endpoint, fallback/recovery, both unavailable, wrong TLS CA and tampered metadata signature refusal |
+| AlmaLinux 10 | `dnf5` | Test-signed `repomd.xml` verified against isolated guest-local OpenPGP key; preferred endpoint, fallback/recovery, both unavailable, wrong TLS CA and tampered metadata signature refusal; signed disposable RPM download, exact SHA-256 and native RPM signature verification in an isolated RPMDB, and corrupted RPM refusal |
 
 The QEMU smoke already verifies client parser help and refusal of
 `repos sync --apply` with no host source change. The extended client
@@ -37,6 +37,7 @@ QEMU jobs:
 ```sh
 PYTHONPATH=src python3 -m pytest -q \
   tests/test_v06_vm_signed_client_guest.py \
+  tests/test_ci_dnf_signed_rpm_fallback.py \
   tests/test_v06_vm_campaign_coverage.py
 ```
 
@@ -55,3 +56,18 @@ publisher Ed25519 artifact acceptance and publication are separately
 authorized Stage C (#76/#88). If a guest's signed metadata or
 rejection/provenance checks fail, its QEMU job must fail rather than
 claiming an accepted host.
+
+
+The booted AlmaLinux RPM fixture uses the native RPMDB directory solely as
+a SELinux label reference for the empty root-owned disposable RPMDB.
+It verifies Enforcing and the exact rpm_var_lib_t label before running
+rpm --initdb, with no host RPMDB fallback or policy relaxation. Container
+tests do not relabel. This addresses the observed isolated .rpm.lock
+permission error; successful execution on the new HEAD remains required.
+
+The initial label-only retry still failed at RPMDB lock creation in `/tmp`.
+The subsequent disposable VM probe allocates the database directly under
+`/var/lib/repocache-ci-rpmdb-*`, verifies its native RPMDB label, and
+removes it on exit. The fixture repository remains in `/tmp`. Initialization
+failure reports bounded directory contexts without changing SELinux policy.
+This correction requires fresh booted-native acceptance evidence.

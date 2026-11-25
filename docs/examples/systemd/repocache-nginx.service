@@ -20,7 +20,7 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=strict
-ReadWritePaths=/run/repocache-nginx
+ReadWritePaths=/run/repocache-nginx /var/cache/nginx/repocache-managed /var/log/nginx/repocache-managed
 UMask=0027
 
 [Install]
