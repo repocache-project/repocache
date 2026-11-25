@@ -450,6 +450,8 @@ def main(platform: str) -> None:
         root = Path(work)
         if platform == "debian13":
             _debian_fixture(root)
+            from ci_apt_stale_reader import probe as probe_stale_reader
+            probe_stale_reader()
         else:
             _alma_label_refusal(root)
     if platform == "almalinux10":
