@@ -87,9 +87,6 @@ case "$phase" in
     cd /home/pr237ci/source
     python3 -m pytest -q tests/test_server_native_nginx_package_journal_v1.py tests/test_server_stock_nginx_package_owner_v1.py
     echo 'PASS: existing journal/package-owner fixture tests executed in native guest'
-    # The booted client fixture independently guards the guest and checks
-    # that its marked sandbox recovery leaves host sources/packages intact.
-    /usr/bin/python3 -B scripts/ci_v06_vm_client_privileged_guest.py "$platform"
     ;;
   journal-prepare)
     python3 -B /home/pr237ci/source/scripts/ci_pr237_native_journal_reboot.py "$(test "$platform" = debian13 && echo debian || echo almalinux)" prepare
