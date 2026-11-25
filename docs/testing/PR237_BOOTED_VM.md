@@ -482,3 +482,49 @@ The relevant stage output is saved as `native-socket-v2.txt` inside each
 per-platform `native-installer` workflow artifact, with source HEAD and
 the pinned synthetic candidate in the adjacent provenance records. A green
 workflow on a *different* HEAD is not acceptance for this test.
+
+
+## Real non-root operator delegation and revocation (#64)
+
+The existing `native-installer` guest exercises the installed fixed control
+socket against the live, legacy vendor-mode v2 generation. A disposable
+non-root local account receives only supplementary `repocache-admin`
+membership; a fresh process drops real, effective and saved root UID/GID
+before using the actual fixed native client to reload generation one. The
+test requires a successful observed reload, unchanged state/include/catalog
+and vendor configuration, live TLS health and no pending transaction.
+
+The guest separately gives the actual `repocache` service UID a kernel
+supplementary admin group credential without changing the persistent service
+account. Its socket connection must succeed at the DAC boundary, but the
+installed worker must close it without a privileged reply. A fresh process
+for the disposable operator then loses socket access after the local group
+membership is removed. The temporary account is deleted. The subsequent
+ordinary native operation must remain usable.
+
+For real operator provisioning, the protected administrator must explicitly
+manage membership of the local `repocache-admin` group. Remove membership
+and terminate old sessions/processes to revoke access: the kernel snapshots
+peer credentials at connection time; editing the group database does not
+retroactively change existing process groups or an accepted operation.
+Never give the service account delegated group access, sudo, arbitrary
+systemctl authority or access to private TLS material. Keep the broker socket
+static, root-owned and disabled unless intentionally started by an authorized
+administrator; an administrator can stop the socket to prevent new requests
+while reconciling durable state.
+
+These are additions to the existing two-distro QEMU harness, not a new VM
+infrastructure. Evidence is NOT VERIFIED until the exact source SHA executes
+on both guests, including AlmaLinux enforcing. This scenario exercises the
+currently integrated vendor-mode worker; dedicated `repocache-nginx.service`
+live WAL/TLS dispatch and its own corresponding operator tests remain
+separate mandatory #27/#64 acceptance.
+
+The same guest also introduces one real managed-include metadata violation
+at a time (additional hardlink, foreign service ownership, world-writable
+mode). It requires a denied fixed reload, no pending WAL, unchanged
+resource snapshot and vendor configuration, and continuing authenticated
+TLS generation/catalog. It restores the original metadata and requires a
+normal subsequent reload. These mutations exist only on the ephemeral
+guest; they are never part of the installer or operator runbook. Each
+native negative remains NOT VERIFIED until both exact-HEAD guest runs pass.
