@@ -2,16 +2,24 @@ name: Client Managed Registry Sandbox
 
 on:
   pull_request:
-    paths-ignore:
-      - '*.md'
-      - '**/*.md'
+    types: [opened, synchronize, reopened]
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  # Disposable development PRs only; keep retries and manual acceptance isolated.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.run_attempt == 1 && format('pr-{0}', github.event.pull_request.number) || format('isolated-{0}-{1}-{2}', github.event_name, github.sha, github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.run_attempt == 1 }}
+
 jobs:
+  impact:
+    uses: ./.github/workflows/supplemental-test-impact.yml
+
   managed-registry:
+    needs: impact
+    if: ${{ needs.impact.outputs.client == 'true' }}
     name: Protected candidate registry (${{ matrix.image }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
