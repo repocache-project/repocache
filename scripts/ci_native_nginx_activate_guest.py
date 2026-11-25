@@ -679,7 +679,7 @@ def verify_owned_service_data_fixture(distribution, native, assets, pins) -> Non
         }
         suffix = "fixture.deb" if repo["kind"] == "apt" else "fixture.rpm"
         path = "/" + name + "/" + suffix
-        payloads[path] = ("REPOCACHE disposable " + name + "\\n").encode("ascii") * 64
+        payloads[path] = ("REPOCACHE disposable " + name + "\n").encode("ascii") * 64
     names = sorted(repo["id"] for repo in doc["repositories"])
 
     # Execute the newly signed module from the actual installed zipapp,
@@ -763,11 +763,11 @@ finally:
     http = bundle["http_fragment"].replace("server 8.8.8.8:443;", "server 127.0.0.1:8008;")
     server = bundle["server_fragment"].replace(
         "    proxy_cache_valid 200 60s;",
-        "    proxy_cache_valid 200 60s;\\n    add_header X-RepoCache-Smoke $upstream_cache_status always;",
+        "    proxy_cache_valid 200 60s;\n    add_header X-RepoCache-Smoke $upstream_cache_status always;",
     )
     tls = render_native_tls_listener_candidate(doc)["server_context_fragment"]
-    fixture = (http + "\\nserver {\\n" + tls + server
-               + "location / { return 404; }\\n}\\n").encode("ascii")
+    fixture = (http + "\nserver {\n" + tls + server
+               + "location / { return 404; }\n}\n").encode("ascii")
     hits = collections.Counter()
     class Origin(BaseHTTPRequestHandler):
         def log_message(self, *_args):
@@ -834,7 +834,7 @@ finally:
         for path, payload in payloads.items():
             for expected in (b"miss", b"hit"):
                 response = https_response("/__repocache/repos" + path)
-                header, body = response.split(b"\\r\\n\\r\\n", 1)
+                header, body = response.split(b"\r\n\r\n", 1)
                 assert header.startswith(b"HTTP/1.1 200 "), header[:160]
                 assert b"x-repocache-smoke: " + expected in header.lower()
                 assert body == payload
@@ -852,9 +852,17 @@ finally:
     finally:
         try:
             assert run("/usr/bin/systemctl", "stop", OWN).returncode == 0
-            require_status(OWN, False, True)
+            # A refused test configuration can leave systemd in failed
+            # state even after stop. Restore the authenticated bytes before
+            # clearing that state; never let a status assertion strand the
+            # temporary include or mask the original fixture failure.
             replace_include(raw)
+            status = run("/usr/bin/systemctl", "is-failed", OWN)
+            if status.returncode == 0:
+                assert run("/usr/bin/systemctl", "reset-failed", OWN).returncode == 0
+            require_status(OWN, False, True)
             assert run("/usr/bin/systemctl", "start", OWN).returncode == 0
+            require_status(OWN, True, True)
         finally:
             os.close(fd)
             backend.shutdown()
