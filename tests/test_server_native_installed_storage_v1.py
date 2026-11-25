@@ -137,3 +137,122 @@ def test_control_storage_uses_only_fixed_read_only_host_root(monkeypatch):
     monkeypatch.setattr(m, "_prepare_under_root", verify)
     assert m.verify_control_storage("debian") == {"verified": True}
     assert calls == ["open", "verify", ("close", 71)]
+
+def _data_document(*, metrics=True, active=True):
+    import json
+    source = Path(__file__).resolve().parents[1] / "docs/examples/server-install-v1.json"
+    doc = json.loads(source.read_text())
+    doc["deployment"]["logging"]["metrics_opt_in"] = metrics
+    doc["repositories"][0]["desired_state"] = "active" if active else "disabled"
+    doc["repositories"][1]["id"] = "almalinux-baseos"
+    doc["repositories"][1]["desired_state"] = "active" if active else "disabled"
+    return doc
+
+
+def _prepare_data(root, *, doc=None, create=True):
+    fd = os.open(root, m._DIR)
+    try:
+        return m._prepare_repository_storage_under_root(
+            fd, owner=os.getuid(), owner_gid=os.getgid(),
+            uid=os.getuid(), gid=os.getgid(), labels=m._Labels("debian"),
+            document=_data_document() if doc is None else doc, allow_create=create,
+        )
+    finally:
+        os.close(fd)
+
+
+def test_active_storage_creates_separate_owned_roots_and_private_metrics(root):
+    prepare(root)
+    report = _prepare_data(root)
+    cache = root / m.CACHE_ROOT.lstrip("/")
+    log = root / m.LOG_ROOT.lstrip("/") / "metrics.jsonl"
+    assert report["repository_cache_roots_verified"] == ["almalinux-baseos", "debian-trixie-main"]
+    assert report["metrics_file_verified"] and not report["actual_service_write_verified"]
+    assert stat.S_IMODE(log.stat().st_mode) == 0o600
+    log.write_bytes(b"history")
+    for name in report["repository_cache_roots_verified"]:
+        assert stat.S_IMODE((cache / name).stat().st_mode) == 0o700
+        (cache / name / "package").write_bytes(name.encode("ascii"))
+    paths = [log, *(cache / name / "package" for name in report["repository_cache_roots_verified"])]
+    before = [(p.stat().st_ino, p.stat().st_mtime_ns, p.read_bytes()) for p in paths]
+    assert _prepare_data(root, create=False) == report
+    assert _prepare_data(root) == report
+    assert before == [(p.stat().st_ino, p.stat().st_mtime_ns, p.read_bytes()) for p in paths]
+    # Disabling/opt-out never deletes or truncates previously owned data.
+    assert _prepare_data(root, doc=_data_document(active=False))["repository_cache_roots_verified"] == []
+    assert before == [(p.stat().st_ino, p.stat().st_mtime_ns, p.read_bytes()) for p in paths]
+
+
+def test_active_storage_preflights_all_leaves_before_creation(root):
+    prepare(root)
+    log = root / m.LOG_ROOT.lstrip("/") / "metrics.jsonl"
+    log.write_bytes(b"foreign")
+    with pytest.raises(m.InstalledStorageError, match="PARTIAL_OR_FOREIGN_DATA"):
+        _prepare_data(root)
+    assert list((root / m.CACHE_ROOT.lstrip("/")).iterdir()) == []
+    assert log.read_bytes() == b"foreign"
+
+
+def test_active_storage_opt_out_does_not_create_metrics(root):
+    prepare(root)
+    report = _prepare_data(root, doc=_data_document(metrics=False))
+    assert not report["metrics_file_verified"]
+    assert list((root / m.LOG_ROOT.lstrip("/")).iterdir()) == []
+
+
+@pytest.mark.parametrize("key", ["cache_root", "log_root"])
+def test_active_storage_rejects_nonfixed_paths_before_io(root, key):
+    doc = _data_document()
+    doc["deployment"]["paths"][key] = "/tmp/foreign"
+    with pytest.raises(m.InstalledStorageError, match="REPOSITORY_LAYOUT_UNSUPPORTED"):
+        _prepare_data(root, doc=doc)
+    assert not list((root / "var/cache/nginx").iterdir())
+
+
+def test_active_storage_read_only_refuses_missing_leaves(root):
+    prepare(root)
+    with pytest.raises(m.InstalledStorageError, match="OWNED_DATA_MISSING"):
+        _prepare_data(root, create=False)
+    assert list((root / m.CACHE_ROOT.lstrip("/")).iterdir()) == []
+
+
+def test_active_storage_foreign_marker_and_symlink_refused(root):
+    prepare(root)
+    _prepare_data(root)
+    cache = root / m.CACHE_ROOT.lstrip("/")
+    leaf = cache / "almalinux-baseos"
+    leaf.rename(cache / "retained")
+    leaf.symlink_to(cache / "retained", target_is_directory=True)
+    with pytest.raises(m.InstalledStorageError):
+        _prepare_data(root)
+    assert leaf.is_symlink() and (cache / "retained").is_dir()
+
+
+def test_active_storage_atomic_publication_never_overwrites_racing_directory(root, monkeypatch):
+    prepare(root)
+    cache = root / m.CACHE_ROOT.lstrip("/")
+    original = m._rename_directory_noreplace
+    def race(parent, stage, directory, name):
+        os.mkdir(name, 0o700, dir_fd=directory)
+        original(parent, stage, directory, name)
+    monkeypatch.setattr(m, "_rename_directory_noreplace", race)
+    with pytest.raises(m.InstalledStorageError, match="DATA_PUBLICATION_REFUSED"):
+        _prepare_data(root)
+    foreign = cache / "almalinux-baseos"
+    before = foreign.stat().st_ino
+    monkeypatch.setattr(m, "_rename_directory_noreplace", original)
+    with pytest.raises(m.InstalledStorageError, match="DATA_STAGE_PENDING"):
+        _prepare_data(root)
+    assert foreign.stat().st_ino == before
+    assert not (cache / "debian-trixie-main").exists()
+
+
+def test_active_storage_metrics_hardlink_refused_without_truncation(root):
+    prepare(root)
+    _prepare_data(root)
+    log = root / m.LOG_ROOT.lstrip("/") / "metrics.jsonl"
+    log.write_bytes(b"history")
+    os.link(log, root / "other")
+    with pytest.raises(m.InstalledStorageError, match="DATA_METADATA_UNSAFE"):
+        _prepare_data(root)
+    assert log.read_bytes() == (root / "other").read_bytes() == b"history"

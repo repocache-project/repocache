@@ -7,16 +7,24 @@ No existing object is relabeled, chowned, deleted or adopted without a marker.
 from __future__ import annotations
 
 from contextlib import ExitStack
+import ctypes
 import json
 import os
 import pwd
 import stat
 import subprocess
 
+from repocache.server_install_v1 import validate_install_document
+
 _CACHE = ("var", "cache", "nginx")
 _LOG = ("var", "log", "nginx")
 _LEAF = "repocache-managed"
 _MARKER = ".repocache-managed.owner-v1"
+CACHE_ROOT = "/var/cache/nginx/repocache-managed"
+LOG_ROOT = "/var/log/nginx/repocache-managed"
+_METRICS = "metrics.jsonl"
+_METRICS_MARKER = ".repocache-metrics-log.owner-v1"
+_CREATE = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
 _DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _READ = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC
 
@@ -266,6 +274,255 @@ def prepare_installed_storage(distribution, *, allow_create):
         raise
     except (OSError, KeyError, ValueError, subprocess.SubprocessError):
         _deny("UNVERIFIED")
+
+
+def _repository_storage_intent(document):
+    """Bind storage only to validated desired-active repository identities."""
+    try:
+        doc = validate_install_document(document, for_apply=True)
+        paths = doc["deployment"]["paths"]
+        if paths["cache_root"] != CACHE_ROOT or paths["log_root"] != LOG_ROOT:
+            _deny("REPOSITORY_LAYOUT_UNSUPPORTED")
+        active = tuple(sorted(row["id"] for row in doc["repositories"]
+                              if row["desired_state"] == "active"))
+        if len(set(active)) != len(active):
+            _deny("REPOSITORY_ID_UNVERIFIED")
+        return active, bool(active and doc["deployment"]["logging"]["metrics_opt_in"])
+    except InstalledStorageError:
+        raise
+    except (ValueError, KeyError, TypeError, RecursionError):
+        _deny("REPOSITORY_INTENT_UNVERIFIED")
+
+
+def _data_record(kind, name, st):
+    record = json.loads(_record(kind, st))
+    if kind == "repository-cache":
+        record["repository_id"] = name
+    return json.dumps(record, sort_keys=True, separators=(",", ":")).encode("ascii")
+
+
+def _verify_data_record(parent, marker, expected, owner, owner_gid, labels):
+    fd = os.open(marker, _READ, dir_fd=parent)
+    try:
+        before = _same(parent, marker, fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                or (before.st_uid, before.st_gid, stat.S_IMODE(before.st_mode))
+                != (owner, owner_gid, 0o600) or not 1 <= before.st_size <= 1024):
+            _deny("DATA_MARKER_UNSAFE")
+        labels.check(fd)
+        raw = os.read(fd, 1025)
+        after = _same(parent, marker, fd)
+        if (raw != expected or before.st_size != len(raw)
+                or _identity(before) != _identity(after) or after.st_nlink != 1
+                or before.st_mtime_ns != after.st_mtime_ns
+                or before.st_ctime_ns != after.st_ctime_ns):
+            _deny("DATA_MARKER_MISMATCH")
+    finally:
+        os.close(fd)
+
+
+def _data_identity(parent, directory, kind, name, marker, stage, uid, gid,
+                   owner, owner_gid, labels, path, label_type, *, allow_missing):
+    if stage is not None and _named(parent, stage) is not None:
+        _deny("DATA_STAGE_PENDING")
+    found, marked = _named(directory, name), _named(parent, marker)
+    if (found is None) != (marked is None):
+        _deny("PARTIAL_OR_FOREIGN_DATA")
+    if found is None:
+        if not allow_missing:
+            _deny("OWNED_DATA_MISSING")
+        return None
+    is_cache = kind == "repository-cache"
+    fd = os.open(name, _DIR if is_cache else _READ, dir_fd=directory)
+    try:
+        st = _same(directory, name, fd)
+        if ((not stat.S_ISDIR(st.st_mode) if is_cache
+             else not stat.S_ISREG(st.st_mode) or st.st_nlink != 1)
+                or (st.st_uid, st.st_gid, stat.S_IMODE(st.st_mode))
+                != (uid, gid, 0o700 if is_cache else 0o600)):
+            _deny("DATA_METADATA_UNSAFE")
+        labels.check(fd, path, label_type)
+        _verify_data_record(parent, marker, _data_record(kind, name, st),
+                            owner, owner_gid, labels)
+        after = _same(directory, name, fd)
+        if (_identity(st) != _identity(after)
+                or (not is_cache and after.st_nlink != 1)):
+            _deny("DATA_CHANGED")
+        labels.check(fd, path, label_type)
+        return _identity(st)
+    finally:
+        os.close(fd)
+
+
+def _rename_directory_noreplace(parent, stage, directory, name):
+    """Linux atomic no-replace publication, never rename over foreign data."""
+    try:
+        rename = ctypes.CDLL(None, use_errno=True).renameat2
+        rename.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
+                           ctypes.c_char_p, ctypes.c_uint)
+        rename.restype = ctypes.c_int
+        if rename(parent, os.fsencode(stage), directory, os.fsencode(name), 1) != 0:
+            _deny("DATA_PUBLICATION_REFUSED")
+    except (AttributeError, OSError, TypeError):
+        _deny("DATA_PUBLICATION_UNAVAILABLE")
+
+
+def _create_owned_data(parent, directory, kind, name, marker, stage, uid, gid,
+                       owner, owner_gid, labels, path, label_type):
+    is_cache = kind == "repository-cache"
+    if is_cache:
+        # The cache root belongs to the NGINX worker. Creating there and
+        # reopening by name would let that UID substitute the inode before
+        # root changes its owner. Prepare under the protected parent instead.
+        os.mkdir(stage, 0o700, dir_fd=parent)
+        os.fsync(parent)
+        fd = os.open(stage, _DIR, dir_fd=parent)
+    else:
+        # The log directory is root-owned and not writable by the worker.
+        fd = os.open(name, _CREATE, 0o600, dir_fd=directory)
+    try:
+        fresh = _same(parent if is_cache else directory,
+                      stage if is_cache else name, fd)
+        if (fresh.st_uid != owner or fresh.st_gid != owner_gid
+                or stat.S_IMODE(fresh.st_mode) != (0o700 if is_cache else 0o600)
+                or (is_cache and (not stat.S_ISDIR(fresh.st_mode) or os.listdir(fd)))
+                or (not is_cache and (not stat.S_ISREG(fresh.st_mode)
+                                      or fresh.st_nlink != 1 or fresh.st_size != 0))):
+            _deny("FRESH_DATA_UNSAFE")
+        labels.check(fd, path, label_type, fresh=True)
+        if is_cache:
+            # Still root-owned on publication. The pinned descriptor, not
+            # a reopened path, receives the worker ownership.
+            _rename_directory_noreplace(parent, stage, directory, name)
+            _same(directory, name, fd)
+            os.fsync(parent)
+        os.fchown(fd, uid, gid)
+        os.fchmod(fd, 0o700 if is_cache else 0o600)
+        os.fsync(fd)
+        os.fsync(directory)
+        st = _same(directory, name, fd)
+        if ((st.st_uid, st.st_gid, stat.S_IMODE(st.st_mode))
+                != (uid, gid, 0o700 if is_cache else 0o600)
+                or (not is_cache and st.st_nlink != 1)):
+            _deny("DATA_METADATA_UNSAFE")
+        labels.check(fd, path, label_type)
+        mark = os.open(marker, _CREATE, 0o600, dir_fd=parent)
+        try:
+            os.fchown(mark, owner, owner_gid)
+            os.fchmod(mark, 0o600)
+            labels.check(mark)
+            raw = _data_record(kind, name, st)
+            if os.write(mark, raw) != len(raw):
+                _deny("DATA_MARKER_WRITE_INCOMPLETE")
+            os.fsync(mark)
+        finally:
+            os.close(mark)
+        os.fsync(parent)
+        if _identity(_same(directory, name, fd)) != _identity(st):
+            _deny("DATA_CHANGED")
+    finally:
+        os.close(fd)
+    # A partial stage/leaf/marker is deliberately not deleted or adopted.
+
+
+def _prepare_repository_storage_under_root(root, *, owner, owner_gid, uid,
+                                            gid, labels, document, allow_create):
+    """Prepare a closed active set under the existing authenticated state lock.
+
+    This private descriptor seam does not grant activation, deletion or
+    storage repair authority. Never mutate previously owned data.
+    """
+    if type(allow_create) is not bool:
+        _deny("ARGUMENT_INVALID")
+    active, metrics = _repository_storage_intent(document)
+    try:
+        _prepare_under_root(root, owner=owner, owner_gid=owner_gid, uid=uid,
+                            gid=gid, labels=labels, allow_create=False)
+        root_identity = _root_owned(root, owner, labels)
+        with ExitStack() as stack:
+            roots = []
+            for kind, segments, leaf_uid, leaf_gid, mode, label_type, path in (
+                ("cache", _CACHE, uid, gid, 0o700, b"httpd_cache_t", CACHE_ROOT),
+                ("log", _LOG, owner, owner_gid, 0o750, b"httpd_log_t", LOG_ROOT),
+            ):
+                parent, chain = _walk(root, segments, owner, labels, stack)
+                args = (parent, kind, leaf_uid, leaf_gid, mode, owner, owner_gid,
+                        labels, path, label_type)
+                _verify(*args)
+                directory = os.open(_LEAF, _DIR, dir_fd=parent)
+                stack.callback(os.close, directory)
+                roots.append((chain, args, directory,
+                              _identity(_same(parent, _LEAF, directory))))
+            def check_roots():
+                if _root_owned(root, owner, labels) != root_identity:
+                    _deny("ROOT_CHANGED")
+                for chain, args, directory, identity in roots:
+                    _recheck(chain, owner, labels)
+                    _verify(*args)
+                    if _identity(_same(args[0], _LEAF, directory)) != identity:
+                        _deny("ROOT_CHANGED")
+            plans = []
+            cache_parent, cache = roots[0][1][0], roots[0][2]
+            log_parent, log = roots[1][1][0], roots[1][2]
+            for name in active:
+                marker = ".repocache-repository-" + name + ".owner-v1"
+                plans.append((cache_parent, cache, "repository-cache", name, marker,
+                              marker + ".stage", uid, gid, owner, owner_gid, labels,
+                              CACHE_ROOT + "/" + name, b"httpd_cache_t"))
+            if metrics:
+                plans.append((log_parent, log, "metrics-log", _METRICS, _METRICS_MARKER,
+                              None, owner, owner_gid, owner, owner_gid, labels,
+                              LOG_ROOT + "/" + _METRICS, b"httpd_log_t"))
+            # Preflight the entire requested set before provisioning any leaf.
+            initial = [_data_identity(*args, allow_missing=allow_create) for args in plans]
+            check_roots()
+            for args, before in zip(plans, initial):
+                if _data_identity(*args, allow_missing=allow_create) != before:
+                    _deny("DATA_CHANGED")
+                if before is None:
+                    _create_owned_data(*args)
+                current = _data_identity(*args, allow_missing=False)
+                if before is not None and current != before:
+                    _deny("DATA_CHANGED")
+                check_roots()
+            for args in plans:
+                _data_identity(*args, allow_missing=False)
+            check_roots()
+        labels.finish()
+        return {"repository_cache_roots_verified": list(active),
+                "metrics_file_verified": metrics,
+                "selinux_enforcing_labels_verified": labels.enforcing,
+                "actual_service_write_verified": False}
+    except InstalledStorageError:
+        raise
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        _deny("DATA_UNVERIFIED")
+
+
+def prepare_installed_repository_storage(distribution, document, *, allow_create):
+    """Internal signed host preparation; caller must authenticate and lock.
+
+    No installed CLI/socket dispatch is wired to this prerequisite yet.
+    """
+    if (os.getresuid() != (0, 0, 0) or os.getresgid() != (0, 0, 0)
+            or distribution not in ("debian", "almalinux")):
+        _deny("HOST_UNVERIFIED")
+    try:
+        worker = pwd.getpwnam("www-data" if distribution == "debian" else "nginx")
+        if not (0 < worker.pw_uid < 2**32 - 1 and 0 < worker.pw_gid < 2**32 - 1):
+            _deny("WORKER_IDENTITY_UNVERIFIED")
+        fd = os.open("/", _DIR)
+        try:
+            return _prepare_repository_storage_under_root(
+                fd, owner=0, owner_gid=0, uid=worker.pw_uid, gid=worker.pw_gid,
+                labels=_Labels(distribution), document=document, allow_create=allow_create,
+            )
+        finally:
+            os.close(fd)
+    except InstalledStorageError:
+        raise
+    except (OSError, KeyError, ValueError, TypeError, subprocess.SubprocessError):
+        _deny("DATA_UNVERIFIED")
 
 
 def verify_control_storage(distribution):

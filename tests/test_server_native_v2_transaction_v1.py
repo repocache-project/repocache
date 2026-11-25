@@ -2727,3 +2727,16 @@ def test_socket_recovery_dispatches_prior_snapshot_not_partial_current(
     assert result == {"status": "NATIVE_V2_ROLLED_BACK"}
     assert _fixture_resource_bytes(paths) == old
     _assert_owned_fixture_clean(filesystem, paths)
+
+@pytest.mark.parametrize("key", ["cache_root", "log_root"])
+def test_owned_active_candidate_refuses_unbound_storage_paths(key):
+    cfg = document(1)
+    cfg["expected_state_generation"] = 1
+    cfg["deployment"]["paths"]["generated_include"] = native._OWNED_INCLUDE_PATH
+    cfg["deployment"]["paths"][key] = "/tmp/foreign"
+    cfg["repositories"][0]["desired_state"] = "active"
+    with pytest.raises(native.NativeV2TransactionError,
+                       match="OWNED_CONTEXT_LAYOUT_UNSUPPORTED"):
+        native._render_owned_managed_candidate(
+            cfg, 1, "debian", {"repo-0": {"mirror0.example.invalid": ["8.8.8.8"]}},
+        )

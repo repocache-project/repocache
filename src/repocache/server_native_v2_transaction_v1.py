@@ -1053,7 +1053,10 @@ def _render_owned_managed_candidate(
         validated = validate_install_document(document, for_apply=True)
         paths = validated["deployment"]["paths"]
         if (paths["generated_include"] != _OWNED_INCLUDE_PATH
-                or paths["state_root"] != "/var/lib/repocache/server"):
+                or paths["state_root"] != "/var/lib/repocache/server"
+                or (any(row["desired_state"] == "active" for row in validated["repositories"])
+                    and (paths["cache_root"] != "/var/cache/nginx/repocache-managed"
+                         or paths["log_root"] != "/var/log/nginx/repocache-managed"))):
             _deny("OWNED_CONTEXT_LAYOUT_UNSUPPORTED")
         bundle = render_repository_nginx_bundle_candidate(
             validated, expected_state_generation=next_generation,

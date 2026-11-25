@@ -36,3 +36,25 @@ publisher acceptance is claimed. Booted tests must establish the actual
 unit mount restrictions and label support on both target distributions;
 actual confined NGINX worker cache/log access is a subsequent managed
 configuration transaction gate.
+
+## Active-set storage preparation prerequisite
+
+The internal signed-host preparation now supports the complete validated
+desired-active repository set and fixed opt-in metrics file. Only the
+two already reviewed cache/log roots are accepted. It verifies both
+external root markers and every requested child before creating anything.
+Each repository's mode-0700 worker-owned directory has an independent
+root-owned 0600 inode marker outside the worker-writable cache root.
+New cache directories are prepared root-owned in the protected parent,
+published with Linux renameat2(RENAME_NOREPLACE), then assigned worker
+ownership on the original pinned descriptor. No racing foreign target is
+overwritten or chowned. Metrics is created exclusively in the existing
+root-owned log directory, mode 0600, with an independent external marker.
+SELinux policy lookup and label assignment apply only to fresh inodes.
+Partial/foreign data, stages, hardlinks, symlinks, label/mount drift and
+nonfixed layout are refused. Repeats and disabling/opt-out retain data.
+
+No installed CLI/socket authorization or active-route exposure is added.
+The internal creation entry requires the authenticated caller's existing
+state lock; native signed host and confined real worker verification
+remain mandatory before enabling it from the fixed APPLY transaction.
