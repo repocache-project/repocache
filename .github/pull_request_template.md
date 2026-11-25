@@ -21,7 +21,7 @@ Substantive AI assistance, if any:
 ## Integration
 
 - Required checks and blocking threads: inspect on the **exact** HEAD/base immediately before merge.
-- Authority: PR #245 standing conditional **versioned-integration** delegation only if all applicable gates PASS; otherwise separate explicit maintainer approval. No automatic main/release merge or publication authority.
+- Authority: adopted harmonized PR #245 standing conditional **versioned-integration** delegation only if all applicable gates PASS; no fresh routine issue-level approval. Preserve specific owner holds and separate explicit approval for non-delegated operations. Record exact HEAD/base, live queue requirement, permitted merge method and post-merge verification. No automatic main/release merge or publication authority.
 - Link: [staged acceptance](../docs/ACCEPTANCE_STAGES.md) and [default fast path](../docs/DEVELOPMENT_FAST_PATH.md).
 
 The issue checklist is the full acceptance ledger. Do not paste duplicated CI logs or omit a required criterion. A green CI run does not establish native-host, signing or release acceptance.

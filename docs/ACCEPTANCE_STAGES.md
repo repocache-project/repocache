@@ -34,7 +34,7 @@ run. A booted VM may itself be orchestrated by suitably equipped CI; what
 matters is the faithful native environment, not who hosts it.
 
 **Stage C — security and publisher acceptance.** Preserve issue-specific
-maintainer operational/merge decisions and substantive security gates; independently
+maintainer operational decisions, non-delegated merge holds and substantive security gates; independently
 commissioned human review is optional for all issues. Preserve real private-key
 Ed25519 signing outside CI, exact signed candidate verification, authorized
 staging/tag/publishing and immutable public readback/postpublication smoke.
@@ -98,8 +98,10 @@ dependencies, required checks and no blocking risks or review threads.
 The current [PR governance](PR_REVIEW_GOVERNANCE.md) controls conditional
 `integration/vMAJOR.MINOR.PATCH` merge delegation and queue admission.
 An active native queue or green checks are not self-authorization.
-Issue-specific maintainer merge approval and technical security acceptance
-remain mandatory where agreed; separately commissioned human review is
+Generic issue-specific repeat-approval wording is superseded only for qualifying
+ordinary integration under the harmonized protected-main PR governance.
+Specific merge holds, scope decisions and technical security acceptance
+remain mandatory; separately commissioned human review is
 optional for every issue. This does not waive GitHub ruleset approvals. Main/release merges, unusual scope/security
 changes, native queue pilots/rulesets, tags, signing, staging, publication,
 production or destructive operations retain their separate authorizations.
