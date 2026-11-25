@@ -65,3 +65,20 @@ and requires a lock-specific denial. This demonstrates one actual APT
 lock-family interaction, not proof of the entire installed APT/DNF lock
 graph or all possible concurrent administrators. The real host writer
 and DNF process exclusion remain unaccepted.
+
+## Process-local scope exclusion
+
+Traditional POSIX record locks belong to the process, not an individual
+file descriptor. Closing a second descriptor for the same inode can drop
+the outer POSIX lock even if a nested BSD lock acquisition was refused.
+The helper therefore rejects nested or concurrent scopes in the same
+process before opening any lock file; its guard is released only after
+descriptor cleanup. Revalidation also refuses use by a different process
+(e.g. an inherited callback after fork). Regression tests exercise actual
+cross-process POSIX and BSD contention after nested refusal and verify
+normal acquisition after exit.
+
+The caller must not independently open and close any of the held native
+lock inodes in the same process or transfer the scope across fork.
+This change does not attest the actual DNF/APT lock graph or authorize
+host source writes.

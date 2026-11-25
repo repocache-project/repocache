@@ -327,3 +327,38 @@ def test_revalidation_detects_drift_before_returning_from_scope(tmp_path):
             first.rename(first.with_name("previous-lock"))
             first.write_bytes(b"")
             recheck()
+
+@pytest.mark.parametrize("manager,names", [("apt", locks.APT), ("dnf5", locks.DNF5)])
+def test_nested_scope_refusal_preserves_outer_posix_and_flock(
+        tmp_path, manager, names):
+    paths = setup_locks(tmp_path, names)
+    with locks.hold_existing_native_package_locks(
+            manager, root=tmp_path, revalidation=True) as recheck:
+        with pytest.raises(locks.LockInspectionRefused, match="already active"):
+            with locks.hold_existing_native_package_locks(manager, root=tmp_path):
+                pytest.fail("nested native lock scope entered")
+        # A second open/close in this process would silently release the
+        # outer POSIX lock even if the nested flock acquisition failed.
+        recheck()
+        for path in paths.values():
+            for family in ("flock", "posix"):
+                assert _competing_process(path, family) == 17
+    # The guard and both kernel lock families must be released on exit.
+    with locks.hold_existing_native_package_locks(manager, root=tmp_path):
+        for family in ("flock", "posix"):
+            assert _competing_process(paths[names[0]], family) == 17
+    for path in paths.values():
+        for family in ("flock", "posix"):
+            assert _competing_process(path, family) == 0
+
+
+def test_revalidation_cannot_be_reused_by_a_different_process(tmp_path, monkeypatch):
+    setup_locks(tmp_path, locks.APT)
+    original_pid = os.getpid()
+    with locks.hold_existing_native_package_locks(
+            "apt", root=tmp_path, revalidation=True) as recheck:
+        with monkeypatch.context() as child:
+            child.setattr(locks.os, "getpid", lambda: original_pid + 1)
+            with pytest.raises(locks.LockInspectionRefused, match="scope expired"):
+                recheck()
+        recheck()

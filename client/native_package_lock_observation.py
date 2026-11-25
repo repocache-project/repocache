@@ -13,6 +13,7 @@ import fcntl
 import os
 import re
 import stat
+import threading
 from pathlib import Path
 
 APT = (
@@ -31,6 +32,12 @@ _LINE = re.compile(
     r"(?:-?\d+)\s+([0-9a-fA-F]+):([0-9a-fA-F]+):([0-9]+)\s+"
     r"(?:\d+|EOF)\s+(?:\d+|EOF)\s*$"
 )
+
+
+# Traditional POSIX record locks are process-owned: closing *any* FD for
+# an inode can release this process's locks on it, even when a nested
+# acquisition failed. Serialize helper scopes before opening any lock FD.
+_HELD_SCOPE = threading.Lock()
 
 
 class LockInspectionRefused(ValueError):
@@ -180,6 +187,7 @@ def hold_existing_native_package_locks(
     identities: set[tuple[int, int]] = set()
     witnesses: list[tuple[str, int, tuple[int, ...]]] = []
     active = False
+    scope_pid = os.getpid()
 
     def fingerprint(info: os.stat_result) -> tuple[int, ...]:
         return (info.st_dev, info.st_ino, info.st_uid, info.st_gid,
@@ -191,7 +199,7 @@ def hold_existing_native_package_locks(
         # the directory FDs used during acquisition. stat does not open a
         # second descriptor on a POSIX-locked inode (closing such an FD
         # in this process could drop the POSIX lock).
-        if not active:
+        if not active or os.getpid() != scope_pid:
             raise LockInspectionRefused("Native package lock scope expired")
         try:
             for relative, lockfd, expected in witnesses:
@@ -202,6 +210,10 @@ def hold_existing_native_package_locks(
         except (OSError, OverflowError, TypeError) as exc:
             raise LockInspectionRefused("Native package lock scope drift") from exc
 
+    # A failed nested or concurrent acquisition must not open and close a
+    # descriptor for an inode already POSIX-locked by this process.
+    if not _HELD_SCOPE.acquire(blocking=False):
+        raise LockInspectionRefused("Native package lock scope already active in process")
     try:
         for relative in targets:
             parents: list[int] = []
@@ -276,10 +288,13 @@ def hold_existing_native_package_locks(
         # Closing each fd releases both of its kernel lock families.
         # Attempt every close even if one fails; never leak held lock FDs.
         close_error = False
-        for lockfd in reversed(held):
-            try:
-                os.close(lockfd)
-            except OSError:
-                close_error = True
+        try:
+            for lockfd in reversed(held):
+                try:
+                    os.close(lockfd)
+                except OSError:
+                    close_error = True
+        finally:
+            _HELD_SCOPE.release()
         if close_error:
             raise LockInspectionRefused("Native package lock release unverified")
