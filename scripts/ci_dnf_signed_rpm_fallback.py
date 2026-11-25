@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Native DNF5 signed-RPM download/fallback regression, disposable CI only (#24).
+"""Native DNF signed-RPM download/fallback regression, disposable CI only (#24).
 
 Builds and signs a noarch fixture RPM under an isolated temporary directory,
-then checks actual DNF5 HTTPS preference/fallback and signed metadata. It
+then checks actual DNF HTTPS preference/fallback and signed metadata. It
 NEVER installs a test package, touches a host source, or uses publisher keys.
 A production client writer remains disabled and #24 host gates remain OPEN.
 """
@@ -411,7 +411,7 @@ def _signed_fixture(base: Path, *, isolated_rpmdb: Path | None = None) -> tuple[
 
 
 def _download_dnf(argv: list[str], target: Path) -> subprocess.CompletedProcess:
-    """Force a fresh DNF5 package transfer, NEVER execute install."""
+    """Force a fresh native DNF package transfer, NEVER execute install."""
     target.mkdir()
     return subprocess.run(
         [*argv[:-1], "download", _PACKAGE, "--destdir=" + str(target)],
@@ -544,7 +544,7 @@ def _probe_signed_rpm(*, booted_vm: bool = False) -> None:
                         )
                     )
                 print(
-                    "PASS: DNF5 signed RPM "
+                    "PASS: DNF signed RPM (" + Path(argv[0]).name + ") "
                     + cycle
                     + " primary_hits=" + str(len(primary.hits))
                     + " upstream_hits=" + str(len(upstream.hits)),
