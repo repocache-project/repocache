@@ -156,3 +156,22 @@ def test_rpm_waiter_requires_exact_pid_inode_and_blocked_record(tmp_path):
     assert not rpm_probe._rpm_waiter(waiter.replace(identity, "00:00:1"), 456, info)
     assert not rpm_probe._rpm_waiter(waiter.replace("POSIX", "FLOCK"), 456, info)
     assert not rpm_probe._rpm_waiter(waiter.replace(identity, "malformed"), 456, info)
+
+def test_dnf_transaction_test_refuses_host_installroot_before_command(tmp_path):
+    package = tmp_path / rpm_probe._RPM_NAME
+    package.write_bytes(b"fixture")
+    with pytest.raises(RuntimeError, match="Unsafe isolated DNF"):
+        rpm_probe._dnf_transaction_test_command(Path("/"), package)
+
+
+def test_dnf_transaction_test_requires_booted_guard(monkeypatch):
+    from types import SimpleNamespace
+
+    def deny(_):
+        raise AssertionError("guard")
+    monkeypatch.setitem(sys.modules, "ci_v06_vm_signed_client_guest",
+                        SimpleNamespace(guarded_native_guest=deny))
+    monkeypatch.setattr(rpm_probe, "_run", lambda *a, **kw:
+                        pytest.fail("command reached before guard"))
+    with pytest.raises(AssertionError, match="guard"):
+        rpm_probe._probe_dnf_transaction_lock(Path("/tmp/rpm"), Path("/tmp/key"))

@@ -98,3 +98,21 @@ fixture does not use the host RPMDB, change system trust or install a
 package. This establishes only the RPMDB lock interaction, not DNF5's
 complete lock graph, path lifecycle or installed source-writer exclusion.
 The actual booted execution is required before claiming PASS.
+
+## DNF5 transaction lock lifecycle (booted AlmaLinux fixture)
+
+The native DNF5 executable is additionally exercised in a completely
+private installroot with the same signed, no-script fixture RPM and
+disposable key. The transaction uses RPM TEST mode, with local package
+signature checking and no repositories or plugins enabled. Both the
+private RPMDB package inventory and absence of the fixture payload must
+remain unchanged. The held DNF5 transaction lock must produce a
+lock-specific refusal and retain the same inode while held; after
+release, the identical transaction check must succeed. Record whether the
+lock inode is retained, removed or replaced on normal completion and the
+actual DNF5 version. No host package installation or source modification.
+The DNF5 transaction lock is acquired during the transaction, not before
+all repository/configuration reads; even positive native exclusion is
+not complete DNF5 source-writer authorization. Upstream implementation
+reference: https://github.com/rpm-software-management/dnf5/blob/main/libdnf5/base/transaction.cpp
+and the DNF5 documented RPM TEST transaction flag.

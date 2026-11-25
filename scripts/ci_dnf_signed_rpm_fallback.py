@@ -103,6 +103,11 @@ def _label_isolated_rpmdb(rpmdb: Path) -> None:
             or not rpmdb.name.startswith("repocache-ci-rpmdb-") or rpmdb.resolve(strict=True) != rpmdb
             or rpmdb.stat().st_uid != 0 or any(rpmdb.iterdir())):
         raise RuntimeError("Unsafe isolated RPMDB label target")
+    _apply_disposable_rpmdb_label(rpmdb)
+
+
+def _apply_disposable_rpmdb_label(rpmdb: Path) -> None:
+    """Private label operation, called only after the disposable path guard."""
     if _run(["getenforce"]).strip() != "Enforcing":
         raise RuntimeError("Booted RPM fixture requires SELinux Enforcing")
     reference = Path("/usr/lib/sysimage/rpm")
@@ -199,6 +204,104 @@ def _import_under_native_lock(rpmdb: Path, public_key: Path) -> None:
     _run(argv, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
     print("PASS: real RPM import excluded by held isolated RPMDB lock; succeeds after release",
           flush=True)
+
+
+def _dnf_transaction_test_command(root: Path, package: Path) -> list[str]:
+    """Only the fixed local signed fixture, with RPM transaction TEST mode."""
+    if (root.parent != Path("/var/lib")
+            or not root.name.startswith("repocache-ci-dnf-root-")
+            or root.resolve(strict=True) != root
+            or root.stat().st_uid != 0 or root.stat().st_mode & 0o077
+            or package.name != _RPM_NAME or not package.is_file()
+            or package.is_symlink()):
+        raise RuntimeError("Unsafe isolated DNF transaction test")
+    executable = Path("/usr/bin/dnf5")
+    if not executable.is_file():
+        raise RuntimeError("Native DNF5 executable missing")
+    return [
+        str(executable), "--installroot=" + str(root), "--releasever=10",
+        "--config=" + str(root / "etc/dnf/dnf.conf"),
+        "--setopt=plugins=0", "--disable-repo=*",
+        "--setopt=localpkg_gpgcheck=1",
+        "--setopt=tsflags=test,noscripts,notriggers,noplugins",
+        "--assumeyes", "install", str(package),
+    ]
+
+
+def _probe_dnf_transaction_lock(package: Path, public_key: Path) -> None:
+    """Actual DNF5 transaction TEST; isolated RPMDB, no package installation.
+
+    DNF5's transaction lock is separate from librpm's .rpm.lock and may
+    be removed on normal release. Measure the native lock lifecycle, never
+    infer coverage of earlier repository/config reads from this test.
+    """
+    from ci_v06_vm_signed_client_guest import guarded_native_guest
+
+    guarded_native_guest("almalinux10")
+    if _run(["rpm", "--eval", "%{_dbpath}"]).strip() != "/usr/lib/sysimage/rpm":
+        raise RuntimeError("Unexpected native RPMDB layout")
+    with tempfile.TemporaryDirectory(prefix="repocache-ci-dnf-root-", dir="/var/lib") as folder:
+        root = Path(folder)
+        argv = _dnf_transaction_test_command(root, package)
+        # Only new, private installroot paths. No host config or package
+        # store is used; the fixture's exact key is imported in this DB.
+        db = root / "usr/lib/sysimage/rpm"
+        db.mkdir(parents=True, mode=0o700)
+        _apply_disposable_rpmdb_label(db)
+        rpm = ["/usr/bin/rpm", "--dbpath", str(db)]
+        _run(rpm + ["--initdb"])
+        _run(rpm + ["--import", str(public_key)])
+        if not _rpm_signature_verified(_run(rpm + ["-Kv", str(package)])):
+            raise RuntimeError("Isolated DNF transaction fixture is not signed")
+        baseline = _run(rpm + ["-qa", "--qf", "%{NAME}-%{VERSION}-%{RELEASE}\\n"])
+        conf = root / "etc/dnf/dnf.conf"
+        conf.parent.mkdir(parents=True)
+        (root / "etc/yum.repos.d").mkdir()
+        conf.write_text("[main]\\nreposdir=/etc/yum.repos.d\\nplugins=0\\n"
+                        "localpkg_gpgcheck=1\\n", encoding="ascii")
+        lock = root / "run/dnf/rpmtransaction.lock"
+        lock.parent.mkdir(parents=True, mode=0o700)
+        env = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"}
+        fd = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                     | os.O_CLOEXEC | os.O_NONBLOCK, 0o600)
+        try:
+            info = os.fstat(fd)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            refused = subprocess.run(argv, stdin=subprocess.DEVNULL,
+                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                     text=True, env=env, timeout=90, check=False)
+            output = refused.stdout.lower()
+            if (refused.returncode == 0 or "rpm transaction lock" not in output
+                    or "another transaction is in progress" not in output):
+                raise RuntimeError("Native DNF5 lock-specific refusal not proven: "
+                                   + refused.stdout[-1800:])
+            named = lock.lstat()
+            if ((named.st_dev, named.st_ino, named.st_nlink)
+                    != (info.st_dev, info.st_ino, 1)):
+                raise RuntimeError("DNF5 replaced a held native transaction lock")
+        finally:
+            os.close(fd)
+        positive = subprocess.run(argv, stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                  text=True, env=env, timeout=90, check=False)
+        if positive.returncode != 0:
+            raise RuntimeError("Native DNF5 TEST transaction failed after release: "
+                               + positive.stdout[-1800:])
+        if (_run(rpm + ["-qa", "--qf", "%{NAME}-%{VERSION}-%{RELEASE}\\n"]) != baseline
+                or (root / "usr/share/doc/repocache-ci-rpm-probe").exists()):
+            raise RuntimeError("DNF5 TEST unexpectedly changed isolated packages")
+        if os.path.lexists(lock):
+            named = lock.lstat()
+            lifecycle = ("retained" if (named.st_dev, named.st_ino)
+                         == (info.st_dev, info.st_ino) else "replaced")
+        else:
+            lifecycle = "removed"
+        print("PASS: actual DNF5 TEST transaction excluded by held private "
+              "rpmtransaction lock; succeeds after release; lock lifecycle="
+              + lifecycle, flush=True)
+        print("DNF5 fixture version: " + _run(["/usr/bin/dnf5", "--version"]).splitlines()[0],
+              flush=True)
 
 
 def _signed_fixture(base: Path, *, isolated_rpmdb: Path | None = None) -> tuple[Path, Path, bytes, Path]:
@@ -313,6 +416,8 @@ def _probe_signed_rpm(*, booted_vm: bool = False) -> None:
         base = Path(folder)
         (base / "www").mkdir()
         key, rpm_file, expected_bytes, rpmdb = _signed_fixture(base, isolated_rpmdb=isolated_rpmdb)
+        if booted_vm:
+            _probe_dnf_transaction_lock(rpm_file, key)
         certificate, private_key = native.temporary_tls_identity(base, "rpm")
         wrong_ca, _ = native.temporary_tls_identity(base, "foreign")
         primary = native.HTTPBackend(
