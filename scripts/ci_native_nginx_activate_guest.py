@@ -630,6 +630,250 @@ def verify_storage_after_recovery(distribution: str, native) -> None:
     print("PASS: owned storage metadata and actual NGINX mount boundaries verified after WAL recovery and reboot", flush=True)
 
 
+def verify_owned_service_data_fixture(distribution, native, assets, pins) -> None:
+    """Real installed systemd unit, private test-only routes and fixed storage.
+
+    The production socket still refuses active candidates. This disposable
+    guest isolates runtime storage/SELinux capability from authoritative
+    route exposure, and restores the exact prior committed include.
+    """
+    import base64
+    import collections
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import pwd
+    import ssl
+    import stat
+    import threading
+    from scripts.ci_pr237_native_socket_guest import https_response
+    from repocache.server_nginx_metrics_bundle_join_v1 import render_repository_nginx_metrics_join
+    from repocache.server_nginx_tls_listener_candidate_v1 import render_native_tls_listener_candidate
+
+    platform = {"debian": "debian13", "almalinux": "almalinux10"}[distribution]
+    assert os.getresuid() == (0, 0, 0) and os.getresgid() == (0, 0, 0)
+    assert socket.gethostname() == "pr237-" + platform
+    assert not Path("/.dockerenv").exists()
+    assert Path("/proc/1/comm").read_text().strip() == "systemd"
+    assert run("/usr/bin/systemd-detect-virt", "--vm").stdout.strip() in ("qemu", "kvm")
+    require_status(OWN, True, True)
+    require_status(VENDOR, False, False)
+    assert run("/usr/bin/systemctl", "is-active", "repocache-control.socket").stdout.strip() == "inactive"
+    assert run("/usr/bin/systemctl", "is-active", "repocache-control.service").stdout.strip() == "inactive"
+    if distribution == "almalinux":
+        assert run("/usr/sbin/getenforce").stdout.strip() == "Enforcing"
+    verified = native.stage.verify_installed_worker(assets, **pins)
+    assert verified["status"] == "AUTHENTICATED_WORKER_FILES_MATCH"
+    before = live_wal_resource_hashes()
+    prior = json.loads((STATE / "state-v2.json").read_bytes())
+    doc = json.loads(base64.b64decode(prior["configuration_base64"], validate=True))
+    assert all(row["desired_state"] == "disabled" for row in doc["repositories"])
+    assert doc["deployment"]["paths"]["cache_root"] == "/var/cache/nginx/repocache-managed"
+    assert doc["deployment"]["paths"]["log_root"] == "/var/log/nginx/repocache-managed"
+    doc["deployment"]["logging"]["metrics_opt_in"] = True
+    payloads = {}
+    for repo in doc["repositories"]:
+        name = repo["id"]
+        repo["desired_state"] = "active"
+        repo["upstream"] = {
+            "base_url": "https://cache.example.invalid/" + name + "/",
+            "allowed_hosts": ["cache.example.invalid"],
+        }
+        suffix = "fixture.deb" if repo["kind"] == "apt" else "fixture.rpm"
+        path = "/" + name + "/" + suffix
+        payloads[path] = ("REPOCACHE disposable " + name + "\\n").encode("ascii") * 64
+    names = sorted(repo["id"] for repo in doc["repositories"])
+
+    # Execute the newly signed module from the actual installed zipapp,
+    # after the fixture authenticated the same archive. The existing
+    # native lock and closed committed generation remain authoritative.
+    code = """
+import json, os, sys, zipimport
+sys.path.insert(0, "/usr/libexec/repocache/server-control-worker")
+from repocache import server_native_installed_storage_v1 as storage
+from repocache import server_native_v2_transaction_v1 as tx
+from repocache.server_protected_state_inspect_v1 import _DIRECTORY_FLAGS
+from repocache.server_protected_state_store_v1 import _locked
+from repocache.server_root_control_host_preflight_v1 import require_native_host_preconditions
+assert isinstance(storage.__loader__, zipimport.zipimporter)
+assert storage.__loader__.archive == "/usr/libexec/repocache/server-control-worker"
+assert require_native_host_preconditions()["initial_root_credentials_observed"] is True
+distribution, create = sys.argv[1:]
+root = os.open("/", _DIRECTORY_FLAGS)
+try:
+    with _locked(root, 0) as state:
+        tx._require_audited_native_package_for_activation(state, distribution=distribution)
+        with tx._owned_layout_locked(root, state, recovering=False) as layout:
+            old = tx._read_owned_resources(state, layout[1], layout[2])
+            snapshot = tx._validate_owned_resources(old)
+            tx._owned_socket_require_inactive_routes(snapshot)
+            identity = tx._owned_live_observe(root)
+            storage.verify_service_storage_mounts(identity[0])
+            report = storage.prepare_installed_repository_storage(
+                distribution, json.load(sys.stdin), allow_create=create == "create")
+            layout[3]()
+            assert tx._read_owned_resources(state, layout[1], layout[2]) == old
+            assert tx._owned_live_observe(root) == identity
+            print(json.dumps(report))
+finally:
+    os.close(root)
+"""
+    def prepare(create):
+        outcome = subprocess.run(
+            ["/usr/bin/python3", "-IS", "-B", "-c", code, distribution,
+             "create" if create else "verify"], input=json.dumps(doc), text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=90, check=False,
+            cwd="/", env={"PATH": "/usr/sbin:/usr/bin:/bin", "LC_ALL": "C"},
+        )
+        if outcome.returncode != 0:
+            import re
+            codes = re.findall(r"(?:INSTALLED_NGINX_STORAGE|NATIVE_V2|NATIVE_HOST)_[A-Z0-9_]+",
+                               outcome.stderr)
+            raise AssertionError("Signed storage fixture refused: " + ",".join(codes))
+        assert json.loads(outcome.stdout) == {
+            "repository_cache_roots_verified": names, "metrics_file_verified": True,
+            "selinux_enforcing_labels_verified": distribution == "almalinux",
+            "actual_service_write_verified": False,
+        }
+
+    prepare(True)
+    assert live_wal_resource_hashes() == before
+    cache = Path(doc["deployment"]["paths"]["cache_root"])
+    log = Path(doc["deployment"]["paths"]["log_root"]) / "metrics.jsonl"
+    assert log.read_bytes() == b""
+    worker = pwd.getpwnam("www-data" if distribution == "debian" else "nginx")
+    for name in names:
+        info = (cache / name).lstat()
+        assert stat.S_ISDIR(info.st_mode)
+        assert (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) == (
+            worker.pw_uid, worker.pw_gid, 0o700)
+    info = log.lstat()
+    assert (info.st_uid, info.st_gid, info.st_nlink, stat.S_IMODE(info.st_mode)) == (0, 0, 1, 0o600)
+    log_identity = (info.st_dev, info.st_ino)
+    ca = {"debian": "/etc/ssl/certs/ca-certificates.crt",
+          "almalinux": "/etc/pki/tls/certs/ca-bundle.crt"}[distribution]
+    bundle = render_repository_nginx_metrics_join(
+        doc, expected_state_generation=doc["expected_state_generation"],
+        candidate_pins_by_repository={name: {"cache.example.invalid": ["8.8.8.8"]}
+                                      for name in names},
+        ca_bundle_path=ca,
+    )
+    assert not bundle["authorizes_nginx_activation"]
+    assert bundle["http_fragment"].count("server 8.8.8.8:443;") == len(names)
+    # Only the disposable VM harness substitutes a fixed loopback origin.
+    # Production resolver and renderer continue to reject private pins.
+    http = bundle["http_fragment"].replace("server 8.8.8.8:443;", "server 127.0.0.1:8008;")
+    server = bundle["server_fragment"].replace(
+        "    proxy_cache_valid 200 60s;",
+        "    proxy_cache_valid 200 60s;\\n    add_header X-RepoCache-Smoke $upstream_cache_status always;",
+    )
+    tls = render_native_tls_listener_candidate(doc)["server_context_fragment"]
+    fixture = (http + "\\nserver {\\n" + tls + server
+               + "location / { return 404; }\\n}\\n").encode("ascii")
+    hits = collections.Counter()
+    class Origin(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+        def do_GET(self):
+            if self.path not in payloads:
+                self.send_error(404)
+                return
+            hits[self.path] += 1
+            payload = payloads[self.path]
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Cache-Control", "public, max-age=60")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+    backend = ThreadingHTTPServer(("127.0.0.1", 8008), Origin)
+    backend.daemon_threads = True
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(doc["deployment"]["tls"]["certificate_file"],
+                            doc["deployment"]["tls"]["private_key_file"])
+    backend.socket = context.wrap_socket(backend.socket, server_side=True)
+    thread = threading.Thread(target=backend.serve_forever, daemon=True)
+    thread.start()
+    include = OWN_CONFIG.parent / "repocache-managed.conf"
+    fd = os.open(include, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
+    old = os.fstat(fd)
+    assert (old.st_uid, old.st_gid, old.st_nlink, stat.S_IMODE(old.st_mode)) == (0, 0, 1, 0o644)
+    raw = os.pread(fd, old.st_size + 1, 0)
+    assert hashlib.sha256(raw).hexdigest() == before[str(include)]
+
+    def replace_include(data):
+        assert (include.lstat().st_dev, include.lstat().st_ino) == (old.st_dev, old.st_ino)
+        os.ftruncate(fd, 0)
+        assert os.pwrite(fd, data, 0) == len(data)
+        os.fsync(fd)
+
+    try:
+        assert run("/usr/bin/systemctl", "stop", OWN).returncode == 0
+        require_status(OWN, False, True)
+        replace_include(fixture)
+        started = run("/usr/bin/systemctl", "start", OWN)
+        if started.returncode != 0:
+            diagnostic = run("/usr/bin/journalctl", "-u", OWN, "-n", "20", "--no-pager")
+            print("STORAGE_FIXTURE_START_DIAGNOSTIC: " + diagnostic.stdout[-2400:], flush=True)
+            raise AssertionError("Actual dedicated service refused fixture configuration")
+        master = native._own_service_observation(active=True)["main_pid_observed"]
+        from repocache.server_native_installed_storage_v1 import verify_service_storage_mounts
+        verify_service_storage_mounts(master)
+        children = Path(f"/proc/{master}/task/{master}/children").read_text().split()
+        observed_worker = False
+        for pid in children:
+            if not Path(f"/proc/{pid}/cmdline").read_bytes().startswith(b"nginx: worker process"):
+                continue
+            fields = dict(line.split(":", 1) for line in
+                          Path(f"/proc/{pid}/status").read_text().splitlines() if ":" in line)
+            assert set(fields["Uid"].split()) == {str(worker.pw_uid)}
+            assert set(fields["Gid"].split()) == {str(worker.pw_gid)}
+            if distribution == "almalinux":
+                assert b":httpd_t:" in Path(f"/proc/{pid}/attr/current").read_bytes()
+            observed_worker = True
+        assert observed_worker
+        for path, payload in payloads.items():
+            for expected in (b"miss", b"hit"):
+                response = https_response("/__repocache/repos" + path)
+                header, body = response.split(b"\\r\\n\\r\\n", 1)
+                assert header.startswith(b"HTTP/1.1 200 "), header[:160]
+                assert b"x-repocache-smoke: " + expected in header.lower()
+                assert body == payload
+            assert hits[path] == 1
+        rows = [json.loads(line) for line in log.read_text().splitlines()]
+        assert len(rows) == 2 * len(names)
+        assert {row["upstream_cache_status"] for row in rows} == {"MISS", "HIT"}
+        assert {row["repocache_repository"] for row in rows} == {
+            "/__repocache/repos/" + name + "/" for name in names}
+        for name in names:
+            files = [p for p in (cache / name).rglob("*") if p.is_file()]
+            assert files and all(p.lstat().st_uid == worker.pw_uid for p in files)
+        assert (log.lstat().st_dev, log.lstat().st_ino) == log_identity
+        print("PASS: actual dedicated systemd NGINX worker writes fixed owned cache and metrics; MISS/HIT and exact fixture bytes", flush=True)
+    finally:
+        try:
+            assert run("/usr/bin/systemctl", "stop", OWN).returncode == 0
+            require_status(OWN, False, True)
+            replace_include(raw)
+            assert run("/usr/bin/systemctl", "start", OWN).returncode == 0
+        finally:
+            os.close(fd)
+            backend.shutdown()
+            backend.server_close()
+            thread.join(timeout=5)
+    assert live_wal_resource_hashes() == before
+    assert b"x-repocache-generation: 1" in https_response("/__repocache/healthz").lower()
+    history = log.read_bytes()
+    cache_before = {str(p.relative_to(cache)): hashlib.sha256(p.read_bytes()).hexdigest()
+                    for p in cache.rglob("*") if p.is_file()}
+    prepare(False)
+    prepare(True)
+    assert log.read_bytes() == history
+    assert cache_before == {str(p.relative_to(cache)): hashlib.sha256(p.read_bytes()).hexdigest()
+                            for p in cache.rglob("*") if p.is_file()}
+    assert live_wal_resource_hashes() == before
+    print("PASS: restored exact committed generation; repeat signed storage preparation retains cache/history", flush=True)
+
+
 def verify_guest(distribution: str, phase: str) -> None:
     assert os.getresuid() == (0, 0, 0)
     assert Path("/proc/1/comm").read_text().strip() == "systemd"
@@ -794,6 +1038,7 @@ def verify_guest(distribution: str, phase: str) -> None:
         verify_storage_after_recovery(distribution, native)
         verify_managed_installer_repeat(distribution, native, assets, pins)
         verify_inactive_managed_repair(distribution, native, assets, pins)
+        verify_owned_service_data_fixture(distribution, native, assets, pins)
         require_status(OWN, True, True)
         require_status(VENDOR, False, False)
         assert hashlib.sha256(VENDOR_CONFIG.read_bytes()).hexdigest() == original["vendor_config_sha256"]
@@ -801,7 +1046,7 @@ def verify_guest(distribution: str, phase: str) -> None:
         assert inspect_stock_nginx_package_file_integrity()[
             "native_package_file_integrity_verified"] is True
         print("PASS: separate REPOCACHE service survives real reboot with vendor service disabled and package integrity intact", flush=True)
-        print("NOT VERIFIED: active repository routes/storage, pending-WAL inactive recovery, final publisher-signed release", flush=True)
+        print("NOT VERIFIED: authoritative active repository transaction/catalog, pending-WAL inactive recovery, final publisher-signed release", flush=True)
     else:
         raise AssertionError("invalid test phase")
 

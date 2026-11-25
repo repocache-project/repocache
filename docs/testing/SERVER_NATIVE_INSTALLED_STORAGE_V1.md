@@ -58,3 +58,13 @@ No installed CLI/socket authorization or active-route exposure is added.
 The internal creation entry requires the authenticated caller's existing
 state lock; native signed host and confined real worker verification
 remain mandatory before enabling it from the fixed APPLY transaction.
+
+The booted signed-installation campaign exercises the actual installed
+zipapp preparation under the native state lock and actual dedicated
+systemd service with the fixed cache and metrics paths. A disposable
+VM-only loopback origin substitution tests MISS/HIT, exact payload bytes,
+worker UID/GID, enforcing httpd_t, and metrics writes. The socket remains
+stopped; the fixture restores the original managed include and requires
+the original committed generation, resource hashes and cache/history
+preservation on repeat. This does not exercise authoritative active
+repository APPLY/catalog publication and must not remove that guard.
