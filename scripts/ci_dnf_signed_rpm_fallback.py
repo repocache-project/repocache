@@ -267,9 +267,7 @@ def _private_dnf4_claim(root: Path):
     leaf = "rpmdb_lock.pid"
     staged = ".repocache-ci-rpmdb-lock.stage"
     expected = str(os.getpid()).encode("ascii")
-    dirfd = os.open(lock_dir, flags)
-    rpmfd = os.open(rpm_dir, flags)
-    fd = kernel = None
+    dirfd = rpmfd = fd = kernel = None
     published = False
     def identity(info):
         return (info.st_dev, info.st_ino, info.st_mode, info.st_uid,
@@ -281,9 +279,13 @@ def _private_dnf4_claim(root: Path):
         assert os.pread(fd, 32, 0) == expected
         assert identity(os.fstat(kernel)) == rpm_identity
         assert identity(os.stat(".rpm.lock", dir_fd=rpmfd, follow_symlinks=False)) == rpm_identity
-        assert os.stat(lock_dir).st_ino == os.fstat(dirfd).st_ino
-        assert os.stat(rpm_dir).st_ino == os.fstat(rpmfd).st_ino
+        for path, pinned in ((lock_dir, dirfd), (rpm_dir, rpmfd)):
+            actual = path.lstat()
+            held = os.fstat(pinned)
+            assert (actual.st_dev, actual.st_ino) == (held.st_dev, held.st_ino)
     try:
+        dirfd = os.open(lock_dir, flags)
+        rpmfd = os.open(rpm_dir, flags)
         # Atomic no-replace avoids publishing an empty PID file for another
         # native process to claim before our live owner bytes are durable.
         if os.path.lexists(lock_dir / leaf) or os.path.lexists(lock_dir / staged):

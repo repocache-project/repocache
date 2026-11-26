@@ -203,3 +203,49 @@ def test_native_transaction_command_retains_private_test_only_flags(
     assert "--setopt=tsflags=test,noscripts,notriggers,noplugins" in argv
     assert "--setopt=localpkg_gpgcheck=1" in argv
     assert argv[-2:] == ["install", str(package)]
+
+
+def test_private_dnf4_claim_requires_native_guard_before_any_io(monkeypatch):
+    from types import SimpleNamespace
+
+    def deny(platform):
+        assert platform == "almalinux10"
+        raise AssertionError("not a disposable enforcing VM")
+
+    monkeypatch.setitem(sys.modules, "ci_v06_vm_signed_client_guest",
+                        SimpleNamespace(guarded_native_guest=deny))
+    monkeypatch.setattr(rpm_probe, "_native_dnf_transaction_variant",
+                        lambda: pytest.fail("native manager reached before guard"))
+    monkeypatch.setattr(rpm_probe.os, "open", lambda *_a, **_kw:
+                        pytest.fail("PID claim reached before guard"))
+    with pytest.raises(AssertionError, match="not a disposable enforcing VM"):
+        with rpm_probe._private_dnf4_claim(Path("/")):
+            pytest.fail("guard bypassed")
+
+
+def test_private_dnf4_claim_refuses_host_root_before_open(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setitem(sys.modules, "ci_v06_vm_signed_client_guest",
+                        SimpleNamespace(guarded_native_guest=lambda _: None))
+    monkeypatch.setattr(rpm_probe, "_native_dnf_transaction_variant",
+                        lambda: ("/usr/bin/dnf", "dnf4"))
+    monkeypatch.setattr(rpm_probe.os, "open", lambda *_a, **_kw:
+                        pytest.fail("host lock reached"))
+    with pytest.raises(AssertionError):
+        with rpm_probe._private_dnf4_claim(Path("/")):
+            pytest.fail("host root accepted")
+
+
+def test_private_dnf4_claim_refuses_dnf5_before_open(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setitem(sys.modules, "ci_v06_vm_signed_client_guest",
+                        SimpleNamespace(guarded_native_guest=lambda _: None))
+    monkeypatch.setattr(rpm_probe, "_native_dnf_transaction_variant",
+                        lambda: ("/usr/bin/dnf5", "dnf5"))
+    monkeypatch.setattr(rpm_probe.os, "open", lambda *_a, **_kw:
+                        pytest.fail("wrong native lock reached"))
+    with pytest.raises(AssertionError):
+        with rpm_probe._private_dnf4_claim(Path("/var/lib/repocache-ci-dnf-root-fixture")):
+            pytest.fail("DNF5 misidentified as DNF4")
