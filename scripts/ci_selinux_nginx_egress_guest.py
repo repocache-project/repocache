@@ -6,6 +6,7 @@ vendor labels, global booleans or host firewall. No production installer.
 """
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import os
@@ -50,6 +51,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         with (root / 'origin-counts').open('a') as f:
             f.write(str(self.server.server_address[0]) + ':' +
                     str(self.server.server_address[1]) + '\n')
+        if self.path == '/rendered/apt/redirect':
+            self.send_response(302)
+            self.send_header('Location', 'https://unapproved.example.invalid/')
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return
         payload = b'REPOCACHE isolated SELinux egress fixture\n' * 32
         self.send_response(200)
         self.send_header('Content-Length', str(len(payload)))
@@ -323,6 +330,38 @@ def authenticated_vendor_digest():
     return digest
 
 
+def capability_policy(context, permission):
+    """Query the loaded enforcing kernel policy, not an optional CLI."""
+    if context.split(":")[2:3] != [DOMAIN] or permission not in ("setuid", "setgid"):
+        return "NOT_VERIFIED"
+    class Decision(ctypes.Structure):
+        _fields_ = [(name, ctypes.c_uint) for name in
+                    ("allowed", "decided", "auditallow", "auditdeny", "seqno", "flags")]
+    try:
+        lib = ctypes.CDLL("libselinux.so.1")
+        lib.security_getenforce.argtypes = ()
+        lib.security_getenforce.restype = ctypes.c_int
+        lib.string_to_security_class.argtypes = (ctypes.c_char_p,)
+        lib.string_to_security_class.restype = ctypes.c_ushort
+        lib.string_to_av_perm.argtypes = (ctypes.c_ushort, ctypes.c_char_p)
+        lib.string_to_av_perm.restype = ctypes.c_uint
+        lib.security_compute_av_flags_raw.argtypes = (
+            ctypes.c_char_p, ctypes.c_char_p, ctypes.c_ushort, ctypes.c_uint,
+            ctypes.POINTER(Decision))
+        lib.security_compute_av_flags_raw.restype = ctypes.c_int
+        klass = lib.string_to_security_class(b"capability")
+        perm = lib.string_to_av_perm(klass, permission.encode("ascii")) if klass else 0
+        decision = Decision()
+        raw = context.encode("ascii")
+        if (not perm or lib.security_getenforce() != 1
+                or lib.security_compute_av_flags_raw(raw, raw, klass, perm, ctypes.byref(decision))
+                or decision.flags & 1):
+            return "NOT_VERIFIED"
+        return "ALLOW" if decision.allowed & perm else "DENY"
+    except (OSError, ValueError, AttributeError):
+        return "NOT_VERIFIED"
+
+
 def start_diagnostics(unit, writable):
     """Bounded fixture-only diagnostics before cleanup removes evidence."""
     status = command("/usr/bin/systemctl", "show", unit, "-p", "ActiveState",
@@ -332,6 +371,7 @@ def start_diagnostics(unit, writable):
                       "-n", "60", "--output=short-monotonic", check=False)
     log = writable / "error.log"
     print("ISOLATED_START_STATUS: " + status.stdout[-2000:], flush=True)
+    context = ""
     main = command("/usr/bin/systemctl", "show", "-p", "MainPID", "--value", unit, check=False).stdout.strip()
     if main.isdigit() and int(main) > 1:
         proc = Path("/proc") / main
@@ -340,14 +380,14 @@ def start_diagnostics(unit, writable):
                       if line.split(":", 1)[0] in {"Uid", "Gid", "CapInh", "CapPrm", "CapEff",
                                                    "CapBnd", "CapAmb", "NoNewPrivs", "Seccomp"}]
             print("ISOLATED_MASTER_CREDENTIALS: " + " | ".join(fields), flush=True)
-            print("ISOLATED_MASTER_DOMAIN: " + (proc / "attr/current").read_text().strip("\0\n"), flush=True)
+            context = (proc / "attr/current").read_text().strip("\0\n")
+            print("ISOLATED_MASTER_DOMAIN: " + context, flush=True)
             print("ISOLATED_MASTER_UID_MAP: " + (proc / "uid_map").read_text().strip(), flush=True)
         except OSError:
             print("ISOLATED_MASTER_CREDENTIALS: NOT OBSERVED", flush=True)
     for cap in ("setgid", "setuid"):
-        lookup = command("/usr/bin/sesearch", "-A", "-s", DOMAIN, "-t", DOMAIN,
-                         "-c", "capability", "-p", cap, check=False)
-        print("ISOLATED_CAPABILITY_POLICY_" + cap.upper() + ": " + lookup.stdout[-1600:], flush=True)
+        print("ISOLATED_CAPABILITY_POLICY_" + cap.upper() + ": "
+              + capability_policy(context, cap), flush=True)
     print("ISOLATED_START_JOURNAL: " + journal.stdout[-5000:], flush=True)
     if log.is_file():
         print("ISOLATED_NGINX_ERROR: " + log.read_text(errors="replace")[-5000:], flush=True)
@@ -449,18 +489,86 @@ def nft_rules(uid, *, negative_port_probe=False, custom_https=False, root_master
     """
 
 
-def request(root, path):
+def request(root, path, *, method="GET"):
+    assert method in ("GET", "POST")
     assert path in ("allowed", "other-address", "other-port", "custom",
-                    "wrong-pair", "custom-live", "custom-after-withdrawal")
+                    "wrong-pair", "custom-live", "custom-after-withdrawal") or re.fullmatch(
+        r"__repocache/repos/fixture-(?:apt|dnf)/(?:payload|fresh|redirect)", path)
     result = command("/usr/sbin/ip", "netns", "exec", NS, "/usr/bin/curl",
                      "--silent", "--show-error", "--max-time", "8",
-                     "--noproxy", "*", "--cacert", str(root / "cert.pem"),
+                     "--noproxy", "*", "--request", method, "--cacert", str(root / "cert.pem"),
                      "--dump-header", str(root / "headers"),
                      "--output", str(root / "response"),
                      "--write-out", "%{http_code}",
                      f"https://127.0.0.1:{PORT}/{path}")
     return (int(result.stdout), (root / "response").read_bytes(),
             (root / "headers").read_text().lower())
+
+
+def render_signed_fixture_routes(root, *, dnf_enabled=True):
+    """Use the authenticated installed zipapp's actual candidate renderer.
+
+    Only the isolated harness substitutes the two loopback tuples after the
+    normal validator rejects private pins. No product validator is relaxed.
+    """
+    guard()
+    assert root.parent == Path("/var/lib") and root.name.startswith(PREFIX)
+    assert type(dnf_enabled) is bool
+    document = json.loads((Path(__file__).resolve().parents[1] /
+                           "docs/examples/server-install-v1.json").read_text("ascii"))
+    dep = document["deployment"]
+    dep["paths"]["cache_root"] = str(root / "runtime/cache")
+    dep["paths"]["log_root"] = str(root / "runtime/logs")
+    dep["paths"]["state_root"] = str(root / "state")
+    dep["paths"]["generated_include"] = str(root / "nginx.conf")
+    dep["tls"]["certificate_file"] = str(root / "cert.pem")
+    dep["tls"]["private_key_file"] = str(root / "key.pem")
+    dep["listen"]["https_port"] = PORT
+    assert sorted(repo["kind"] for repo in document["repositories"]) == ["apt", "dnf"]
+    pins = {}
+    for repo in document["repositories"]:
+        kind = repo["kind"]
+        ident = "fixture-" + kind
+        repo["id"] = ident
+        enabled = kind == "apt" or dnf_enabled
+        repo["desired_state"] = "active" if enabled else "disabled"
+        port = "" if kind == "apt" else ":8008"
+        repo["upstream"] = {"base_url": "https://cache.example.invalid" + port +
+                            "/rendered/" + kind + "/",
+                            "allowed_hosts": ["cache.example.invalid"]}
+        if enabled:
+            pins[ident] = {"cache.example.invalid": ["8.8.8.8"]}
+    # The surrounding probe has just authenticated the installed worker
+    # archive and its bytes against the synthetic release. Assert its loader.
+    code = """
+import json,sys,zipimport
+sys.path.insert(0, "/usr/libexec/repocache/server-control-worker")
+from repocache import server_nginx_repository_bundle_v1 as bundle
+assert isinstance(bundle.__loader__, zipimport.zipimporter)
+assert bundle.__loader__.archive == "/usr/libexec/repocache/server-control-worker"
+doc,pins,ca=json.load(sys.stdin)
+result=bundle.render_repository_nginx_bundle_candidate(
+    doc,expected_state_generation=doc["expected_state_generation"],
+    candidate_pins_by_repository=pins,ca_bundle_path=ca)
+print(json.dumps(result))
+"""
+    outcome = command("/usr/bin/python3", "-IS", "-B", "-c", code,
+                      input_text=json.dumps([document, pins, str(root / "cert.pem")]))
+    bundle = json.loads(outcome.stdout)
+    assert bundle["proposed_repository_ids"] == sorted(pins)
+    assert bundle["status"] == "MULTI_REPOSITORY_RENDER_CANDIDATE_ONLY"
+    assert bundle["authorizes_nginx_activation"] is False
+    assert bundle["authorizes_catalog_publication"] is False
+    http = bundle["http_upstream_fragment"]
+    assert http.count("server 8.8.8.8:443;") == 1
+    assert http.count("server 8.8.8.8:8008;") == int(dnf_enabled)
+    http = http.replace("server 8.8.8.8:443;", "server 127.0.0.1:443;")
+    http = http.replace("server 8.8.8.8:8008;", "server 127.0.0.2:8008;")
+    locations = bundle["server_location_fragment"]
+    marker = "    proxy_cache_valid 200 60s;\n"
+    assert locations.count(marker) == len(pins)
+    locations = locations.replace(marker, marker + "    add_header X-Cache $upstream_cache_status always;\n")
+    return http, locations
 
 
 def process_identity(pid, executable, uid, gid, *, capabilities=0, bounding=None):
@@ -554,6 +662,9 @@ def probe(vendor_digest=None, *, root_master=False, signed_derived=False):
             path.mkdir(mode=0o700)
             # Root master must itself perform NGINX native ownership setup.
             os.chown(path, master_uid, master_gid)
+        legacy = writable / "cache/legacy"
+        legacy.mkdir(mode=0o700)
+        os.chown(legacy, master_uid, master_gid)
         pid_dir = root / "pid" if root_master or signed_derived else writable
         if root_master or signed_derived:
             pid_dir.mkdir(mode=0o750)
@@ -567,7 +678,7 @@ def probe(vendor_digest=None, *, root_master=False, signed_derived=False):
         command("/usr/bin/openssl", "req", "-x509", "-newkey", "rsa:2048",
                 "-nodes", "-days", "1", "-keyout", str(key), "-out", str(cert),
                 "-subj", "/CN=localhost",
-                "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1")
+                "-addext", "subjectAltName=DNS:localhost,DNS:cache.example.invalid,IP:127.0.0.1")
         os.chown(key, 0, account.pw_gid)
         key.chmod(0o640)
         cert.chmod(0o644)
@@ -595,6 +706,13 @@ location = /{name} {{
     add_header X-Cache $upstream_cache_status always;
 }}
 """
+        rendered_http, rendered_locations = "", ""
+        if signed_derived:
+            for kind in ("apt", "dnf"):
+                directory = writable / "cache" / ("fixture-" + kind)
+                directory.mkdir(mode=0o700)
+                os.chown(directory, account.pw_uid, account.pw_gid)
+            rendered_http, rendered_locations = render_signed_fixture_routes(root)
         conf.write_text(f"""
 daemon {'on' if root_master or signed_derived else 'off'};
 {'user nginx nginx;' if root_master else ''}
@@ -610,13 +728,16 @@ proxy_temp_path {writable}/proxy;
 fastcgi_temp_path {writable}/fastcgi;
 scgi_temp_path {writable}/scgi;
 uwsgi_temp_path {writable}/uwsgi;
-proxy_cache_path {writable}/cache levels=1:2 keys_zone=fixture:1m use_temp_path=off;
+proxy_cache_path {writable}/cache/legacy levels=1:2 keys_zone=fixture:1m use_temp_path=off;
+{rendered_http}
 server {{
 listen 127.0.0.1:{PORT} ssl;
 ssl_certificate {cert};
 ssl_certificate_key {key};
 location = /health {{ return 204; }}
 {locations}
+{rendered_locations}
+location / {{ return 404; }}
 }}
 }}
 """, encoding="ascii")
@@ -813,13 +934,80 @@ location = /health {{ return 204; }}
                 assert any(p.is_file() for p in (writable / "cache").rglob("*"))
                 assert command("/usr/sbin/getenforce").stdout.strip() == "Enforcing"
                 if signed_derived:
+                    # Actual signed render fragments, same authenticated
+                    # executable and native unit. Observe real cache files.
+                    before_hits = (root / "origin-counts").read_text().splitlines()
+                    apt = "__repocache/repos/fixture-apt/"
+                    dnf = "__repocache/repos/fixture-dnf/"
+                    first, second = request(root, apt + "payload"), request(root, apt + "payload")
+                    assert first[:2] == second[:2] == (200, PAYLOAD)
+                    assert "x-cache: miss" in first[2] and "x-cache: hit" in second[2]
+                    assert request(root, apt + "payload", method="POST")[0] == 403
+                    assert request(root, apt + "redirect")[0] == 502
+                    assert request(root, dnf + "payload")[0] == 502
+                    assert (root / "origin-counts").read_text().splitlines() == before_hits + [
+                        "127.0.0.1:443", "127.0.0.1:443"]
+                    command("/usr/sbin/ip", "netns", "exec", NS, "/usr/sbin/nft", "-f", "-",
+                            input_text="delete table inet repocache_ci\n" + packet_rules(custom_https=True))
+                    first, second = request(root, dnf + "payload"), request(root, dnf + "payload")
+                    assert first[:2] == second[:2] == (200, PAYLOAD)
+                    assert "x-cache: miss" in first[2] and "x-cache: hit" in second[2]
+                    assert (root / "origin-counts").read_text().splitlines() == before_hits + [
+                        "127.0.0.1:443", "127.0.0.1:443", "127.0.0.2:8008"]
+                    for kind in ("apt", "dnf"):
+                        assert any(p.is_file() for p in
+                                   (writable / "cache" / ("fixture-" + kind)).rglob("*"))
+                    # New complete candidate omits DNF. Replace only this
+                    # root-owned private config; retain the old file label.
+                    next_http, next_locations = render_signed_fixture_routes(root, dnf_enabled=False)
+                    old_conf = conf.read_text("ascii")
+                    assert old_conf.count(rendered_http) == old_conf.count(rendered_locations) == 1
+                    new_conf = old_conf.replace(rendered_http, next_http).replace(
+                        rendered_locations, next_locations)
+                    staged = root / ".nginx.conf.next"
+                    with staged.open("xb") as stream:
+                        os.fchmod(stream.fileno(), 0o644)
+                        stream.write(new_conf.encode("ascii"))
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    command("/usr/bin/chcon", "--reference=" + str(conf), str(staged))
+                    assert staged.stat().st_uid == 0 and not staged.is_symlink()
+                    os.replace(staged, conf)
+                    directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                    try:
+                        os.fsync(directory)
+                    finally:
+                        os.close(directory)
+                    former = workers(pid, executable, account.pw_uid, account.pw_gid, bounding=bounding)
+                    assert len(former) == 1
+                    command("/usr/bin/systemctl", "reload", unit)
+                    for _ in range(100):
+                        assert process_identity(pid, executable, account.pw_uid, account.pw_gid,
+                                                bounding=bounding) == master
+                        live = workers(pid, executable, account.pw_uid, account.pw_gid, bounding=bounding)
+                        if len(live) == 1 and not live & former:
+                            break
+                        time.sleep(0.1)
+                    else:
+                        raise AssertionError("Rendered route withdrawal did not drain old worker")
+                    command("/usr/sbin/ip", "netns", "exec", NS, "/usr/sbin/nft", "-f", "-",
+                            input_text="delete table inet repocache_ci\n" + packet_rules())
+                    assert request(root, dnf + "payload")[0] == 404
+                    assert request(root, dnf + "fresh")[0] == 404
+                    assert request(root, apt + "fresh")[:2] == (200, PAYLOAD)
+                    assert (root / "origin-counts").read_text().splitlines() == before_hits + [
+                        "127.0.0.1:443", "127.0.0.1:443", "127.0.0.2:8008", "127.0.0.1:443"]
+                    print("PASS: authenticated installed renderer APT/DNF private routes; TLS MISS/HIT, POST/redirect refusal, DNF withdrawal after worker drain, APT fresh access", flush=True)
                     assert int(pid_file.read_text()) == pid and pid_file.stat().st_uid == account.pw_uid
                     print("PASS: authenticated signed-unit-derived nonroot forking lifecycle, native ExecStartPre and ExecReload; confined HTTPS cache", flush=True)
                 print("PASS: dedicated enforcing NGINX domain, verified HTTPS MISS/HIT, "
                       "SELinux non-HTTP-port refusal and independent exact-address refusal", flush=True)
             except Exception:
                 if started:
-                    start_diagnostics(unit, writable)
+                    try:
+                        start_diagnostics(unit, writable)
+                    except Exception as diagnostic:
+                        print("ISOLATED_START_DIAGNOSTICS_NOT_VERIFIED: " + type(diagnostic).__name__, flush=True)
                     if root_master:
                         try:
                             credential_probe(root, account)

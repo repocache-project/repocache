@@ -318,3 +318,21 @@ ExecStartPre/ExecStart/ExecReload/ExecStop lifecycle and hardening directives.
 It tests positive and negative TLS/cache/egress, native reload and exact
 runtime unit removal; it does not change or enable the installed signed
 unit, adopt a new production architecture or waive the failing root probe.
+
+The prior exact AlmaLinux run established the signed-unit-derived nonroot
+forking lifecycle, native reload/stop and unchanged signed installed unit.
+The privileged master was active but CapEff/CapPrm were 0x61 while CapBnd
+was 0xe1: CAP_SETUID was missing. The cause is not yet established. Replace
+the unavailable sesearch command with a loaded-kernel libselinux capability
+decision, and ensure an optional diagnostic failure cannot prevent the
+credential canary or conceal the original start failure.
+
+The successful nonroot derived lifecycle now additionally executes the
+authenticated installed worker's actual closed repository renderer on a
+fixed private APT/DNF document. Only after normal validation does the
+harness replace the two public dummy pins with exact private loopback
+tuples. It checks per-repository HTTPS MISS/HIT and cache files, rejects
+POST and upstream redirect, and withdraws DNF with a new rendered
+candidate, real reload and old-worker drain while APT remains usable.
+The fixture does not publish a catalog, mutate the installed signed unit,
+grant an operational route, or validate a production egress transaction.
