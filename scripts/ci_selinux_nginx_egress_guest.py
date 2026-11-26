@@ -30,6 +30,9 @@ VENDOR = Path("/usr/sbin/nginx")
 ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"}
 PORT = 8443
 PAYLOAD = b"REPOCACHE isolated SELinux egress fixture\n" * 32
+# CHOWN, KILL, SETGID, SETUID only; no DAC bypass or network administration.
+MASTER_CAPS = (1 << 0) | (1 << 5) | (1 << 6) | (1 << 7)
+MASTER_CAP_NAMES = "CAP_CHOWN CAP_KILL CAP_SETGID CAP_SETUID"
 
 # Fixed origins and negative canaries inside the new namespace.
 # The custom HTTPS port is tested without changing stock port labels.
@@ -166,7 +169,7 @@ def installed_modules():
     return command("/usr/sbin/semodule", "-l").stdout
 
 
-def nft_rules(uid, *, negative_port_probe=False, custom_https=False):
+def nft_rules(uid, *, negative_port_probe=False, custom_https=False, root_master=False):
     """The namespace has no external links; deny new nonapproved UID flows.
 
     5432 is intentionally allowed by the independent packet filter ONLY
@@ -175,18 +178,22 @@ def nft_rules(uid, *, negative_port_probe=False, custom_https=False):
     """
     assert type(uid) is int and 0 < uid < 2**31
     assert type(negative_port_probe) is bool
-    assert type(custom_https) is bool
+    assert type(custom_https) is bool and type(root_master) is bool
     ports = "{443,5432}" if negative_port_probe else "443"
     custom_rule = (f"meta skuid {uid} ip daddr 127.0.0.2 tcp dport 8008 accept"
                    if custom_https else "")
+    root_rules = (f"ct state established,related accept\n"
+                  f"meta skuid 0 ip daddr 127.0.0.1 tcp dport {PORT} accept"
+                  if root_master else "")
     return f"""table inet repocache_ci {{
         counter denied {{ }}
         chain output {{
-            type filter hook output priority 0; policy accept;
+            type filter hook output priority 0; policy {'drop' if root_master else 'accept'};
+            {root_rules}
             meta skuid {uid} ct state established,related accept
             meta skuid {uid} ip daddr 127.0.0.1 tcp dport {ports} accept
             {custom_rule}
-            meta skuid {uid} counter name denied reject
+            {"" if root_master else f"meta skuid {uid}"} counter name denied reject
         }}
     }}
     """
@@ -206,7 +213,7 @@ def request(root, path):
             (root / "headers").read_text().lower())
 
 
-def process_identity(pid, executable, uid, gid):
+def process_identity(pid, executable, uid, gid, *, capabilities=0, bounding=None):
     """Bind the observed fixture process to its copied package executable."""
     assert type(pid) is int and pid > 1
     proc = Path("/proc") / str(pid)
@@ -218,8 +225,11 @@ def process_identity(pid, executable, uid, gid):
     fields = dict(line.split(":", 1) for line in
                   (proc / "status").read_text().splitlines() if ":" in line)
     assert fields["NoNewPrivs"].strip() == "1"
-    assert int(fields["CapEff"].strip(), 16) == 0
-    assert int(fields["CapPrm"].strip(), 16) == 0
+    assert int(fields["CapEff"].strip(), 16) == capabilities
+    assert int(fields["CapPrm"].strip(), 16) == capabilities
+    assert int(fields["CapAmb"].strip(), 16) == 0
+    if bounding is not None:
+        assert int(fields["CapBnd"].strip(), 16) == bounding
     assert set(fields["Uid"].split()) == {str(uid)}
     assert set(fields["Gid"].split()) == {str(gid)}
     assert (proc / "ns/net").stat().st_ino == Path("/run/netns", NS).stat().st_ino
@@ -227,7 +237,7 @@ def process_identity(pid, executable, uid, gid):
     return (pid, (proc / "stat").read_text().rsplit(")", 1)[1].split()[19])
 
 
-def workers(master, executable, uid, gid):
+def workers(master, executable, uid, gid, *, bounding):
     children = (Path("/proc") / str(master) / "task" / str(master) / "children")
     result = set()
     for item in children.read_text().split():
@@ -235,15 +245,16 @@ def workers(master, executable, uid, gid):
         try:
             if (Path("/proc") / item / "cmdline").read_bytes().startswith(
                     b"nginx: worker process"):
-                result.add(process_identity(pid, executable, uid, gid))
+                result.add(process_identity(pid, executable, uid, gid, bounding=bounding))
         except FileNotFoundError:
             # A worker can exit while its replacement starts. Poll again.
             continue
     return result
 
 
-def probe():
+def probe(*, root_master=False):
     guard()
+    assert type(root_master) is bool
     modules_before = installed_modules()
     assert MODULE not in {line.split()[0] for line in modules_before.splitlines() if line}
     assert not Path("/run/netns", NS).exists()
@@ -262,6 +273,10 @@ def probe():
                 os.getxattr(VENDOR, "security.selinux"))
     account = pwd.getpwnam("nginx")
     assert account.pw_uid != 0 and account.pw_gid != 0
+    master_uid, master_gid = (0, 0) if root_master else (account.pw_uid, account.pw_gid)
+    bounding = MASTER_CAPS if root_master else 0
+    def packet_rules(**kwargs):
+        return nft_rules(account.pw_uid, root_master=root_master, **kwargs)
     loaded = False
     namespace = False
     started = False
@@ -272,12 +287,13 @@ def probe():
         assert root.resolve(strict=True) == root and root.stat().st_uid == 0
         root.chmod(0o755)
         writable = root / "runtime"
-        writable.mkdir(mode=0o750)
-        os.chown(writable, account.pw_uid, account.pw_gid)
+        writable.mkdir(mode=0o755 if root_master else 0o750)
+        os.chown(writable, master_uid, master_gid)
         for name in ("body", "proxy", "fastcgi", "scgi", "uwsgi", "cache"):
             path = writable / name
             path.mkdir(mode=0o700)
-            os.chown(path, account.pw_uid, account.pw_gid)
+            # Root master must itself perform NGINX native ownership setup.
+            os.chown(path, master_uid, master_gid)
         executable = root / "nginx"
         shutil.copyfile(VENDOR, executable)
         executable.chmod(0o755)
@@ -315,7 +331,8 @@ location = /{name} {{
 }}
 """
         conf.write_text(f"""
-daemon off;
+daemon {'on' if root_master else 'off'};
+{'user nginx nginx;' if root_master else ''}
 master_process on;
 worker_processes 1;
 pid {writable}/nginx.pid;
@@ -359,7 +376,7 @@ location = /health {{ return 204; }}
                 namespace = True
                 command("/usr/sbin/ip", "-n", NS, "link", "set", "lo", "up")
                 command("/usr/sbin/ip", "netns", "exec", NS, "/usr/sbin/nft",
-                        "-f", "-", input_text=nft_rules(account.pw_uid, negative_port_probe=True))
+                        "-f", "-", input_text=packet_rules(negative_port_probe=True))
                 origin = subprocess.Popen(
                     ["/usr/sbin/ip", "netns", "exec", NS, "/usr/bin/python3",
                      "-I", "-c", ORIGIN, str(root)], env=ENV,
@@ -372,12 +389,19 @@ location = /health {{ return 204; }}
                     time.sleep(0.1)
                 else:
                     raise AssertionError("Origin not ready")
-                # NoNewPrivileges plus native init domain transition, no
-                # capabilities, no root service process, dedicated network.
+                # Preserve the zero-capability baseline, then separately test
+                # the packaged service's forking root-master lifecycle.
                 started = True
-                command("/usr/bin/systemd-run", "--unit=" + UNIT, "--property=Type=exec",
-                        "--property=User=nginx", "--property=Group=nginx",
-                        "--property=NoNewPrivileges=yes", "--property=CapabilityBoundingSet=",
+                service_properties = [
+                    "--property=Type=forking", "--property=PIDFile=" + str(writable / "nginx.pid"),
+                    "--property=User=root", "--property=Group=root",
+                    "--property=CapabilityBoundingSet=" + MASTER_CAP_NAMES,
+                ] if root_master else [
+                    "--property=Type=exec", "--property=User=nginx", "--property=Group=nginx",
+                    "--property=CapabilityBoundingSet=",
+                ]
+                command("/usr/bin/systemd-run", "--unit=" + UNIT, *service_properties,
+                        "--property=NoNewPrivileges=yes", "--property=UMask=0027",
                         "--property=ProtectSystem=strict",
                         "--property=ReadWritePaths=" + str(writable),
                         "--property=NetworkNamespacePath=/run/netns/" + NS,
@@ -402,10 +426,24 @@ location = /health {{ return 204; }}
                                                    if (writable / "error.log").is_file() else ""))
                 pid = int(command("/usr/bin/systemctl", "show", "--value",
                                   "-p", "MainPID", UNIT).stdout)
-                master = process_identity(pid, executable, account.pw_uid, account.pw_gid)
+                master = process_identity(pid, executable, master_uid, master_gid,
+                                          capabilities=bounding, bounding=bounding)
+                if root_master:
+                    assert int((writable / "nginx.pid").read_text()) == pid
+                    assert (writable / "nginx.pid").stat().st_uid == 0
+                    assert all((writable / name).stat().st_uid == account.pw_uid
+                               for name in ("body", "proxy", "fastcgi", "scgi", "uwsgi", "cache"))
+                    # Root cannot bypass the namespace-local egress filter.
+                    denied = command("/usr/sbin/ip", "netns", "exec", NS, "/usr/bin/curl",
+                                     "--silent", "--max-time", "2", "--noproxy", "*",
+                                     "--cacert", str(cert), "https://127.0.0.1:443/fixture",
+                                     check=False)
+                    assert denied.returncode != 0
+                    assert not (root / "origin-counts").exists()
                 assert Path(f"/proc/{pid}/cmdline").read_bytes().startswith(b"nginx: master process")
                 for _ in range(100):
-                    previous_workers = workers(pid, executable, account.pw_uid, account.pw_gid)
+                    previous_workers = workers(pid, executable, account.pw_uid, account.pw_gid,
+                                               bounding=bounding)
                     if len(previous_workers) == 1:
                         break
                     time.sleep(0.1)
@@ -428,7 +466,7 @@ location = /health {{ return 204; }}
                 # in one atomic namespace-local nft transaction.
                 command("/usr/sbin/ip", "netns", "exec", NS, "/usr/sbin/nft",
                         "-f", "-", input_text="delete table inet repocache_ci\n"
-                        + nft_rules(account.pw_uid))
+                        + packet_rules())
                 assert request(root, "allowed")[:2] == (200, PAYLOAD)
                 assert request(root, "other-address")[0] == 502
                 assert request(root, "other-port")[0] == 502
@@ -438,7 +476,7 @@ location = /health {{ return 204; }}
                 assert request(root, "custom")[0] == 502
                 command("/usr/sbin/ip", "netns", "exec", NS, "/usr/sbin/nft",
                         "-f", "-", input_text="delete table inet repocache_ci\n"
-                        + nft_rules(account.pw_uid, custom_https=True))
+                        + packet_rules(custom_https=True))
                 custom_first = request(root, "custom")
                 custom_second = request(root, "custom")
                 assert custom_first[:2] == custom_second[:2] == (200, PAYLOAD)
@@ -464,9 +502,10 @@ location = /health {{ return 204; }}
                 command("/usr/bin/systemctl", "kill", "--kill-whom=main",
                         "--signal=HUP", UNIT)
                 for _ in range(100):
-                    assert process_identity(pid, executable, account.pw_uid,
-                                            account.pw_gid) == master
-                    current_workers = workers(pid, executable, account.pw_uid, account.pw_gid)
+                    assert process_identity(pid, executable, master_uid, master_gid,
+                                            capabilities=bounding, bounding=bounding) == master
+                    current_workers = workers(pid, executable, account.pw_uid, account.pw_gid,
+                                              bounding=bounding)
                     if len(current_workers) == 1 and not current_workers & previous_workers:
                         break
                     time.sleep(0.1)
@@ -477,13 +516,14 @@ location = /health {{ return 204; }}
                 assert (root / "origin-counts").read_text().splitlines() == [
                     "127.0.0.1:443", "127.0.0.2:8008", "127.0.0.2:8008",
                     "127.0.0.2:8008"]
-                print("PASS: confined nonroot NGINX master/worker reload, executable inode "
-                      "and domain continuity; fresh positive/negative egress", flush=True)
+                print("PASS: confined " + ("limited-capability root master" if root_master else "nonroot NGINX master") +
+                      "/worker reload, executable inode and domain continuity; "
+                      "fresh positive/negative egress", flush=True)
                 # Withdraw the custom tuple. The uncached location tests a
                 # fresh upstream connect, not the already cached response.
                 command("/usr/sbin/ip", "netns", "exec", NS, "/usr/sbin/nft",
                         "-f", "-", input_text="delete table inet repocache_ci\n"
-                        + nft_rules(account.pw_uid))
+                        + packet_rules())
                 assert request(root, "custom-after-withdrawal")[0] == 502
                 assert request(root, "allowed")[:2] == (200, PAYLOAD)
                 assert (root / "origin-counts").read_text().splitlines() == [
@@ -525,3 +565,4 @@ location = /health {{ return 204; }}
 
 if __name__ == "__main__":
     probe()
+    probe(root_master=True)

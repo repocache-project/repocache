@@ -276,3 +276,14 @@ envelope is not a release asset, and no policy files are added to the product
 inventory or installed by the production installer. This does not authenticate
 the native RPM payload independently, authorize an installed service
 transition, or replace the outstanding signed installed-service acceptance.
+
+The same authenticated temporary module is also tested with an independent
+forking root-master lifecycle, the four-capability bounding set CHOWN,
+KILL, SETGID and SETUID, and zero effective/permitted/ambient worker
+capabilities. NGINX must itself assign its private cache/temp directories to
+the worker account and retain a root-owned PID file. The private namespace
+uses default-deny fresh egress including root (only root health requests to
+the fixed listener and exact worker upstream tuples allowed). A root-origin
+negative connection, cache MISS/HIT, HUP worker replacement and tuple
+withdrawal must all pass; the original zero-capability probe remains.
+This is an isolated fixture, not a transition of the installed signed unit.

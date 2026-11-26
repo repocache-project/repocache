@@ -189,7 +189,7 @@ def _debian_fixture(root: Path) -> None:
                 if active == phase:
                     os.kill(os.getpid(), signal.SIGKILL)
             pair._crash = kill_at
-            pair.apply_catalog_bound_sandbox(root, ident, crash="source")
+            pair.apply_retaining_apt_companion_sandbox(root, ident, crash="source")
             os._exit(77)
         _, status = os.waitpid(pid, 0)
         assert os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGKILL
@@ -206,8 +206,11 @@ def _debian_fixture(root: Path) -> None:
     restored = _snapshot(source)
     assert restored[0] == original[0]
     assert restored[3:6] == original[3:6] and restored[-1] == original[-1]
-    assert not mirror.exists()
-    print("PASS: Debian booted root exact HTTPS preparation/approval and sandbox SIGKILL restore")
+    assert mirror.read_bytes() == (record["upstream"] + "\tpriority:1\n").encode("ascii")
+    retained = _snapshot(mirror)
+    assert pair.recover_sandbox(root, ident)["status"] == "restored"
+    assert _snapshot(mirror) == retained
+    print("PASS: Debian booted root exact HTTPS preparation/approval and sandbox SIGKILL restore with retained upstream-only companion")
 
 
 def _alma_label_refusal(root: Path) -> None:

@@ -13,6 +13,10 @@ type repocache_ci_nginx_rw_t;
 files_type(repocache_ci_nginx_rw_t)
 
 allow repocache_ci_nginx_t self:process { signal_perms setrlimit };
+# Separate root-master VM probe: only the capabilities required to set up
+# owned paths, drop worker credentials and signal workers. The nonroot
+# unit still has an empty capability bounding set.
+allow repocache_ci_nginx_t self:capability { chown kill setgid setuid };
 allow repocache_ci_nginx_t self:tcp_socket create_stream_socket_perms;
 allow repocache_ci_nginx_t self:unix_stream_socket create_stream_socket_perms;
 allow repocache_ci_nginx_t self:fifo_file rw_fifo_file_perms;
