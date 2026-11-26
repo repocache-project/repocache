@@ -6,6 +6,7 @@ Test files live under an isolated 0700 /tmp tree and require real UID 0.
 """
 from __future__ import annotations
 
+import errno
 import fcntl
 import hashlib
 import json
@@ -457,6 +458,84 @@ def retained_apt_matrix(with_metadata=False):
             print(f"apt: retained companion schema-{schema} recovery {point} PASS", flush=True)
 
 
+def incomplete_journal_matrix(manager):
+    """Inject ENOSPC at the pending journal fsync, not on the runner disk.
+
+    Every public sandbox entry must preserve the last committed journal,
+    incomplete pending file, and source/companion/staging inodes. A prior
+    installed/restored-looking snapshot is not sufficient recovery proof.
+    """
+    cases = (("apply", 1, None), ("apply", 2, "armed"),
+             ("restore", 1, "installed"), ("restore", 2, "restore-armed"))
+    if manager == "apt":
+        cases += (("restore", 3, "restore-armed"),)
+    for action, fail_at, prior_phase in cases:
+        with tempfile.TemporaryDirectory(prefix="repocache-pair-io-fault-") as place:
+            root = Path(place)
+            source, mirror, _, state = build(root, manager)
+            original = source.read_bytes()
+            pending = state / pair._pending_journal_name(IDENT)
+            journal = state / pair._journal_name(IDENT)
+            def apply():
+                if manager == "apt":
+                    return pair.apply_retaining_apt_companion_sandbox(
+                        root, IDENT, current_catalog=False)
+                return pair.apply_sandbox(root, IDENT)
+            def restore():
+                return pair.restore_sandbox(root, IDENT)
+            if action == "restore":
+                assert apply()["status"] == "installed-sandbox"
+            actual_fsync = os.fsync
+            calls = 0
+            def fail_pending(fd):
+                nonlocal calls
+                # Only the exact new regular journal file in this private
+                # fixture is subject to the simulated kernel error.
+                if os.readlink("/proc/self/fd/" + str(fd)) == str(pending):
+                    calls += 1
+                    if calls == fail_at:
+                        raise OSError(errno.ENOSPC, "injected pending journal fsync")
+                actual_fsync(fd)
+            try:
+                os.fsync = fail_pending
+                try:
+                    (apply if action == "apply" else restore)()
+                except (OSError, pair.PairRefused) as exc:
+                    cause = exc if isinstance(exc, OSError) else exc.__cause__
+                    assert isinstance(cause, OSError) and cause.errno == errno.ENOSPC
+                else:
+                    raise AssertionError("Pending journal fsync error was accepted")
+            finally:
+                os.fsync = actual_fsync
+            assert calls == fail_at and pending.is_file()
+            assert pending.stat().st_uid == 0 and pending.stat().st_mode & 0o777 == 0o600
+            if prior_phase is None:
+                assert not journal.exists() and source.read_bytes() == original
+                assert not mirror.exists()
+            else:
+                assert json.loads(journal.read_text())["phase"] == prior_phase
+            def snapshot():
+                # All regular fixture files, including exact staged and
+                # pending inodes. Never follow links or examine host data.
+                return {str(path.relative_to(root)): (
+                    path.stat().st_dev, path.stat().st_ino, path.stat().st_uid,
+                    path.stat().st_gid, path.stat().st_mode,
+                    path.read_bytes(), tuple(sorted(
+                        (key, os.getxattr(path, key)) for key in os.listxattr(path))))
+                        for path in root.rglob("*") if path.is_file()}
+            before = snapshot()
+            for operation in (lambda: pair.recover_sandbox(root, IDENT), apply, restore):
+                try:
+                    operation()
+                except pair.PairRefused as exc:
+                    assert str(exc) == "Pending journal requires manual recovery"
+                else:
+                    raise AssertionError("Incomplete journal was treated as clean")
+                assert snapshot() == before
+            print(f"{manager}: pending journal {action} fsync {fail_at} ENOSPC refusal and inode preservation PASS",
+                  flush=True)
+
+
 if __name__ == "__main__":
     if (len(sys.argv) != 2 or sys.argv[1] not in ("apt", "dnf")
             or os.geteuid() != 0 or
@@ -469,6 +548,7 @@ if __name__ == "__main__":
     sigkill_recovery(manager)
     sigkill_restore(manager)
     hostile(manager)
+    incomplete_journal_matrix(manager)
     if manager == "apt":
         retained_apt_matrix()
         retained_apt_matrix(with_metadata=True)
