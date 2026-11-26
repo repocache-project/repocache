@@ -287,3 +287,16 @@ the fixed listener and exact worker upstream tuples allowed). A root-origin
 negative connection, cache MISS/HIT, HUP worker replacement and tuple
 withdrawal must all pass; the original zero-capability probe remains.
 This is an isolated fixture, not a transition of the installed signed unit.
+
+The first forking root-master attempt timed out during transient unit start.
+The corrected fixture uses a distinct unit and root-owned separately labelled
+PID directory, granting init only the fixture PID read/search permissions.
+The systemd start is asynchronous with a bounded active+health check and
+captures scoped status, journal, NGINX errors and relevant AVCs before
+cleanup. The PID-label hypothesis remains subject to real native evidence.
+Before either probe, the fixture independently queries signed official AlmaLinux
+metadata for the exact installed nginx-core NEVRA, downloads only that HTTPS
+RPM, verifies its signature with the distro key in an isolated RPMDB and
+compares the signed SHA-256 executable digest against the installed bytes.
+Unavailable exact payload or mismatched trust/identity refuses the test;
+no package installation, host RPMDB change or shipped policy is authorized.

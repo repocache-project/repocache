@@ -24,6 +24,7 @@ import time
 MODULE = "repocache_ci_nginx"
 DOMAIN = MODULE + "_t"
 UNIT = "repocache-ci-nginx-egress.service"
+ROOT_UNIT = "repocache-ci-nginx-root-egress.service"
 NS = "repocache-ci-nginx-egress"
 PREFIX = "repocache-ci-selinux-"
 VENDOR = Path("/usr/sbin/nginx")
@@ -165,6 +166,86 @@ def authenticated_policy():
     return result
 
 
+def authenticated_vendor_digest():
+    """Independently verify the installed executable against a signed RPM.
+
+    No package install, system RPMDB import, third-party repo or executable
+    extraction. Use the existing distribution-specific signed metadata profile.
+    """
+    guard()
+    sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
+                    str(Path(__file__).resolve().parents[1])]
+    from repocache.server_native_package_trust_v1 import _dnf_commands, _trusted_key, _NATIVE
+    from repocache.server_stock_nginx_package_owner_v1 import inspect_stock_nginx_package_file_integrity
+    from ci_dnf_signed_rpm_fallback import _label_isolated_rpmdb, _rpm_signature_verified
+    key = _NATIVE["almalinux"][2]
+    assert _trusted_key(key)
+    assert inspect_stock_nginx_package_file_integrity()["native_package_file_integrity_verified"]
+    fmt = "%{NAME}-%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}\\n"
+    installed = command("/usr/bin/rpm", "-q", "--queryformat=" + fmt, "nginx-core").stdout.strip()
+    assert re.fullmatch(r"nginx-core-[0-9]+:[A-Za-z0-9._+~-]+-[A-Za-z0-9._+~-]+\.x86_64", installed)
+    with tempfile.TemporaryDirectory(prefix="repocache-ci-rpm-payload-", dir="/var/lib") as place:
+        work = Path(place)
+        update, query = _dnf_commands(work)
+        assert query[-4:] == ["repoquery", "--available", "--queryformat=%{name}", "nginx"]
+        command(*update, timeout=180)
+        locations = command(*query[:-4], "-q", "repoquery", "--available",
+                            "--location", installed, timeout=120).stdout.splitlines()
+        urls = sorted(set(line.strip() for line in locations if line.strip()))
+        assert len(urls) == 1 and re.fullmatch(
+            r"https://repo\.almalinux\.org/almalinux/10/(?:AppStream|BaseOS)/"
+            r"x86_64/os/Packages/(?:[A-Za-z0-9._+~-]+/)*nginx-core-[A-Za-z0-9._+~-]+\.rpm",
+            urls[0]), "Exact signed RPM location unavailable"
+        payload = work / "nginx-core.rpm"
+        command("/usr/bin/curl", "--fail", "--silent", "--show-error",
+                "--proto", "=https", "--tlsv1.2", "--max-filesize", str(32 * 1024 * 1024),
+                "--max-time", "90", "--output", str(payload), urls[0], timeout=100)
+        payload.chmod(0o600)
+        assert payload.is_file() and 0 < payload.stat().st_size <= 32 * 1024 * 1024
+        with tempfile.TemporaryDirectory(prefix="repocache-ci-rpmdb-", dir="/var/lib") as db:
+            rpmdb = Path(db)
+            _label_isolated_rpmdb(rpmdb)
+            command("/usr/bin/rpm", "--dbpath", db, "--initdb")
+            command("/usr/bin/rpm", "--dbpath", db, "--import", key)
+            verified = command("/usr/bin/rpmkeys", "--dbpath", db, "--checksig", "--verbose",
+                               str(payload))
+            assert _rpm_signature_verified(verified.stdout + verified.stderr)
+        identity = command("/usr/bin/rpm", "-qp", "--queryformat=" + fmt,
+                           str(payload)).stdout.strip()
+        assert identity == installed
+        algorithm = command("/usr/bin/rpm", "-qp", "--queryformat=%{FILEDIGESTALGO}",
+                            str(payload)).stdout.strip()
+        assert algorithm == "8"
+        rows = command("/usr/bin/rpm", "-qp", "--queryformat=[%{FILENAMES}\\t%{FILEDIGESTS}\\n]",
+                       str(payload)).stdout.splitlines()
+        matching = [row.split("\t", 1)[1] for row in rows
+                    if row.startswith(str(VENDOR) + "\t")]
+        assert len(matching) == 1 and re.fullmatch(r"[0-9a-f]{64}", matching[0])
+        digest = hashlib.sha256(VENDOR.read_bytes()).hexdigest()
+        assert digest == matching[0], "Installed executable differs from authenticated RPM"
+    print("PASS: exact native nginx-core RPM verified by isolated OS key and signed "
+          "SHA-256 file digest matches the installed executable", flush=True)
+    return digest
+
+
+def start_diagnostics(unit, writable):
+    """Bounded fixture-only diagnostics before cleanup removes evidence."""
+    status = command("/usr/bin/systemctl", "show", unit, "-p", "ActiveState",
+                     "-p", "SubState", "-p", "Result", "-p", "MainPID",
+                     "-p", "ExecMainStatus", check=False)
+    journal = command("/usr/bin/journalctl", "--unit=" + unit, "--no-pager",
+                      "-n", "60", "--output=short-monotonic", check=False)
+    log = writable / "error.log"
+    print("ISOLATED_START_STATUS: " + status.stdout[-2000:], flush=True)
+    print("ISOLATED_START_JOURNAL: " + journal.stdout[-5000:], flush=True)
+    if log.is_file():
+        print("ISOLATED_NGINX_ERROR: " + log.read_text(errors="replace")[-5000:], flush=True)
+    if Path("/usr/sbin/ausearch").is_file():
+        audit = command("/usr/sbin/ausearch", "-m", "AVC,USER_AVC", "-ts", "recent", check=False)
+        records = [line for line in audit.stdout.splitlines() if MODULE in line]
+        print("ISOLATED_AVC: " + ("\n".join(records[-20:])[-4000:] or "NOT OBSERVED"), flush=True)
+
+
 def installed_modules():
     return command("/usr/sbin/semodule", "-l").stdout
 
@@ -252,9 +333,11 @@ def workers(master, executable, uid, gid, *, bounding):
     return result
 
 
-def probe(*, root_master=False):
+def probe(vendor_digest, *, root_master=False):
     guard()
     assert type(root_master) is bool
+    assert re.fullmatch(r"[0-9a-f]{64}", vendor_digest)
+    unit = ROOT_UNIT if root_master else UNIT
     modules_before = installed_modules()
     assert MODULE not in {line.split()[0] for line in modules_before.splitlines() if line}
     assert not Path("/run/netns", NS).exists()
@@ -262,7 +345,7 @@ def probe(*, root_master=False):
     assert installed_modules() == modules_before
     assert not Path("/run/netns", NS).exists()
     assert command("/usr/bin/systemctl", "show", "-p", "LoadState",
-                   "--value", UNIT, check=False).stdout.strip() == "not-found"
+                   "--value", unit, check=False).stdout.strip() == "not-found"
     booleans = command("/usr/sbin/getsebool", "-a").stdout
     owner = command("/usr/bin/rpm", "-qf", "--queryformat=%{NAME}\\n", str(VENDOR))
     assert owner.stdout.strip() == "nginx-core"
@@ -271,6 +354,7 @@ def probe(*, root_master=False):
     assert vendor_info.st_nlink == 1 and not vendor_info.st_mode & 0o022
     original = (vendor_info, hashlib.sha256(VENDOR.read_bytes()).hexdigest(),
                 os.getxattr(VENDOR, "security.selinux"))
+    assert original[1] == vendor_digest
     account = pwd.getpwnam("nginx")
     assert account.pw_uid != 0 and account.pw_gid != 0
     master_uid, master_gid = (0, 0) if root_master else (account.pw_uid, account.pw_gid)
@@ -294,6 +378,10 @@ def probe(*, root_master=False):
             path.mkdir(mode=0o700)
             # Root master must itself perform NGINX native ownership setup.
             os.chown(path, master_uid, master_gid)
+        pid_dir = root / "pid" if root_master else writable
+        if root_master:
+            pid_dir.mkdir(mode=0o750)
+        pid_file = pid_dir / "nginx.pid"
         executable = root / "nginx"
         shutil.copyfile(VENDOR, executable)
         executable.chmod(0o755)
@@ -335,7 +423,7 @@ daemon {'on' if root_master else 'off'};
 {'user nginx nginx;' if root_master else ''}
 master_process on;
 worker_processes 1;
-pid {writable}/nginx.pid;
+pid {pid_file};
 error_log {writable}/error.log notice;
 events {{ worker_connections 64; }}
 http {{
@@ -372,6 +460,8 @@ location = /health {{ return 204; }}
                         str(cert), str(key), str(conf))
                 command("/usr/bin/chcon", "-t", MODULE + "_exec_t", str(executable))
                 command("/usr/bin/chcon", "-R", "-t", MODULE + "_rw_t", str(writable))
+                if root_master:
+                    command("/usr/bin/chcon", "-t", MODULE + "_pid_t", str(pid_dir))
                 command("/usr/sbin/ip", "netns", "add", NS)
                 namespace = True
                 command("/usr/sbin/ip", "-n", NS, "link", "set", "lo", "up")
@@ -393,44 +483,46 @@ location = /health {{ return 204; }}
                 # the packaged service's forking root-master lifecycle.
                 started = True
                 service_properties = [
-                    "--property=Type=forking", "--property=PIDFile=" + str(writable / "nginx.pid"),
+                    "--property=Type=forking", "--property=PIDFile=" + str(pid_file),
                     "--property=User=root", "--property=Group=root",
                     "--property=CapabilityBoundingSet=" + MASTER_CAP_NAMES,
                 ] if root_master else [
                     "--property=Type=exec", "--property=User=nginx", "--property=Group=nginx",
                     "--property=CapabilityBoundingSet=",
                 ]
-                command("/usr/bin/systemd-run", "--unit=" + UNIT, *service_properties,
+                command("/usr/bin/systemd-run", "--no-block", "--unit=" + unit, *service_properties,
+                        "--property=TimeoutStartSec=25s", "--property=TimeoutStopSec=20s",
                         "--property=NoNewPrivileges=yes", "--property=UMask=0027",
                         "--property=ProtectSystem=strict",
-                        "--property=ReadWritePaths=" + str(writable),
+                        "--property=ReadWritePaths=" + str(writable) + (" " + str(pid_dir) if root_master else ""),
                         "--property=NetworkNamespacePath=/run/netns/" + NS,
                         "--property=RestrictAddressFamilies=AF_UNIX AF_INET",
                         "--property=PrivateTmp=yes",
                         str(executable), "-p", str(root), "-c", str(conf))
-                for _ in range(100):
+                deadline = time.monotonic() + 30
+                ready = None
+                while time.monotonic() < deadline:
+                    state = command("/usr/bin/systemctl", "show", "--value", "-p",
+                                    "ActiveState", unit, check=False).stdout.strip()
+                    if state == "failed":
+                        break
                     ready = command("/usr/sbin/ip", "netns", "exec", NS, "/usr/bin/curl",
                                     "-sS", "--max-time", "1", "--noproxy", "*",
                                     "--cacert", str(cert), "-o", "/dev/null",
                                     "-w", "%{http_code}",
                                     f"https://127.0.0.1:{PORT}/health", check=False)
-                    if ready.returncode == 0 and ready.stdout == "204":
+                    if state == "active" and ready.returncode == 0 and ready.stdout == "204":
                         break
                     time.sleep(0.1)
-                else:
-                    status = command("/usr/bin/systemctl", "show", UNIT,
-                                     "-p", "ActiveState", "-p", "SubState", "-p", "Result",
-                                     check=False)
-                    raise AssertionError("Confined fixture not ready: " + status.stdout
-                                         + "\n" + ((writable / "error.log").read_text()[-2000:]
-                                                   if (writable / "error.log").is_file() else ""))
+                if state != "active" or ready is None or ready.returncode != 0 or ready.stdout != "204":
+                    raise AssertionError("Confined fixture did not become active and healthy")
                 pid = int(command("/usr/bin/systemctl", "show", "--value",
-                                  "-p", "MainPID", UNIT).stdout)
+                                  "-p", "MainPID", unit).stdout)
                 master = process_identity(pid, executable, master_uid, master_gid,
                                           capabilities=bounding, bounding=bounding)
                 if root_master:
-                    assert int((writable / "nginx.pid").read_text()) == pid
-                    assert (writable / "nginx.pid").stat().st_uid == 0
+                    assert int(pid_file.read_text()) == pid
+                    assert pid_file.stat().st_uid == 0
                     assert all((writable / name).stat().st_uid == account.pw_uid
                                for name in ("body", "proxy", "fastcgi", "scgi", "uwsgi", "cache"))
                     # Root cannot bypass the namespace-local egress filter.
@@ -500,7 +592,7 @@ location = /health {{ return 204; }}
                 # Exercise the real master/worker reload without changing
                 # executable, domain, capabilities, namespace or filter.
                 command("/usr/bin/systemctl", "kill", "--kill-whom=main",
-                        "--signal=HUP", UNIT)
+                        "--signal=HUP", unit)
                 for _ in range(100):
                     assert process_identity(pid, executable, master_uid, master_gid,
                                             capabilities=bounding, bounding=bounding) == master
@@ -535,10 +627,14 @@ location = /health {{ return 204; }}
                 assert command("/usr/sbin/getenforce").stdout.strip() == "Enforcing"
                 print("PASS: dedicated enforcing NGINX domain, verified HTTPS MISS/HIT, "
                       "SELinux non-HTTP-port refusal and independent exact-address refusal", flush=True)
+            except Exception:
+                if started:
+                    start_diagnostics(unit, writable)
+                raise
             finally:
                 if started:
-                    command("/usr/bin/systemctl", "stop", UNIT, check=False)
-                    assert command("/usr/bin/systemctl", "is-active", UNIT,
+                    command("/usr/bin/systemctl", "stop", unit)
+                    assert command("/usr/bin/systemctl", "is-active", unit,
                                    check=False).stdout.strip() in ("inactive", "unknown")
                 if origin is not None:
                     if origin.poll() is None:
@@ -564,5 +660,6 @@ location = /health {{ return 204; }}
 
 
 if __name__ == "__main__":
-    probe()
-    probe(root_master=True)
+    digest = authenticated_vendor_digest()
+    probe(digest)
+    probe(digest, root_master=True)

@@ -12,6 +12,18 @@ files_type(repocache_ci_nginx_ro_t)
 type repocache_ci_nginx_rw_t;
 files_type(repocache_ci_nginx_rw_t)
 
+# Separate fixture PID identity: systemd may read only the PID, not cache or TLS.
+type repocache_ci_nginx_pid_t;
+files_pid_file(repocache_ci_nginx_pid_t)
+gen_require(`
+    type init_t;
+')
+allow init_t repocache_ci_nginx_ro_t:dir search_dir_perms;
+allow init_t repocache_ci_nginx_pid_t:dir search_dir_perms;
+allow init_t repocache_ci_nginx_pid_t:file read_file_perms;
+manage_files_pattern(repocache_ci_nginx_t, repocache_ci_nginx_pid_t, repocache_ci_nginx_pid_t)
+allow repocache_ci_nginx_t repocache_ci_nginx_pid_t:dir rw_dir_perms;
+
 allow repocache_ci_nginx_t self:process { signal_perms setrlimit };
 # Separate root-master VM probe: only the capabilities required to set up
 # owned paths, drop worker credentials and signal workers. The nonroot
