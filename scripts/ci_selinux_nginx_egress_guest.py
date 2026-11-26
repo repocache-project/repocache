@@ -221,7 +221,7 @@ def derive_signed_unit(raw, root):
                     "NetworkNamespacePath": "/run/netns/" + NS,
                     "RestrictAddressFamilies": "AF_UNIX AF_INET"})
     # No [Install] section: this is a runtime-only, never-enabled unit.
-    return ("[Unit]\\nDescription=REPOCACHE CI derived signed unit\\nAfter=network.target\n"
+    return ("[Unit]\nDescription=REPOCACHE CI derived signed unit\nAfter=network.target\n"
             "[Service]\n" + "".join(key + "=" + value + "\n" for key, value in service.items())
             ).encode("ascii")
 
@@ -234,6 +234,7 @@ def publish_derived_unit(raw):
     # The caller records the exact inode and performs scoped cleanup even if
     # daemon-reload/start subsequently fails. Never replace an existing unit.
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644)
+    created = os.fstat(fd)
     try:
         with os.fdopen(fd, "wb") as stream:
             os.fchmod(stream.fileno(), 0o644)
@@ -242,6 +243,9 @@ def publish_derived_unit(raw):
             os.fsync(stream.fileno())
             info = os.fstat(stream.fileno())
     except Exception:
+        named = path.lstat()
+        if (named.st_dev, named.st_ino) == (created.st_dev, created.st_ino):
+            path.unlink()
         raise
     return (path, info.st_dev, info.st_ino, hashlib.sha256(raw).hexdigest())
 
@@ -336,7 +340,7 @@ def start_diagnostics(unit, writable):
                       if line.split(":", 1)[0] in {"Uid", "Gid", "CapInh", "CapPrm", "CapEff",
                                                    "CapBnd", "CapAmb", "NoNewPrivs", "Seccomp"}]
             print("ISOLATED_MASTER_CREDENTIALS: " + " | ".join(fields), flush=True)
-            print("ISOLATED_MASTER_DOMAIN: " + (proc / "attr/current").read_text().strip("\\0\n"), flush=True)
+            print("ISOLATED_MASTER_DOMAIN: " + (proc / "attr/current").read_text().strip("\0\n"), flush=True)
             print("ISOLATED_MASTER_UID_MAP: " + (proc / "uid_map").read_text().strip(), flush=True)
         except OSError:
             print("ISOLATED_MASTER_CREDENTIALS: NOT OBSERVED", flush=True)
@@ -375,7 +379,7 @@ uid, gid = map(int, sys.argv[1:3])
 def snapshot(phase):
     rows = [x for x in Path('/proc/self/status').read_text().splitlines()
             if x.split(':', 1)[0] in ('Uid','Gid','CapEff','CapPrm','CapBnd','CapAmb','NoNewPrivs','Seccomp')]
-    print(phase, Path('/proc/self/attr/current').read_text().strip('\\0\\n'), ' | '.join(rows), flush=True)
+    print(phase, Path('/proc/self/attr/current').read_text().strip('\0\n'), ' | '.join(rows), flush=True)
 snapshot('before')
 assert os.getresuid() == (0, 0, 0)
 try:
@@ -829,6 +833,9 @@ location = /health {{ return 204; }}
                                    check=False).stdout.strip() in ("inactive", "unknown")
                 if derived_identity is not None:
                     remove_derived_unit(derived_identity)
+                    # Reauthenticate the installed unit after removing the derived one.
+                    _, unchanged_unit = authenticated_policy(include_unit=True)
+                    assert unchanged_unit == signed_unit
                     print("PASS: runtime-only derived unit removed after native ExecStop; signed installed unit untouched", flush=True)
                 if origin is not None:
                     if origin.poll() is None:

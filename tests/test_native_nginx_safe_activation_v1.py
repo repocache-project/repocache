@@ -691,6 +691,14 @@ def test_isolated_derived_unit_preserves_signed_contract_and_private_paths():
               "docs/examples/systemd/repocache-nginx.service").read_bytes()
     root = Path("/var/lib/repocache-ci-selinux-test")
     derived = guest.derive_signed_unit(signed, root).decode("ascii")
+    import configparser
+    parsed = configparser.ConfigParser(interpolation=None, strict=True)
+    parsed.optionxform = str
+    parsed.read_string(derived)
+    assert parsed.sections() == ["Unit", "Service"]
+    assert parsed["Unit"]["Description"] == "REPOCACHE CI derived signed unit"
+    assert parsed["Service"]["Type"] == "forking"
+    assert parsed["Service"]["CapabilityBoundingSet"] == ""
     assert "Type=forking" in derived and "NoNewPrivileges=yes" in derived
     assert "User=nginx" in derived and "Group=nginx" in derived
     assert "CapabilityBoundingSet=\n" in derived
