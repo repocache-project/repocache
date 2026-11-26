@@ -373,8 +373,8 @@ def hostile(manager):
         print(f"{manager}: root-lock and production-root refusal PASS", flush=True)
 
 
-def retained_apt_matrix():
-    """Exercise durable boundaries and real SIGKILL; no installed writer."""
+def retained_apt_matrix(with_metadata=False):
+    """Exercise both retained schemas at every durable boundary."""
     upstream = b"https://deb.example.org/debian/\tpriority:1\n"
     for point in ("armed", "companion", "source", "retention-armed",
                   "companion-neutralized", "restore-armed", "source-restored", None):
@@ -382,6 +382,29 @@ def retained_apt_matrix():
             root = Path(place)
             source, mirror, _, state = build(root, "apt")
             before = source.read_bytes()
+            if with_metadata:
+                os.setxattr(source, "user.repocache-ci", b"retained-exact")
+                acl = struct.pack("<I", 2) + b"".join(
+                    struct.pack("<HHI", tag, perms, uid)
+                    for tag, perms, uid in ((1, 6, 0xffffffff), (2, 4, 65534),
+                                            (4, 4, 0xffffffff), (16, 4, 0xffffffff),
+                                            (32, 4, 0xffffffff)))
+                os.setxattr(source, "system.posix_acl_access", acl)
+                fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+                try:
+                    identity, attrs = boundary.metadata._metadata(fd)
+                finally:
+                    os.close(fd)
+                assert {name for name, _ in attrs} == {
+                    "user.repocache-ci", "system.posix_acl_access"}
+                manifest = state / ("candidate-" + IDENT + ".json")
+                approval = json.loads(manifest.read_text())
+                approval.update(schema=3, source_identity=identity,
+                                source_attributes_sha256=boundary.metadata.attribute_digest(attrs))
+                manifest.write_text(json.dumps(approval))
+            else:
+                attrs = ()
+            schema = 5 if with_metadata else 4
             apply = lambda **kw: pair.apply_retaining_apt_companion_sandbox(
                 root, IDENT, current_catalog=False, **kw)
             applying = point in ("armed", "companion", "source")
@@ -406,14 +429,19 @@ def retained_apt_matrix():
                     os._exit(77)
                 _, status = os.waitpid(pid, 0)
                 assert os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGKILL
+            journal = state / ("pair-" + IDENT + ".json")
+            assert json.loads(journal.read_text())["schema"] == schema
             assert pair.recover_sandbox(root, IDENT)["status"] == "restored"
             assert source.read_bytes() == before
+            assert tuple(sorted((name, os.getxattr(source, name))
+                                for name in os.listxattr(source))) == attrs
             if point == "armed":
                 assert not mirror.exists()
             else:
                 assert mirror.read_bytes() == upstream
                 assert mirror.stat().st_uid == mirror.stat().st_gid == 0
                 assert mirror.stat().st_mode & 0o777 == 0o644
+                assert not os.listxattr(mirror)
                 saved = mirror.stat().st_ino
                 assert pair.recover_sandbox(root, IDENT)["status"] == "restored"
                 assert mirror.stat().st_ino == saved
@@ -426,7 +454,7 @@ def retained_apt_matrix():
                 assert mirror.read_bytes() == upstream
             refuses(apply, "Restored approval ID cannot be reused")
             assert not list(source.parent.glob(".repocache-atomic-*"))
-            print(f"apt: retained companion recovery {point} PASS", flush=True)
+            print(f"apt: retained companion schema-{schema} recovery {point} PASS", flush=True)
 
 
 if __name__ == "__main__":
@@ -443,5 +471,6 @@ if __name__ == "__main__":
     hostile(manager)
     if manager == "apt":
         retained_apt_matrix()
+        retained_apt_matrix(with_metadata=True)
     print(f"{manager}: paired transaction full disposable-native matrix PASS",
           flush=True)
