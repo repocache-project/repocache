@@ -327,7 +327,7 @@ def stage_nginx_candidate_with_receipt(
         previous = None
         if raw is not None:
             saved = _json(raw, limit=_RECEIPT_MAX)
-            if (type(saved) is not dict or set(saved) != set(expected) | {"device", "inode"}
+            if (type(saved) is not dict or set(saved) != set(expected) | {"device", "inode", "size", "mtime_ns", "ctime_ns"}
                     or _canonical(saved, limit=_RECEIPT_MAX) != raw
                     or any(type(saved[key]) is not type(value) or saved[key] != value
                            for key, value in expected.items())
@@ -335,18 +335,26 @@ def stage_nginx_candidate_with_receipt(
                     or type(saved["inode"]) is not int or saved["inode"] <= 0):
                 _deny("RECEIPT_REFUSED")
             previous = (saved["device"], saved["inode"])
+            before = _verify_leaf(directory, authenticated_sha256)
+            if (before[:2] != previous or any(type(saved[key]) is not int for key in
+                    ("size", "mtime_ns", "ctime_ns")) or before[6:] !=
+                    (saved["size"], saved["mtime_ns"], saved["ctime_ns"])):
+                _deny("RECEIPT_CHANGED")
         result = stage_verified_nginx_candidate(
             directory, vendor_fd, authenticated_sha256=authenticated_sha256,
             previous_inode=previous,
         )
-        record = {**expected, "device": result["device"], "inode": result["inode"]}
+        observed = _verify_leaf(directory, authenticated_sha256)
+        if observed[:2] != (result["device"], result["inode"]):
+            _deny("RECEIPT_CHANGED")
+        record = {**expected, "device": observed[0], "inode": observed[1],
+                  "size": observed[6], "mtime_ns": observed[7], "ctime_ns": observed[8]}
         encoded = _canonical(record, limit=_RECEIPT_MAX)
         if raw is None:
             _write_exclusive(directory, _RECEIPT, encoded, 0, _RECEIPT_MAX)
         if (_read_executable_receipt(directory) != encoded
                 or _directory(directory) != identity
-                or _verify_leaf(directory, authenticated_sha256)[:2] !=
-                    (record["device"], record["inode"])):
+                or _verify_leaf(directory, authenticated_sha256) != observed):
             _deny("RECEIPT_CHANGED")
         return {**result, "receipt_sha256": hashlib.sha256(encoded).hexdigest(),
                 "receipt_matches_owned_inode": True}

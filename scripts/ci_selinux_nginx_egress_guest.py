@@ -201,7 +201,7 @@ def authenticated_policy(*, include_unit=False):
         finally:
             os.close(directory)
         assert hashlib.sha256(signed_unit).hexdigest() == receipt["files"]["repocache-nginx.service"]
-        return result, signed_unit
+        return result, signed_unit, receipt
     return result
 
 
@@ -296,7 +296,7 @@ def remove_derived_unit(identity):
     assert not path.exists()
 
 
-def authenticated_vendor_digest():
+def authenticated_vendor_evidence():
     """Independently verify the installed executable against a signed RPM.
 
     No package install, system RPMDB import, third-party repo or executable
@@ -353,9 +353,11 @@ def authenticated_vendor_digest():
         assert len(matching) == 1 and re.fullmatch(r"[0-9a-f]{64}", matching[0])
         digest = hashlib.sha256(VENDOR.read_bytes()).hexdigest()
         assert digest == matching[0], "Installed executable differs from authenticated RPM"
+        archive_digest = hashlib.sha256(payload.read_bytes()).hexdigest()
     print("PASS: exact native nginx-core RPM verified by isolated OS key and signed "
           "SHA-256 file digest matches the installed executable", flush=True)
-    return digest
+    return {"distribution": "almalinux", "package_identity": installed,
+            "native_payload_sha256": archive_digest, "authenticated_sha256": digest}
 
 
 def capability_policy(context, permission):
@@ -774,19 +776,20 @@ def configure_peer_network():
     print("PASS: distinct private client/upstream and service netns linked only by veth, no default routes", flush=True)
 
 
-def probe(vendor_digest=None, *, root_master=False, signed_derived=False):
+def probe(evidence=None, *, root_master=False, signed_derived=False):
     guard()
     assert type(root_master) is bool and type(signed_derived) is bool
     remote = root_master and signed_derived
-    if vendor_digest is None:
-        vendor_digest = authenticated_vendor_digest()
+    if evidence is None:
+        evidence = authenticated_vendor_evidence()
+    vendor_digest = evidence["authenticated_sha256"]
     assert re.fullmatch(r"[0-9a-f]{64}", vendor_digest)
     unit = (DERIVED_ROOT_UNIT if root_master else DERIVED_UNIT) if signed_derived else (ROOT_UNIT if root_master else UNIT)
     modules_before = installed_modules()
     assert MODULE not in {line.split()[0] for line in modules_before.splitlines() if line}
     assert not any(os.path.lexists(Path("/run/netns", ns)) for ns in (NS, PEER_NS))
     if signed_derived:
-        policy_bytes, signed_unit = authenticated_policy(include_unit=True)
+        policy_bytes, signed_unit, release = authenticated_policy(include_unit=True)
     else:
         policy_bytes = authenticated_policy()
     assert installed_modules() == modules_before
@@ -852,13 +855,20 @@ sys.path.insert(0, "/usr/libexec/repocache/server-control-worker")
 from repocache import server_native_nginx_executable_v1 as stage
 assert isinstance(stage.__loader__, zipimport.zipimporter)
 assert stage.__loader__.archive == "/usr/libexec/repocache/server-control-worker"
-root,digest=sys.argv[1:]
+root=sys.argv[1]
+evidence=json.loads(sys.argv[2])
 directory=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
 vendor=os.open("/usr/sbin/nginx",os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
 try:
-    first=stage.stage_verified_nginx_candidate(directory,vendor,authenticated_sha256=digest)
-    second=stage.stage_verified_nginx_candidate(directory,vendor,authenticated_sha256=digest,
-        previous_inode=(first["device"],first["inode"]))
+    first=stage.stage_nginx_candidate_with_receipt(directory,vendor,**evidence)
+    second=stage.stage_nginx_candidate_with_receipt(directory,vendor,**evidence)
+    assert first["receipt_sha256"] == second["receipt_sha256"]
+    try:
+        stage.stage_nginx_candidate_with_receipt(directory,vendor,**dict(evidence,native_payload_sha256="0"*64))
+    except stage.NativeExecutableCandidateError:
+        pass
+    else:
+        raise AssertionError("Changed native payload identity accepted")
     assert first["status"].endswith("STAGED") and second["status"].endswith("UNCHANGED")
     assert first["inode"] == second["inode"]
     assert not first["authorizes_nginx_activation"]
@@ -868,7 +878,9 @@ finally:
     os.close(directory)
 """
             placed = json.loads(command("/usr/bin/python3", "-IS", "-B", "-c", code,
-                                        str(root), original[1]).stdout)
+                                        str(root), json.dumps({**evidence,
+                                            "release_source_sha": release["source_sha"],
+                                            "release_archive_sha256": release["archive_sha256"]})).stdout)
             assert (placed["device"], placed["inode"]) == (
                 executable.stat().st_dev, executable.stat().st_ino)
             assert placed["sha256"] == original[1]
@@ -1303,7 +1315,8 @@ location / {{ return 404; }}
                 if derived_identity is not None:
                     remove_derived_unit(derived_identity)
                     # Reauthenticate the installed unit after removing the derived one.
-                    _, unchanged_unit = authenticated_policy(include_unit=True)
+                    _, unchanged_unit, unchanged_release = authenticated_policy(include_unit=True)
+                    assert unchanged_release == release
                     assert unchanged_unit == signed_unit
                     print("PASS: runtime-only derived unit removed after native ExecStop; signed installed unit untouched", flush=True)
                 if origin is not None:
@@ -1336,8 +1349,8 @@ location / {{ return 404; }}
 
 
 if __name__ == "__main__":
-    digest = authenticated_vendor_digest()
-    probe(digest)
-    probe(digest, signed_derived=True)
-    probe(digest, root_master=True)
-    probe(digest, root_master=True, signed_derived=True)
+    evidence = authenticated_vendor_evidence()
+    probe(evidence)
+    probe(evidence, signed_derived=True)
+    probe(evidence, root_master=True)
+    probe(evidence, root_master=True, signed_derived=True)
