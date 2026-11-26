@@ -357,3 +357,28 @@ After transient success the signed-unit-derived root variant must also pass
 the actual rendered routes, reload/drain, withdrawal, native stop and
 readback of the unchanged installed unit. No production service changes
 or broadened capabilities, policy, firewall or publisher claim are made.
+
+### Peer-network ingress and exact egress bridge
+
+The exact prior AlmaLinux 10.3 enforcing campaign proved all four isolated
+variants, including implicit-root signed-derived startup, exact master and
+worker capabilities, native reload/stop, route withdrawal and cleanup.
+The actual stock-policy installed service nevertheless returned 502/EACCES;
+loaded SELinux policy denied name_connect on 443 and 8008 and a correlated AVC
+remains unverified. No production solution is inferred from that contrast.
+
+The root signed-derived experiment now retains its loopback controls and
+adds a second private namespace linked only by a veth pair. The service
+and peer have no default routes or host links; the peer serves TLS on two
+fixed documentation-range addresses and acts as an actual HTTPS client.
+The authenticated renderer's dummy public pins are replaced only in the
+fixture with the two peer tuples. A default-deny namespace-local output
+chain permits only the selected worker tuples and established responses,
+plus the existing root loopback health exception. Crossed tuples and root
+fresh egress must fail, actual client ingress and cache MISS/HIT must pass,
+and withdrawal must drain the old worker, remove DNF and retain fresh APT
+access from the peer. All resources are disposable; the production signed
+unit, package, vendor labels, global policy/booleans and host firewall are
+unchanged. This is not a production network namespace provisioning, routing,
+policy/WAL installation or active catalog design. The original installed
+service failure is not waived; new native execution is required.

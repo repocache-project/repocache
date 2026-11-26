@@ -30,6 +30,12 @@ DERIVED_UNIT = "repocache-ci-nginx-derived-egress.service"
 DERIVED_ROOT_UNIT = "repocache-ci-nginx-derived-root-egress.service"
 CREDENTIAL_UNIT = "repocache-ci-nginx-credential.service"
 NS = "repocache-ci-nginx-egress"
+PEER_NS = "repocache-ci-nginx-peer"
+SERVICE_LINK = "rcsvc0"
+PEER_LINK = "rcpeer0"
+SERVICE_ADDR = "192.0.2.1"
+APT_PEER = "192.0.2.2"
+DNF_PEER = "192.0.2.3"
 PREFIX = "repocache-ci-selinux-"
 VENDOR = Path("/usr/sbin/nginx")
 ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"}
@@ -45,11 +51,16 @@ ORIGIN = r"""
 import http.server, ssl, sys, threading
 from pathlib import Path
 root = Path(sys.argv[1])
+assert len(sys.argv) in (2, 3)
+remote = len(sys.argv) == 3
+assert not remote or sys.argv[2] == "peer"
+counts = "peer-origin-counts" if remote else "origin-counts"
+ready = "peer-origin-ready" if remote else "origin-ready"
 ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 ctx.load_cert_chain(root / 'cert.pem', root / 'key.pem')
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        with (root / 'origin-counts').open('a') as f:
+        with (root / counts).open('a') as f:
             f.write(str(self.server.server_address[0]) + ':' +
                     str(self.server.server_address[1]) + '\n')
         if self.path == '/rendered/apt/redirect':
@@ -67,13 +78,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 servers = []
-for address in (('127.0.0.1', 443), ('127.0.0.2', 443), ('127.0.0.1', 5432),
-                ('127.0.0.2', 8008), ('127.0.0.1', 8008)):
+addresses = (('192.0.2.2', 443), ('192.0.2.3', 443),
+             ('192.0.2.3', 8008), ('192.0.2.2', 8008)) if remote else (
+                 ('127.0.0.1', 443), ('127.0.0.2', 443), ('127.0.0.1', 5432),
+                 ('127.0.0.2', 8008), ('127.0.0.1', 8008))
+for address in addresses:
     server = http.server.ThreadingHTTPServer(address, Handler)
     server.socket = ctx.wrap_socket(server.socket, server_side=True)
     servers.append(server)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-(root / 'origin-ready').touch(exist_ok=False)
+(root / ready).touch(exist_ok=False)
 threading.Event().wait()
 """
 
@@ -472,7 +486,8 @@ def installed_modules():
     return command("/usr/sbin/semodule", "-l").stdout
 
 
-def nft_rules(uid, *, negative_port_probe=False, custom_https=False, root_master=False):
+def nft_rules(uid, *, negative_port_probe=False, custom_https=False, root_master=False,
+              remote=False):
     """The namespace has no external links; deny new nonapproved UID flows.
 
     5432 is intentionally allowed by the independent packet filter ONLY
@@ -482,8 +497,12 @@ def nft_rules(uid, *, negative_port_probe=False, custom_https=False, root_master
     assert type(uid) is int and 0 < uid < 2**31
     assert type(negative_port_probe) is bool
     assert type(custom_https) is bool and type(root_master) is bool
+    assert type(remote) is bool
+    assert not remote or (root_master and not negative_port_probe)
     ports = "{443,5432}" if negative_port_probe else "443"
-    custom_rule = (f"meta skuid {uid} ip daddr 127.0.0.2 tcp dport 8008 accept"
+    first = APT_PEER if remote else "127.0.0.1"
+    second = DNF_PEER if remote else "127.0.0.2"
+    custom_rule = (f"meta skuid {uid} ip daddr {second} tcp dport 8008 accept"
                    if custom_https else "")
     root_rules = (f"ct state established,related accept\n"
                   f"meta skuid 0 ip daddr 127.0.0.1 tcp dport {PORT} accept"
@@ -494,7 +513,7 @@ def nft_rules(uid, *, negative_port_probe=False, custom_https=False, root_master
             type filter hook output priority 0; policy {'drop' if root_master else 'accept'};
             {root_rules}
             meta skuid {uid} ct state established,related accept
-            meta skuid {uid} ip daddr 127.0.0.1 tcp dport {ports} accept
+            meta skuid {uid} ip daddr {first} tcp dport {ports} accept
             {custom_rule}
             {"" if root_master else f"meta skuid {uid}"} counter name denied reject
         }}
@@ -502,23 +521,26 @@ def nft_rules(uid, *, negative_port_probe=False, custom_https=False, root_master
     """
 
 
-def request(root, path, *, method="GET"):
-    assert method in ("GET", "POST")
+def request(root, path, *, method="GET", remote=False):
+    assert method in ("GET", "POST") and type(remote) is bool
     assert path in ("allowed", "other-address", "other-port", "custom",
-                    "wrong-pair", "custom-live", "custom-after-withdrawal") or re.fullmatch(
+                    "wrong-pair", "custom-live", "custom-after-withdrawal",
+                    "remote-wrong-pair", "remote-wrong-address") or re.fullmatch(
         r"__repocache/repos/fixture-(?:apt|dnf)/(?:payload|fresh|redirect)", path)
-    result = command("/usr/sbin/ip", "netns", "exec", NS, "/usr/bin/curl",
+    resolve = ["--resolve", f"cache.example.invalid:{PORT}:{SERVICE_ADDR}"] if remote else []
+    host = "cache.example.invalid" if remote else "127.0.0.1"
+    result = command("/usr/sbin/ip", "netns", "exec", PEER_NS if remote else NS, "/usr/bin/curl",
                      "--silent", "--show-error", "--max-time", "8",
                      "--noproxy", "*", "--request", method, "--cacert", str(root / "cert.pem"),
-                     "--dump-header", str(root / "headers"),
+                     *resolve, "--dump-header", str(root / "headers"),
                      "--output", str(root / "response"),
                      "--write-out", "%{http_code}",
-                     f"https://127.0.0.1:{PORT}/{path}")
+                     f"https://{host}:{PORT}/{path}")
     return (int(result.stdout), (root / "response").read_bytes(),
             (root / "headers").read_text().lower())
 
 
-def render_signed_fixture_routes(root, *, dnf_enabled=True):
+def render_signed_fixture_routes(root, *, dnf_enabled=True, remote=False):
     """Use the authenticated installed zipapp's actual candidate renderer.
 
     Only the isolated harness substitutes the two loopback tuples after the
@@ -526,7 +548,7 @@ def render_signed_fixture_routes(root, *, dnf_enabled=True):
     """
     guard()
     assert root.parent == Path("/var/lib") and root.name.startswith(PREFIX)
-    assert type(dnf_enabled) is bool
+    assert type(dnf_enabled) is bool and type(remote) is bool
     document = json.loads((Path(__file__).resolve().parents[1] /
                            "docs/examples/server-install-v1.json").read_text("ascii"))
     dep = document["deployment"]
@@ -575,8 +597,9 @@ print(json.dumps(result))
     http = bundle["http_upstream_fragment"]
     assert http.count("server 8.8.8.8:443;") == 1
     assert http.count("server 8.8.8.8:8008;") == int(dnf_enabled)
-    http = http.replace("server 8.8.8.8:443;", "server 127.0.0.1:443;")
-    http = http.replace("server 8.8.8.8:8008;", "server 127.0.0.2:8008;")
+    first, second = (APT_PEER, DNF_PEER) if remote else ("127.0.0.1", "127.0.0.2")
+    http = http.replace("server 8.8.8.8:443;", f"server {first}:443;")
+    http = http.replace("server 8.8.8.8:8008;", f"server {second}:8008;")
     locations = bundle["server_location_fragment"]
     marker = "    proxy_cache_valid 200 60s;\n"
     assert locations.count(marker) == len(pins)
@@ -623,16 +646,42 @@ def workers(master, executable, uid, gid, *, bounding):
     return result
 
 
+def configure_peer_network():
+    """Two private namespaces only, with no host link or default route."""
+    guard()
+    assert all(Path("/run/netns", ns).exists() for ns in (NS, PEER_NS))
+    identities = {Path("/run/netns", ns).stat().st_ino for ns in (NS, PEER_NS)}
+    assert len(identities) == 2 and Path("/proc/self/ns/net").stat().st_ino not in identities
+    for ns in (NS, PEER_NS):
+        assert {row["ifname"] for row in json.loads(command(
+            "/usr/sbin/ip", "-n", ns, "-j", "link", "show").stdout)} == {"lo"}
+    command("/usr/sbin/ip", "-n", NS, "link", "add", SERVICE_LINK, "type", "veth",
+            "peer", "name", PEER_LINK, "netns", PEER_NS)
+    for ns, link, addresses in ((NS, SERVICE_LINK, (SERVICE_ADDR,)),
+                                 (PEER_NS, PEER_LINK, (APT_PEER, DNF_PEER))):
+        command("/usr/sbin/ip", "-n", ns, "link", "set", "lo", "up")
+        for addr in addresses:
+            command("/usr/sbin/ip", "-n", ns, "addr", "add", addr + "/29", "dev", link)
+        command("/usr/sbin/ip", "-n", ns, "link", "set", link, "up")
+        assert {row["ifname"] for row in json.loads(command(
+            "/usr/sbin/ip", "-n", ns, "-j", "link", "show").stdout)} == {"lo", link}
+        for family in ("-4", "-6"):
+            assert json.loads(command("/usr/sbin/ip", "-n", ns, family, "-j",
+                                      "route", "show", "default").stdout) == []
+    print("PASS: distinct private client/upstream and service netns linked only by veth, no default routes", flush=True)
+
+
 def probe(vendor_digest=None, *, root_master=False, signed_derived=False):
     guard()
     assert type(root_master) is bool and type(signed_derived) is bool
+    remote = root_master and signed_derived
     if vendor_digest is None:
         vendor_digest = authenticated_vendor_digest()
     assert re.fullmatch(r"[0-9a-f]{64}", vendor_digest)
     unit = (DERIVED_ROOT_UNIT if root_master else DERIVED_UNIT) if signed_derived else (ROOT_UNIT if root_master else UNIT)
     modules_before = installed_modules()
     assert MODULE not in {line.split()[0] for line in modules_before.splitlines() if line}
-    assert not Path("/run/netns", NS).exists()
+    assert not any(os.path.lexists(Path("/run/netns", ns)) for ns in (NS, PEER_NS))
     if signed_derived:
         policy_bytes, signed_unit = authenticated_policy(include_unit=True)
     else:
@@ -658,9 +707,11 @@ def probe(vendor_digest=None, *, root_master=False, signed_derived=False):
         return nft_rules(account.pw_uid, root_master=root_master, **kwargs)
     loaded = False
     namespace = False
+    peer_namespace = False
     started = False
     derived_identity = None
     origin = None
+    peer_origin = None
     with tempfile.TemporaryDirectory(prefix=PREFIX, dir="/var/lib") as place:
         root = Path(place)
         assert root.parent == Path("/var/lib") and root.name.startswith(PREFIX)
@@ -702,13 +753,17 @@ def probe(vendor_digest=None, *, root_master=False, signed_derived=False):
         cert.chmod(0o644)
         conf = root / "nginx.conf"
         locations = ""
-        for name, target in (("allowed", "127.0.0.1:443"),
+        targets = (("allowed", "127.0.0.1:443"),
                              ("other-address", "127.0.0.2:443"),
                              ("other-port", "127.0.0.1:5432"),
                              ("custom", "127.0.0.2:8008"),
                              ("wrong-pair", "127.0.0.1:8008"),
                              ("custom-live", "127.0.0.2:8008"),
-                             ("custom-after-withdrawal", "127.0.0.2:8008")):
+                             ("custom-after-withdrawal", "127.0.0.2:8008"))
+        if remote:
+            targets += (("remote-wrong-pair", APT_PEER + ":8008"),
+                        ("remote-wrong-address", DNF_PEER + ":443"))
+        for name, target in targets:
             locations += f"""
 location = /{name} {{
     proxy_pass https://{target}/fixture;
@@ -730,7 +785,7 @@ location = /{name} {{
                 directory = writable / "cache" / ("fixture-" + kind)
                 directory.mkdir(mode=0o700)
                 os.chown(directory, master_uid, account.pw_gid)
-            rendered_http, rendered_locations = render_signed_fixture_routes(root)
+            rendered_http, rendered_locations = render_signed_fixture_routes(root, remote=remote)
         conf.write_text(f"""
 daemon {'on' if root_master or signed_derived else 'off'};
 {'user nginx nginx;' if root_master else ''}
@@ -750,6 +805,7 @@ proxy_cache_path {legacy} levels=1:2 keys_zone=fixture:1m use_temp_path=off;
 {rendered_http}
 server {{
 listen 127.0.0.1:{PORT} ssl;
+{f"listen {SERVICE_ADDR}:{PORT} ssl;" if remote else ""}
 ssl_certificate {cert};
 ssl_certificate_key {key};
 location = /health {{ return 204; }}
@@ -781,6 +837,22 @@ location / {{ return 404; }}
                 command("/usr/sbin/ip", "netns", "add", NS)
                 namespace = True
                 command("/usr/sbin/ip", "-n", NS, "link", "set", "lo", "up")
+                if remote:
+                    command("/usr/sbin/ip", "netns", "add", PEER_NS)
+                    peer_namespace = True
+                    configure_peer_network()
+                    peer_origin = subprocess.Popen(
+                        ["/usr/sbin/ip", "netns", "exec", PEER_NS, "/usr/bin/python3",
+                         "-I", "-c", ORIGIN, str(root), "peer"], env=ENV,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        start_new_session=True)
+                    for _ in range(100):
+                        assert peer_origin.poll() is None
+                        if (root / "peer-origin-ready").is_file():
+                            break
+                        time.sleep(0.1)
+                    else:
+                        raise AssertionError("Peer origin not ready")
                 command("/usr/sbin/ip", "netns", "exec", NS, "/usr/sbin/nft",
                         "-f", "-", input_text=packet_rules(negative_port_probe=True))
                 origin = subprocess.Popen(
@@ -961,30 +1033,51 @@ location / {{ return 404; }}
                 if signed_derived:
                     # Actual signed render fragments, same authenticated
                     # executable and native unit. Observe real cache files.
-                    before_hits = (root / "origin-counts").read_text().splitlines()
+                    counts_path = root / ("peer-origin-counts" if remote else "origin-counts")
+                    first_origin = APT_PEER + ":443" if remote else "127.0.0.1:443"
+                    second_origin = DNF_PEER + ":8008" if remote else "127.0.0.2:8008"
+                    if remote:
+                        assert not counts_path.exists()
+                        command("/usr/sbin/ip", "netns", "exec", NS, "/usr/sbin/nft",
+                                "-f", "-", input_text="delete table inet repocache_ci\n"
+                                + packet_rules(remote=True))
+                        denied = command("/usr/sbin/ip", "netns", "exec", NS, "/usr/bin/curl",
+                                         "--silent", "--max-time", "2", "--noproxy", "*",
+                                         "--cacert", str(cert), "--resolve", f"localhost:443:{APT_PEER}",
+                                         "https://localhost/fixture", check=False)
+                        assert denied.returncode != 0 and not counts_path.exists()
+                        assert request(root, "remote-wrong-pair", remote=True)[0] == 502
+                        assert request(root, "remote-wrong-address", remote=True)[0] == 502
+                        assert not counts_path.exists()
+                    before_hits = counts_path.read_text().splitlines() if counts_path.exists() else []
                     apt = "__repocache/repos/fixture-apt/"
                     dnf = "__repocache/repos/fixture-dnf/"
-                    first, second = request(root, apt + "payload"), request(root, apt + "payload")
+                    first, second = request(root, apt + "payload", remote=remote), request(root, apt + "payload", remote=remote)
                     assert first[:2] == second[:2] == (200, PAYLOAD)
                     assert "x-cache: miss" in first[2] and "x-cache: hit" in second[2]
-                    assert request(root, apt + "payload", method="POST")[0] == 403
-                    assert request(root, apt + "redirect")[0] == 502
-                    assert request(root, dnf + "payload")[0] == 502
-                    assert (root / "origin-counts").read_text().splitlines() == before_hits + [
-                        "127.0.0.1:443", "127.0.0.1:443"]
+                    assert request(root, apt + "payload", method="POST", remote=remote)[0] == 403
+                    assert request(root, apt + "redirect", remote=remote)[0] == 502
+                    assert request(root, dnf + "payload", remote=remote)[0] == 502
+                    assert counts_path.read_text().splitlines() == before_hits + [
+                        first_origin, first_origin]
                     command("/usr/sbin/ip", "netns", "exec", NS, "/usr/sbin/nft", "-f", "-",
-                            input_text="delete table inet repocache_ci\n" + packet_rules(custom_https=True))
-                    first, second = request(root, dnf + "payload"), request(root, dnf + "payload")
+                            input_text="delete table inet repocache_ci\n" + packet_rules(custom_https=True, remote=remote))
+                    first, second = request(root, dnf + "payload", remote=remote), request(root, dnf + "payload", remote=remote)
                     assert first[:2] == second[:2] == (200, PAYLOAD)
                     assert "x-cache: miss" in first[2] and "x-cache: hit" in second[2]
-                    assert (root / "origin-counts").read_text().splitlines() == before_hits + [
-                        "127.0.0.1:443", "127.0.0.1:443", "127.0.0.2:8008"]
+                    assert counts_path.read_text().splitlines() == before_hits + [
+                        first_origin, first_origin, second_origin]
+                    if remote:
+                        assert request(root, "remote-wrong-pair", remote=True)[0] == 502
+                        assert request(root, "remote-wrong-address", remote=True)[0] == 502
+                        assert counts_path.read_text().splitlines() == before_hits + [
+                            first_origin, first_origin, second_origin]
                     for kind in ("apt", "dnf"):
                         assert any(p.is_file() for p in
                                    (writable / "cache" / ("fixture-" + kind)).rglob("*"))
                     # New complete candidate omits DNF. Replace only this
                     # root-owned private config; retain the old file label.
-                    next_http, next_locations = render_signed_fixture_routes(root, dnf_enabled=False)
+                    next_http, next_locations = render_signed_fixture_routes(root, dnf_enabled=False, remote=remote)
                     old_conf = conf.read_text("ascii")
                     assert old_conf.count(rendered_http) == old_conf.count(rendered_locations) == 1
                     new_conf = old_conf.replace(rendered_http, next_http).replace(
@@ -1016,13 +1109,20 @@ location / {{ return 404; }}
                     else:
                         raise AssertionError("Rendered route withdrawal did not drain old worker")
                     command("/usr/sbin/ip", "netns", "exec", NS, "/usr/sbin/nft", "-f", "-",
-                            input_text="delete table inet repocache_ci\n" + packet_rules())
-                    assert request(root, dnf + "payload")[0] == 404
-                    assert request(root, dnf + "fresh")[0] == 404
-                    assert request(root, apt + "fresh")[:2] == (200, PAYLOAD)
-                    assert (root / "origin-counts").read_text().splitlines() == before_hits + [
-                        "127.0.0.1:443", "127.0.0.1:443", "127.0.0.2:8008", "127.0.0.1:443"]
+                            input_text="delete table inet repocache_ci\n" + packet_rules(remote=remote))
+                    assert request(root, dnf + "payload", remote=remote)[0] == 404
+                    assert request(root, dnf + "fresh", remote=remote)[0] == 404
+                    assert request(root, apt + "fresh", remote=remote)[:2] == (200, PAYLOAD)
+                    assert counts_path.read_text().splitlines() == before_hits + [
+                        first_origin, first_origin, second_origin, first_origin]
                     print("PASS: authenticated installed renderer APT/DNF private routes; TLS MISS/HIT, POST/redirect refusal, DNF withdrawal after worker drain, APT fresh access", flush=True)
+                    if remote:
+                        assert request(root, "remote-wrong-pair", remote=True)[0] == 502
+                        assert request(root, "remote-wrong-address", remote=True)[0] == 502
+                        assert counts_path.read_text().splitlines() == before_hits + [
+                            first_origin, first_origin, second_origin, first_origin]
+                        print("PASS: peer client HTTPS ingress and exact remote APT/DNF egress over veth; "
+                              "crossed tuples refused, DNF withdrawn after drain, APT still available", flush=True)
                     assert int(pid_file.read_text()) == pid and pid_file.stat().st_uid == master_uid
                     print("PASS: authenticated signed-unit-derived " +
                           ("limited-capability root-master" if root_master else "nonroot") +
@@ -1056,14 +1156,20 @@ location / {{ return 404; }}
                     if origin.poll() is None:
                         os.killpg(origin.pid, signal.SIGTERM)
                     origin.wait(timeout=10)
+                if peer_origin is not None:
+                    if peer_origin.poll() is None:
+                        os.killpg(peer_origin.pid, signal.SIGTERM)
+                    peer_origin.wait(timeout=10)
                 if namespace:
                     command("/usr/sbin/ip", "netns", "delete", NS)
+                if peer_namespace:
+                    command("/usr/sbin/ip", "netns", "delete", PEER_NS)
                 # Remove only this new VM fixture tree before policy removal.
                 # TemporaryDirectory will then observe an already absent tree.
                 if loaded:
                     shutil.rmtree(root)
                     command("/usr/sbin/semodule", "-r", MODULE, timeout=120)
-        assert not Path("/run/netns", NS).exists()
+        assert not any(os.path.lexists(Path("/run/netns", ns)) for ns in (NS, PEER_NS))
         assert installed_modules() == modules_before
         assert command("/usr/sbin/getsebool", "-a").stdout == booleans
         assert hashlib.sha256(VENDOR.read_bytes()).hexdigest() == original[1]

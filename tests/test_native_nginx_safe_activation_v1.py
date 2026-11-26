@@ -759,3 +759,26 @@ raise SystemExit(91)
     result = subprocess.run([sys.executable, "-I", "-O", "-c", code, str(scripts)],
                             capture_output=True, timeout=15, check=False)
     assert result.returncode == 0, result.stderr
+
+
+def test_isolated_remote_egress_is_root_only_and_exact_tuple_bound():
+    from scripts import ci_selinux_nginx_egress_guest as guest
+
+    first = guest.nft_rules(987, root_master=True, remote=True)
+    both = guest.nft_rules(987, root_master=True, remote=True, custom_https=True)
+    assert "policy drop" in first
+    assert "meta skuid 0 ip daddr 127.0.0.1 tcp dport 8443 accept" in first
+    assert "meta skuid 987 ip daddr 192.0.2.2 tcp dport 443 accept" in first
+    assert "192.0.2.3" not in first
+    assert "meta skuid 987 ip daddr 192.0.2.3 tcp dport 8008 accept" in both
+    assert "meta skuid 987 ip daddr 192.0.2.2 tcp dport 8008 accept" not in both
+    assert "meta skuid 987 ip daddr 192.0.2.3 tcp dport 443 accept" not in both
+    assert "meta skuid 987 ip daddr 127.0.0.1" not in both
+    assert "meta skuid 0 ip daddr 192.0.2." not in both
+    assert "5432" not in both
+    with pytest.raises(AssertionError):
+        guest.nft_rules(987, remote=True)
+    with pytest.raises(AssertionError):
+        guest.nft_rules(987, root_master=True, remote=True, negative_port_probe=True)
+    with pytest.raises(AssertionError):
+        guest.nft_rules(987, root_master=True, remote=1)
