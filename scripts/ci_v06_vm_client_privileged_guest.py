@@ -549,8 +549,15 @@ def _alma_label_roundtrip(root: Path, *, dnf4=False) -> None:
             _signed_recovery_readback(root, ident, platform="almalinux10", phase="restored",
                                       source_state="restored", companion_state="not-applicable")
             if dnf4:
+                # The private foreign-inode test moved the owned inode
+                # out and back, changing ctime as expected. Verify all
+                # other fields, then retain the new exact snapshot for
+                # the native-lock noninterference observation.
+                after_readback = _snapshot(source)
+                assert after_readback[:7] == restored[:7]
+                assert after_readback[-1] == restored[-1]
                 with _native_dnf4_library_owner(root):
-                    assert _snapshot(source) == restored
+                    assert _snapshot(source) == after_readback
                 print("PASS: real DNF4 PID scope and native-created RPM lock across labelled SIGKILL journal; stale refusal, explicit fixture-owner cleanup and recovery", flush=True)
     finally:
         boundary.client._catalog = original_catalog
