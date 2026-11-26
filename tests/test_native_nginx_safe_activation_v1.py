@@ -737,3 +737,25 @@ def test_isolated_derived_root_uses_implicit_identity_and_same_four_caps():
     assert svc["ProtectSystem"] == "strict" and svc["ProtectHome"] == "yes"
     assert svc["Type"] == "forking"
     assert parsed.sections() == ["Unit", "Service"]
+
+
+def test_isolated_selinux_guard_rejects_optimized_python_before_io():
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    scripts = Path(__file__).resolve().parents[1] / "scripts"
+    code = """
+import sys
+sys.path.insert(0, sys.argv[1])
+import ci_selinux_nginx_egress_guest as guest
+try:
+    guest.guard()
+except AssertionError as exc:
+    if str(exc) == "Native isolated fixture requires assertions enabled":
+        raise SystemExit(0)
+raise SystemExit(91)
+"""
+    result = subprocess.run([sys.executable, "-I", "-O", "-c", code, str(scripts)],
+                            capture_output=True, timeout=15, check=False)
+    assert result.returncode == 0, result.stderr

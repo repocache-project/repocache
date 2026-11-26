@@ -88,6 +88,10 @@ def command(*argv, timeout=60, input_text=None, check=True):
 
 
 def guard():
+    # This standalone test uses assertions for all of its native boundaries.
+    # Reject optimized execution before any system or filesystem mutation.
+    if not __debug__:
+        raise AssertionError("Native isolated fixture requires assertions enabled")
     assert os.getresuid() == (0, 0, 0) and os.getresgid() == (0, 0, 0)
     assert socket.gethostname() == "pr237-almalinux10"
     assert not Path("/.dockerenv").exists()
@@ -267,6 +271,7 @@ def publish_derived_unit(raw, unit):
 
 
 def remove_derived_unit(identity):
+    guard()
     path, dev, ino, digest = identity
     assert path.parent == Path("/run/systemd/system") and path.name in (DERIVED_UNIT, DERIVED_ROOT_UNIT)
     info = path.lstat()
