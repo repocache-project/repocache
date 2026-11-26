@@ -441,3 +441,13 @@ receipt or changed identity is refused, never overwritten or adopted.
 No service activation, package-manager command, relabel or policy change
 is performed by the primitive. Native installer orchestration, exact
 signed package verification and reboot/rollback remain separate gates.
+
+At source 3cb0ea7 the kernel deny counter increased for both crossed peer
+tuples (four packets per HTTP 504, zero peer-origin requests). The next
+rendered DNF negative timed out at the client because the signed renderer's
+connect timeout is 10 s but the fixture curl deadline was 8 s. The remote
+fixture now allows 20 s while still requiring an actual NGINX HTTP response,
+kernel counter increment and unchanged upstream counts. No timeout or
+policy semantics in the signed renderer are changed. The Debian probe
+checks the exact APT metadata SHA-256 before invoking the bounded archive
+decompressor and repeats the package digest in the signed worker.

@@ -531,8 +531,12 @@ def request(root, path, *, method="GET", remote=False):
         r"__repocache/repos/fixture-(?:apt|dnf)/(?:payload|fresh|redirect)", path)
     resolve = ["--resolve", f"cache.example.invalid:{PORT}:{SERVICE_ADDR}"] if remote else []
     host = "cache.example.invalid" if remote else "127.0.0.1"
+    # The signed renderer uses proxy_connect_timeout 10s. Leave time
+    # for the bounded NGINX 504 response; do not accept curl timeout as
+    # evidence of a denied upstream or alter the product timeout.
+    budget = "20" if remote else "8"
     result = command("/usr/sbin/ip", "netns", "exec", PEER_NS if remote else NS, "/usr/bin/curl",
-                     "--silent", "--show-error", "--max-time", "8",
+                     "--silent", "--show-error", "--max-time", budget,
                      "--noproxy", "*", "--request", method, "--cacert", str(root / "cert.pem"),
                      *resolve, "--dump-header", str(root / "headers"),
                      "--output", str(root / "response"),
@@ -706,6 +710,7 @@ print(json.dumps(result))
         "ip daddr 8.8.8.8 tcp dport 8008", f"ip daddr {second} tcp dport 8008")
     assert "8.8.8.8" not in rules
     locations = bundle["server_location_fragment"]
+    assert locations.count("    proxy_connect_timeout 10s;\n") == len(pins)
     marker = "    proxy_cache_valid 200 60s;\n"
     assert locations.count(marker) == len(pins)
     locations = locations.replace(marker, marker + "    add_header X-Cache $upstream_cache_status always;\n")

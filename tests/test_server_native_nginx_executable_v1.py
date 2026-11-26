@@ -133,3 +133,40 @@ def test_receipt_requires_exact_owned_inode_and_native_release_identity(tmp_path
     finally:
         os.close(fd)
         os.close(parent)
+
+
+@pytest.mark.skipif(os.geteuid() != 0 or os.getegid() != 0, reason="private root fixture")
+def test_receipt_refuses_same_inode_metadata_change_and_partial_publication(tmp_path):
+    from repocache.server_native_nginx_executable_v1 import stage_nginx_candidate_with_receipt
+    source = tmp_path / "vendor"
+    source.write_bytes(b"private synthetic executable")
+    source.chmod(0o755)
+    owned = tmp_path / "owned"
+    owned.mkdir(mode=0o700)
+    opts = dict(distribution="debian", package_identity="nginx:amd64=1.2-3",
+                native_payload_sha256="a" * 64, release_source_sha="b" * 40,
+                release_archive_sha256="c" * 64,
+                authenticated_sha256=hashlib.sha256(source.read_bytes()).hexdigest())
+    parent = os.open(owned, os.O_RDONLY | os.O_DIRECTORY)
+    fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        receipt = owned / ".native-nginx-executable-v1.json"
+        receipt.write_bytes(b"partial")
+        receipt.chmod(0o600)
+        with pytest.raises(NativeExecutableCandidateError):
+            stage_nginx_candidate_with_receipt(parent, fd, **opts)
+        assert receipt.read_bytes() == b"partial"
+        assert not (owned / "nginx").exists()
+        receipt.unlink()  # This deliberately injected fixture leaf is ours.
+        stage_nginx_candidate_with_receipt(parent, fd, **opts)
+        raw = receipt.read_bytes()
+        candidate = owned / "nginx"
+        info = candidate.stat()
+        os.utime(candidate, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000_000))
+        with pytest.raises(NativeExecutableCandidateError, match="RECEIPT_CHANGED"):
+            stage_nginx_candidate_with_receipt(parent, fd, **opts)
+        assert receipt.read_bytes() == raw and candidate.stat().st_ino == info.st_ino
+        assert candidate.read_bytes() == source.read_bytes()
+    finally:
+        os.close(fd)
+        os.close(parent)

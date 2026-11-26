@@ -1189,7 +1189,10 @@ def verify_debian_executable_candidate(native, assets, pins) -> None:
     import stat
     import tempfile
     from repocache.server_native_package_trust_v1 import _apt_commands, _trusted_key, _NATIVE
+    from repocache.server_native_nginx_executable_v1 import debian_nginx_metadata_digest
 
+    assert __debug__ and socket.gethostname() == "pr237-debian13"
+    assert not Path("/.dockerenv").exists()
     assert Path("/etc/os-release").read_text().splitlines().count('ID=debian') == 1
     assert 'VERSION_ID="13"' in Path("/etc/os-release").read_text().splitlines()
     assert os.getresuid() == (0, 0, 0) and os.getresgid() == (0, 0, 0)
@@ -1212,7 +1215,7 @@ def verify_debian_executable_candidate(native, assets, pins) -> None:
         assert query[-2:] == ["policy", "nginx"]
         manager(*refresh)
         metadata = manager(*query[:-2], "show", spec)
-        assert metadata
+        expected_payload = debian_nginx_metadata_digest(metadata, version)
         manager(*refresh[:-1], "download", spec)
         packages = list(work.glob("*.deb"))
         assert len(packages) == 1
@@ -1220,12 +1223,16 @@ def verify_debian_executable_candidate(native, assets, pins) -> None:
         info = payload.lstat()
         assert stat.S_ISREG(info.st_mode) and info.st_uid == 0 and info.st_nlink == 1
         assert 0 < info.st_size <= 32 * 1024 * 1024 and not info.st_mode & 0o022
+        assert info.st_gid == 0
+        archive_digest = hashlib.sha256(payload.read_bytes()).hexdigest()
+        assert archive_digest == expected_payload
         assert manager("/usr/bin/dpkg-deb", "-f", str(payload), "Package") == "nginx"
         assert manager("/usr/bin/dpkg-deb", "-f", str(payload), "Version") == version
         assert manager("/usr/bin/dpkg-deb", "-f", str(payload), "Architecture") == "amd64"
-        archive_digest = hashlib.sha256(payload.read_bytes()).hexdigest()
+        assert hashlib.sha256(payload.read_bytes()).hexdigest() == archive_digest
         data = work / "data.tar"
         with data.open("xb") as out:
+            os.fchmod(out.fileno(), 0o600)
             subprocess.run(["/usr/bin/prlimit", "--fsize=67108864:67108864", "--",
                             "/usr/bin/dpkg-deb", "--fsys-tarfile", str(payload)],
                            stdout=out, stderr=subprocess.PIPE, check=True, timeout=60,
@@ -1233,6 +1240,7 @@ def verify_debian_executable_candidate(native, assets, pins) -> None:
             out.flush()
             os.fsync(out.fileno())
         assert 0 < data.stat().st_size <= 64 * 1024 * 1024
+        assert hashlib.sha256(payload.read_bytes()).hexdigest() == expected_payload
         target = work / "owned"
         target.mkdir(mode=0o700)
         evidence = dict(distribution="debian", package_identity=spec,
@@ -1246,8 +1254,9 @@ sys.path.insert(0, "/usr/libexec/repocache/server-control-worker")
 from repocache import server_native_nginx_executable_v1 as stage
 assert isinstance(stage.__loader__,zipimport.zipimporter)
 assert stage.__loader__.archive == "/usr/libexec/repocache/server-control-worker"
-root, data, version, metadata, raw = sys.argv[1:]
-evidence=json.loads(raw)
+root, data, version, payload = sys.argv[1:]
+metadata,evidence=json.load(sys.stdin)
+assert hashlib.sha256(Path(payload).read_bytes()).hexdigest() == evidence["native_payload_sha256"]
 assert stage.debian_nginx_metadata_digest(metadata,version) == evidence["native_payload_sha256"]
 assert stage.debian_nginx_tar_digest(Path(data).read_bytes()) == evidence["authenticated_sha256"]
 directory=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
@@ -1263,8 +1272,8 @@ finally:
     os.close(directory)
 """
         subprocess.run(["/usr/bin/python3", "-IS", "-B", "-c", code,
-                        str(target), str(data), version, metadata, json.dumps(evidence)],
-                       check=True, timeout=60)
+                        str(target), str(data), version, str(payload)],
+                       input=json.dumps([metadata,evidence]),text=True,check=True, timeout=60)
         assert hashlib.sha256((target / "nginx").read_bytes()).hexdigest() == digest
     after = vendor.stat()
     assert (before.st_dev, before.st_ino, before.st_mode, before.st_mtime_ns, before.st_ctime_ns) == (
