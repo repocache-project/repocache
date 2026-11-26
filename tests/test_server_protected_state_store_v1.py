@@ -471,3 +471,39 @@ def test_unexpected_stage_after_replacement_is_refused(
     assert (folder / STAGE_NAME).read_bytes() == (
         expected_state_bytes if identical_candidate else b"unexpected")
     assert (folder / STATE_NAME).read_bytes() == expected_state_bytes
+
+
+@pytest.mark.parametrize("native_effects", [False, True])
+def test_native_executable_scratch_churn_preserves_lock_boundary(
+    protected_root, native_effects,
+):
+    from contextlib import nullcontext
+    from repocache.server_protected_state_inspect_v1 import (
+        ProtectedStateInspectionError, _identity,
+    )
+
+    fd, folder, uid = protected_root
+    shared = folder.parents[1]
+    before = _identity(shared.stat())
+    expected = (nullcontext() if native_effects else pytest.raises(
+        ProtectedStateInspectionError, match="MANAGED_DIRECTORY_CHANGED"))
+    with expected:
+        with _locked(fd, uid, allow_native_package_parent_changes=native_effects):
+            scratch = shared / "repocache-native-executable-test"
+            scratch.mkdir(mode=0o700)
+            scratch.rmdir()
+            assert _identity(shared.stat()) != before
+            with pytest.raises(ProtectedStateStoreError, match="PROTECTED_LOCK_UNAVAILABLE"):
+                with _locked(fd, uid):
+                    pytest.fail("concurrent state lock admitted")
+    assert list(folder.iterdir()) == [folder / LOCK_NAME]
+
+
+def test_native_executable_scratch_mode_refuses_private_parent_changes(protected_root):
+    fd, folder, uid = protected_root
+    unexpected = folder.parent / "foreign"
+    with pytest.raises(ProtectedStateStoreError, match="PROTECTED_DIRECTORY_CHANGED"):
+        with _locked(fd, uid, allow_native_package_parent_changes=True):
+            unexpected.mkdir(mode=0o700)
+    assert unexpected.is_dir()
+    assert list(folder.iterdir()) == [folder / LOCK_NAME]

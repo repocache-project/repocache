@@ -899,3 +899,16 @@ and foreign-process refusal, durable application/compensation of rules
 at WAL boundaries, reboot/repair and exact installed-service cache/log
 and catalog evidence on both supported distributions. Never apply the
 candidate rules to the host namespace or promote the disposable test policy.
+
+
+The authenticated fixed executable placement uses the existing retained
+native-package-effects state lock contract while creating and removing
+private APT and isolated RPM workspaces under /var/lib. The shared /var
+and /var/lib parents may undergo normal metadata churn, but must retain
+their pinned device, inode, type, mode and ownership; the private
+/var/lib/repocache ancestor remains strictly unchanged, and the state
+directory and lock retain their existing identity checks. Ordinary state
+transactions continue to use the strict default lock. No new trust
+anchor, service activation, policy or network permission is granted.
+The existing booted candidate placement/reboot test and detached-root
+lock regressions must pass on the corrected revision.

@@ -785,3 +785,22 @@ def test_executable_candidate_requires_native_host_before_asset_access(monkeypat
     with pytest.raises(RuntimeError, match="fixture host refused"):
         install._stage_authenticated_native_executable_candidate(
             tmp_path, commit="a" * 40, archive_sha256="b" * 64)
+
+@pytest.mark.parametrize("distribution", ["debian", "almalinux"])
+def test_executable_candidate_selects_retained_native_effects_lock(
+    monkeypatch, tmp_path, distribution,
+):
+    monkeypatch.setattr(install, "_native_distro", lambda: distribution)
+    monkeypatch.setattr(install, "require_native_host_preconditions", lambda: None)
+    monkeypatch.setattr(stage, "_authenticated_payloads",
+                        lambda *a, **kw: ({}, {"fixture": True}))
+
+    def stop_at_lock(root_fd, owner_uid, *, allow_native_package_parent_changes=False):
+        assert root_fd >= 0 and owner_uid == 0
+        assert allow_native_package_parent_changes is True
+        raise RuntimeError("fixture stopped before host access")
+
+    monkeypatch.setattr(install, "_locked", stop_at_lock)
+    with pytest.raises(RuntimeError, match="fixture stopped before host access"):
+        install._stage_authenticated_native_executable_candidate(
+            tmp_path, commit="a" * 40, archive_sha256="b" * 64)

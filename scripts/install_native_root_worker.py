@@ -596,7 +596,12 @@ def _stage_authenticated_native_executable_candidate(
     with ExitStack() as stack:
         root = os.open("/", stage._DIRECTORY)
         stack.callback(os.close, root)
-        state = stack.enter_context(_locked(root, 0))
+        # The private APT workspace and isolated RPM database are created
+        # and removed under /var/lib. Reuse the audited native-effects lock
+        # contract for shared-parent metadata only; the private REPOCACHE
+        # ancestor, state directory, lock and mount checks remain enforced.
+        state = stack.enter_context(_locked(
+            root, 0, allow_native_package_parent_changes=True))
         def require_boundary():
             stage._audit_worker_files(Path("/"), payloads)
             if (_read_file(state, _RUNTIME_RECEIPT, 0, 8192) != expected
