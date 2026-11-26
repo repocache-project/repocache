@@ -32,6 +32,7 @@ from recovery_journal_v1 import (
     JOURNAL_MAX, PairRefused, _hash, _blob, _decode, _pack,
     _no_duplicates, _journal_name, _pending_journal_name,
     _refuse_pending_journal, _source_attrs, _get_journal, _retained_bytes,
+    _modern_recovery_record, _inspect_record_locked, _observe_stage,
 )
 
 MARKER = ".repocache-recoverable-pair-test"
@@ -410,6 +411,12 @@ def _apply_sandbox(root: Path, ident: str, *, crash: str | None,
                         raise PairRefused("Existing transaction uses a different rollback contract")
                     if journal["phase"] != "installed":
                         raise PairRefused("Interrupted or restored transaction needs review")
+                    if _modern_recovery_record(journal):
+                        recheck()
+                        observed, _ = _inspect_record_locked(root, statefd, ident)
+                        if observed != journal:
+                            raise PairRefused("Recovery journal changed before retry")
+                        recheck()
                     approval = boundary._manifest(statefd, ident)
                     if (approved != approval or approval != journal["approval"]
                             or _hash(_pack(approval)) != journal["approval_sha256"]):
@@ -444,6 +451,18 @@ def _apply_sandbox(root: Path, ident: str, *, crash: str | None,
                 # context; current supported enforcing platform uses DNF.
                 if proposal.companion and any(name == "security.selinux" for name, _ in attrs):
                     raise PairRefused("Labelled APT companion not supported")
+                # Refuse any pre-existing staging leaf before the first
+                # staging write, including an unexpected APT companion.
+                # The historical nonretaining lab remains separate.
+                if approval["schema"] in (2, 3) and (not proposal.companion or retain_companion):
+                    _observe_stage(root, {"id": ident}, proposal.source, None)
+                    if proposal.companion:
+                        path, _ = proposal.companion
+                        _observe_stage(root, {"id": ident}, path, None)
+                        with atom._source_directory(root, path) as (fd, leaf):
+                            if _read_named(fd, leaf) is not None:
+                                raise PairRefused("Unexpected existing mirror companion")
+                    recheck()
                 with atom._source_directory(root, proposal.source) as (fd, leaf):
                     source = _read_named(fd, leaf, attrs)
                     if source is None or source[0] != proposal.original:
@@ -582,6 +601,14 @@ def _neutralize_companion(root, fdstate, ident, j, *, recheck, crash):
 def _restore_locked(root: Path, fdstate: int, ident: str, j: dict,
                     *, recheck, crash: str | None = None) -> dict:
     recheck()
+    # The same signed readback used for evidence must pass before the
+    # isolated writer changes any companion, source, staging leaf or journal.
+    # Keep historical lab formats explicitly separate from the modern contract.
+    if _modern_recovery_record(j):
+        observed, _ = _inspect_record_locked(root, fdstate, ident)
+        if observed != j:
+            raise PairRefused("Recovery journal changed before rollback")
+        recheck()
     original, proposed, mirror = (
         _decode(j["original"]), _decode(j["proposed"]), _decode(j["mirror"]))
     attrs = _source_attrs(j)

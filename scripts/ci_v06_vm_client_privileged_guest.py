@@ -332,6 +332,26 @@ def _debian_fixture(root: Path) -> None:
     mirror = root / ("etc/apt/mirrors/repocache-" + ident + ".list")
     _signed_recovery_readback(root, ident, platform="debian13", phase="armed",
                               source_state="proposed", companion_state="cache-bearing")
+    # A foreign source stage must stop the modern writer before it can
+    # neutralize the already-published companion or modify its journal.
+    stage = source.with_name(".repocache-atomic-" + ident)
+    journal = state / ("pair-" + ident + ".json")
+    with stage.open("xb") as stream:
+        os.fchmod(stream.fileno(), 0o600)
+        stream.write(b"foreign fixture stage")
+    try:
+        resources = (source, mirror, journal, stage)
+        before = tuple(_snapshot(path) for path in resources)
+        try:
+            pair.recover_sandbox(root, ident)
+        except pair.PairRefused as exc:
+            assert "Unexpected recovery stage" in str(exc)
+        else:
+            raise AssertionError("Unknown stage admitted to recovery")
+        assert tuple(_snapshot(path) for path in resources) == before
+    finally:
+        stage.unlink()
+    print("PASS: shared pre-mutation readback refuses foreign stage before companion neutralization", flush=True)
     # Interrupt recovery after the real restore inode and journal are durable.
     # The authenticated installed read-only helper must observe that exact
     # stage before the separate lab resumes the rollback, with catalog offline.

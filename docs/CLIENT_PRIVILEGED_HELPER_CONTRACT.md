@@ -340,3 +340,26 @@ missing and unexpected stages; the existing booted signed-helper exercise
 adds terminal-stage refusal on both distributions and a Debian SIGKILL
 after durable rollback staging with offline resume. Exact execution is
 required before acceptance; no new CLI operation or host write is enabled.
+
+
+### Shared pre-mutation recovery evidence
+
+The isolated modern pair writer now reuses the exact authenticated
+readback under its already-held exclusive client state lock and separate
+private native lock scope. Retry, restore and recover refuse a changed
+journal, inconsistent phase, missing required stage or unknown resource
+before changing the companion, source, stage or journal. Fresh modern
+apply also refuses either pre-existing staging leaf or companion before
+creating its first staged file. Historical schema-1 approval and
+nonretaining APT lab paths remain explicitly separate; no installed
+writer or legacy migration authority is added.
+
+Root-container regressions preserve exact file inode, bytes, permissions
+and metadata across pre-mutation refusal. The booted Debian fixture
+injects an unexpected source stage after interrupted source publication,
+requires no companion neutralization or journal change, then resumes
+the existing offline recovery/SIGKILL proof. AlmaLinux labelled
+transactions exercise the same modern preflight. This is not a guarantee
+of CAS against another root actor, full native exclusion, immediate URL
+revocation, or permission to expose `--apply`; actual installed mutation
+remains disabled and its original acceptance gates remain open.
