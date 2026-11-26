@@ -487,6 +487,7 @@ def incomplete_journal_matrix(manager):
                 assert apply()["status"] == "installed-sandbox"
             actual_fsync = os.fsync
             calls = 0
+            injected = OSError(errno.ENOSPC, "injected pending journal fsync")
             def fail_pending(fd):
                 nonlocal calls
                 # Only the exact new regular journal file in this private
@@ -494,15 +495,24 @@ def incomplete_journal_matrix(manager):
                 if os.readlink("/proc/self/fd/" + str(fd)) == str(pending):
                     calls += 1
                     if calls == fail_at:
-                        raise OSError(errno.ENOSPC, "injected pending journal fsync")
+                        raise injected
                 actual_fsync(fd)
             try:
                 os.fsync = fail_pending
                 try:
                     (apply if action == "apply" else restore)()
-                except (OSError, pair.PairRefused) as exc:
-                    cause = exc if isinstance(exc, OSError) else exc.__cause__
-                    assert isinstance(cause, OSError) and cause.errno == errno.ENOSPC
+                except (OSError, pair.PairRefused, boundary.BoundaryRefused) as exc:
+                    # The protected state context wraps OSError, and the
+                    # apply entry adds its own PairRefused. Require the
+                    # original injected exception, not just any refusal.
+                    cause = exc
+                    for _ in range(4):
+                        if cause is injected:
+                            break
+                        cause = cause.__cause__
+                        if cause is None:
+                            break
+                    assert cause is injected and cause.errno == errno.ENOSPC
                 else:
                     raise AssertionError("Pending journal fsync error was accepted")
             finally:
