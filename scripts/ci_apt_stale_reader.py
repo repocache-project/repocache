@@ -211,7 +211,7 @@ from pathlib import Path
 root, view = map(Path, sys.argv[1:3])
 assert os.getresuid() == (0, 0, 0)
 assert root.name == 'transaction' and view == root.parent / 'view'
-assert root.parent.name == 'journal'
+assert root.parent.name in ('journal', 'journal-deb822')
 assert root.parent.parent.name.startswith('repocache-booted-apt-reader-')
 assert root.resolve(strict=True) == root and view.resolve(strict=True) == view
 assert os.readlink('/proc/self/ns/mnt') != sys.argv[3]
@@ -225,13 +225,15 @@ assert view.stat().st_ino == (root / 'var').stat().st_ino
 """ + _TRACE_CHILD
 
 
-def _journal_cycle(case, primary, upstream, keyring, ca):
+def _journal_cycle(case, primary, upstream, keyring, ca, *, deb822=False):
     """Prove actual journal recovery, not a manual simulation, for a stale APT reader."""
     from smoke_client_recoverable_pair import build
     import recoverable_fallback_pair_lab as pair
     import root_source_boundary as boundary
 
-    assert case.name == "journal" and case.parent.parent == Path("/tmp")
+    assert type(deb822) is bool
+    assert case.name == ("journal-deb822" if deb822 else "journal")
+    assert case.parent.parent == Path("/tmp")
     assert case.parent.name.startswith("repocache-booted-apt-reader-")
     case.mkdir(mode=0o755)
     case.chmod(0o755)
@@ -244,9 +246,20 @@ def _journal_cycle(case, primary, upstream, keyring, ca):
     keys.mkdir(mode=0o755)
     shutil.copyfile(keyring, keys / "repocache-ci.gpg")
     (keys / "repocache-ci.gpg").chmod(0o644)
-    original = (f"deb [signed-by=/etc/apt/keyrings/repocache-ci.gpg] "
-                f"{upstream.origin} stable main\n").encode("ascii")
+    if deb822:
+        target = source.with_suffix(".sources")
+        assert not os.path.lexists(target)
+        source.rename(target)
+        source = target
+        original = ("Types: deb\n"
+                    f"URIs: {upstream.origin}\n"
+                    "Suites: stable\nComponents: main\nArchitectures: amd64\n"
+                    "Signed-By: /etc/apt/keyrings/repocache-ci.gpg\n").encode("ascii")
+    else:
+        original = (f"deb [signed-by=/etc/apt/keyrings/repocache-ci.gpg] "
+                    f"{upstream.origin} stable main\n").encode("ascii")
     source.write_bytes(original)
+    assert source.stat().st_uid == 0 and source.stat().st_mode & 0o777 == 0o644
     for name in ("apt.conf.d", "empty-parts"):
         (etc / name).mkdir(mode=0o755)
     (etc / "apt.conf").touch(mode=0o644, exist_ok=False)
@@ -263,7 +276,7 @@ def _journal_cycle(case, primary, upstream, keyring, ca):
     (config / "config.json").write_text(json.dumps({"server": server}))
     (config / "config.json").chmod(0o644)
     catalog = case.parent / "www/.well-known/repocache/catalog.json"
-    catalog.parent.mkdir(parents=True)
+    catalog.parent.mkdir(parents=True, exist_ok=True)
     catalog.write_text(json.dumps({"schema": 1, "repositories": [
         {"upstream": upstream.origin, "cache": route}]}))
     (state / ("candidate-" + "a" * 32 + ".json")).unlink()
@@ -300,7 +313,8 @@ def _journal_cycle(case, primary, upstream, keyring, ca):
     config_file = case / "fixture.conf"
     config_file.write_text(
         'Dir::Etc "/etc/apt";\nDir::Etc::main "apt.conf";\n'
-        'Dir::Etc::parts "apt.conf.d";\nDir::Etc::sourcelist "sources.list.d/base.list";\n'
+        'Dir::Etc::parts "apt.conf.d";\n'
+        f'Dir::Etc::sourcelist "sources.list.d/{source.name}";\n'
         'Dir::Etc::sourceparts "empty-parts";\n'
         f'Dir::State "{view}/lib/apt";\nDir::State::status "{view}/lib/dpkg/status";\n'
         f'Dir::Cache "{view}/cache/apt";\nDir::Log "{view}/log/apt";\n'
@@ -328,6 +342,11 @@ def _journal_cycle(case, primary, upstream, keyring, ca):
                 assert source.read_bytes() == original
                 assert mirror.read_bytes() == (upstream.origin + "\tpriority:1\n").encode()
                 retained_inode = mirror.stat().st_ino
+                if deb822:
+                    # A healthy former cache must not be contacted through
+                    # the retained upstream-only mirror of a parsed stanza.
+                    primary.mode = "healthy"
+                assert not primary.hits and not upstream.hits
                 _ptrace(17, child.pid)
                 result = child.wait(timeout=45)
             finally:
@@ -342,6 +361,12 @@ def _journal_cycle(case, primary, upstream, keyring, ca):
         assert pair.recover_sandbox(root, ident)["status"] == "restored"
         assert mirror.stat().st_ino == retained_inode
         assert source.read_bytes() == original
+        assert source.stat().st_uid == 0 and source.stat().st_mode & 0o777 == 0o644
+        if deb822:
+            assert not source.with_suffix(".list").exists()
+            assert "Types: deb" in source.read_text("ascii")
+            assert primary.mode == "healthy"
+            print("PASS: real deb822 journal SIGKILL and pre-parsed native APT stanza; healthy former cache not contacted, signed upstream only", flush=True)
         assert not list(view.iterdir())  # the mount never propagated to the parent
         assert os.readlink("/proc/self/ns/mnt") == parent_ns
         now = Path("/etc/apt").stat()
@@ -368,6 +393,7 @@ def probe():
                 for mode in ("retained", "removed", "upstream-only"):
                     _cycle(base / mode, primary, upstream, keyring, ca, mode)
                 _journal_cycle(base / "journal", primary, upstream, keyring, ca)
+                _journal_cycle(base / "journal-deb822", primary, upstream, keyring, ca, deb822=True)
             finally:
                 upstream.close()
         finally:
