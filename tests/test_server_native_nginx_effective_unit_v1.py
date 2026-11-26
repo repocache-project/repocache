@@ -386,3 +386,71 @@ def test_native_nginx_unit_change_during_kernel_probe_refuses_observation(
         inspect_effective_native_nginx_unit("debian")
     assert [event[0] for event in events].count("run") == 2
     assert ("kernel", 1450) in events
+
+
+def _signed_unit_fixture():
+    from pathlib import Path
+    return (Path(__file__).resolve().parents[1] /
+            "docs/examples/systemd/repocache-nginx.service").read_bytes()
+
+
+@pytest.mark.parametrize("port,low", [(1, True), (443, True), (1023, True),
+                                      (1024, False), (8008, False), (65535, False)])
+def test_namespace_candidate_preserves_closed_signed_unit(port, low):
+    import configparser
+    import hashlib
+
+    raw = _signed_unit_fixture()
+    report = unit._render_owned_nginx_namespace_unit_candidate(raw, https_port=port)
+    candidate = report["unit_bytes"]
+    parser = configparser.ConfigParser(interpolation=None, strict=True)
+    parser.optionxform = str
+    parser.read_string(candidate.decode("ascii"))
+    expected = unit._closed_signed_owned_unit_contract(raw)
+    service = dict(parser["Service"])
+    for name in unit._OWN_EXEC_KEYS:
+        assert service.pop(name) == expected.pop(name).replace(
+            "/usr/sbin/nginx", "/usr/libexec/repocache/nginx", 1)
+    assert service.pop("NetworkNamespacePath") == "/run/netns/repocache-nginx"
+    assert service.pop("RestrictAddressFamilies") == "AF_UNIX AF_INET AF_INET6"
+    assert service.pop("CapabilityBoundingSet") == (
+        "CAP_CHOWN CAP_KILL CAP_SETGID CAP_SETUID" +
+        (" CAP_NET_BIND_SERVICE" if low else ""))
+    assert service == expected
+    assert dict(parser["Install"]) == {"WantedBy": "multi-user.target"}
+    assert report["source_unit_sha256"] == hashlib.sha256(raw).hexdigest()
+    assert report["candidate_unit_sha256"] == hashlib.sha256(candidate).hexdigest()
+    assert report["https_port"] == port
+    for name in ("runtime_namespace_verified", "runtime_selinux_verified",
+                 "authorizes_nginx_activation", "authorizes_systemctl"):
+        assert report[name] is False
+
+
+@pytest.mark.parametrize("port", [0, 65536, True, "443", None])
+def test_namespace_candidate_refuses_invalid_port(port):
+    with pytest.raises(EffectiveNginxUnitError, match="NAMESPACE_UNIT_PORT_INVALID"):
+        unit._render_owned_nginx_namespace_unit_candidate(_signed_unit_fixture(), https_port=port)
+
+
+@pytest.mark.parametrize("old,new", [
+    (b"NoNewPrivileges=yes", b"NoNewPrivileges=no"),
+    (b"ProtectSystem=strict", b"ProtectSystem=full"),
+    (b"ExecStart=/usr/sbin/nginx", b"ExecStart=/tmp/foreign"),
+    (b"UMask=0027", b"UMask=0027\nExecStartPost=/tmp/foreign"),
+    (b"UMask=0027", b"UMask=0027\nUMask=0027"),
+    (b"[Service]", b"[DEFAULT]\nUser=root\n[Service]"),
+    (b"[Service]", b"[DEFAULT]\n[Service]"),
+    (b"UMask=0027", b"UMask:0027"),
+    (b"After=network.target", b"After=network.target\r"),
+    (b"[Install]", b"[Foreign]"),
+])
+def test_namespace_candidate_refuses_unreviewed_source_contract(old, new):
+    raw = _signed_unit_fixture()
+    assert old in raw
+    with pytest.raises(EffectiveNginxUnitError, match="NAMESPACE_UNIT_SOURCE_INVALID"):
+        unit._render_owned_nginx_namespace_unit_candidate(raw.replace(old, new), https_port=8008)
+
+
+def test_namespace_candidate_requires_installed_signed_source():
+    with pytest.raises(EffectiveNginxUnitError, match="SIGNED_OWN_UNIT_SOURCE_REQUIRED"):
+        unit.render_owned_nginx_namespace_unit_candidate(https_port=8008)

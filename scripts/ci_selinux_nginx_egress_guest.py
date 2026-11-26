@@ -210,43 +210,37 @@ def derive_signed_unit(raw, root, *, root_master=False):
     assert type(raw) is bytes and 0 < len(raw) <= 8192
     assert type(root_master) is bool
     assert root.parent == Path("/var/lib") and re.fullmatch(PREFIX + r"[a-z0-9_]+", root.name)
-    # Require exact service contract; unexpected upstream unit changes fail
-    # closed and must be reviewed rather than silently inherited.
-    expected = {
-        "Type": "forking", "RuntimeDirectory": "repocache-nginx",
-        "RuntimeDirectoryMode": "0755", "PIDFile": "/run/repocache-nginx/nginx.pid",
-        "ExecStartPre": "/usr/sbin/nginx -t -q -c /etc/nginx/repocache.d/repocache.conf",
-        "ExecStart": "/usr/sbin/nginx -c /etc/nginx/repocache.d/repocache.conf",
-        "ExecReload": "/usr/sbin/nginx -s reload -c /etc/nginx/repocache.d/repocache.conf",
-        "ExecStop": "/usr/sbin/nginx -s quit -c /etc/nginx/repocache.d/repocache.conf",
-        "TimeoutStartSec": "30s", "TimeoutStopSec": "30s", "KillMode": "mixed",
-        "NoNewPrivileges": "yes", "PrivateTmp": "yes", "ProtectHome": "yes",
-        "ProtectSystem": "strict",
-        "ReadWritePaths": "/run/repocache-nginx /var/cache/nginx/repocache-managed /var/log/nginx/repocache-managed",
-        "UMask": "0027",
-    }
-    import configparser
-    parser = configparser.ConfigParser(interpolation=None, strict=True)
-    parser.optionxform = str
-    parser.read_string(raw.decode("ascii"))
-    assert parser.defaults() == {}
-    assert parser.sections() == ["Unit", "Service", "Install"]
-    assert dict(parser["Unit"]) == {"Description": "REPOCACHE isolated native NGINX service",
-                                    "After": "network.target"}
-    assert dict(parser["Service"]) == expected
-    assert dict(parser["Install"]) == {"WantedBy": "multi-user.target"}
-    service = dict(expected)
+    # Reuse the signed-worker candidate contract instead of duplicating
+    # unit parsing and the root-master capability decision in the fixture.
+    from repocache.server_native_nginx_effective_unit_v1 import (
+        _closed_signed_owned_unit_contract, _render_owned_nginx_namespace_unit_candidate,
+    )
+    if root_master:
+        import configparser
+        result = _render_owned_nginx_namespace_unit_candidate(raw, https_port=PORT)
+        assert not result["authorizes_nginx_activation"]
+        parser = configparser.ConfigParser(interpolation=None, strict=True)
+        parser.optionxform = str
+        parser.read_string(result["unit_bytes"].decode("ascii"))
+        service = dict(parser["Service"])
+        assert service["CapabilityBoundingSet"] == MASTER_CAP_NAMES
+    else:
+        service = _closed_signed_owned_unit_contract(raw)
     del service["RuntimeDirectory"]
     del service["RuntimeDirectoryMode"]
     service["PIDFile"] = str(root / "pid/nginx.pid")
     service["ReadWritePaths"] = str(root / "runtime") + " " + str(root / "pid")
     for key in ("ExecStartPre", "ExecStart", "ExecReload", "ExecStop"):
-        service[key] = (service[key].replace("/usr/sbin/nginx", str(root / "nginx") +
+        executable = "/usr/libexec/repocache/nginx" if root_master else "/usr/sbin/nginx"
+        service[key] = (service[key].replace(executable, str(root / "nginx") +
                            " -e stderr -p " + str(root))
                         .replace("/etc/nginx/repocache.d/repocache.conf", str(root / "nginx.conf")))
-    service.update({"CapabilityBoundingSet": MASTER_CAP_NAMES if root_master else "",
-                    "NetworkNamespacePath": "/run/netns/" + NS,
-                    "RestrictAddressFamilies": "AF_UNIX AF_INET"})
+    # Only the private fixture namespace and paths are substituted. Keep
+    # the root variant's candidate capabilities and address families.
+    service["NetworkNamespacePath"] = "/run/netns/" + NS
+    if not root_master:
+        service.update({"CapabilityBoundingSet": "",
+                        "RestrictAddressFamilies": "AF_UNIX AF_INET"})
     if not root_master:
         service.update({"User": "nginx", "Group": "nginx"})
     # For the root variant preserve the signed unit's implicit system-manager

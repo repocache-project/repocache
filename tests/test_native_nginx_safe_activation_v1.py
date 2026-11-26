@@ -711,8 +711,10 @@ def test_isolated_derived_unit_preserves_signed_contract_and_private_paths():
     for bad in (signed.replace(b"Type=forking", b"Type=exec"),
                 signed.replace(b"NoNewPrivileges=yes", b"NoNewPrivileges=no"),
                 signed.replace(b"KillMode=mixed", b"KillMode=mixed\nExecStartPost=/bin/false")):
-        with pytest.raises(AssertionError):
-            guest.derive_signed_unit(bad, root)
+        from repocache.server_native_nginx_effective_unit_v1 import EffectiveNginxUnitError
+        for root_master in (False, True):
+            with pytest.raises(EffectiveNginxUnitError, match="NAMESPACE_UNIT_SOURCE_INVALID"):
+                guest.derive_signed_unit(bad, root, root_master=root_master)
     with pytest.raises(AssertionError):
         guest.derive_signed_unit(signed, Path("/"))
 
@@ -733,7 +735,7 @@ def test_isolated_derived_root_uses_implicit_identity_and_same_four_caps():
     assert svc["CapabilityBoundingSet"].split() == ["CAP_CHOWN", "CAP_KILL", "CAP_SETGID", "CAP_SETUID"]
     assert "AmbientCapabilities" not in svc
     assert svc["NoNewPrivileges"] == "yes"
-    assert svc["RestrictAddressFamilies"] == "AF_UNIX AF_INET"
+    assert svc["RestrictAddressFamilies"] == "AF_UNIX AF_INET AF_INET6"
     assert svc["ProtectSystem"] == "strict" and svc["ProtectHome"] == "yes"
     assert svc["Type"] == "forking"
     assert parsed.sections() == ["Unit", "Service"]

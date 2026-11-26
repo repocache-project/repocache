@@ -912,3 +912,28 @@ transactions continue to use the strict default lock. No new trust
 anchor, service activation, policy or network permission is granted.
 The existing booted candidate placement/reboot test and detached-root
 lock regressions must pass on the corrected revision.
+
+
+### Closed signed namespace-unit candidate
+
+The authenticated worker derives an inert unit candidate from its embedded
+signed dedicated unit. A closed contract rejects changed commands,
+permissions, unknown options, duplicate directives and unexpected sections.
+All four NGINX operations use the fixed staged executable path; the
+candidate binds the fixed service namespace, IPv4/IPv6/Unix address families
+and the previously exercised root-master capability subset. A privileged
+listener port additionally proposes CAP_NET_BIND_SERVICE; native permission
+and SELinux policy for that case remain unverified. Existing fixed writable
+paths, no-new-privileges, service identity and systemd lifecycle are preserved.
+The trusted future caller must bind the port to the authenticated generation.
+The installed signed unit is not replaced or activated by this renderer.
+
+The existing guarded booted fixture now derives its root-master test unit
+from the same candidate renderer, substituting only the private fixture
+paths and namespace. Both target guests also derive the candidate directly
+from the authenticated installed worker, compare the signed unit identity
+and require the same candidate digest after reboot. This is not a deployed
+domain, policy/namespace provisioner, WAL transition or actual installed
+cache acceptance. Existing active-route refusal and stock service checks
+remain in force. Exact-head native tests and the installed AlmaLinux data
+plane still require acceptance; do not suppress its upstream failure.

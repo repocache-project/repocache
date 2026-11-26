@@ -1216,6 +1216,28 @@ finally:
     print("PASS: restored exact committed generation; repeat signed storage preparation retains cache/history", flush=True)
 
 
+def signed_namespace_unit_candidate():
+    """Render from the actual installed authenticated worker, without writing."""
+    code = r"""
+import json,sys,zipimport
+sys.path.insert(0, "/usr/libexec/repocache/server-control-worker")
+from repocache import server_native_nginx_effective_unit_v1 as unit
+assert isinstance(unit.__loader__, zipimport.zipimporter)
+assert unit.__loader__.archive == "/usr/libexec/repocache/server-control-worker"
+report=unit.render_owned_nginx_namespace_unit_candidate(https_port=8008)
+raw=report.pop("unit_bytes")
+assert raw.count(b"/usr/libexec/repocache/nginx ") == 4
+assert b"NetworkNamespacePath=/run/netns/repocache-nginx\n" in raw
+assert b"CapabilityBoundingSet=CAP_CHOWN CAP_KILL CAP_SETGID CAP_SETUID\n" in raw
+assert not report["authorizes_nginx_activation"] and not report["authorizes_systemctl"]
+assert not report["runtime_namespace_verified"] and not report["runtime_selinux_verified"]
+print(json.dumps(report))
+"""
+    return json.loads(subprocess.run(
+        ["/usr/bin/python3", "-IS", "-B", "-c", code], check=True,
+        capture_output=True, text=True, timeout=30).stdout)
+
+
 def verify_fixed_executable_candidate(native, assets, pins, distribution):
     """Exercise the actual fixed installer candidate in the guarded VM."""
     import stat
@@ -1252,6 +1274,11 @@ def verify_fixed_executable_candidate(native, assets, pins, distribution):
     assert all(getattr(before, k) == getattr(vendor.lstat(), k) for k in fields)
     if label is not None:
         assert os.getxattr(vendor, "security.selinux") == label
+    unit_candidate = signed_namespace_unit_candidate()
+    assert unit_candidate["source_unit_sha256"] == release["files"][OWN]
+    assert hashlib.sha256(Path("/etc/systemd/system", OWN).read_bytes()).hexdigest() == unit_candidate["source_unit_sha256"]
+    result["namespace_unit_candidate"] = unit_candidate
+    print("PASS: authenticated installed worker derives fixed namespace unit candidate; signed unit unchanged", flush=True)
     # Preserve separate fixture-only evidence across the real reboot.
     record = ROOT / "native-executable-candidate-proof.json"
     with record.open("x") as out:
@@ -1290,7 +1317,9 @@ finally:
 """
     subprocess.run(["/usr/bin/python3", "-IS", "-B", "-c", code],
                    input=json.dumps([expected,pins]),text=True,check=True,timeout=30)
+    assert signed_namespace_unit_candidate() == expected["namespace_unit_candidate"]
     print("PASS: exact fixed executable and authenticated release receipt survive real reboot; no activation authority", flush=True)
+    print("PASS: authenticated namespace unit candidate digest is unchanged after reboot", flush=True)
 
 
 def verify_guest(distribution: str, phase: str) -> None:

@@ -357,6 +357,101 @@ def _signed_owned_unit_bytes() -> bytes:
         _deny("SIGNED_OWN_UNIT_SOURCE_UNAVAILABLE")
 
 
+# Inert candidate only. The existing signed unit remains authoritative
+# until the dedicated domain, namespace, kernel egress and WAL lifecycle
+# have been accepted together. Installed paths are not caller parameters.
+_NAMESPACE_PATH = "/run/netns/repocache-nginx"
+_CANDIDATE_EXECUTABLE = "/usr/libexec/repocache/nginx"
+_MASTER_CAPABILITIES = "CAP_CHOWN CAP_KILL CAP_SETGID CAP_SETUID"
+_OWN_EXEC_KEYS = ("ExecStartPre", "ExecStart", "ExecReload", "ExecStop")
+
+
+def _closed_signed_owned_unit_contract(raw: bytes) -> dict[str, str]:
+    """Decode the exact supported source contract, never inherited options."""
+    expected = {
+        "Type": "forking", "RuntimeDirectory": "repocache-nginx",
+        "RuntimeDirectoryMode": "0755", "PIDFile": "/run/repocache-nginx/nginx.pid",
+        "ExecStartPre": "/usr/sbin/nginx -t -q -c /etc/nginx/repocache.d/repocache.conf",
+        "ExecStart": "/usr/sbin/nginx -c /etc/nginx/repocache.d/repocache.conf",
+        "ExecReload": "/usr/sbin/nginx -s reload -c /etc/nginx/repocache.d/repocache.conf",
+        "ExecStop": "/usr/sbin/nginx -s quit -c /etc/nginx/repocache.d/repocache.conf",
+        "TimeoutStartSec": "30s", "TimeoutStopSec": "30s", "KillMode": "mixed",
+        "NoNewPrivileges": "yes", "PrivateTmp": "yes", "ProtectHome": "yes",
+        "ProtectSystem": "strict",
+        "ReadWritePaths": "/run/repocache-nginx /var/cache/nginx/repocache-managed /var/log/nginx/repocache-managed",
+        "UMask": "0027",
+    }
+    try:
+        if (type(raw) is not bytes or not 1 <= len(raw) <= _UNIT_MAX_BYTES
+                or any(byte != 10 and not 32 <= byte <= 126 for byte in raw)):
+            _deny("NAMESPACE_UNIT_SOURCE_INVALID")
+        # A closed line grammar avoids accepting configparser-specific
+        # continuations, DEFAULT sections or delimiters that PID1 interprets
+        # differently. Only whole-line comments and empty lines are ignored.
+        lines = [line for line in raw.decode("ascii").splitlines()
+                 if line and not line.startswith("#")]
+        canonical = [
+            "[Unit]", "Description=REPOCACHE isolated native NGINX service",
+            "After=network.target", "[Service]",
+            *(key + "=" + value for key, value in expected.items()),
+            "[Install]", "WantedBy=multi-user.target",
+        ]
+        if lines != canonical:
+            _deny("NAMESPACE_UNIT_SOURCE_INVALID")
+        # Render only reviewed values, never raw syntax or comments that
+        # might be interpreted differently by PID1.
+        return expected
+    except EffectiveNginxUnitError:
+        raise
+    except (UnicodeError, ValueError, TypeError):
+        _deny("NAMESPACE_UNIT_SOURCE_INVALID")
+
+
+def _render_owned_nginx_namespace_unit_candidate(raw: bytes, *, https_port: int) -> dict:
+    """Pure closed unit proposal for a later authenticated transition.
+
+    The trusted caller must bind https_port to the verified generation.
+    The fixed namespace must be provisioned and verified separately.
+    No policy, label, file, service, namespace or permission is changed.
+    """
+    import hashlib
+
+    if type(https_port) is not int or not 1 <= https_port <= 65535:
+        _deny("NAMESPACE_UNIT_PORT_INVALID")
+    service = _closed_signed_owned_unit_contract(raw)
+    for name in _OWN_EXEC_KEYS:
+        service[name] = _CANDIDATE_EXECUTABLE + service[name][len("/usr/sbin/nginx"):]
+    # A low listener additionally needs NET_BIND_SERVICE. Its actual
+    # SELinux permission and native behavior remain separate gates.
+    service.update({
+        "CapabilityBoundingSet": _MASTER_CAPABILITIES + (
+            " CAP_NET_BIND_SERVICE" if https_port < 1024 else ""),
+        "NetworkNamespacePath": _NAMESPACE_PATH,
+        "RestrictAddressFamilies": "AF_UNIX AF_INET AF_INET6",
+    })
+    candidate = (
+        "[Unit]\nDescription=REPOCACHE isolated native NGINX service\nAfter=network.target\n"
+        "[Service]\n" + "".join(key + "=" + value + "\n" for key, value in service.items())
+        + "[Install]\nWantedBy=multi-user.target\n"
+    ).encode("ascii")
+    return {
+        "unit_bytes": candidate,
+        "source_unit_sha256": hashlib.sha256(raw).hexdigest(),
+        "candidate_unit_sha256": hashlib.sha256(candidate).hexdigest(),
+        "https_port": https_port,
+        "runtime_namespace_verified": False,
+        "runtime_selinux_verified": False,
+        "authorizes_nginx_activation": False,
+        "authorizes_systemctl": False,
+    }
+
+
+def render_owned_nginx_namespace_unit_candidate(*, https_port: int) -> dict:
+    """Internal installed-worker candidate; source imports confer no trust."""
+    return _render_owned_nginx_namespace_unit_candidate(
+        _signed_owned_unit_bytes(), https_port=https_port)
+
+
 def _read_exact_owned_unit_at(root_fd: int, expected: bytes, *,
                               owner_uid: int, owner_gid: int) -> tuple[int, ...]:
     """Descriptor-bound exact unit read. Test fixtures never confer authority."""
