@@ -382,3 +382,19 @@ unit, package, vendor labels, global policy/booleans and host firewall are
 unchanged. This is not a production network namespace provisioning, routing,
 policy/WAL installation or active catalog design. The original installed
 service failure is not waived; new native execution is required.
+
+### Descriptor-bound executable candidate staging (decision A)
+
+The signed worker candidate contains an internal, root-only primitive for
+placing the exact independently authenticated NGINX package bytes into a
+retained owned directory. It never overwrites, executes, copies vendor
+capabilities or changes a SELinux label. A pending leaf causes fail-closed
+refusal, including a broken symlink. Repeated exact staging retains the
+existing inode. Its input digest must come from native package authentication;
+the primitive does not authenticate a digest supplied by an operator.
+The existing guarded AlmaLinux signed-derived fixture invokes it from the
+authenticated worker ZIP after checking the installed native executable
+against the exact signed RPM. Actual process/domain/namespace checks still
+follow. No production placement or automatic repair is enabled; Debian
+package payload binding, fixed installed location, durable receipt and
+lifecycle integration remain NOT VERIFIED.

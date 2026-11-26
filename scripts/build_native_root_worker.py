@@ -30,6 +30,7 @@ MODULES = (
     "server_native_egress_candidate_v1",
     "server_native_installed_storage_v1",
     "server_native_nginx_effective_unit_v1",
+    "server_native_nginx_executable_v1",
     "server_native_nginx_package_journal_v1",
     "server_native_package_effects_observe_v1",
     "server_native_nginx_service_unit_v1",

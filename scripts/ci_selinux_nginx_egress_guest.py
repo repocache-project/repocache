@@ -763,8 +763,39 @@ def probe(vendor_digest=None, *, root_master=False, signed_derived=False):
             os.chown(pid_dir, master_uid, master_gid)
         pid_file = pid_dir / "nginx.pid"
         executable = root / "nginx"
-        shutil.copyfile(VENDOR, executable)
-        executable.chmod(0o755)
+        if signed_derived:
+            # Reuse the authenticated worker's descriptor-bound staging
+            # primitive, but only in this guarded private fixture directory.
+            code = """
+import json,os,sys,zipimport
+sys.path.insert(0, "/usr/libexec/repocache/server-control-worker")
+from repocache import server_native_nginx_executable_v1 as stage
+assert isinstance(stage.__loader__, zipimport.zipimporter)
+assert stage.__loader__.archive == "/usr/libexec/repocache/server-control-worker"
+root,digest=sys.argv[1:]
+directory=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+vendor=os.open("/usr/sbin/nginx",os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+try:
+    first=stage.stage_verified_nginx_candidate(directory,vendor,authenticated_sha256=digest)
+    second=stage.stage_verified_nginx_candidate(directory,vendor,authenticated_sha256=digest)
+    assert first["status"].endswith("STAGED") and second["status"].endswith("UNCHANGED")
+    assert first["inode"] == second["inode"]
+    assert not first["authorizes_nginx_activation"]
+    print(json.dumps(first))
+finally:
+    os.close(vendor)
+    os.close(directory)
+"""
+            placed = json.loads(command("/usr/bin/python3", "-IS", "-B", "-c", code,
+                                        str(root), original[1]).stdout)
+            assert (placed["device"], placed["inode"]) == (
+                executable.stat().st_dev, executable.stat().st_ino)
+            assert placed["sha256"] == original[1]
+            print("PASS: authenticated worker staged exact native NGINX candidate "
+                  "without replacement; repeat retained inode", flush=True)
+        else:
+            shutil.copyfile(VENDOR, executable)
+            executable.chmod(0o755)
         assert hashlib.sha256(executable.read_bytes()).hexdigest() == original[1]
         cert, key = root / "cert.pem", root / "key.pem"
         command("/usr/bin/openssl", "req", "-x509", "-newkey", "rsa:2048",

@@ -107,6 +107,7 @@ V06_EXTRA_FILES = frozenset((
     "src/repocache/server_native_metrics_logrotate_candidate_v1.py",
     "src/repocache/server_native_min_free_syntax_probe_v1.py",
     "src/repocache/server_native_nginx_effective_unit_v1.py",
+    "src/repocache/server_native_nginx_executable_v1.py",
     "src/repocache/server_native_nginx_local_boundary_v1.py",
     "src/repocache/server_native_nginx_managed_rehearsal_v1.py",
     "src/repocache/server_native_nginx_ownership_v1.py",
