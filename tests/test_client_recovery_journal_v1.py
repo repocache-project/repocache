@@ -219,6 +219,10 @@ def test_readback_refuses_missing_and_foreign_required_stage(tmp_path, manager, 
     with pytest.raises(PairRefused, match="Required recovery stage missing"):
         inspect_local_recovery_record(IDENT, _test_root=root)
     assert saved.read_bytes() == raw and not path.exists()
+    before = _private_file_snapshot(root)
+    with pytest.raises(PairRefused, match="Required recovery stage missing"):
+        pair.recover_sandbox(root, IDENT)
+    assert _private_file_snapshot(root) == before
     path.write_bytes(raw)
     path.chmod(mode)
     foreign = path.stat()
@@ -226,6 +230,10 @@ def test_readback_refuses_missing_and_foreign_required_stage(tmp_path, manager, 
         inspect_local_recovery_record(IDENT, _test_root=root)
     assert path.stat().st_ino == foreign.st_ino and path.read_bytes() == raw
     assert saved.read_bytes() == raw
+    before = _private_file_snapshot(root)
+    with pytest.raises(PairRefused, match="not a recorded inode"):
+        pair.recover_sandbox(root, IDENT)
+    assert _private_file_snapshot(root) == before
     path.unlink()
     saved.rename(path)
     assert inspect_local_recovery_record(IDENT, _test_root=root)["journal_record_verified"]
@@ -246,3 +254,66 @@ def test_readback_refuses_unexpected_stage_without_following_symlink(tmp_path, m
     with pytest.raises(PairRefused, match="Unexpected recovery stage"):
         inspect_local_recovery_record(IDENT, _test_root=root)
     assert path.is_symlink() and path.readlink() == target and not target.exists()
+
+
+def _private_file_snapshot(root):
+    import stat
+    result = {}
+    for path in root.rglob("*"):
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode):
+            continue
+        result[str(path.relative_to(root))] = (
+            info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+            info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+            hashlib.sha256(path.read_bytes()).hexdigest())
+    return result
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="requires private root-owned fixture")
+@pytest.mark.parametrize("manager,resource", [
+    ("apt", "source-stage"), ("apt", "companion-stage"),
+    ("apt", "companion"), ("dnf", "source-stage"),
+])
+def test_modern_apply_refuses_foreign_resources_before_any_staging(tmp_path, manager, resource):
+    root = tmp_path / "fixture"
+    source, mirror = _modern_pair(root, manager)
+    foreign = (source if resource == "source-stage" else mirror)
+    if resource.endswith("-stage"):
+        foreign = foreign.with_name(".repocache-atomic-" + IDENT)
+    foreign.write_bytes(b"foreign")
+    foreign.chmod(0o644)
+    before = _private_file_snapshot(root)
+    with pytest.raises(PairRefused, match="Unexpected (recovery stage|existing mirror companion)"):
+        _apply_modern_pair(root, manager)
+    assert _private_file_snapshot(root) == before
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="requires private root-owned fixture")
+@pytest.mark.parametrize("manager,operation", [
+    ("apt", "retry"), ("apt", "restore"), ("apt", "recover-armed"),
+    ("apt", "recover-restored"), ("dnf", "retry"), ("dnf", "restore"),
+    ("dnf", "recover-armed"), ("dnf", "recover-restored"),
+])
+def test_modern_writer_checks_all_stages_before_any_recovery_write(tmp_path, manager, operation):
+    root = tmp_path / "fixture"
+    source, mirror = _modern_pair(root, manager)
+    if operation == "recover-armed":
+        with pytest.raises(pair.InjectedCrash):
+            _apply_modern_pair(root, manager, "source")
+    else:
+        _apply_modern_pair(root, manager)
+        if operation == "recover-restored":
+            pair.restore_sandbox(root, IDENT)
+    foreign = source.with_name(".repocache-atomic-" + IDENT)
+    foreign.write_bytes(b"foreign stage")
+    foreign.chmod(0o644)
+    before = _private_file_snapshot(root)
+    with pytest.raises(PairRefused, match="Unexpected recovery stage"):
+        if operation == "retry":
+            _apply_modern_pair(root, manager)
+        elif operation == "restore":
+            pair.restore_sandbox(root, IDENT)
+        else:
+            pair.recover_sandbox(root, IDENT)
+    assert _private_file_snapshot(root) == before
