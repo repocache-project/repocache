@@ -361,6 +361,105 @@ def _check_observed_phase(record: dict, source: str, companion: str) -> None:
         raise PairRefused("Unknown recovery phase")
 
 
+def _stage_specifications(record: dict, source: str, companion: str):
+    """Derive the only permissible staged identities from a verified phase.
+
+    A known initial stage can already have been removed during cancellation.
+    A durable rollback intent that still needs publication, however, requires
+    its exact staged inode. Terminal phases must have no staged resources.
+    """
+    phase = record["phase"]
+    source_stage = companion_stage = None
+    if phase in ("armed", "restore-armed") and source == "original":
+        source_stage = (record["proposed_id"], _decode(record["proposed"]),
+                        _source_attrs(record), False)
+    elif (phase == "restore-armed" and source == "proposed"
+          and record["restore_id"] is not None):
+        source_stage = (record["restore_id"], _decode(record["original"]),
+                        _source_attrs(record), True)
+    if record["companion"] is not None:
+        if phase == "armed" and companion == "absent":
+            companion_stage = (record["mirror_id"], _decode(record["mirror"]), (), False)
+        elif phase == "restore-armed" and companion == "cache-bearing":
+            companion_stage = (record["retained_id"], _retained_bytes(record), (), True)
+    return source_stage, companion_stage
+
+
+def _observe_stage(root: Path, record: dict, relative: str, expected) -> str:
+    """Read one fixed journal-derived staging leaf; never create or remove it."""
+    if (not pre.SOURCE_PATH.fullmatch(relative)
+            or not boundary.IDENT.fullmatch(record["id"])):
+        raise PairRefused("Recovery stage path refused")
+    name = ".repocache-atomic-" + record["id"]
+    with boundary._root(root) as (parent, owner), contextlib.ExitStack() as stack:
+        witnesses = []
+        for component in relative.split("/")[:-1]:
+            child = os.open(component, boundary.DIR, dir_fd=parent)
+            stack.callback(os.close, child)
+            witnesses.append((parent, component, child))
+            parent = child
+
+        def recheck():
+            for p, component, child in witnesses:
+                boundary._checked_directory(child, owner, private=False)
+                actual = os.fstat(child)
+                named = os.stat(component, dir_fd=p, follow_symlinks=False)
+                if (actual.st_gid != 0 or (actual.st_dev, actual.st_ino)
+                        != (named.st_dev, named.st_ino)):
+                    raise PairRefused("Recovery stage parent changed")
+
+        recheck()
+        try:
+            named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError:
+            recheck()
+            try:
+                os.stat(name, dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError:
+                if expected is not None and expected[3]:
+                    raise PairRefused("Required recovery stage missing")
+                return "absent"
+            raise PairRefused("Recovery stage appeared")
+        if expected is None:
+            raise PairRefused("Unexpected recovery stage")
+        identity, payload, attrs, _ = expected
+        if (not stat.S_ISREG(named.st_mode) or named.st_nlink != 1
+                or [named.st_dev, named.st_ino] != identity
+                or named.st_uid != 0 or named.st_gid != record["gid"]
+                or stat.S_IMODE(named.st_mode) != record["mode"]
+                or named.st_size != len(payload)):
+            raise PairRefused("Recovery stage is not a recorded inode")
+        opened = os.open(name, boundary.REG, dir_fd=parent)
+        stack.callback(os.close, opened)
+        fields = ("st_dev", "st_ino", "st_uid", "st_gid", "st_mode",
+                  "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+
+        def fingerprint(info):
+            return tuple(getattr(info, field) for field in fields)
+
+        before = fingerprint(named)
+        if fingerprint(os.fstat(opened)) != before:
+            raise PairRefused("Recovery stage changed during open")
+        metadata, actual_attrs = security_metadata._metadata(opened)
+        raw = os.read(opened, pre.MAX_SOURCE_BYTES + 1)
+        if (raw != payload or actual_attrs != attrs
+                or security_metadata._metadata(opened) != (metadata, actual_attrs)):
+            raise PairRefused("Recovery stage bytes or attributes differ")
+        recheck()
+        if (fingerprint(os.fstat(opened)) != before or fingerprint(
+                os.stat(name, dir_fd=parent, follow_symlinks=False)) != before):
+            raise PairRefused("Recovery stage changed during inspection")
+        return "recorded"
+
+
+def _observe_stages(root: Path, record: dict, source: str, companion: str):
+    source_expected, companion_expected = _stage_specifications(record, source, companion)
+    source_stage = _observe_stage(root, record, record["source"], source_expected)
+    companion_stage = ("not-applicable" if record["companion"] is None else
+                       _observe_stage(root, record, record["companion"], companion_expected))
+    return source_stage, companion_stage
+
+
 def inspect_local_recovery_record(ident: str, *, _test_root: Path | None = None) -> dict:
     """Internal root-only readback; no recovery, native exclusion or revocation proof.
 
@@ -403,10 +502,12 @@ def inspect_local_recovery_record(ident: str, *, _test_root: Path | None = None)
                 source = _observe_source(root, record)
                 companion = _observe_companion(root, record)
                 _check_observed_phase(record, source, companion)
+                stages = _observe_stages(root, record, source, companion)
                 _refuse_pending_journal(fd, ident)
                 if (_get_journal(fd, ident) != record
                         or _observe_source(root, record) != source
-                        or _observe_companion(root, record) != companion):
+                        or _observe_companion(root, record) != companion
+                        or _observe_stages(root, record, source, companion) != stages):
                     raise PairRefused("Recovery evidence changed")
                 final = os.stat(journal_name, dir_fd=fd, follow_symlinks=False)
                 if (initial.st_dev, initial.st_ino, initial.st_ctime_ns) != (
@@ -417,7 +518,9 @@ def inspect_local_recovery_record(ident: str, *, _test_root: Path | None = None)
                     "status": "record-verified-read-only",
                     "journal_record_verified": True,
                     "phase": record["phase"], "source_state": source,
-                    "companion_state": companion, **flags,
+                    "companion_state": companion,
+                    "source_stage_state": stages[0],
+                    "companion_stage_state": stages[1], **flags,
                 }
     except (boundary.BoundaryRefused, pre.PreflightError, OSError,
             ValueError, TypeError, RecursionError) as exc:
