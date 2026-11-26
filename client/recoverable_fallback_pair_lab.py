@@ -12,12 +12,8 @@ resource. It refuses foreign edits instead of force-restoring them.
 """
 from __future__ import annotations
 
-import base64
-import binascii
 import contextlib
 import fcntl
-import hashlib
-import json
 import os
 import re
 import stat
@@ -30,15 +26,17 @@ import root_source_boundary as boundary
 import source_preflight as pre
 import source_metadata_lab as security_metadata
 import transaction_atomic_lab as atom
+# Keep the existing lab API/exception identity; the decoder itself is
+# shared with the non-activating authenticated client candidate.
+from recovery_journal_v1 import (
+    JOURNAL_MAX, PairRefused, _hash, _blob, _decode, _pack,
+    _no_duplicates, _journal_name, _pending_journal_name,
+    _refuse_pending_journal, _source_attrs, _get_journal, _retained_bytes,
+)
 
 MARKER = ".repocache-recoverable-pair-test"
 MAGIC = b"REPOCACHE_PAIR_SANDBOX_ONLY_V1\n"
-JOURNAL_MAX = 5 * 1024 * 1024
 REG = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
-
-
-class PairRefused(RuntimeError):
-    """Unsafe, ambiguous or foreign transaction state requires intervention."""
 
 
 class InjectedCrash(PairRefused):
@@ -49,23 +47,6 @@ def _identity(info: dict | os.stat_result) -> list[int]:
     if isinstance(info, dict):
         return [info["device"], info["inode"]]
     return [info.st_dev, info.st_ino]
-
-
-def _hash(content: bytes) -> str:
-    return hashlib.sha256(content).hexdigest()
-
-
-def _blob(raw: bytes) -> str:
-    return base64.b64encode(raw).decode("ascii")
-
-
-def _decode(value: str) -> bytes:
-    if type(value) is not str or len(value) > 2 * pre.MAX_SOURCE_BYTES:
-        raise PairRefused("Invalid protected journal payload")
-    try:
-        return base64.b64decode(value, validate=True)
-    except (binascii.Error, ValueError) as exc:
-        raise PairRefused("Corrupt protected journal payload") from exc
 
 
 def _sandbox(root: Path, statefd: int) -> None:
@@ -85,183 +66,6 @@ def _sandbox(root: Path, statefd: int) -> None:
         os.close(fd)
     # A statefd that holds a known root-owned 0700 directory is mandatory.
     boundary._checked_directory(statefd, 0, private=True)
-
-
-def _pack(data: dict) -> bytes:
-    return json.dumps(data, sort_keys=True, separators=(",", ":")).encode("ascii")
-
-
-def _no_duplicates(pairs: list[tuple[str, object]]) -> dict:
-    obj = {}
-    for key, value in pairs:
-        if key in obj:
-            raise PairRefused("Duplicate journal key")
-        obj[key] = value
-    return obj
-
-
-def _journal_name(ident: str) -> str:
-    if type(ident) is not str or not boundary.IDENT.fullmatch(ident):
-        raise PairRefused("Invalid transaction identifier")
-    return "pair-" + ident + ".json"
-
-
-def _pending_journal_name(ident: str) -> str:
-    _journal_name(ident)  # Validate the ID before constructing a leaf.
-    return ".pair-" + ident + ".pending"
-
-
-def _refuse_pending_journal(fd: int, ident: str) -> None:
-    """Never mistake interrupted journal publication for a clean state.
-
-    Called under the existing exclusive state lock, before reading an old
-    journal or staging any new source. Even a dangling symlink, empty
-    file or matching payload is uncertain; preserve it for manual review.
-    """
-    try:
-        os.stat(_pending_journal_name(ident), dir_fd=fd, follow_symlinks=False)
-    except FileNotFoundError:
-        return
-    except OSError as exc:
-        raise PairRefused("Pending journal state cannot be verified") from exc
-    raise PairRefused("Pending journal requires manual recovery")
-
-
-def _source_attrs(journal: dict) -> tuple[tuple[str, bytes], ...]:
-    if journal["schema"] in (2, 4):
-        return ()
-    encoded = journal["source_attributes"]
-    if type(encoded) is not list or len(encoded) > security_metadata.MAX_ATTRS:
-        raise PairRefused("Protected attribute snapshot refused")
-    parsed = []
-    total = 0
-    for item in encoded:
-        if (type(item) is not list or len(item) != 2 or type(item[0]) is not str
-                or len(item[0].encode("utf-8")) > 255
-                or not (security_metadata._allowed_attribute(item[0])
-                        or (item[0] == "security.selinux"
-                            and security_metadata.policy_active()))):
-            raise PairRefused("Protected attribute namespace refused")
-        value = _decode(item[1])
-        total += len(value)
-        if (len(value) > security_metadata.MAX_ATTRIBUTE_BYTES
-                or total > security_metadata.MAX_TOTAL_ATTRIBUTE_BYTES):
-            raise PairRefused("Protected attribute snapshot too large")
-        parsed.append((item[0], value))
-    if [name for name, _ in parsed] != sorted({name for name, _ in parsed}):
-        raise PairRefused("Duplicate or unordered protected attributes")
-    attrs = tuple(parsed)
-    if security_metadata.attribute_digest(attrs) != journal["approval"].get("source_attributes_sha256"):
-        raise PairRefused("Protected attribute snapshot differs from approval")
-    return attrs
-
-
-def _get_journal(fd: int, ident: str) -> dict | None:
-    name = _journal_name(ident)
-    try:
-        os.stat(name, dir_fd=fd, follow_symlinks=False)
-    except FileNotFoundError:
-        return None
-    raw = boundary._read_pinned(fd, name, JOURNAL_MAX)
-    try:
-        j = json.loads(raw.decode("ascii"), object_pairs_hook=_no_duplicates)
-    except (UnicodeError, ValueError) as exc:
-        raise PairRefused("Malformed protected journal") from exc
-    required = {
-        "schema", "id", "phase", "source", "companion",
-        "original", "proposed", "mirror", "original_id",
-        "proposed_id", "mirror_id", "restore_id", "mode", "gid",
-        "original_digest", "proposed_digest", "mirror_digest",
-        "approval", "approval_sha256",
-    }
-    if type(j) is dict and j.get("schema") in (3, 5):
-        required.add("source_attributes")
-    if type(j) is dict and j.get("schema") in (4, 5):
-        required.add("retained_id")
-    if (type(j) is not dict or set(j) != required
-            or type(j["schema"]) is not int or j["schema"] not in (2, 3, 4, 5)
-            or type(j["id"]) is not str or j["id"] != ident
-            or type(j["approval"]) is not dict
-            or type(j["approval_sha256"]) is not str
-            or not boundary.DIGEST.fullmatch(j["approval_sha256"])
-            or j["phase"] not in ("armed", "installed", "restore-armed", "restored")
-            or type(j["source"]) is not str or
-            not pre.SOURCE_PATH.fullmatch(j["source"])
-            or type(j["companion"]) not in (str, type(None))
-            or (j["companion"] is not None and
-                not j["companion"].startswith("etc/apt/mirrors/repocache-"))
-            or type(j["mode"]) is not int or j["mode"] not in (0o600, 0o640, 0o644)
-            or type(j["gid"]) is not int or j["gid"] < 0
-            # Original and proposed inode IDs are mandatory. A missing
-            # identity is NOT equivalent to an absent optional mirror.
-            or any(type(j[key]) is not list or len(j[key]) != 2
-                   or any(type(x) is not int or x < 0 for x in j[key])
-                   for key in ("original_id", "proposed_id"))
-            or (j["mirror_id"] is not None and (
-                type(j["mirror_id"]) is not list or len(j["mirror_id"]) != 2
-                or any(type(x) is not int or x < 0
-                       for x in j["mirror_id"])))
-            or (j["restore_id"] is not None and (
-                type(j["restore_id"]) is not list or len(j["restore_id"]) != 2
-                or any(type(x) is not int or x < 0 for x in j["restore_id"])))):
-        raise PairRefused("Unexpected protected journal schema")
-    if j["schema"] in (4, 5):
-        retained = j["retained_id"]
-        if (j["companion"] is None or j["gid"] != 0 or j["mode"] != 0o644
-                or (retained is not None and (
-                    type(retained) is not list or len(retained) != 2
-                    or any(type(x) is not int or x < 0 for x in retained)
-                    or retained == j["mirror_id"]
-                    or j["phase"] in ("armed", "installed")))
-                or (j["restore_id"] is not None and retained is None)):
-            raise PairRefused("Invalid retained companion journal identity")
-    original, proposed = _decode(j["original"]), _decode(j["proposed"])
-    mirror = _decode(j["mirror"])
-    if (_hash(original) != j["original_digest"] or
-            _hash(proposed) != j["proposed_digest"] or
-            _hash(mirror) != j["mirror_digest"] or
-            len(original) > pre.MAX_SOURCE_BYTES or
-            len(proposed) > pre.MAX_SOURCE_BYTES or
-            (j["companion"] is None) != (j["mirror_id"] is None) or
-            (j["companion"] is None and mirror)):
-        raise PairRefused("Protected journal digest mismatch")
-    if j["companion"] is not None:
-        if (j["companion"] !=
-                "etc/apt/mirrors/repocache-" + ident + ".list"):
-            raise PairRefused("Journal companion path mismatches managed ID")
-    # A protected snapshot binds recovery to the exact authorized compiler
-    # inputs. Local rollback never depends on a reachable catalog or the
-    # continued existence of an approval file, and never grants a new apply.
-    try:
-        snapshot = _pack(j["approval"])
-        approval = boundary._decode_manifest(snapshot, ident)
-        if (_hash(snapshot) != j["approval_sha256"]
-                or approval["source"] != j["source"]
-                or approval["source_sha256"] != j["original_digest"]
-                or _hash(approval["cache"].encode("ascii")) != approval["route_sha256"]):
-            raise PairRefused("Journal approval identity mismatch")
-        if (approval["schema"] == 3) != (j["schema"] in (3, 5)):
-            raise PairRefused("Journal attribute schema differs from approval")
-        _source_attrs(j)
-        if approval["schema"] in (2, 3):
-            identity = approval["source_identity"]
-            if ([identity["device"], identity["inode"]] != j["original_id"]
-                    or identity["uid"] != 0 or identity["gid"] != j["gid"]
-                    or identity["mode"] != j["mode"]
-                    or identity["size"] != len(original)):
-                raise PairRefused("Journal source identity mismatch")
-        compiled = compiler.compile_fallback(
-            source=j["source"], original=original,
-            expected_source_sha256=approval["source_sha256"],
-            selected_entry_sha256=approval["entry_sha256"],
-            managed_id=ident, upstream=approval["upstream"], cache=approval["cache"])
-        expected_companion = (j["companion"], mirror) if j["companion"] else None
-        if compiled.proposed != proposed or compiled.companion != expected_companion:
-            raise PairRefused("Journal differs from exact approved proposal")
-    except (boundary.BoundaryRefused, compiler.FallbackRefused,
-            UnicodeError, ValueError, RecursionError) as exc:
-        raise PairRefused("Protected journal approval refused") from exc
-    return j
 
 
 def _put_journal(fd: int, ident: str, j: dict) -> None:
@@ -737,12 +541,6 @@ def _apply_sandbox(root: Path, ident: str, *, crash: str | None,
     except (OSError, ValueError, compiler.FallbackRefused,
             boundary.BoundaryRefused, pre.PreflightError) as exc:
         raise PairRefused("Paired transaction refused") from exc
-
-
-def _retained_bytes(j: dict) -> bytes:
-    # _get_journal has recompiled the exact approval and original source.
-    # Never accept a new URI, user-supplied neutralization bytes or a cache.
-    return (j["approval"]["upstream"] + "\tpriority:1\n").encode("ascii")
 
 
 def _neutralize_companion(root, fdstate, ident, j, *, recheck, crash):
