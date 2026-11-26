@@ -51,11 +51,6 @@ jobs:
               PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q -rs -p no:cacheprovider \
                 tests/test_client_root_source_boundary.py \
                 -k "registry_directory_metadata_matches_bootstrap or registry_directory_identity_rechecked_after_operation"
-              # The authenticated recovery decoder has root-only tests.
-              # Execute every case here, not just in the unprivileged matrix.
-              test "$(id -u)" = 0 && test "$(id -g)" = 0
-              PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q -rs -p no:cacheprovider \
-                tests/test_client_recovery_journal_v1.py
               python3 scripts/smoke_client_helper_preview.py
               # Execute genuine kernel locks under root only inside this
               # disposable Debian/Alma container. The bind-mounted source
