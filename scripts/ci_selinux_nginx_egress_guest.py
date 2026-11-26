@@ -333,9 +333,11 @@ def workers(master, executable, uid, gid, *, bounding):
     return result
 
 
-def probe(vendor_digest, *, root_master=False):
+def probe(vendor_digest=None, *, root_master=False):
     guard()
     assert type(root_master) is bool
+    if vendor_digest is None:
+        vendor_digest = authenticated_vendor_digest()
     assert re.fullmatch(r"[0-9a-f]{64}", vendor_digest)
     unit = ROOT_UNIT if root_master else UNIT
     modules_before = installed_modules()
