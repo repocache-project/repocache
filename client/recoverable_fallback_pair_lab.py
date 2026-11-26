@@ -50,15 +50,65 @@ def _identity(info: dict | os.stat_result) -> list[int]:
     return [info.st_dev, info.st_ino]
 
 
-def _sandbox(root: Path, statefd: int) -> None:
+_MOUNTINFO_MAX = 4 * 1024 * 1024
+_MOUNT_ESCAPES = {b"040": b" ", b"011": b"\t", b"012": b"\n", b"134": b"\\"}
+
+
+def _mountpoint(raw: bytes) -> bytes:
+    """Decode only the kernel mountinfo pathname escapes, not shell syntax."""
+    fields = raw.split(b"\\")
+    decoded = bytearray(fields[0])
+    for field in fields[1:]:
+        if field[:3] not in _MOUNT_ESCAPES:
+            raise PairRefused("Malformed fixture mount evidence")
+        decoded.extend(_MOUNT_ESCAPES[field[:3]])
+        decoded.extend(field[3:])
+    if not decoded.startswith(b"/") or b"\x00" in decoded:
+        raise PairRefused("Malformed fixture mount evidence")
+    return bytes(decoded)
+
+
+def _read_mountinfo() -> bytes:
+    try:
+        with open("/proc/self/mountinfo", "rb") as stream:
+            raw = stream.read(_MOUNTINFO_MAX + 1)
+    except OSError as exc:
+        raise PairRefused("Cannot inspect fixture mount topology") from exc
+    if not raw or len(raw) > _MOUNTINFO_MAX or not raw.endswith(b"\n"):
+        raise PairRefused("Incomplete fixture mount evidence")
+    return raw
+
+
+def _private_mount_tree(root: Path) -> None:
+    """Refuse mounts at/below a fixture or between its temp anchor and root.
+
+    This is an extra sandbox boundary, not a lease against a concurrently
+    privileged mount-namespace administrator or a host-write authorization.
+    """
     root = Path(root)
     if root == Path("/") or not root.is_absolute() or ".." in root.parts:
         raise PairRefused("No production filesystem writes are permitted")
-    if (root in (Path("/tmp"), Path("/var/tmp"))
-            or not any(parent in (Path("/tmp"), Path("/var/tmp"))
-                       for parent in root.parents)
-            or root.resolve(strict=True) != root):
+    anchor = next((parent for parent in root.parents
+                   if parent in (Path("/tmp"), Path("/var/tmp"))), None)
+    if anchor is None or root.resolve(strict=True) != root:
         raise PairRefused("Only private disposable test roots are permitted")
+    raw = os.fsencode(root)
+    anchor_raw = os.fsencode(anchor)
+    for row in _read_mountinfo().split(b"\n")[:-1]:
+        fields = row.split(b" ")
+        if (len(fields) < 10 or not fields[0].isdigit()
+                or not fields[1].isdigit() or b"-" not in fields[6:]):
+            raise PairRefused("Malformed fixture mount evidence")
+        mount = _mountpoint(fields[4])
+        if (mount == raw or mount.startswith(raw + b"/")
+                or (mount.startswith(anchor_raw + b"/")
+                    and raw.startswith(mount + b"/"))):
+            raise PairRefused("Mounted fixture resource refused")
+
+
+def _sandbox(root: Path, statefd: int) -> None:
+    root = Path(root)
+    _private_mount_tree(root)
     fd = os.open(root, boundary.DIR)
     try:
         if boundary._read_pinned(fd, MARKER, len(MAGIC)) != MAGIC:
@@ -355,6 +405,23 @@ def _package_scope(root: Path, source: str):
         yield checked
 
 
+
+@contextlib.contextmanager
+def _pair_scope(root: Path, statefd: int, source: str):
+    # Check before native lock acquisition (DNF4 may publish a PID file),
+    # then at each existing journal/staging/publication revalidation.
+    _sandbox(root, statefd)
+    with _package_scope(root, source) as native_recheck:
+        def recheck():
+            _sandbox(root, statefd)
+            native_recheck()
+            _private_mount_tree(root)
+
+        recheck()
+        yield recheck
+        recheck()
+
+
 def _crash(where: str | None, phase: str) -> None:
     if where == phase:
         raise InjectedCrash("Injected transaction interruption: " + phase)
@@ -395,6 +462,7 @@ def _apply_sandbox(root: Path, ident: str, *, crash: str | None,
     if root == Path("/"):
         raise PairRefused("Production root is forbidden")
     try:
+        _private_mount_tree(root)
         with boundary._state(root) as (statefd, owner):
             _sandbox(root, statefd)
             with boundary._exclusive_lock(statefd, owner), contextlib.ExitStack() as scope:
@@ -403,7 +471,7 @@ def _apply_sandbox(root: Path, ident: str, *, crash: str | None,
                 approved = boundary._manifest(statefd, ident)
                 source = journal["source"] if journal is not None else approved["source"]
                 recheck = scope.enter_context(
-                    _package_scope(root, source))
+                    _pair_scope(root, statefd, source))
                 if retain_companion and _manager(source) != "apt":
                     raise PairRefused("Retained companion is APT-only")
                 if journal is not None:
@@ -475,6 +543,7 @@ def _apply_sandbox(root: Path, ident: str, *, crash: str | None,
                     if (source[1]["uid"] != 0 or mode not in (0o600, 0o640, 0o644)
                             or (proposal.companion and (mode != 0o644 or gid != 0))):
                         raise PairRefused("Unsafe source or APT mirror ownership or mode")
+                    recheck()
                     source_temp, new_id = atom._write_new(
                         fd, leaf, ident, proposal.proposed, source[1], attrs)
                     # All current permissions and metadata must still match.
@@ -487,6 +556,7 @@ def _apply_sandbox(root: Path, ident: str, *, crash: str | None,
                     with atom._source_directory(root, path) as (fd, leaf):
                         if _read_named(fd, leaf) is not None:
                             raise PairRefused("Unexpected existing mirror companion")
+                        recheck()
                         temp, c_id = atom._write_new(
                             fd, leaf, ident, bytes_, source[1])
                         companion = path
@@ -668,6 +738,7 @@ def _restore_locked(root: Path, fdstate: int, ident: str, j: dict,
     if from_proposed:
         with atom._source_directory(root, j["source"]) as (fd, leaf):
             if j["restore_id"] is None:
+                recheck()
                 temp, new_id = atom._write_new(fd, leaf, ident, original, current[1], attrs)
                 j["restore_id"] = list(new_id)
                 j["phase"] = "restore-armed"
@@ -734,6 +805,7 @@ def restore_sandbox(root: Path, ident: str, *,
     root = Path(root)
     if root == Path("/"):
         raise PairRefused("Production root forbidden")
+    _private_mount_tree(root)
     with boundary._state(root) as (fd, owner):
         _sandbox(root, fd)
         with boundary._exclusive_lock(fd, owner):
@@ -742,7 +814,7 @@ def restore_sandbox(root: Path, ident: str, *,
             if j is None or j["phase"] not in ("installed", "restore-armed"):
                 raise PairRefused("No committed sandbox transaction to restore")
             try:
-                with _package_scope(root, j["source"]) as recheck:
+                with _pair_scope(root, fd, j["source"]) as recheck:
                     return _restore_locked(root, fd, ident, j, recheck=recheck, crash=crash or "manual")
             except locks.LockInspectionRefused as exc:
                 raise PairRefused("Native lock scope refused rollback") from exc
@@ -753,6 +825,7 @@ def recover_sandbox(root: Path, ident: str) -> dict:
     root = Path(root)
     if root == Path("/"):
         raise PairRefused("Production root forbidden")
+    _private_mount_tree(root)
     with boundary._state(root) as (fd, owner):
         _sandbox(root, fd)
         with boundary._exclusive_lock(fd, owner):
@@ -761,7 +834,7 @@ def recover_sandbox(root: Path, ident: str) -> dict:
             if j is None:
                 return {"status": "no-intent", "write_eligible": False}
             try:
-                with _package_scope(root, j["source"]) as recheck:
+                with _pair_scope(root, fd, j["source"]) as recheck:
                     if j["phase"] in ("installed", "restored"):
                         return _restore_locked(root, fd, ident, j, recheck=recheck)
                     return _restore_locked(root, fd, ident, j, recheck=recheck, crash="recover")
