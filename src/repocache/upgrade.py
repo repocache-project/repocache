@@ -57,6 +57,7 @@ V06_EXTRA_FILES = frozenset((
     "client/native_fallback_plan.py",
     "client/native_package_lock_observation.py",
     "client/recoverable_fallback_pair_lab.py",
+    "client/recovery_journal_v1.py",
     "client/root_source_boundary.py",
     "client/source_entry_boundaries.py",
     "client/source_helper_preview.py",

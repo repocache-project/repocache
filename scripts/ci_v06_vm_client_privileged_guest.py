@@ -103,6 +103,107 @@ def _apt_source_read_order(root: Path) -> None:
           "even with all four transaction locks held; release succeeds")
 
 
+def _signed_recovery_readback(root, ident, *, platform, phase, source_state, companion_state):
+    """Inspect existing exact lab evidence using only the authenticated zip."""
+    guarded_native_guest(platform)
+    target = "/usr/libexec/repocache-client/client-source-helper"
+    code = """
+import json,sys,zipimport
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import recovery_journal_v1 as recovery
+assert isinstance(recovery.__loader__, zipimport.zipimporter)
+assert recovery.__loader__.archive == sys.argv[1]
+assert "recoverable_fallback_pair_lab" not in sys.modules
+root=Path(sys.argv[2])
+with recovery.security_metadata.native_metadata_scope(root):
+    print(json.dumps(recovery.inspect_local_recovery_record(sys.argv[3], _test_root=root)))
+assert "recoverable_fallback_pair_lab" not in sys.modules
+"""
+    report = json.loads(subprocess.run(
+        ["/usr/bin/python3", "-IS", "-B", "-c", code, target, str(root), ident],
+        check=True, capture_output=True, timeout=20,
+    ).stdout)
+    assert report["status"] == "record-verified-read-only"
+    assert report["journal_record_verified"]
+    if source_state == "restored":
+        # Independently inspect the private fixture's exact journal and
+        # actual source inode. DNF may reuse the freed original inode.
+        journal = json.loads((root / "var/lib/repocache-client/approved-entries" /
+                              ("pair-" + ident + ".json")).read_text("ascii"))
+        actual = (root / journal["source"]).stat()
+        assert [actual.st_dev, actual.st_ino] == journal["restore_id"]
+        if journal["original_id"] == journal["restore_id"]:
+            source_state = "original-or-restored"
+    assert (report["phase"], report["source_state"], report["companion_state"]) == (
+        phase, source_state, companion_state), report
+    assert all(report[name] is False for name in (
+        "local_rollback_verified", "route_revocation_verified",
+        "native_exclusion_verified", "write_eligible"))
+    print("PASS: authenticated read-only recovery record, exact local evidence, "
+          "no revocation or write claim: " + phase + " " + source_state, flush=True)
+    if phase == "restored":
+        # Negative readback from the same authenticated archive, not a
+        # second writer. Only the exact marked fixture journal is touched.
+        journal_path = root / "var/lib/repocache-client/approved-entries" / ("pair-" + ident + ".json")
+        pending = journal_path.with_name(".pair-" + ident + ".pending")
+        before = _snapshot(journal_path)
+        with pending.open("xb") as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write(b"partial fixture evidence")
+        try:
+            pending_before = _snapshot(pending)
+            denied = subprocess.run(
+                ["/usr/bin/python3", "-IS", "-B", "-c", code, target, str(root), ident],
+                capture_output=True, timeout=20)
+            assert denied.returncode != 0 and b"Pending journal requires manual recovery" in denied.stderr
+            assert _snapshot(pending) == pending_before and _snapshot(journal_path) == before
+        finally:
+            # This test owns the deliberately injected pending leaf.
+            pending.unlink()
+        print("PASS: authenticated readback refuses pending journal without changes", flush=True)
+        # Preserve the exact owned file as a separate fixture leaf; publish
+        # a different inode with the same content and attributes. The
+        # authenticated read-only helper must refuse for identity, not a
+        # missing label or changed source bytes. Never touch host sources.
+        entry = root / (journal["companion"] or journal["source"])
+        saved = entry.with_name(".repocache-ci-readback-owned")
+        foreign = entry.with_name(".repocache-ci-readback-foreign")
+        assert not os.path.lexists(saved) and not os.path.lexists(foreign)
+        owned = _snapshot(entry)
+        import shutil
+        with foreign.open("xb") as stream:
+            stream.write(owned[0])
+            os.fchown(stream.fileno(), owned[3], owned[4])
+            os.fchmod(stream.fileno(), owned[5] & 0o777)
+        shutil.copystat(entry, foreign, follow_symlinks=False)
+        for name, value in owned[-1]:
+            os.setxattr(foreign, name, value, follow_symlinks=False)
+        replacement = _snapshot(foreign)
+        assert replacement[0] == owned[0] and replacement[3:7] == owned[3:7]
+        assert replacement[-1] == owned[-1] and replacement[1:3] != owned[1:3]
+        os.rename(entry, saved)
+        os.rename(foreign, entry)
+        try:
+            foreign_before = _snapshot(entry)
+            saved_before = _snapshot(saved)
+            denied = subprocess.run(
+                ["/usr/bin/python3", "-IS", "-B", "-c", code, target, str(root), ident],
+                capture_output=True, timeout=20)
+            assert denied.returncode != 0 and b"is not a recorded inode" in denied.stderr, denied.stderr
+            assert _snapshot(entry) == foreign_before and _snapshot(saved) == saved_before
+            assert _snapshot(journal_path) == before
+        finally:
+            os.rename(entry, foreign)
+            os.rename(saved, entry)
+            foreign.unlink()
+        again = json.loads(subprocess.run(
+            ["/usr/bin/python3", "-IS", "-B", "-c", code, target, str(root), ident],
+            check=True, capture_output=True, timeout=20).stdout)
+        assert again == report
+        print("PASS: authenticated readback refuses same-byte foreign inode; owned evidence preserved", flush=True)
+
+
 def _debian_fixture(root: Path) -> None:
     source, _, lock, state = build(root, "apt")
     original = _snapshot(source)
@@ -203,6 +304,8 @@ def _debian_fixture(root: Path) -> None:
 
     # The catalog is offline. All changes are in the marked private lab root.
     mirror = root / ("etc/apt/mirrors/repocache-" + ident + ".list")
+    _signed_recovery_readback(root, ident, platform="debian13", phase="armed",
+                              source_state="proposed", companion_state="cache-bearing")
     assert pair.recover_sandbox(root, ident)["status"] == "restored"
     restored = _snapshot(source)
     assert restored[0] == original[0]
@@ -211,6 +314,8 @@ def _debian_fixture(root: Path) -> None:
     retained = _snapshot(mirror)
     assert pair.recover_sandbox(root, ident)["status"] == "restored"
     assert _snapshot(mirror) == retained
+    _signed_recovery_readback(root, ident, platform="debian13", phase="restored",
+                              source_state="restored", companion_state="upstream-only")
     print("PASS: Debian booted root exact HTTPS preparation/approval and sandbox SIGKILL restore with retained upstream-only companion")
 
 
@@ -412,6 +517,8 @@ def _alma_label_roundtrip(root: Path, *, dnf4=False) -> None:
             assert os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGKILL
             changed = _snapshot(source)
             assert changed[0] != baseline[0] and changed[-1] == baseline[-1]
+            _signed_recovery_readback(root, ident, platform="almalinux10", phase="armed",
+                                      source_state="proposed", companion_state="not-applicable")
             if dnf4:
                 stale = root / "var/lib/dnf/rpmdb_lock.pid"
                 info = stale.lstat()
@@ -439,9 +546,18 @@ def _alma_label_roundtrip(root: Path, *, dnf4=False) -> None:
             assert restored[0] == baseline[0]
             assert restored[3:6] == baseline[3:6] and restored[-1] == baseline[-1]
             assert pair.recover_sandbox(root, ident)["status"] == "restored"
+            _signed_recovery_readback(root, ident, platform="almalinux10", phase="restored",
+                                      source_state="restored", companion_state="not-applicable")
             if dnf4:
+                # The private foreign-inode test moved the owned inode
+                # out and back, changing ctime as expected. Verify all
+                # other fields, then retain the new exact snapshot for
+                # the native-lock noninterference observation.
+                after_readback = _snapshot(source)
+                assert after_readback[:7] == restored[:7]
+                assert after_readback[-1] == restored[-1]
                 with _native_dnf4_library_owner(root):
-                    assert _snapshot(source) == restored
+                    assert _snapshot(source) == after_readback
                 print("PASS: real DNF4 PID scope and native-created RPM lock across labelled SIGKILL journal; stale refusal, explicit fixture-owner cleanup and recovery", flush=True)
     finally:
         boundary.client._catalog = original_catalog
