@@ -451,3 +451,26 @@ kernel counter increment and unchanged upstream counts. No timeout or
 policy semantics in the signed renderer are changed. The Debian probe
 checks the exact APT metadata SHA-256 before invoking the bounded archive
 decompressor and repeats the package digest in the signed worker.
+
+### Fixed installed executable candidate
+
+The authenticated installer now has an internal non-dispatched staging
+operation. It retains the existing protected server-state lock and signed
+worker placement receipt; re-verifies the native package completion,
+exact native package identity and exact signed package member; requires
+both NGINX units inactive/disabled and no committed generation or foreign
+pending state; pins the vendor executable and existing worker directory
+using retained descriptors. It stages the distinct executable at
+`/usr/libexec/repocache/nginx` with its exclusive receipt, repeats readback,
+and rechecks package, source, unit and worker placement boundaries. The
+same-version package must be available through the authenticated native
+sources; an unavailable or changed payload refuses without using an
+unverified cached binary. AlmaLinux uses a new empty private RPM key
+verification database with the distro RPMDB label, not a host trust import.
+The operation is called only by the isolated authenticated VM harness;
+there is no public CLI dispatch, service reference, policy installation or
+activation. The fixture retains the candidate through the actual reboot
+and checks the receipt and executable metadata using the authenticated
+installed worker. Pending/ambiguous placement remains fail-closed;
+automatic recovery, offline native payload retention, label transition
+and generation-bound service activation are still unverified.

@@ -422,6 +422,261 @@ def _native_workspace_is_root_owned(work: Path) -> bool:
             and stat.S_ISDIR(info.st_mode))
 
 
+def _candidate_payload_sha256(path: Path) -> str:
+    """Bounded fixed-workspace payload read; no archive extraction."""
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    with os.fdopen(os.open(path, flags), "rb") as stream:
+        before = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != 0
+                or before.st_gid != 0 or before.st_nlink != 1
+                or before.st_mode & 0o022 or not 0 < before.st_size <= 32 * 1024 * 1024):
+            _reject("NATIVE_EXECUTABLE_PAYLOAD_UNSAFE")
+        raw = stream.read(32 * 1024 * 1024 + 1)
+        after = os.fstat(stream.fileno())
+        named = path.lstat()
+        fields = ("st_dev", "st_ino", "st_uid", "st_gid", "st_mode",
+                  "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if (len(raw) != before.st_size or
+                any(getattr(before, k) != getattr(after, k) or
+                    getattr(after, k) != getattr(named, k) for k in fields)):
+            _reject("NATIVE_EXECUTABLE_PAYLOAD_CHANGED")
+        return hashlib.sha256(raw).hexdigest()
+
+
+def _candidate_native_identity(distribution: str, work: Path) -> str:
+    if distribution == "debian":
+        version = _native_package_command(
+            ["/usr/bin/dpkg-query", "-W", "-f=${Version}\\t${Status}\\t${Architecture}",
+             "nginx:amd64"], work)
+        fields = version.split("\t")
+        if (len(fields) != 3 or fields[1:] != ["install ok installed", "amd64"]
+                or re.fullmatch(r"(?:[0-9]+:)?[0-9][A-Za-z0-9.+~:-]{0,127}", fields[0]) is None):
+            _reject("NATIVE_EXECUTABLE_PACKAGE_IDENTITY_REFUSED")
+        return "nginx:amd64=" + fields[0]
+    if distribution == "almalinux":
+        identity = _native_package_command(
+            ["/usr/bin/rpm", "-q", "--queryformat=%{NAME}-%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}",
+             "nginx-core"], work)
+        if re.fullmatch(r"nginx-core-[0-9]+:[A-Za-z0-9._+~-]+-[A-Za-z0-9._+~-]+\.x86_64", identity) is None:
+            _reject("NATIVE_EXECUTABLE_PACKAGE_IDENTITY_REFUSED")
+        return identity
+    _reject("NATIVE_EXECUTABLE_DISTRIBUTION_REFUSED")
+
+
+def _authenticate_candidate_deb(work: Path, identity: str) -> tuple[str, str]:
+    from repocache.server_native_package_trust_v1 import _apt_commands
+    from repocache.server_native_nginx_executable_v1 import (
+        debian_nginx_metadata_digest, debian_nginx_tar_digest,
+    )
+    refresh, query = _apt_commands(work)
+    if refresh[-1] != "update" or query[-2:] != ["policy", "nginx"]:
+        _reject("NATIVE_EXECUTABLE_APT_PROFILE_CHANGED")
+    _native_package_command(refresh, work)
+    version = identity.removeprefix("nginx:amd64=")
+    metadata = _native_package_command([*query[:-2], "show", identity], work)
+    expected = debian_nginx_metadata_digest(metadata, version)
+    _native_package_command([*refresh[:-1], "download", identity], work)
+    packages = list(work.glob("*.deb"))
+    if len(packages) != 1 or _candidate_payload_sha256(packages[0]) != expected:
+        _reject("NATIVE_EXECUTABLE_DEB_DIGEST_REFUSED")
+    payload = packages[0]
+    for field, value in (("Package", "nginx"), ("Version", version), ("Architecture", "amd64")):
+        if _native_package_command(["/usr/bin/dpkg-deb", "--field", str(payload), field], work) != value:
+            _reject("NATIVE_EXECUTABLE_DEB_IDENTITY_REFUSED")
+    data = work / "payload.tar"
+    with data.open("xb") as out:
+        os.fchmod(out.fileno(), 0o600)
+        subprocess.run(
+            ["/usr/bin/prlimit", "--fsize=67108864:67108864", "--",
+             "/usr/bin/dpkg-deb", "--fsys-tarfile", str(payload)],
+            stdout=out, stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            check=True, timeout=60, cwd=str(work),
+            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C", "LANG": "C"},
+        )
+        out.flush()
+        os.fsync(out.fileno())
+    if (not 0 < data.stat().st_size <= 64 * 1024 * 1024
+            or _candidate_payload_sha256(payload) != expected):
+        _reject("NATIVE_EXECUTABLE_DEB_DIGEST_REFUSED")
+    return expected, debian_nginx_tar_digest(data.read_bytes())
+
+
+def _authenticate_candidate_rpm(work: Path, identity: str) -> tuple[str, str]:
+    from repocache.server_native_package_trust_v1 import _dnf_commands
+    update, query = _dnf_commands(work)
+    if query[-4:] != ["repoquery", "--available", "--queryformat=%{name}", "nginx"]:
+        _reject("NATIVE_EXECUTABLE_DNF_PROFILE_CHANGED")
+    _native_package_command(update, work)
+    urls = set(_native_package_command(
+        [*query[:-4], "-q", "repoquery", "--available", "--location", identity], work).splitlines())
+    if len(urls) != 1:
+        _reject("NATIVE_EXECUTABLE_RPM_LOCATION_REFUSED")
+    url = urls.pop()
+    if re.fullmatch(
+        r"https://repo\.almalinux\.org/almalinux/10/(?:AppStream|BaseOS)/"
+        r"x86_64/os/Packages/(?:[A-Za-z0-9._+~-]+/)*nginx-core-[A-Za-z0-9._+~-]+\.rpm",
+        url,
+    ) is None:
+        _reject("NATIVE_EXECUTABLE_RPM_LOCATION_REFUSED")
+    payload = work / "nginx-core.rpm"
+    _native_package_command(["/usr/bin/curl", "--fail", "--silent", "--show-error",
+                             "--proto", "=https", "--tlsv1.2", "--max-filesize", "33554432",
+                             "--max-time", "90", "--output", str(payload), url], work)
+    archive_digest = _candidate_payload_sha256(payload)
+    key = _NATIVE["almalinux"][2]
+    if not _trusted_key(key):
+        _reject("NATIVE_EXECUTABLE_TRUST_ANCHOR_REFUSED")
+    # The private verification database is a new root-owned scratch inode,
+    # not the native system database or a new system trust anchor. Match
+    # its existing distro RPMDB label, never change a policy or host path.
+    with tempfile.TemporaryDirectory(prefix="repocache-native-executable-rpmdb-", dir="/var/lib") as tmp:
+        db = Path(tmp)
+        if not _native_workspace_is_root_owned(db) or any(db.iterdir()):
+            _reject("NATIVE_EXECUTABLE_RPMDB_REFUSED")
+        with ExitStack() as stack:
+            reference = os.open("/usr/lib/sysimage/rpm", stage._DIRECTORY)
+            stack.callback(os.close, reference)
+            stage._protected_directory(reference)
+            directory = os.open(db, stage._DIRECTORY)
+            stack.callback(os.close, directory)
+            stage._protected_directory(directory)
+            label = os.getxattr(reference, "security.selinux")
+            if label.split(b":")[2:3] != [b"rpm_var_lib_t"]:
+                _reject("NATIVE_EXECUTABLE_RPMDB_LABEL_REFUSED")
+            os.setxattr(directory, "security.selinux", label)
+            if os.getxattr(directory, "security.selinux") != label:
+                _reject("NATIVE_EXECUTABLE_RPMDB_LABEL_REFUSED")
+        for action in (["--initdb"], ["--import", key]):
+            _native_package_command(["/usr/bin/rpm", "--dbpath", str(db), *action], work)
+        verified = _native_package_command(
+            ["/usr/bin/rpmkeys", "--dbpath", str(db), "--checksig", str(payload)], work)
+        if verified != str(payload) + ": digests signatures OK":
+            _reject("NATIVE_EXECUTABLE_RPM_SIGNATURE_REFUSED")
+        if _candidate_payload_sha256(payload) != archive_digest:
+            _reject("NATIVE_EXECUTABLE_PAYLOAD_CHANGED")
+        def query_rpm(fmt):
+            return _native_package_command(
+                ["/usr/bin/rpm", "--dbpath", str(db), "-qp", "--queryformat=" + fmt,
+                 str(payload)], work)
+        if (query_rpm("%{NAME}-%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}") != identity
+                or query_rpm("%{FILEDIGESTALGO}") != "8"):
+            _reject("NATIVE_EXECUTABLE_RPM_IDENTITY_REFUSED")
+        rows = query_rpm("[%{FILENAMES}\\t%{FILEDIGESTS}\\n]").splitlines()
+        matching = [row.split("\t", 1)[1] for row in rows
+                    if row.startswith("/usr/sbin/nginx\t")]
+        if len(matching) != 1 or re.fullmatch(r"[0-9a-f]{64}", matching[0]) is None:
+            _reject("NATIVE_EXECUTABLE_RPM_MEMBER_REFUSED")
+        if _candidate_payload_sha256(payload) != archive_digest:
+            _reject("NATIVE_EXECUTABLE_PAYLOAD_CHANGED")
+        return archive_digest, matching[0]
+
+
+def _stage_authenticated_native_executable_candidate(
+    assets: Path, *, commit: str, archive_sha256: str,
+) -> dict:
+    """Internal candidate placement only; not a CLI or activation path.
+
+    The caller is the authorized isolated installer harness. Re-authenticate
+    source and native package, retain the existing server-state lock, stage
+    only the fixed executable in the existing authenticated worker directory.
+    No systemd unit, SELinux policy, vendor label or firewall is modified.
+    Refuse uncertain receipt/placement; never adopt or execute the copy.
+    """
+    from repocache.server_native_nginx_executable_v1 import (
+        NativeExecutableCandidateError, stage_nginx_candidate_with_receipt,
+        _identity as executable_identity, _verify_leaf, _read_executable_receipt,
+    )
+    from repocache.server_protected_state_store_v1 import _read_file
+    distribution = _native_distro()
+    require_native_host_preconditions()
+    payloads, receipt = stage._authenticated_payloads(
+        assets, commit=commit, archive_sha256=archive_sha256, system=None)
+    expected = stage._json_line(receipt)
+    completed = _MARKER + "complete-" + hashlib.sha256(expected).hexdigest()
+    with ExitStack() as stack:
+        root = os.open("/", stage._DIRECTORY)
+        stack.callback(os.close, root)
+        state = stack.enter_context(_locked(root, 0))
+        def require_boundary():
+            stage._audit_worker_files(Path("/"), payloads)
+            if (_read_file(state, _RUNTIME_RECEIPT, 0, 8192) != expected
+                    or {name for name in os.listdir(state) if name.startswith(_MARKER)} != {completed}
+                    or _read_file(state, completed, 0, 0) != b""):
+                _reject("NATIVE_EXECUTABLE_WORKER_RECEIPT_REFUSED")
+            _no_conflicting_owned_wal_pending(state)
+            _require_audited_native_package_for_activation(state, distribution=distribution)
+            if (_read_v2(state, 0)[0] is not None or
+                    _nginx_systemctl("is-enabled") != (1, b"disabled\n")
+                    or _nginx_systemctl("is-active") != (3, b"inactive\n")
+                    or _own_systemctl("is-enabled") != (1, b"disabled\n")
+                    or _own_systemctl("is-active") != (3, b"inactive\n")):
+                _reject("NATIVE_EXECUTABLE_INACTIVE_BOUNDARY_REFUSED")
+        require_boundary()
+        usr = _open_directory(root, "usr", stack)
+        sbin = _open_directory(usr, "sbin", stack)
+        libexec = _open_directory(usr, "libexec", stack)
+        destination = _open_directory(libexec, "repocache", stack)
+        vendor = os.open("nginx", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK |
+                         os.O_CLOEXEC, dir_fd=sbin)
+        stack.callback(os.close, vendor)
+        vendor_before = executable_identity(os.fstat(vendor))
+        def recheck_paths():
+            for parent, name, fd in ((root, "usr", usr), (usr, "sbin", sbin),
+                                     (usr, "libexec", libexec),
+                                     (libexec, "repocache", destination)):
+                stage._protected_directory(fd)
+                if _identity(os.fstat(fd)) != _identity(os.stat(
+                        name, dir_fd=parent, follow_symlinks=False)):
+                    _reject("NATIVE_EXECUTABLE_PARENT_CHANGED")
+            if (executable_identity(os.fstat(vendor)) != vendor_before or
+                    executable_identity(os.stat("nginx", dir_fd=sbin,
+                                                follow_symlinks=False)) != vendor_before):
+                _reject("NATIVE_EXECUTABLE_VENDOR_CHANGED")
+        recheck_paths()
+        if not _trusted_key(_NATIVE[distribution][2]):
+            _reject("NATIVE_EXECUTABLE_TRUST_ANCHOR_REFUSED")
+        # Refuse an unowned preexisting leaf or pending evidence before any
+        # package download. Only the exact known receipt may enable repeat.
+        if (_named(destination, ".repocache-nginx-executable.pending") is not None
+                or (_named(destination, "nginx") is not None and
+                    _read_executable_receipt(destination) is None)):
+            _reject("NATIVE_EXECUTABLE_FOREIGN_OR_PENDING")
+        with tempfile.TemporaryDirectory(prefix="repocache-native-executable-", dir="/var/lib") as tmp:
+            work = Path(tmp)
+            if not _native_workspace_is_root_owned(work):
+                _reject("NATIVE_EXECUTABLE_WORKSPACE_REFUSED")
+            identity = _candidate_native_identity(distribution, work)
+            package_digest, binary_digest = (
+                _authenticate_candidate_deb(work, identity) if distribution == "debian"
+                else _authenticate_candidate_rpm(work, identity))
+            require_boundary()
+            recheck_paths()
+            if (_candidate_native_identity(distribution, work) != identity
+                    or not _trusted_key(_NATIVE[distribution][2])):
+                _reject("NATIVE_EXECUTABLE_PACKAGE_CHANGED")
+            options = dict(distribution=distribution, package_identity=identity,
+                           native_payload_sha256=package_digest, authenticated_sha256=binary_digest,
+                           release_source_sha=commit, release_archive_sha256=archive_sha256)
+            try:
+                result = stage_nginx_candidate_with_receipt(destination, vendor, **options)
+                again = stage_nginx_candidate_with_receipt(destination, vendor, **options)
+                if (again["status"] != "NGINX_EXECUTABLE_CANDIDATE_UNCHANGED"
+                        or again["receipt_sha256"] != result["receipt_sha256"]
+                        or _verify_leaf(destination, binary_digest)[:2] !=
+                           (result["device"], result["inode"])):
+                    _reject("NATIVE_EXECUTABLE_READBACK_REFUSED")
+            except NativeExecutableCandidateError:
+                _reject("NATIVE_EXECUTABLE_PLACEMENT_REFUSED")
+            require_boundary()
+            recheck_paths()
+            if _candidate_native_identity(distribution, work) != identity:
+                _reject("NATIVE_EXECUTABLE_PACKAGE_CHANGED")
+        return {**result, "native_payload_authenticated_by_installer": True,
+                "package_identity": identity, "native_payload_sha256": package_digest,
+                "release_source_sha": commit, "release_archive_sha256": archive_sha256,
+                "service_enabled": False, "service_active": False}
+
+
 def _ensure_fixed_nginx_cache_parent_under_root(
     root_fd: int, *, owner_uid: int = 0, distribution: str | None = None,
 ) -> None:

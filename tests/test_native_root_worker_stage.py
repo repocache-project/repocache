@@ -773,3 +773,15 @@ def test_synthetic_signed_candidate_enters_exact_native_journal_once(
         assert (state / NATIVE_COMPLETE_NAME).read_bytes() == receipt
     finally:
         os.close(fake_root)
+
+
+def test_executable_candidate_requires_native_host_before_asset_access(monkeypatch, tmp_path):
+    monkeypatch.setattr(install, "_native_distro", lambda: "debian")
+    def refuse():
+        raise RuntimeError("fixture host refused")
+    monkeypatch.setattr(install, "require_native_host_preconditions", refuse)
+    monkeypatch.setattr(stage, "_authenticated_payloads",
+                        lambda *a, **kw: pytest.fail("asset access before native host proof"))
+    with pytest.raises(RuntimeError, match="fixture host refused"):
+        install._stage_authenticated_native_executable_candidate(
+            tmp_path, commit="a" * 40, archive_sha256="b" * 64)
