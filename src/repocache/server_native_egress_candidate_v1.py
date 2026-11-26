@@ -156,7 +156,7 @@ def render_namespace_egress_candidate(
 # This closed grammar ignores formatting only, never rule ordering or
 # arbitrary statements. The caller independently binds the namespace.
 _HEADER = re.compile(
-    r'table inet repocache_egress \{ counter "?denied"? \{ \} '
+    r'table inet repocache_egress \{ counter (?:denied|"denied") \{ \} '
     r'chain output \{ type filter hook output priority (?:0|filter); policy drop; '
     r'meta l4proto (?:tcp|6) ct state established accept '
     r'meta skuid 0 oifname "lo" (ip6?) daddr ([0-9a-f:.]+) '

@@ -426,3 +426,18 @@ fixture binds the namespace identity, checks the old complete ruleset,
 syntax-checks a single atomic table replacement, rechecks the old
 ruleset and verifies the new complete ruleset. Installed lifecycle and
 WAL compensation still require their own authority and native evidence.
+
+### Native executable payload and durable candidate receipt
+
+The candidate now has bounded, non-extracting Debian data-tar inspection
+for the exact regular root-owned NGINX member, and exact-version/architecture
+SHA-256 comparison against separately authenticated APT metadata. These
+pure checks cannot authenticate a supplied package by themselves. The
+root-only placement primitive may bind a separate executable inode to
+native package identity/payload digest and authenticated release source
+and archive digests in one fixed mode-0600 receipt. Repeat requires that
+same canonical receipt and exact inode/digest; any unknown copy, partial
+receipt or changed identity is refused, never overwritten or adopted.
+No service activation, package-manager command, relabel or policy change
+is performed by the primitive. Native installer orchestration, exact
+signed package verification and reboot/rollback remain separate gates.
