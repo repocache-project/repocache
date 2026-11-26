@@ -239,8 +239,17 @@ def _observe_source(root: Path, record: dict) -> str:
     identity = [observed["device"], observed["inode"]]
     original = _decode(record["original"])
     proposed = _decode(record["proposed"])
+    return _classify_source(record, identity, raw, original, proposed)
+
+
+def _classify_source(record, identity, raw, original, proposed):
+    # Linux may recycle the original inode after its unlink. A journal
+    # containing identical original/restore identities cannot establish
+    # which historical inode incarnation we are observing. Report that
+    # ambiguity explicitly, never turn it into a stronger recovery claim.
     if identity == record["original_id"] and raw == original:
-        return "original"
+        return ("original-or-restored" if identity == record["restore_id"]
+                else "original")
     if identity == record["proposed_id"] and raw == proposed:
         return "proposed"
     if identity == record["restore_id"] and raw == original:
@@ -307,13 +316,13 @@ def _check_observed_phase(record: dict, source: str, companion: str) -> None:
     elif phase == "restored":
         expected = ("not-applicable" if record["companion"] is None else
                     "upstream-only" if record["retained_id"] is not None else "absent")
-        if source not in ("original", "restored") or companion != expected:
+        if source not in ("original", "restored", "original-or-restored") or companion != expected:
             raise PairRefused("Restored journal evidence differs")
     elif phase == "armed":
-        if source == "restored" or (source == "proposed" and companion == "absent"):
+        if source in ("restored", "original-or-restored") or (source == "proposed" and companion == "absent"):
             raise PairRefused("Armed journal evidence differs")
     elif phase == "restore-armed":
-        if companion == "absent" or (source == "restored" and
+        if companion == "absent" or (source in ("restored", "original-or-restored") and
                 companion not in ("not-applicable", "upstream-only")):
             raise PairRefused("Rollback journal evidence differs")
 

@@ -47,7 +47,10 @@ def test_exact_recovery_record_and_foreign_inode(tmp_path, manager):
     assert snapshot() == before
     pair.restore_sandbox(root, IDENT)
     report = inspect_local_recovery_record(IDENT, _test_root=root)
-    assert report["phase"] == "restored" and report["source_state"] == "restored"
+    journal = json.loads((state / pair._journal_name(IDENT)).read_text())
+    expected = ("original-or-restored" if journal["original_id"] == journal["restore_id"]
+                else "restored")
+    assert report["phase"] == "restored" and report["source_state"] == expected
     if manager == "apt":
         assert report["companion_state"] == "upstream-only"
     pending = state / pair._pending_journal_name(IDENT)
@@ -86,3 +89,16 @@ def test_nonroot_readback_refused_before_inspection(monkeypatch):
     monkeypatch.setattr(os, "getresuid", lambda: (1000, 0, 0))
     with pytest.raises(PairRefused, match="requires root"):
         inspect_local_recovery_record(IDENT)
+
+
+def test_recycled_original_inode_reports_ambiguity_not_new_authority():
+    from recovery_journal_v1 import _classify_source
+    record = {"original_id": [1, 2], "restore_id": [1, 2],
+              "proposed_id": [1, 3], "phase": "restored", "companion": None}
+    result = _classify_source(record, [1, 2], b"original", b"original", b"proposed")
+    assert result == "original-or-restored"
+    _check_observed_phase(record, result, "not-applicable")
+    with pytest.raises(PairRefused):
+        _check_observed_phase({**record, "phase": "armed"}, result, "not-applicable")
+    with pytest.raises(PairRefused):
+        _classify_source(record, [1, 4], b"original", b"original", b"proposed")

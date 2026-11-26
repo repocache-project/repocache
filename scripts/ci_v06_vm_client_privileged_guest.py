@@ -126,13 +126,42 @@ assert "recoverable_fallback_pair_lab" not in sys.modules
     ).stdout)
     assert report["status"] == "record-verified-read-only"
     assert report["journal_record_verified"]
+    if source_state == "restored":
+        # Independently inspect the private fixture's exact journal and
+        # actual source inode. DNF may reuse the freed original inode.
+        journal = json.loads((root / "var/lib/repocache-client/approved-entries" /
+                              ("pair-" + ident + ".json")).read_text("ascii"))
+        actual = (root / journal["source"]).stat()
+        assert [actual.st_dev, actual.st_ino] == journal["restore_id"]
+        if journal["original_id"] == journal["restore_id"]:
+            source_state = "original-or-restored"
     assert (report["phase"], report["source_state"], report["companion_state"]) == (
-        phase, source_state, companion_state)
+        phase, source_state, companion_state), report
     assert all(report[name] is False for name in (
         "local_rollback_verified", "route_revocation_verified",
         "native_exclusion_verified", "write_eligible"))
     print("PASS: authenticated read-only recovery record, exact local evidence, "
-          "no revocation or write claim: " + phase, flush=True)
+          "no revocation or write claim: " + phase + " " + source_state, flush=True)
+    if phase == "restored":
+        # Negative readback from the same authenticated archive, not a
+        # second writer. Only the exact marked fixture journal is touched.
+        journal_path = root / "var/lib/repocache-client/approved-entries" / ("pair-" + ident + ".json")
+        pending = journal_path.with_name(".pair-" + ident + ".pending")
+        before = _snapshot(journal_path)
+        with pending.open("xb") as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write(b"partial fixture evidence")
+        try:
+            pending_before = _snapshot(pending)
+            denied = subprocess.run(
+                ["/usr/bin/python3", "-IS", "-B", "-c", code, target, str(root), ident],
+                capture_output=True, timeout=20)
+            assert denied.returncode != 0 and b"Pending journal requires manual recovery" in denied.stderr
+            assert _snapshot(pending) == pending_before and _snapshot(journal_path) == before
+        finally:
+            # This test owns the deliberately injected pending leaf.
+            pending.unlink()
+        print("PASS: authenticated readback refuses pending journal without changes", flush=True)
 
 
 def _debian_fixture(root: Path) -> None:

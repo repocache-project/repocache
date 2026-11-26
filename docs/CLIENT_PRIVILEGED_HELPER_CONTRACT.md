@@ -296,3 +296,13 @@ candidate evidence boundary, not production writer acceptance. Exact
 fresh route consent, retained upstream-only companions, real native
 exclusion, transaction durability and server-side route withdrawal remain
 separate mandatory gates. No previously fetched URL is claimed revoked.
+
+### Recycled inode evidence
+
+Linux may reuse the original source inode for the journalled restore. When
+both recorded identities and original bytes match, readback reports
+`original-or-restored` rather than claiming a distinguishable historical
+inode incarnation. This is admissible only in a rollback phase, with all
+existing exact metadata and companion checks; no write, rollback completion,
+revocation or native exclusion authority follows. Native fixtures independently
+check the actual restored inode against the recorded restore identity.
