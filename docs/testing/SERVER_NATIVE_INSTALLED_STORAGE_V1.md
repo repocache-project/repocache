@@ -474,3 +474,24 @@ and checks the receipt and executable metadata using the authenticated
 installed worker. Pending/ambiguous placement remains fail-closed;
 automatic recovery, offline native payload retention, label transition
 and generation-bound service activation are still unverified.
+
+### Generation-bound egress recovery candidate (decision A)
+
+The private installed executable staging operation authenticates the exact native
+package and signed REPOCACHE release under the existing installer lock. It stages
+only the fixed owned executable and its exclusive receipt; it does not start a
+service or modify a host firewall. The isolated native test checks the receipt
+and executable again after a real reboot. Recovery of interrupted executable
+placement remains fail-closed, not automatic.
+
+The v3 owned WAL can now reconstruct the prior namespace-output policy from its
+exact old resources. When all proposed state/main/include byte streams match
+the WAL, it deterministically re-derives the catalog, owner manifest and complete
+proposed policy, and checks every proposed hash against the original WAL.
+Incomplete transitions yield only the prior candidate. Foreign bytes, non-v3
+journals and inconsistent proposed hashes are refused. No new DNS resolution,
+policy application, kernel proof or publication authority follows from this
+read-only evidence. The signed-worker reboot fixture exercises the actual WAL
+under the existing lock before normal recovery. Dedicated SELinux domain,
+namespace provisioning, service binding and live policy application/drain
+ordering remain separate, unverified integration work.

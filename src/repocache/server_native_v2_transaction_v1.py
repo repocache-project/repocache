@@ -1655,8 +1655,17 @@ def _owned_generation_egress(resources, *, distribution: str, worker_uid: int):
         }
         for repo in document["repositories"] if repo["desired_state"] == "active"
     }
+    # Non-base allowed hosts are not represented in the installed upstream
+    # groups and are never granted egress. Scope only the re-render check
+    # to the recoverable base host, just as the tuple parser does.
+    render_document = {**document, "repositories": [
+        {**repo, "upstream": {**repo["upstream"], "allowed_hosts": [
+            urlsplit(repo["upstream"]["base_url"]).hostname
+        ]}} if repo["desired_state"] == "active" else repo
+        for repo in document["repositories"]
+    ]}
     main, include, catalog = _render_owned_managed_candidate(
-        document, snapshot["state_generation"], distribution, pins,
+        render_document, snapshot["state_generation"], distribution, pins,
     )
     if (main, include, catalog) != (
             resources[_OWNED_MAIN], resources[_INCLUDE], resources[_CATALOG]):
