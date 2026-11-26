@@ -149,3 +149,20 @@ def test_retention_bytes_are_original_upstream_not_cache():
     assert lab._retained_bytes({"approval": {"upstream": "https://example.org/repo/",
                                             "cache": "https://cache.example.org/repo/"}}) == (
         b"https://example.org/repo/\tpriority:1\n")
+
+
+def test_reserved_dnf4_pair_root_never_falls_back_to_dnf5(monkeypatch):
+    root = Path("/var/tmp/repocache-booted-dnf4-fixture")
+
+    def refused(_root):
+        raise FileExistsError("stale PID")
+
+    monkeypatch.setattr(lab, "_dnf4_private_claim", refused)
+    monkeypatch.setattr(lab.locks, "hold_existing_native_package_locks",
+                        lambda *_a, **_kw: pytest.fail("DNF5 fallback"))
+    with pytest.raises(lab.locks.LockInspectionRefused, match="DNF4"):
+        with lab._package_scope(root, "etc/yum.repos.d/base.repo"):
+            pytest.fail("stale PID accepted")
+    with pytest.raises(lab.locks.LockInspectionRefused, match="DNF4"):
+        with lab._package_scope(root, "etc/apt/sources.list.d/base.list"):
+            pytest.fail("APT accepted in DNF4 fixture")

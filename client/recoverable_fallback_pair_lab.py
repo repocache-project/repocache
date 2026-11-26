@@ -15,10 +15,13 @@ from __future__ import annotations
 import base64
 import binascii
 import contextlib
+import fcntl
 import hashlib
 import json
 import os
+import re
 import stat
+import subprocess
 from pathlib import Path
 
 import native_fallback_plan as compiler
@@ -350,6 +353,175 @@ def _manager(source: str) -> str:
     return "dnf5" if source.startswith("etc/yum.repos.d/") else "apt"
 
 
+DNF4_MARKER = ".repocache-dnf4-lock-test"
+DNF4_MAGIC = b"REPOCACHE_DNF4_PRIVATE_LOCK_LAB_V1\n"
+DNF4_PAIR_PREFIX = "repocache-booted-dnf4-"
+
+
+def _is_dnf4_pair_root(root: Path) -> bool:
+    return root.parent == Path("/var/tmp") and root.name.startswith(DNF4_PAIR_PREFIX)
+
+
+def _dnf4_fixture_guard(root: Path) -> None:
+    """Only fixed root-owned native VM fixtures; no host locks or override."""
+    root = Path(root)
+    assert os.getresuid() == (0, 0, 0) and os.getresgid() == (0, 0, 0)
+    assert os.uname().nodename == "pr237-almalinux10"
+    assert not Path("/.dockerenv").exists()
+    assert Path("/proc/1/comm").read_text("ascii").strip() == "systemd"
+    assert _is_dnf4_pair_root(root) or (
+        root.parent == Path("/var/lib") and root.name.startswith("repocache-ci-dnf-root-"))
+    assert root.resolve(strict=True) == root
+    parent = root.parent.lstat()
+    assert stat.S_ISDIR(parent.st_mode) and parent.st_uid == 0
+    if root.parent == Path("/var/tmp"):
+        assert parent.st_mode & stat.S_ISVTX
+    else:
+        assert not parent.st_mode & 0o022
+    env = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"}
+
+    def native(*argv):
+        result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, env=env, timeout=15)
+        assert result.returncode == 0
+        return result.stdout.strip()
+
+    assert native("/usr/bin/systemd-detect-virt", "--vm") in ("qemu", "kvm")
+    assert native("/usr/sbin/getenforce") == "Enforcing"
+    release = Path("/etc/os-release").read_text("ascii")
+    assert re.search(r'^ID="?almalinux"?$', release, re.M)
+    assert re.search(r'^VERSION_ID="?10(?:\.[0-9]+)?"?$', release, re.M)
+    assert not Path("/usr/bin/dnf5").is_file()
+    assert native("/usr/bin/dnf", "--version").splitlines()[0].startswith("4.")
+    fd = os.open(root, boundary.DIR)
+    try:
+        info = os.fstat(fd)
+        assert info.st_uid == info.st_gid == 0 and stat.S_IMODE(info.st_mode) == 0o700
+        mark = os.open(DNF4_MARKER, REG, dir_fd=fd)
+        try:
+            found = os.fstat(mark)
+            assert stat.S_ISREG(found.st_mode) and found.st_uid == found.st_gid == 0
+            assert found.st_nlink == 1 and stat.S_IMODE(found.st_mode) == 0o600
+            assert os.read(mark, len(DNF4_MAGIC) + 1) == DNF4_MAGIC
+            named = os.stat(DNF4_MARKER, dir_fd=fd, follow_symlinks=False)
+            assert (found.st_dev, found.st_ino) == (named.st_dev, named.st_ino)
+        finally:
+            os.close(mark)
+        if _is_dnf4_pair_root(root):
+            assert boundary._read_pinned(fd, MARKER, len(MAGIC)) == MAGIC
+    finally:
+        os.close(fd)
+
+
+@contextlib.contextmanager
+def _dnf4_private_claim(root: Path):
+    """Fixture-only atomic live-PID publication plus real RPMDB kernel locks.
+
+    Unlike DNF5, DNF4's PID file is created/removed, not a stable inode.
+    Never steal an existing (even stale) PID record. This does not exclude
+    metadata/config readers or prove an installed source-writer lease.
+    """
+    _dnf4_fixture_guard(root)
+    lock_dir = root / "var/lib/dnf"
+    rpm_dir = root / "usr/lib/sysimage/rpm"
+    for directory in (lock_dir, rpm_dir):
+        assert directory.resolve(strict=True) == directory
+        # The sticky /var/tmp parent is outside this protected private root.
+        for parent in (directory, *directory.parents):
+            if parent == root.parent:
+                break
+            info = parent.lstat()
+            assert stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    leaf = "rpmdb_lock.pid"
+    staged = ".repocache-ci-rpmdb-lock.stage"
+    expected = str(os.getpid()).encode("ascii")
+    dirfd = rpmfd = fd = kernel = None
+    published = False
+    def identity(info):
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_uid,
+                info.st_gid, info.st_nlink, info.st_size)
+    def recheck():
+        assert os.getpid() == int(expected)
+        assert identity(os.fstat(fd)) == claim
+        assert identity(os.stat(leaf, dir_fd=dirfd, follow_symlinks=False)) == claim
+        assert os.pread(fd, 32, 0) == expected
+        assert identity(os.fstat(kernel)) == rpm_identity
+        assert identity(os.stat(".rpm.lock", dir_fd=rpmfd, follow_symlinks=False)) == rpm_identity
+        for path, pinned in ((lock_dir, dirfd), (rpm_dir, rpmfd)):
+            actual = path.lstat()
+            held = os.fstat(pinned)
+            assert (actual.st_dev, actual.st_ino) == (held.st_dev, held.st_ino)
+    try:
+        dirfd = os.open(lock_dir, flags)
+        rpmfd = os.open(rpm_dir, flags)
+        # Atomic no-replace avoids publishing an empty PID file for another
+        # native process to claim before our live owner bytes are durable.
+        if os.path.lexists(lock_dir / leaf) or os.path.lexists(lock_dir / staged):
+            raise FileExistsError("Existing DNF4 lock evidence; no takeover")
+        fd = os.open(staged, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW |
+                     os.O_CLOEXEC, 0o600, dir_fd=dirfd)
+        assert os.write(fd, expected) == len(expected)
+        os.fsync(fd)
+        claim = identity(os.fstat(fd))
+        assert claim[3:6] == (0, 0, 1)
+        boundary._rename_noreplace(dirfd, staged, leaf)
+        published = True
+        os.fsync(dirfd)
+        # Native RPM creates this inode during the preceding key import.
+        kernel = os.open(".rpm.lock", os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC |
+                         os.O_NONBLOCK, dir_fd=rpmfd)
+        info = os.fstat(kernel)
+        assert stat.S_ISREG(info.st_mode) and info.st_uid == info.st_gid == 0
+        assert info.st_nlink == 1 and not info.st_mode & 0o022
+        fcntl.flock(kernel, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.lockf(kernel, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        rpm_identity = identity(os.fstat(kernel))
+        recheck()
+        yield recheck
+        recheck()
+    finally:
+        # If anything is ambiguous, preserve the published/staged evidence.
+        # Remove only this process's exact PID record; no stale-lock GC.
+        try:
+            if published and fd is not None:
+                named = os.stat(leaf, dir_fd=dirfd, follow_symlinks=False)
+                if identity(named) != claim or os.pread(fd, 32, 0) != expected:
+                    raise RuntimeError("Foreign DNF4 PID record; retained for review")
+                os.unlink(leaf, dir_fd=dirfd)
+                os.fsync(dirfd)
+        finally:
+            for held in (kernel, fd, rpmfd, dirfd):
+                if held is not None:
+                    os.close(held)
+
+
+@contextlib.contextmanager
+def _package_scope(root: Path, source: str):
+    """Reserved DNF4 VM root always uses DNF4; no fallback to fake DNF5 locks."""
+    manager = _manager(source)
+    if not _is_dnf4_pair_root(root):
+        with locks.hold_existing_native_package_locks(
+                manager, root=root, revalidation=True) as recheck:
+            yield recheck
+        return
+    if manager != "dnf5":
+        raise locks.LockInspectionRefused("DNF4 fixture cannot write an APT source")
+    with contextlib.ExitStack() as scope:
+        try:
+            recheck = scope.enter_context(_dnf4_private_claim(root))
+        except (OSError, ValueError, AssertionError) as exc:
+            raise locks.LockInspectionRefused("Private DNF4 lock scope refused") from exc
+
+        def checked():
+            try:
+                recheck()
+            except (OSError, AssertionError) as exc:
+                raise locks.LockInspectionRefused("Private DNF4 lock scope drift") from exc
+
+        yield checked
+
+
 def _crash(where: str | None, phase: str) -> None:
     if where == phase:
         raise InjectedCrash("Injected transaction interruption: " + phase)
@@ -397,7 +569,7 @@ def _apply_sandbox(root: Path, ident: str, *, crash: str | None,
                 approved = boundary._manifest(statefd, ident)
                 source = journal["source"] if journal is not None else approved["source"]
                 recheck = scope.enter_context(
-                    locks.hold_existing_native_package_locks(_manager(source), root=root, revalidation=True))
+                    _package_scope(root, source))
                 if retain_companion and _manager(source) != "apt":
                     raise PairRefused("Retained companion is APT-only")
                 if journal is not None:
@@ -715,7 +887,7 @@ def restore_sandbox(root: Path, ident: str, *,
             if j is None or j["phase"] not in ("installed", "restore-armed"):
                 raise PairRefused("No committed sandbox transaction to restore")
             try:
-                with locks.hold_existing_native_package_locks(_manager(j["source"]), root=root, revalidation=True) as recheck:
+                with _package_scope(root, j["source"]) as recheck:
                     return _restore_locked(root, fd, ident, j, recheck=recheck, crash=crash or "manual")
             except locks.LockInspectionRefused as exc:
                 raise PairRefused("Native lock scope refused rollback") from exc
@@ -733,7 +905,7 @@ def recover_sandbox(root: Path, ident: str) -> dict:
             if j is None:
                 return {"status": "no-intent", "write_eligible": False}
             try:
-                with locks.hold_existing_native_package_locks(_manager(j["source"]), root=root, revalidation=True) as recheck:
+                with _package_scope(root, j["source"]) as recheck:
                     if j["phase"] in ("installed", "restored"):
                         return _restore_locked(root, fd, ident, j, recheck=recheck)
                     return _restore_locked(root, fd, ident, j, recheck=recheck, crash="recover")
