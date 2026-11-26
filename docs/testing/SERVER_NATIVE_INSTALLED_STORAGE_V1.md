@@ -390,7 +390,9 @@ placing the exact independently authenticated NGINX package bytes into a
 retained owned directory. It never overwrites, executes, copies vendor
 capabilities or changes a SELinux label. A pending leaf causes fail-closed
 refusal, including a broken symlink. Repeated exact staging retains the
-existing inode. Its input digest must come from native package authentication;
+existing inode only when the caller provides its previously authenticated
+owned device/inode; equal bytes alone never authorize adoption. Its input
+digest must come from native package authentication;
 the primitive does not authenticate a digest supplied by an operator.
 The existing guarded AlmaLinux signed-derived fixture invokes it from the
 authenticated worker ZIP after checking the installed native executable

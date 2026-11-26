@@ -777,7 +777,8 @@ directory=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
 vendor=os.open("/usr/sbin/nginx",os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
 try:
     first=stage.stage_verified_nginx_candidate(directory,vendor,authenticated_sha256=digest)
-    second=stage.stage_verified_nginx_candidate(directory,vendor,authenticated_sha256=digest)
+    second=stage.stage_verified_nginx_candidate(directory,vendor,authenticated_sha256=digest,
+        previous_inode=(first["device"],first["inode"]))
     assert first["status"].endswith("STAGED") and second["status"].endswith("UNCHANGED")
     assert first["inode"] == second["inode"]
     assert not first["authorizes_nginx_activation"]

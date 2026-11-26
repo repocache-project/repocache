@@ -92,6 +92,7 @@ def _verify_leaf(directory, digest):
 
 def stage_verified_nginx_candidate(
     directory: int, vendor_fd: int, *, authenticated_sha256: str,
+    previous_inode: tuple[int, int] | None = None,
 ) -> dict:
     """Place fixed leaf in a retained owned directory without overwrite.
 
@@ -99,12 +100,17 @@ def stage_verified_nginx_candidate(
     package identity, not a request. The caller retains namespace and
     placement lock authority, independently verifies the directory path,
     and must never execute before checking the service policy and receipt.
-    Unexpected pending evidence is preserved for manual reconciliation.
+    Repeat staging requires the caller's previously owned device/inode;
+    equal bytes alone cannot establish ownership. Unexpected pending
+    evidence is preserved for manual reconciliation.
     """
     if (os.getresuid() != (0, 0, 0) or os.getresgid() != (0, 0, 0)
             or type(directory) is not int or type(vendor_fd) is not int
             or directory == vendor_fd or type(authenticated_sha256) is not str
-            or not re.fullmatch(r"[0-9a-f]{64}", authenticated_sha256)):
+            or not re.fullmatch(r"[0-9a-f]{64}", authenticated_sha256)
+            or (previous_inode is not None and (
+                type(previous_inode) is not tuple or len(previous_inode) != 2
+                or any(type(x) is not int or x < 0 for x in previous_inode)))):
         _deny("INPUT_REFUSED")
     try:
         dir_id = _directory(directory)
@@ -112,6 +118,11 @@ def stage_verified_nginx_candidate(
             _deny("PENDING_REFUSED")
         raw, source_id = _read_verified(vendor_fd, authenticated_sha256)
         existed = _named(directory, _LEAF) is not None
+        if existed:
+            if previous_inode is None or _verify_leaf(directory, authenticated_sha256)[:2] != previous_inode:
+                _deny("FOREIGN_DESTINATION")
+        elif previous_inode is not None:
+            _deny("OWNED_DESTINATION_MISSING")
         if not existed:
             fd = os.open(_PENDING, os.O_RDWR | os.O_CREAT | os.O_EXCL |
                          os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=directory)
@@ -147,6 +158,7 @@ def stage_verified_nginx_candidate(
         if (_directory(directory) != dir_id
                 or _identity(os.fstat(vendor_fd)) != source_id
                 or copy_id[:2] == source_id[:2]
+                or (previous_inode is not None and copy_id[:2] != previous_inode)
                 or _named(directory, _PENDING) is not None):
             _deny("PLACEMENT_CHANGED")
         return {

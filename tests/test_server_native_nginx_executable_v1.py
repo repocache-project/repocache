@@ -37,7 +37,10 @@ def test_stage_idempotence_foreign_and_pending_refusal(tmp_path):
         assert not first["native_payload_authenticity_verified_by_primitive"]
         assert target.read_bytes() == source.read_bytes()
         assert target.stat().st_ino != source.stat().st_ino
-        again = stage_verified_nginx_candidate(parent, fd, authenticated_sha256=digest)
+        with pytest.raises(NativeExecutableCandidateError, match="FOREIGN_DESTINATION"):
+            stage_verified_nginx_candidate(parent, fd, authenticated_sha256=digest)
+        again = stage_verified_nginx_candidate(parent, fd, authenticated_sha256=digest,
+                                              previous_inode=(info.st_dev, info.st_ino))
         assert again["status"].endswith("UNCHANGED")
         assert target.stat().st_ino == info.st_ino
         assert target.stat().st_mtime_ns == info.st_mtime_ns
@@ -49,7 +52,8 @@ def test_stage_idempotence_foreign_and_pending_refusal(tmp_path):
         pending.unlink()
         target.write_bytes(b"foreign")
         with pytest.raises(NativeExecutableCandidateError):
-            stage_verified_nginx_candidate(parent, fd, authenticated_sha256=digest)
+            stage_verified_nginx_candidate(parent, fd, authenticated_sha256=digest,
+                                           previous_inode=(info.st_dev, info.st_ino))
         assert target.read_bytes() == b"foreign"
         assert source.read_bytes() == b"private synthetic executable"
     finally:
