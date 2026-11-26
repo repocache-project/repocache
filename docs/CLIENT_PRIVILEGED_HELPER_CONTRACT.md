@@ -363,3 +363,22 @@ transactions exercise the same modern preflight. This is not a guarantee
 of CAS against another root actor, full native exclusion, immediate URL
 revocation, or permission to expose `--apply`; actual installed mutation
 remains disabled and its original acceptance gates remain open.
+
+
+### Isolated writer mount boundary
+
+The private pair writer now checks bounded Linux mountinfo before opening
+the transaction state or taking native locks, and again at the existing
+staging, journal and publication checkpoints. Any mount at or below the
+fixture, or between its temporary-directory anchor and the fixture root,
+is refused. Device and inode equality alone cannot identify a bind mount.
+No mount is created, removed or adopted by the writer. The booted Debian
+fixture binds its own source onto itself, verifies identical inode and
+metadata, checks refusal without mutation and unmounts only that fixture
+mount before continuing recovery. Container regressions inject mount
+evidence at each boundary and after native lock acquisition.
+
+This is an isolated-writer safeguard, not protection against a concurrent
+privileged mount-namespace administrator, an installed host-mount policy,
+or authorization for the installed helper to write. The authenticated
+read-only candidate remains unchanged.
