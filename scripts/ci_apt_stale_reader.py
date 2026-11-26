@@ -9,6 +9,7 @@ from __future__ import annotations
 import ctypes
 import fcntl
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
@@ -19,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from urllib.parse import urlsplit
 
 from ci_client_native_fallback import HTTPBackend, apt_repository, temporary_tls_identity
 from ci_v06_vm_signed_client_guest import guarded_native_guest
@@ -225,6 +227,33 @@ assert view.stat().st_ino == (root / 'var').stat().st_ino
 """ + _TRACE_CHILD
 
 
+def _assert_healthy_approved_route(case, primary, upstream, route, context):
+    """Observe the exact catalog route serving the signed fixture before resume."""
+    target = urlsplit(route)
+    assert target.scheme == "https" and target.hostname == "127.0.0.1"
+    assert target.port is not None and target.path == "/__repocache/repos/approved/"
+    assert not (target.username or target.password or target.query or target.fragment)
+    assert primary.mode == "healthy" and not primary.hits and not upstream.hits
+    requests = []
+    for relative in ("InRelease", "main/binary-amd64/Packages",
+                     "main/binary-amd64/Packages.gz", "main/binary-amd64/Packages.xz"):
+        expected = (case.parent / "www/repo/dists/stable" / relative).read_bytes()
+        path = target.path + "dists/stable/" + relative
+        connection = http.client.HTTPSConnection(target.hostname, target.port,
+                                                  timeout=10, context=context)
+        try:
+            connection.request("GET", path)
+            with connection.getresponse() as response:
+                assert response.status == 200, f"Former cache returned {response.status} for {relative}"
+                assert response.read(len(expected) + 1) == expected, f"Former cache bytes differ: {relative}"
+        finally:
+            connection.close()
+        requests.append("GET " + path)
+    assert primary.hits == requests and not upstream.hits
+    primary.hits.clear()  # Count only the previously parsed native reader from here.
+    print("PASS: exact former cache HTTPS route serves byte-identical signed APT metadata and indexes", flush=True)
+
+
 def _journal_cycle(case, primary, upstream, keyring, ca, *, deb822=False):
     """Prove actual journal recovery, not a manual simulation, for a stale APT reader."""
     from smoke_client_recoverable_pair import build
@@ -346,6 +375,7 @@ def _journal_cycle(case, primary, upstream, keyring, ca, *, deb822=False):
                     # A healthy former cache must not be contacted through
                     # the retained upstream-only mirror of a parsed stanza.
                     primary.mode = "healthy"
+                    _assert_healthy_approved_route(case, primary, upstream, route, trusted)
                 assert not primary.hits and not upstream.hits
                 _ptrace(17, child.pid)
                 result = child.wait(timeout=45)
@@ -379,12 +409,16 @@ def _journal_cycle(case, primary, upstream, keyring, ca, *, deb822=False):
 
 
 def probe():
+    if not __debug__:
+        raise AssertionError("Native isolated fixture requires assertions enabled")
     guarded_native_guest("debian13")
     assert os.uname().machine == "x86_64"
     with tempfile.TemporaryDirectory(prefix="repocache-booted-apt-reader-", dir="/tmp") as work:
         base = Path(work)
         base.chmod(0o755)  # Public fixture metadata/key only; private keys remain 0600.
         keyring = apt_repository(base)
+        # The exact catalog-approved path must actually serve valid fixture bytes.
+        shutil.copytree(base / "www/repo", base / "www/__repocache/repos/approved")
         ca, private = temporary_tls_identity(base, "stale-source")
         primary = HTTPBackend(base / "www", certificate=ca, key=private)
         try:
