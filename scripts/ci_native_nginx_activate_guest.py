@@ -1184,6 +1184,97 @@ finally:
     print("PASS: restored exact committed generation; repeat signed storage preparation retains cache/history", flush=True)
 
 
+def verify_debian_executable_candidate(native, assets, pins) -> None:
+    """Authenticate the exact installed Debian binary in a disposable VM."""
+    import stat
+    import tempfile
+    from repocache.server_native_package_trust_v1 import _apt_commands, _trusted_key, _NATIVE
+
+    assert Path("/etc/os-release").read_text().splitlines().count('ID=debian') == 1
+    assert 'VERSION_ID="13"' in Path("/etc/os-release").read_text().splitlines()
+    assert os.getresuid() == (0, 0, 0) and os.getresgid() == (0, 0, 0)
+    assert run("/usr/bin/systemd-detect-virt", "--vm").returncode == 0
+    from scripts import stage_native_root_worker as stage
+    release = stage.verify_installed_worker(assets, **pins)
+    assert release["status"] == "AUTHENTICATED_WORKER_FILES_MATCH"
+    assert release["publisher_key_id"] == "pr237-synthetic"
+    assert _trusted_key(_NATIVE["debian"][2])
+    vendor = Path("/usr/sbin/nginx")
+    before = vendor.stat()
+    digest = hashlib.sha256(vendor.read_bytes()).hexdigest()
+    with tempfile.TemporaryDirectory(prefix="repocache-ci-deb-payload-", dir="/var/lib") as tmp:
+        work = Path(tmp)
+        manager = lambda *args: native._native_package_command(list(args), work)
+        version = manager("/usr/bin/dpkg-query", "-W", "-f=${Version}", "nginx:amd64")
+        assert re.fullmatch(r"(?:[0-9]+:)?[0-9][A-Za-z0-9.+~:-]{0,127}", version)
+        spec = "nginx:amd64=" + version
+        refresh, query = _apt_commands(work)
+        assert query[-2:] == ["policy", "nginx"]
+        manager(*refresh)
+        metadata = manager(*query[:-2], "show", spec)
+        assert metadata
+        manager(*refresh[:-1], "download", spec)
+        packages = list(work.glob("*.deb"))
+        assert len(packages) == 1
+        payload = packages[0]
+        info = payload.lstat()
+        assert stat.S_ISREG(info.st_mode) and info.st_uid == 0 and info.st_nlink == 1
+        assert 0 < info.st_size <= 32 * 1024 * 1024 and not info.st_mode & 0o022
+        assert manager("/usr/bin/dpkg-deb", "-f", str(payload), "Package") == "nginx"
+        assert manager("/usr/bin/dpkg-deb", "-f", str(payload), "Version") == version
+        assert manager("/usr/bin/dpkg-deb", "-f", str(payload), "Architecture") == "amd64"
+        archive_digest = hashlib.sha256(payload.read_bytes()).hexdigest()
+        data = work / "data.tar"
+        with data.open("xb") as out:
+            subprocess.run(["/usr/bin/prlimit", "--fsize=67108864:67108864", "--",
+                            "/usr/bin/dpkg-deb", "--fsys-tarfile", str(payload)],
+                           stdout=out, stderr=subprocess.PIPE, check=True, timeout=60,
+                           env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
+            out.flush()
+            os.fsync(out.fileno())
+        assert 0 < data.stat().st_size <= 64 * 1024 * 1024
+        target = work / "owned"
+        target.mkdir(mode=0o700)
+        evidence = dict(distribution="debian", package_identity=spec,
+                        native_payload_sha256=archive_digest, authenticated_sha256=digest,
+                        release_source_sha=release["source_sha"],
+                        release_archive_sha256=release["archive_sha256"])
+        code = """
+import hashlib,json,os,sys,zipimport
+from pathlib import Path
+sys.path.insert(0, "/usr/libexec/repocache/server-control-worker")
+from repocache import server_native_nginx_executable_v1 as stage
+assert isinstance(stage.__loader__,zipimport.zipimporter)
+assert stage.__loader__.archive == "/usr/libexec/repocache/server-control-worker"
+root, data, version, metadata, raw = sys.argv[1:]
+evidence=json.loads(raw)
+assert stage.debian_nginx_metadata_digest(metadata,version) == evidence["native_payload_sha256"]
+assert stage.debian_nginx_tar_digest(Path(data).read_bytes()) == evidence["authenticated_sha256"]
+directory=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+vendor=os.open("/usr/sbin/nginx",os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+try:
+    first=stage.stage_nginx_candidate_with_receipt(directory,vendor,**evidence)
+    second=stage.stage_nginx_candidate_with_receipt(directory,vendor,**evidence)
+    assert first["status"].endswith("STAGED") and second["status"].endswith("UNCHANGED")
+    assert first["receipt_sha256"] == second["receipt_sha256"]
+    assert not first["authorizes_nginx_activation"]
+finally:
+    os.close(vendor)
+    os.close(directory)
+"""
+        subprocess.run(["/usr/bin/python3", "-IS", "-B", "-c", code,
+                        str(target), str(data), version, metadata, json.dumps(evidence)],
+                       check=True, timeout=60)
+        assert hashlib.sha256((target / "nginx").read_bytes()).hexdigest() == digest
+    after = vendor.stat()
+    assert (before.st_dev, before.st_ino, before.st_mode, before.st_mtime_ns, before.st_ctime_ns) == (
+        after.st_dev, after.st_ino, after.st_mode, after.st_mtime_ns, after.st_ctime_ns)
+    assert hashlib.sha256(vendor.read_bytes()).hexdigest() == digest
+    require_status(VENDOR, False, False)
+    require_status(OWN, False, False)
+    print("PASS: exact Debian apt-secure package and data member bind the isolated executable receipt; repeat unchanged", flush=True)
+
+
 def verify_guest(distribution: str, phase: str) -> None:
     assert os.getresuid() == (0, 0, 0)
     assert Path("/proc/1/comm").read_text().strip() == "systemd"
@@ -1213,6 +1304,8 @@ def verify_guest(distribution: str, phase: str) -> None:
     if phase == "activate":
         require_status(VENDOR, False, False)
         require_status(OWN, False, False)
+        if distribution == "debian":
+            verify_debian_executable_candidate(native, assets, pins)
         assert not OWN_CONFIG.parent.exists() and not OWN_CONFIG.parent.is_symlink()
         legacy = OWN_CONFIG.parent.parent / OWN_CONFIG.name
         legacy.symlink_to(VENDOR_CONFIG)
