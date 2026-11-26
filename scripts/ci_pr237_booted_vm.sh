@@ -155,7 +155,11 @@ if test "$scenario" = native-installer || test "$scenario" = native-package-inte
   fi
   prepare_pinned_synthetic_source
   stage=synthetic-worker-native-placement
-  sshguest "sudo /usr/bin/python3 -B /home/pr237ci/source/scripts/ci_pr237_synthetic_worker_guest.py /home/pr237ci/combined '$combined_sha'" > "$out/synthetic-installed-worker.txt" 2>&1 || { cat "$out/synthetic-installed-worker.txt"; exit 1; }
+  policy_option=
+  if test "$scenario" = native-activation && test "$PR237_PLATFORM" = almalinux10; then
+    policy_option=--isolated-selinux-policy
+  fi
+  sshguest "sudo /usr/bin/python3 -B /home/pr237ci/source/scripts/ci_pr237_synthetic_worker_guest.py /home/pr237ci/combined '$combined_sha' $policy_option" > "$out/synthetic-installed-worker.txt" 2>&1 || { cat "$out/synthetic-installed-worker.txt"; exit 1; }
   if test "$scenario" = native-package-interruption; then
     stage=real-native-manager-SIGKILL
     sshguest "sudo /usr/bin/python3 -B /home/pr237ci/source/scripts/ci_pr237_native_package_interrupt_guest.py '$PR237_PLATFORM_ID' interrupt" > "$out/native-package-manager-interruption.txt" 2>&1 || { cat "$out/native-package-manager-interruption.txt"; exit 1; }

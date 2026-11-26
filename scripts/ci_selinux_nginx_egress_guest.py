@@ -17,6 +17,7 @@ import signal
 import socket
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -83,6 +84,82 @@ def guard():
     assert re.search(r'^ID="?almalinux"?$', osr, re.M)
     assert re.search(r'^VERSION_ID="?10(?:\.[0-9]+)?"?$', osr, re.M)
     assert Path("/root/pr237-synthetic-fixture").is_dir()
+
+
+def policy_manifest(commit, archive_digest, manifest_digest, unit_digest, raw_policy):
+    """Canonical, deliberately non-release test envelope with fixed scope."""
+    assert re.fullmatch(r"[0-9a-f]{40}", commit)
+    assert all(re.fullmatch(r"[0-9a-f]{64}", x) for x in
+               (archive_digest, manifest_digest, unit_digest))
+    assert type(raw_policy) is bytes and 0 < len(raw_policy) <= 16384
+    return (json.dumps({
+        "schema": 1, "scope": "isolated-almalinux10-egress-fixture",
+        "key_id": "pr237-synthetic", "commit": commit,
+        "archive_sha256": archive_digest, "release_manifest_sha256": manifest_digest,
+        "signed_unit_sha256": unit_digest, "module": MODULE,
+        "policy_sha256": hashlib.sha256(raw_policy).hexdigest(),
+    }, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+
+
+def verify_policy_bytes(raw, envelope, detached, receipt, public_key):
+    """Require exact contextual identity AND valid Ed25519 before compilation."""
+    expected = policy_manifest(receipt["source_sha"], receipt["archive_sha256"],
+                               receipt["manifest_sha256"],
+                               receipt["files"]["repocache-nginx.service"], raw)
+    if envelope != expected or len(detached) != 64:
+        raise ValueError("Isolated policy envelope identity refused")
+    with tempfile.TemporaryDirectory(prefix="repocache-ci-policy-auth-") as place:
+        root = Path(place)
+        manifest = root / "manifest"
+        signature = root / "signature"
+        manifest.write_bytes(envelope)
+        signature.write_bytes(detached)
+        outcome = command("/usr/bin/openssl", "pkeyutl", "-verify", "-pubin",
+                          "-inkey", str(public_key), "-rawin", "-in", str(manifest),
+                          "-sigfile", str(signature), check=False)
+        if outcome.returncode:
+            raise ValueError("Isolated policy signature refused")
+    return raw
+
+
+def authenticated_policy():
+    """Use the unchanged signed-worker verifier and its existing VM trust key."""
+    guard()
+    sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
+                    str(Path(__file__).resolve().parents[1])]
+    from repocache import signatures
+    from scripts import stage_native_root_worker as stage
+    root = Path("/root/pr237-synthetic-fixture")
+    assert root.lstat().st_uid == 0 and stat.S_IMODE(root.lstat().st_mode) == 0o700
+    assert not root.is_symlink()
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        pins = json.loads(stage._asset_bytes(fd, "pins.json", 1024))
+        assert set(pins) == {"commit", "archive_sha256"}
+        raw = stage._asset_bytes(fd, "isolated-policy.te", 16384, installed_mode=0o600)
+        envelope = stage._asset_bytes(fd, "isolated-policy.json", 2048, installed_mode=0o600)
+        detached = stage._asset_bytes(fd, "isolated-policy.sig", 64, installed_mode=0o600)
+    finally:
+        os.close(fd)
+    receipt = stage.verify_installed_worker(root / "assets", **pins)
+    assert receipt["status"] == "AUTHENTICATED_WORKER_FILES_MATCH"
+    assert receipt["publisher_key_id"] == "pr237-synthetic"
+    key = signatures._trusted_key("pr237-synthetic")
+    # Distinguish wrong source, identity, and invalid detached signature.
+    for altered, statement, signature in (
+            (raw + b"\n", envelope, detached),
+            (raw, envelope.replace(receipt["source_sha"].encode(), b"0" * 40), detached),
+            (raw, envelope, bytes([detached[0] ^ 1]) + detached[1:])):
+        try:
+            verify_policy_bytes(altered, statement, signature, receipt, key)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Unauthenticated fixture policy accepted")
+    result = verify_policy_bytes(raw, envelope, detached, receipt, key)
+    print("PASS: isolated policy bound to authenticated synthetic archive and signed unit; "
+          "changed source/identity/signature refused before compilation", flush=True)
+    return result
 
 
 def installed_modules():
@@ -169,6 +246,9 @@ def probe():
     guard()
     modules_before = installed_modules()
     assert MODULE not in {line.split()[0] for line in modules_before.splitlines() if line}
+    assert not Path("/run/netns", NS).exists()
+    policy_bytes = authenticated_policy()
+    assert installed_modules() == modules_before
     assert not Path("/run/netns", NS).exists()
     assert command("/usr/bin/systemctl", "show", "-p", "LoadState",
                    "--value", UNIT, check=False).stdout.strip() == "not-found"
@@ -262,7 +342,10 @@ location = /health {{ return 204; }}
         with tempfile.TemporaryDirectory(prefix="repocache-policy-build-") as build:
             build = Path(build)
             policy = build / (MODULE + ".te")
-            shutil.copyfile(Path(__file__).with_name("ci_selinux_nginx_egress_fixture.te"), policy)
+            # Compile only the bytes authenticated before any policy side effects.
+            policy.write_bytes(policy_bytes)
+            policy.chmod(0o600)
+            assert policy.read_bytes() == policy_bytes
             command("/usr/bin/make", "-C", str(build), "-f",
                     "/usr/share/selinux/devel/Makefile", MODULE + ".pp", timeout=120)
             try:

@@ -263,3 +263,16 @@ and after reload must preserve the exact approved tuple. This is a stronger
 fixture only; RPM owner observation is not independent signature proof.
 The production root-master unit, authenticated executable placement,
 transactional policy installation and installed cache egress remain unaccepted.
+
+The isolated AlmaLinux activation campaign now signs a separate, fixed
+fixture-only policy envelope with the existing disposable Ed25519 identity
+before deleting the private key. The envelope binds the exact policy bytes,
+combined source identity, authenticated release archive/manifest and signed
+NGINX unit. The guarded guest re-authenticates the installed signed worker,
+uses its existing root-owned test trust anchor, and rejects altered policy,
+identity and signature before compiling or installing the temporary module.
+Only authenticated in-memory policy bytes are compiled. The supplemental
+envelope is not a release asset, and no policy files are added to the product
+inventory or installed by the production installer. This does not authenticate
+the native RPM payload independently, authorize an installed service
+transition, or replace the outstanding signed installed-service acceptance.
