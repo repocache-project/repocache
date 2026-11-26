@@ -41,10 +41,12 @@ jobs:
             sh -ec '
               if command -v apt-get >/dev/null 2>&1; then
                 apt-get update -qq
-                apt-get install -y --no-install-recommends python3 >/dev/null
+                apt-get install -y --no-install-recommends python3 python3-pytest >/dev/null
               else
-                dnf install -y python3 >/dev/null
+                dnf install -y python3 python3-pytest >/dev/null
               fi
+              test "$(id -u)" = 0
+              python3 -B -m pytest -q tests/test_client_recovery_journal_v1.py
               python3 scripts/smoke_client_atomic_sandbox.py
               if command -v apt-get >/dev/null 2>&1; then
                 python3 -B scripts/smoke_client_recoverable_pair.py apt

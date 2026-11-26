@@ -27,6 +27,9 @@ def test_deterministic_closed_client_helper_archive(tmp_path):
     with zipfile.ZipFile(io.BytesIO(first)) as archive:
         assert archive.namelist() == ["__main__.py", *(m + ".py" for m in stage.MODULES)]
         assert not any("server" in name or "sandbox" in name for name in archive.namelist())
+        assert "recovery_journal_v1.py" in archive.namelist()
+        assert "recoverable_fallback_pair_lab.py" not in archive.namelist()
+        assert "transaction_atomic_lab.py" not in archive.namelist()
     executable = tmp_path / stage.HELPER
     executable.write_bytes(first)
     executable.chmod(0o700)

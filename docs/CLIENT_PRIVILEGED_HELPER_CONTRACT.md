@@ -268,3 +268,53 @@ every fixture file's bytes, inode and metadata to remain unchanged across
 subsequent refusal of all three operations. The injection is a simulated I/O
 failure, not a full-filesystem or power-loss test. There is no new installed
 writer, automatic orphan cleanup, CLI contract or production permission.
+
+
+## Decision B: authenticated read-only recovery record
+
+The maintainer approved the local-recovery versus server-revocation
+contract exclusively for isolated candidate implementation and validation
+(#24 comment 7191837069, 2026-11-26). The authenticated candidate now
+contains the same nonmutating journal decoder used by the private pair lab,
+not the lab's write engine. Under the existing root-only state lock it
+refuses pending publication, legacy approvals, nonretaining APT journals,
+foreign source or companion inodes, content/attribute drift and mismatched
+journal phases. It observes exact original/proposed/restored source and
+cache-bearing/upstream-only/absent companion states without a catalog
+request. Output is limited to fixed state names and booleans. The internal
+inspection has no installed CLI operation and cannot issue consent or
+perform recovery, source writes, native exclusion or server revocation.
+An observed local state is not permission to mutate it.
+
+The existing booted, synthetic-signed helper placement fixture imports
+this decoder directly from the authenticated installed zip and inspects
+actual marked APT and SELinux-labelled DNF SIGKILL records before and after
+the independent private lab restores them. No real host sources or
+package-manager files are written by the candidate. The existing
+signature, native lock and metadata checks are preserved. This is a
+candidate evidence boundary, not production writer acceptance. Exact
+fresh route consent, retained upstream-only companions, real native
+exclusion, transaction durability and server-side route withdrawal remain
+separate mandatory gates. No previously fetched URL is claimed revoked.
+
+### Recycled inode evidence
+
+Linux may reuse the original source inode for the journalled restore. When
+both recorded identities and original bytes match, readback reports
+`original-or-restored` rather than claiming a distinguishable historical
+inode incarnation. This is admissible only in a rollback phase, with all
+existing exact metadata and companion checks; no write, rollback completion,
+revocation or native exclusion authority follows. Native fixtures independently
+check the actual restored inode against the recorded restore identity.
+
+The authenticated readback also checks that its observed phase and inode
+relationships are reachable from the actual pair journal sequence. Staged
+original/proposed and proposed/restore inodes must be distinct. A DNF
+rollback-armed record requires a restore inode; an APT rollback-armed
+record requires a retained companion identity, and source replacement
+requires that companion to already be upstream-only. The original inode
+may be recycled only for the later restore. These checks do not inspect
+or authorize pending filesystem writes, and all authority flags stay
+false. Both distro root containers execute the recovery readback tests;
+the booted signed-helper fixture additionally verifies exact-metadata
+same-byte foreign inode refusal without changing the journal.
