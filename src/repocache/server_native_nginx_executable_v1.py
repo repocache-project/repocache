@@ -123,6 +123,7 @@ def stage_verified_nginx_candidate(
                 _deny("FOREIGN_DESTINATION")
         elif previous_inode is not None:
             _deny("OWNED_DESTINATION_MISSING")
+        published_inode = previous_inode
         if not existed:
             fd = os.open(_PENDING, os.O_RDWR | os.O_CREAT | os.O_EXCL |
                          os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=directory)
@@ -150,6 +151,7 @@ def stage_verified_nginx_candidate(
                         or _identity(target) != _identity(linked)
                         or _identity(pending) != _identity(linked)):
                     _deny("PUBLICATION_CHANGED")
+                published_inode = (linked.st_dev, linked.st_ino)
                 os.unlink(_PENDING, dir_fd=directory)
                 os.fsync(directory)
             finally:
@@ -158,7 +160,7 @@ def stage_verified_nginx_candidate(
         if (_directory(directory) != dir_id
                 or _identity(os.fstat(vendor_fd)) != source_id
                 or copy_id[:2] == source_id[:2]
-                or (previous_inode is not None and copy_id[:2] != previous_inode)
+                or copy_id[:2] != published_inode
                 or _named(directory, _PENDING) is not None):
             _deny("PLACEMENT_CHANGED")
         return {
