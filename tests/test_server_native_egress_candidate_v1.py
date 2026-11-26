@@ -251,32 +251,57 @@ def test_namespace_kernel_ioctl_type_owner_and_host_checks(monkeypatch, fault):
 
     calls = []
     closed = []
+    namespace_fd, owner_fd = 1000000, 1000001
+    real_ioctl, real_fstat, real_stat, real_close = (
+        fcntl.ioctl, os.fstat, os.stat, os.close)
+    paths = {"/proc/1/ns/user": 40, "/proc/1/ns/net": 20,
+             "/proc/self/ns/net": 21}
 
-    def ioctl(fd, op):
+    def ioctl(fd, op, *args, **kwargs):
+        if fd != namespace_fd:
+            return real_ioctl(fd, op, *args, **kwargs)
         calls.append((fd, op))
-        assert fd == 10
         if op == egress._NS_GET_NSTYPE:
             return 0x20000 if fault == "type" else egress._CLONE_NEWNET
         assert op == egress._NS_GET_USERNS
-        return 11
+        return owner_fd
 
-    monkeypatch.setattr(fcntl, "ioctl", ioctl)
-    monkeypatch.setattr(os, "fstat", lambda fd: info(
-        (20 if fault == "host" else 30) if fd == 10 else
-        (41 if fault == "owner" else 40)))
-    monkeypatch.setattr(os, "stat", lambda path: info({
-        "/proc/1/ns/user": 40, "/proc/1/ns/net": 20, "/proc/self/ns/net": 21,
-    }[path]))
-    monkeypatch.setattr(os, "close", closed.append)
-    if fault == "none":
-        assert egress._verify_network_namespace_fd(10) == (3, 30)
-    else:
-        with pytest.raises(NativeEgressCandidateError, match={
-            "host": "HOST_NAMESPACE_REFUSED", "type": "NAMESPACE_TYPE_REFUSED",
-            "owner": "NAMESPACE_OWNER_REFUSED",
-        }[fault]):
-            egress._verify_network_namespace_fd(10)
-    assert closed == ([] if fault == "type" else [11])
+    def fstat(fd):
+        if fd == namespace_fd:
+            return info(20 if fault == "host" else 30)
+        if fd == owner_fd:
+            return info(41 if fault == "owner" else 40)
+        return real_fstat(fd)
+
+    def stat_path(path, *args, **kwargs):
+        if isinstance(path, str) and path in paths and not args and not kwargs:
+            return info(paths[path])
+        return real_stat(path, *args, **kwargs)
+
+    def close(fd):
+        if fd == owner_fd:
+            closed.append(fd)
+        else:
+            real_close(fd)
+
+    # Do not intercept pytest capture or unrelated runtime descriptors.
+    with monkeypatch.context() as scoped:
+        scoped.setattr(fcntl, "ioctl", ioctl)
+        scoped.setattr(os, "fstat", fstat)
+        scoped.setattr(os, "stat", stat_path)
+        scoped.setattr(os, "close", close)
+        if fault == "none":
+            assert egress._verify_network_namespace_fd(namespace_fd) == (3, 30)
+        else:
+            with pytest.raises(NativeEgressCandidateError, match={
+                "host": "HOST_NAMESPACE_REFUSED", "type": "NAMESPACE_TYPE_REFUSED",
+                "owner": "NAMESPACE_OWNER_REFUSED",
+            }[fault]):
+                egress._verify_network_namespace_fd(namespace_fd)
+    assert calls == ([(namespace_fd, egress._NS_GET_NSTYPE)] +
+                     ([] if fault == "type" else
+                      [(namespace_fd, egress._NS_GET_USERNS)]))
+    assert closed == ([] if fault == "type" else [owner_fd])
 
 
 @pytest.mark.parametrize("fault", ["none", "large", "nonzero"])
