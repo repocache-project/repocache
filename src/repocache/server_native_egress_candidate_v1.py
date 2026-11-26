@@ -131,9 +131,29 @@ def render_namespace_egress_candidate(
         document, generation=generation, http_fragment=http_fragment,
     )
     listen = validate_install_document(document, for_apply=True)["deployment"]["listen"]
-    address = ipaddress.ip_address(listen["bind_address"])
+    return {**plan, "nft_candidate": _render_closed_output_rules(
+        listen["bind_address"], listen["https_port"], plan["destinations"], worker_uid)}
+
+
+def render_bootstrap_egress_candidate(*, worker_uid: int) -> dict[str, Any]:
+    """Fixed loopback bootstrap; never permit a fresh upstream connection."""
+    if type(worker_uid) is not int or not 0 < worker_uid < 2**31:
+        raise NativeEgressCandidateError("NATIVE_EGRESS_WORKER_UID_INVALID")
+    return {
+        "generation": 0,
+        "http_sha256": hashlib.sha256(b"").hexdigest(),
+        "repository_destinations": {},
+        "destinations": (),
+        "authorizes_nginx_activation": False,
+        "authorizes_firewall_change": False,
+        "runtime_egress_verified": False,
+        "nft_candidate": _render_closed_output_rules("127.0.0.1", 8008, (), worker_uid),
+    }
+
+
+def _render_closed_output_rules(address_text, port, destinations, worker_uid):
+    address = ipaddress.ip_address(address_text)
     family = "ip" if address.version == 4 else "ip6"
-    port = listen["https_port"]
     lines = [
         f"table inet {_TABLE} {{",
         "    counter denied { }",
@@ -142,13 +162,13 @@ def render_namespace_egress_candidate(
         "        meta l4proto tcp ct state established accept",
         f'        meta skuid 0 oifname "lo" {family} daddr {address} tcp dport {port} ct state new accept',
     ]
-    for raw, port in plan["destinations"]:
+    for raw, port in destinations:
         family = "ip" if ipaddress.ip_address(raw).version == 4 else "ip6"
         lines.append(
             f"        meta skuid {worker_uid} {family} daddr {raw} tcp dport {port} ct state new accept"
         )
     lines.extend(("        counter name denied reject", "    }", "}"))
-    return {**plan, "nft_candidate": "\n".join(lines) + "\n"}
+    return "\n".join(lines) + "\n"
 
 
 # Read back the complete dedicated namespace, not just a named chain. Use

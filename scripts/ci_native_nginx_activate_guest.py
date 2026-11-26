@@ -783,6 +783,38 @@ def recover_live_wal_after_reboot(distribution: str) -> None:
     assert (STATE / ".state-v2-owned-nginx.pending").is_file()
     assert not Path("/var/lib/repocache/public/catalog.json").exists()
     old = json.loads((ROOT / "owned-live-prior-hashes.json").read_text())
+    code = """
+import os,pwd,sys,zipimport
+sys.path.insert(0,"/usr/libexec/repocache/server-control-worker")
+from repocache import server_native_v2_transaction_v1 as tx
+assert isinstance(tx.__loader__,zipimport.zipimporter)
+assert tx.__loader__.archive == "/usr/libexec/repocache/server-control-worker"
+distribution=sys.argv[1]
+uid=pwd.getpwnam("www-data" if distribution == "debian" else "nginx").pw_uid
+root=os.open("/",tx._DIRECTORY_FLAGS)
+try:
+    with tx._locked(root,0) as state:
+        with tx._owned_layout_locked(root,state,recovering=True) as layout:
+            state,nginx,public,check=layout
+            raw=tx._read_file(state,tx._OWNED_WAL,0,tx._MAX_WAL)
+            current=tx._read_owned_resources(state,nginx,public)
+            assert current[tx._CATALOG] is None
+            report=tx._owned_live_egress_recovery_candidates(
+                raw,current,distribution=distribution,worker_uid=uid)
+            assert report["prior"]["generation"] == 1
+            assert report["proposed"]["generation"] == 2
+            assert report["prior"]["destinations"] == report["proposed"]["destinations"] == ()
+            assert report["authorizes_firewall_change"] is False
+            assert report["authorizes_catalog_publication"] is False
+            assert tx._read_owned_resources(state,nginx,public) == current
+            assert tx._read_file(state,tx._OWNED_WAL,0,tx._MAX_WAL) == raw
+            check()
+finally:
+    os.close(root)
+"""
+    subprocess.run(["/usr/bin/python3","-IS","-B","-c",code,distribution],
+                   stdin=subprocess.DEVNULL,check=True,timeout=45)
+    print("PASS: signed installed worker reconstructs exact prior and proposed egress from durable v3 WAL after reboot, without DNS, mutation or authority", flush=True)
     verify_dedicated_socket(pending=True)
     assert live_wal_resource_hashes() == old
     assert not (STATE / ".state-v2-owned-nginx.pending").exists()

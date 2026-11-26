@@ -32,6 +32,7 @@ import sys
 import time
 from contextlib import ExitStack, contextmanager
 from typing import Any
+from urllib.parse import urlsplit
 
 from repocache.server_bounded_dns_v1 import DEFAULT_DNS_SECONDS, bounded_getaddrinfo
 from repocache.server_install_v1 import parse_install_bytes, validate_install_document
@@ -39,7 +40,10 @@ from repocache.server_locked_manifest_reconcile_v1 import (
     _validate_proposed_v2_snapshot, preview_proposed_v2_state_transition,
     _verify_current_root_fd,
 )
-from repocache.server_native_egress_candidate_v1 import derive_pinned_egress_candidate
+from repocache.server_native_egress_candidate_v1 import (
+    derive_pinned_egress_candidate, render_namespace_egress_candidate,
+    render_bootstrap_egress_candidate,
+)
 from repocache.server_native_nginx_effective_unit_v1 import (
     EffectiveNginxUnitError, inspect_effective_native_nginx_unit,
     OWNED_NGINX_CONFIG_MARKER_PREFIX,
@@ -1624,6 +1628,96 @@ def _decode_owned_wal(raw: bytes, *, distribution: str | None = None) -> tuple[d
         raise
     except (ValueError, TypeError, KeyError, OverflowError, RecursionError):
         _deny("OWNED_WAL_INVALID")
+
+
+def _owned_generation_egress(resources, *, distribution: str, worker_uid: int):
+    """Derive the closed ruleset from exact owned bytes, never from fresh DNS."""
+    snapshot = _validate_owned_resources(resources, distribution=distribution)
+    if snapshot is None:
+        return render_bootstrap_egress_candidate(worker_uid=worker_uid)
+    document = parse_install_bytes(
+        base64.b64decode(snapshot["configuration_base64"], validate=True),
+        for_apply=True,
+    )
+    fragment = resources[_INCLUDE].partition(b"\nserver {\n")[0]
+    fragment = fragment[len(b"# REPOCACHE managed v2\n"):]
+    plan = render_namespace_egress_candidate(
+        document, generation=snapshot["state_generation"],
+        http_fragment=fragment, worker_uid=worker_uid,
+    )
+    # Check the entire rendered include and catalog, not merely the upstream
+    # groups. Additional locations or altered TLS cannot inherit a ruleset.
+    pins = {
+        repo["id"]: {
+            urlsplit(repo["upstream"]["base_url"]).hostname: [
+                addr for addr, _ in plan["repository_destinations"][repo["id"]]
+            ]
+        }
+        for repo in document["repositories"] if repo["desired_state"] == "active"
+    }
+    main, include, catalog = _render_owned_managed_candidate(
+        document, snapshot["state_generation"], distribution, pins,
+    )
+    if (main, include, catalog) != (
+            resources[_OWNED_MAIN], resources[_INCLUDE], resources[_CATALOG]):
+        _deny("OWNED_EGRESS_GENERATION_DRIFT")
+    return plan
+
+
+def _owned_live_egress_recovery_candidates(
+    raw: bytes, current: dict, *, distribution: str, worker_uid: int,
+) -> dict:
+    """Read-only v3 WAL policy evidence; no kernel or publication authority.
+
+    A partial transition permits only derivation of the prior policy.
+    Recover the proposed policy only if all three necessary current byte
+    streams match the WAL, and deterministic reconstruction of the missing
+    catalog and manifest reproduces every proposed hash and the entire WAL.
+    The caller must independently own the lock, namespace and service.
+    """
+    if type(distribution) is not str or distribution not in _CA:
+        _deny("OWNED_EGRESS_DISTRIBUTION_INVALID")
+    old, hashes = _decode_owned_wal(raw, distribution=distribution)
+    if _json(raw, limit=_MAX_WAL)["version"] != 3:
+        _deny("OWNED_LIVE_WAL_REQUIRED")
+    _owned_wal_resource_drift(old, hashes, current, unpublished=False,
+                              catalog_withdrawal=True)
+    prior = _owned_generation_egress(old, distribution=distribution, worker_uid=worker_uid)
+    proposed = None
+    if all(_hash(current[name]) == hashes[name] for name in (
+            V2_STATE, _OWNED_MAIN, _INCLUDE)):
+        snapshot = _json(current[V2_STATE], limit=_LIMIT[V2_STATE])
+        document = parse_install_bytes(
+            base64.b64decode(snapshot["configuration_base64"], validate=True),
+            for_apply=True,
+        )
+        listen = document["deployment"]["listen"]
+        origin = "https://" + listen["hostname"] + (
+            "" if listen["https_port"] == 443 else ":" + str(listen["https_port"])
+        )
+        catalog = _canonical({"schema": 1, "repositories": sorted((
+            {"upstream": repo["upstream"]["base_url"],
+             "cache": origin + "/__repocache/repos/" + repo["id"] + "/"}
+            for repo in document["repositories"] if repo["desired_state"] == "active"
+        ), key=lambda row: (row["upstream"], row["cache"]))}, limit=_LIMIT[_CATALOG])
+        candidate = {
+            **current, _CATALOG: catalog,
+            _OWNED_MANIFEST: _owned_manifest_for(
+                current[V2_STATE], current[_OWNED_MAIN], current[_INCLUDE], catalog),
+        }
+        if _owned_wal_record(old, candidate, live=True) != raw:
+            _deny("OWNED_EGRESS_PROPOSED_WAL_DRIFT")
+        proposed = _owned_generation_egress(
+            candidate, distribution=distribution, worker_uid=worker_uid,
+        )
+    return {
+        "prior": prior, "proposed": proposed,
+        "wal_sha256": hashlib.sha256(raw).hexdigest(),
+        "runtime_egress_verified": False,
+        "authorizes_firewall_change": False,
+        "authorizes_nginx_activation": False,
+        "authorizes_catalog_publication": False,
+    }
 
 
 def _owned_wal_resource_drift(old: dict, new_sha: dict, current: dict,

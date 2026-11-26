@@ -2893,3 +2893,49 @@ def test_owned_wal_refuses_rehashed_unapproved_egress_tuple():
     with pytest.raises(native.NativeV2TransactionError,
                        match="OWNED_WAL_EGRESS_CANDIDATE_INVALID"):
         native._owned_wal_record(_owned_bootstrap_resources(), new)
+
+
+@pytest.mark.parametrize("initial", [True, False])
+def test_live_egress_recovery_derives_exact_policies_without_catalog(initial, monkeypatch):
+    old = _owned_bootstrap_resources() if initial else _owned_generation()
+    previous = None if initial else json.loads(old[V2_STATE])
+    new = _owned_generation(1 if initial else 2, previous=previous, active=initial)
+    wal = native._owned_wal_record(old, new, live=True)
+    def never(*args, **kwargs):
+        pytest.fail("recovery must not resolve DNS")
+    monkeypatch.setattr(native, "bounded_getaddrinfo", never)
+    partial = native._owned_live_egress_recovery_candidates(
+        wal, old, distribution="debian", worker_uid=33)
+    assert partial["proposed"] is None
+    current = {**new, native._CATALOG: None, native._OWNED_MANIFEST: old[native._OWNED_MANIFEST]}
+    report = native._owned_live_egress_recovery_candidates(
+        wal, current, distribution="debian", worker_uid=33)
+    assert report["prior"]["generation"] == (0 if initial else 1)
+    assert report["proposed"]["generation"] == (1 if initial else 2)
+    assert report["prior"]["destinations"] == (() if initial else (("8.8.8.8", 443),))
+    assert report["proposed"]["destinations"] == ((("8.8.8.8", 443),) if initial else ())
+    assert report["wal_sha256"] == hashlib.sha256(wal).hexdigest()
+    assert all(report[key] is False for key in (
+        "runtime_egress_verified", "authorizes_firewall_change",
+        "authorizes_nginx_activation", "authorizes_catalog_publication"))
+    assert "policy drop;" in report["prior"]["nft_candidate"]
+    if initial:
+        assert '127.0.0.1 tcp dport 8008' in report["prior"]["nft_candidate"]
+
+
+def test_live_egress_recovery_refuses_foreign_and_inconsistent_wal():
+    old = _owned_bootstrap_resources()
+    new = _owned_generation()
+    current = {**new, native._CATALOG: None}
+    raw = native._owned_wal_record(old, new, live=True)
+    with pytest.raises(native.NativeV2TransactionError):
+        native._owned_live_egress_recovery_candidates(
+            native._owned_wal_record(old, new), current, distribution="debian", worker_uid=33)
+    with pytest.raises(native.NativeV2TransactionError, match="FOREIGN_DRIFT"):
+        native._owned_live_egress_recovery_candidates(
+            raw, {**current, native._INCLUDE: b"foreign"}, distribution="debian", worker_uid=33)
+    altered = json.loads(raw)
+    altered["new_sha256"][native._CATALOG] = "0" * 64
+    with pytest.raises(native.NativeV2TransactionError, match="PROPOSED_WAL_DRIFT"):
+        native._owned_live_egress_recovery_candidates(
+            _canon(altered), current, distribution="debian", worker_uid=33)
