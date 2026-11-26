@@ -29,7 +29,7 @@ ROOT_UNIT = "repocache-ci-nginx-root-egress.service"
 DERIVED_UNIT = "repocache-ci-nginx-derived-egress.service"
 DERIVED_ROOT_UNIT = "repocache-ci-nginx-derived-root-egress.service"
 CREDENTIAL_UNIT = "repocache-ci-nginx-credential.service"
-NS = "repocache-ci-nginx-egress"
+NS = "repocache-nginx"  # Fixed service netns name, exclusively in the guarded disposable VM.
 PEER_NS = "repocache-ci-nginx-peer"
 SERVICE_LINK = "rcsvc0"
 PEER_LINK = "rcpeer0"
@@ -541,7 +541,7 @@ def request(root, path, *, method="GET", remote=False):
 
 
 def verify_peer_ruleset(expected):
-    """Fixed whole-ruleset listing and signed-worker closed shape check."""
+    """Authenticated fixed-fd whole-ruleset readback in the guarded VM."""
     guard()
     namespace = Path("/run/netns", NS)
     before = namespace.stat()
@@ -549,27 +549,39 @@ def verify_peer_ruleset(expected):
     peer = Path("/run/netns", PEER_NS).stat()
     identity = (before.st_dev, before.st_ino)
     assert identity not in ((host.st_dev, host.st_ino), (peer.st_dev, peer.st_ino))
-    observed = command("/usr/sbin/ip", "netns", "exec", NS, "/usr/sbin/nft",
-                       "--stateless", "--numeric-priority", "list", "ruleset").stdout
-    after = namespace.stat()
-    assert (after.st_dev, after.st_ino) == identity
-    code = """
-import json,sys,zipimport
+    code = r"""
+import json,os,sys,zipimport
 sys.path.insert(0, "/usr/libexec/repocache/server-control-worker")
 from repocache import server_native_egress_candidate_v1 as egress
 assert isinstance(egress.__loader__, zipimport.zipimporter)
 assert egress.__loader__.archive == "/usr/libexec/repocache/server-control-worker"
-expected,observed=json.load(sys.stdin)
-print(json.dumps(egress.verify_namespace_egress_readback(expected, observed)))
+for path, error in (("/proc/1/ns/net", "HOST_NAMESPACE_REFUSED"),
+                    ("/proc/self/ns/mnt", "NAMESPACE_TYPE_REFUSED")):
+    fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        try:
+            egress._verify_network_namespace_fd(fd)
+        except egress.NativeEgressCandidateError as exc:
+            assert str(exc).endswith(error)
+        else:
+            raise AssertionError("Unsafe namespace accepted")
+    finally:
+        os.close(fd)
+print(json.dumps(egress.inspect_fixed_namespace_egress(json.load(sys.stdin))))
 """
     outcome = command("/usr/bin/python3", "-IS", "-B", "-c", code,
-                      input_text=json.dumps([expected, observed]), check=False)
+                      input_text=json.dumps(expected), check=False)
     if outcome.returncode:
-        raise AssertionError("Authenticated closed ruleset readback refused: " +
-                             observed[-4000:])
+        raise AssertionError("Authenticated fixed namespace readback refused: " +
+                             outcome.stderr[-1200:])
+    after = namespace.stat()
+    assert (after.st_dev, after.st_ino) == identity
     report = json.loads(outcome.stdout)
-    assert report["ruleset_shape_matches"] and not report["runtime_egress_verified"]
-    assert not report["authorizes_firewall_change"]
+    assert (report["namespace_device"], report["namespace_inode"]) == identity
+    assert report["fixed_namespace_identity_observed"] and report["ruleset_shape_matches"]
+    assert not report["namespace_exclusivity_verified"]
+    assert not report["runtime_egress_verified"] and not report["authorizes_firewall_change"]
+    print("PASS: authenticated fixed nsfs descriptor readback, host and wrong namespace type refused", flush=True)
     return report
 
 

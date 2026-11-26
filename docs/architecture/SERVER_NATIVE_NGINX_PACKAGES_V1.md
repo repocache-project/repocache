@@ -937,3 +937,30 @@ domain, policy/namespace provisioner, WAL transition or actual installed
 cache acceptance. Existing active-route refusal and stock service checks
 remain in force. Exact-head native tests and the installed AlmaLinux data
 plane still require acceptance; do not suppress its upstream failure.
+
+
+### Fixed kernel namespace readback
+
+The signed worker has a separate read-only native observer for the fixed
+`/run/netns/repocache-nginx` service namespace. It requires standalone
+native root preconditions, descriptor-walked root-owned non-writable
+parents, and a regular namespace handle. Linux nsfs ioctls verify the
+network namespace type and owning initial user namespace, rejecting the
+PID1 and caller network namespaces. A fixed native nsenter invocation
+inherits the retained descriptor and enters only that network namespace
+in a child to list the complete nft ruleset. The child has fixed arguments,
+environment, output bound and timeout; no shell, mutation or path input.
+Both readings must match the closed authenticated candidate, and parent,
+namespace and fixed executable identities must remain unchanged.
+
+The guarded AlmaLinux VM now uses the exact fixed namespace name and
+the installed authenticated worker observer for prior/replacement rules,
+including host and wrong-type handle refusal. Unit tests cover descriptor
+replacement, policy and program drift, owner/type/host rejection, malformed
+candidate and bounded listing. This does not establish exclusive ownership,
+ingress, service identity, installed dedicated domain or a durable
+generation-bound kernel transaction. The caller must retain the ownership
+and WAL lock; the observer cannot authorize activation or a firewall change.
+No global host rule, vendor service, SELinux boolean or label is modified
+by the observer. The actual installed AlmaLinux upstream gate remains
+mandatory and is not waived by a successful isolated test.
