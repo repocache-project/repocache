@@ -25,6 +25,8 @@ MODULE = "repocache_ci_nginx"
 DOMAIN = MODULE + "_t"
 UNIT = "repocache-ci-nginx-egress.service"
 ROOT_UNIT = "repocache-ci-nginx-root-egress.service"
+DERIVED_UNIT = "repocache-ci-nginx-derived-egress.service"
+CREDENTIAL_UNIT = "repocache-ci-nginx-credential.service"
 NS = "repocache-ci-nginx-egress"
 PREFIX = "repocache-ci-selinux-"
 VENDOR = Path("/usr/sbin/nginx")
@@ -126,7 +128,7 @@ def verify_policy_bytes(raw, envelope, detached, receipt, public_key):
     return raw
 
 
-def authenticated_policy():
+def authenticated_policy(*, include_unit=False):
     """Use the unchanged signed-worker verifier and its existing VM trust key."""
     guard()
     sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
@@ -163,7 +165,96 @@ def authenticated_policy():
     result = verify_policy_bytes(raw, envelope, detached, receipt, key)
     print("PASS: isolated policy bound to authenticated synthetic archive and signed unit; "
           "changed source/identity/signature refused before compilation", flush=True)
+    if include_unit:
+        # Re-read only the fixed signed unit through the audited file primitive.
+        directory = os.open("/etc/systemd/system", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            stage._protected_directory(directory)
+            signed_unit = stage._asset_bytes(directory, "repocache-nginx.service", 8192,
+                                             installed_mode=0o644)
+        finally:
+            os.close(directory)
+        assert hashlib.sha256(signed_unit).hexdigest() == receipt["files"]["repocache-nginx.service"]
+        return result, signed_unit
     return result
+
+
+def derive_signed_unit(raw, root):
+    """Strict fixed transformations of authenticated bytes, never a host unit editor."""
+    assert type(raw) is bytes and 0 < len(raw) <= 8192
+    assert root.parent == Path("/var/lib") and re.fullmatch(PREFIX + r"[a-z0-9_]+", root.name)
+    # Require exact service contract; unexpected upstream unit changes fail
+    # closed and must be reviewed rather than silently inherited.
+    expected = {
+        "Type": "forking", "RuntimeDirectory": "repocache-nginx",
+        "RuntimeDirectoryMode": "0755", "PIDFile": "/run/repocache-nginx/nginx.pid",
+        "ExecStartPre": "/usr/sbin/nginx -t -q -c /etc/nginx/repocache.d/repocache.conf",
+        "ExecStart": "/usr/sbin/nginx -c /etc/nginx/repocache.d/repocache.conf",
+        "ExecReload": "/usr/sbin/nginx -s reload -c /etc/nginx/repocache.d/repocache.conf",
+        "ExecStop": "/usr/sbin/nginx -s quit -c /etc/nginx/repocache.d/repocache.conf",
+        "TimeoutStartSec": "30s", "TimeoutStopSec": "30s", "KillMode": "mixed",
+        "NoNewPrivileges": "yes", "PrivateTmp": "yes", "ProtectHome": "yes",
+        "ProtectSystem": "strict",
+        "ReadWritePaths": "/run/repocache-nginx /var/cache/nginx/repocache-managed /var/log/nginx/repocache-managed",
+        "UMask": "0027",
+    }
+    import configparser
+    parser = configparser.ConfigParser(interpolation=None, strict=True)
+    parser.optionxform = str
+    parser.read_string(raw.decode("ascii"))
+    assert parser.defaults() == {}
+    assert parser.sections() == ["Unit", "Service", "Install"]
+    assert dict(parser["Unit"]) == {"Description": "REPOCACHE isolated native NGINX service",
+                                    "After": "network.target"}
+    assert dict(parser["Service"]) == expected
+    assert dict(parser["Install"]) == {"WantedBy": "multi-user.target"}
+    service = dict(expected)
+    del service["RuntimeDirectory"]
+    del service["RuntimeDirectoryMode"]
+    service["PIDFile"] = str(root / "pid/nginx.pid")
+    service["ReadWritePaths"] = str(root / "runtime") + " " + str(root / "pid")
+    for key in ("ExecStartPre", "ExecStart", "ExecReload", "ExecStop"):
+        service[key] = (service[key].replace("/usr/sbin/nginx", str(root / "nginx") +
+                           " -e stderr -p " + str(root))
+                        .replace("/etc/nginx/repocache.d/repocache.conf", str(root / "nginx.conf")))
+    service.update({"User": "nginx", "Group": "nginx", "CapabilityBoundingSet": "",
+                    "NetworkNamespacePath": "/run/netns/" + NS,
+                    "RestrictAddressFamilies": "AF_UNIX AF_INET"})
+    # No [Install] section: this is a runtime-only, never-enabled unit.
+    return ("[Unit]\\nDescription=REPOCACHE CI derived signed unit\\nAfter=network.target\n"
+            "[Service]\n" + "".join(key + "=" + value + "\n" for key, value in service.items())
+            ).encode("ascii")
+
+
+def publish_derived_unit(raw):
+    guard()
+    path = Path("/run/systemd/system") / DERIVED_UNIT
+    assert path.parent.resolve(strict=True) == path.parent
+    assert path.parent.stat().st_uid == 0 and not path.parent.stat().st_mode & 0o022
+    # The caller records the exact inode and performs scoped cleanup even if
+    # daemon-reload/start subsequently fails. Never replace an existing unit.
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            os.fchmod(stream.fileno(), 0o644)
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+            info = os.fstat(stream.fileno())
+    except Exception:
+        raise
+    return (path, info.st_dev, info.st_ino, hashlib.sha256(raw).hexdigest())
+
+
+def remove_derived_unit(identity):
+    path, dev, ino, digest = identity
+    assert path == Path("/run/systemd/system") / DERIVED_UNIT
+    info = path.lstat()
+    assert (info.st_dev, info.st_ino, info.st_uid, info.st_nlink) == (dev, ino, 0, 1)
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == digest
+    path.unlink()
+    command("/usr/bin/systemctl", "daemon-reload")
+    assert not path.exists()
 
 
 def authenticated_vendor_digest():
@@ -181,7 +272,7 @@ def authenticated_vendor_digest():
     key = _NATIVE["almalinux"][2]
     assert _trusted_key(key)
     assert inspect_stock_nginx_package_file_integrity()["native_package_file_integrity_verified"]
-    fmt = "%{NAME}-%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}\\n"
+    fmt = "%{NAME}-%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}\n"
     installed = command("/usr/bin/rpm", "-q", "--queryformat=" + fmt, "nginx-core").stdout.strip()
     assert re.fullmatch(r"nginx-core-[0-9]+:[A-Za-z0-9._+~-]+-[A-Za-z0-9._+~-]+\.x86_64", installed)
     with tempfile.TemporaryDirectory(prefix="repocache-ci-rpm-payload-", dir="/var/lib") as place:
@@ -237,6 +328,22 @@ def start_diagnostics(unit, writable):
                       "-n", "60", "--output=short-monotonic", check=False)
     log = writable / "error.log"
     print("ISOLATED_START_STATUS: " + status.stdout[-2000:], flush=True)
+    main = command("/usr/bin/systemctl", "show", "-p", "MainPID", "--value", unit, check=False).stdout.strip()
+    if main.isdigit() and int(main) > 1:
+        proc = Path("/proc") / main
+        try:
+            fields = [line for line in (proc / "status").read_text().splitlines()
+                      if line.split(":", 1)[0] in {"Uid", "Gid", "CapInh", "CapPrm", "CapEff",
+                                                   "CapBnd", "CapAmb", "NoNewPrivs", "Seccomp"}]
+            print("ISOLATED_MASTER_CREDENTIALS: " + " | ".join(fields), flush=True)
+            print("ISOLATED_MASTER_DOMAIN: " + (proc / "attr/current").read_text().strip("\\0\n"), flush=True)
+            print("ISOLATED_MASTER_UID_MAP: " + (proc / "uid_map").read_text().strip(), flush=True)
+        except OSError:
+            print("ISOLATED_MASTER_CREDENTIALS: NOT OBSERVED", flush=True)
+    for cap in ("setgid", "setuid"):
+        lookup = command("/usr/bin/sesearch", "-A", "-s", DOMAIN, "-t", DOMAIN,
+                         "-c", "capability", "-p", cap, check=False)
+        print("ISOLATED_CAPABILITY_POLICY_" + cap.upper() + ": " + lookup.stdout[-1600:], flush=True)
     print("ISOLATED_START_JOURNAL: " + journal.stdout[-5000:], flush=True)
     if log.is_file():
         print("ISOLATED_NGINX_ERROR: " + log.read_text(errors="replace")[-5000:], flush=True)
@@ -244,6 +351,64 @@ def start_diagnostics(unit, writable):
         audit = command("/usr/sbin/ausearch", "-m", "AVC,USER_AVC", "-ts", "recent", check=False)
         records = [line for line in audit.stdout.splitlines() if MODULE in line]
         print("ISOLATED_AVC: " + ("\n".join(records[-20:])[-4000:] or "NOT OBSERVED"), flush=True)
+
+
+def credential_probe(root, account):
+    """On root-master failure, reproduce the exact credential drop in the same
+    isolated domain and capability set; no change to NNP, booleans or policy.
+    """
+    guard()
+    assert root.parent == Path("/var/lib") and root.name.startswith(PREFIX)
+    interpreter = Path("/usr/bin/python3").resolve(strict=True)
+    assert interpreter.parent == Path("/usr/bin") and re.fullmatch(r"python3\.[0-9]+", interpreter.name)
+    before = interpreter.stat()
+    assert stat.S_ISREG(before.st_mode) and before.st_uid == 0 and not before.st_mode & 0o022
+    copy = root / "credential-python"
+    shutil.copyfile(interpreter, copy)
+    copy.chmod(0o755)
+    assert hashlib.sha256(copy.read_bytes()).digest() == hashlib.sha256(interpreter.read_bytes()).digest()
+    command("/usr/bin/chcon", "-t", MODULE + "_exec_t", str(copy))
+    code = r"""
+import os, sys
+from pathlib import Path
+uid, gid = map(int, sys.argv[1:3])
+def snapshot(phase):
+    rows = [x for x in Path('/proc/self/status').read_text().splitlines()
+            if x.split(':', 1)[0] in ('Uid','Gid','CapEff','CapPrm','CapBnd','CapAmb','NoNewPrivs','Seccomp')]
+    print(phase, Path('/proc/self/attr/current').read_text().strip('\\0\\n'), ' | '.join(rows), flush=True)
+snapshot('before')
+assert os.getresuid() == (0, 0, 0)
+try:
+    os.setgid(gid)
+    os.initgroups('nginx', gid)
+    snapshot('after-groups')
+    os.setuid(uid)
+    snapshot('after-uid')
+    assert os.getresuid() == (uid, uid, uid) and os.getresgid() == (gid, gid, gid)
+except OSError as e:
+    print('CREDENTIAL_DROP_ERRNO', e.errno, flush=True)
+    raise
+"""
+    assert command("/usr/bin/systemctl", "show", "-p", "LoadState", "--value",
+                   CREDENTIAL_UNIT, check=False).stdout.strip() == "not-found"
+    try:
+        result = command("/usr/bin/systemd-run", "--unit=" + CREDENTIAL_UNIT,
+                         "--wait", "--pipe", "--collect", "--property=Type=exec",
+                         "--property=User=root", "--property=Group=root",
+                         "--property=CapabilityBoundingSet=" + MASTER_CAP_NAMES,
+                         "--property=NoNewPrivileges=yes", "--property=ProtectSystem=strict",
+                         "--property=ProtectHome=yes", "--property=PrivateTmp=yes",
+                         "--property=NetworkNamespacePath=/run/netns/" + NS,
+                         "--property=RestrictAddressFamilies=AF_UNIX AF_INET",
+                         "--property=TimeoutStartSec=15s", "--property=RuntimeMaxSec=15s",
+                         str(copy), "-I", "-B", "-c", code, str(account.pw_uid),
+                         str(account.pw_gid), timeout=30, check=False)
+        print("ISOLATED_CREDENTIAL_CANARY_EXIT=" + str(result.returncode), flush=True)
+        print((result.stdout + result.stderr)[-4500:], flush=True)
+    finally:
+        command("/usr/bin/systemctl", "stop", CREDENTIAL_UNIT, check=False)
+        assert command("/usr/bin/systemctl", "is-active", CREDENTIAL_UNIT,
+                       check=False).stdout.strip() in ("inactive", "unknown", "failed")
 
 
 def installed_modules():
@@ -333,23 +498,27 @@ def workers(master, executable, uid, gid, *, bounding):
     return result
 
 
-def probe(vendor_digest=None, *, root_master=False):
+def probe(vendor_digest=None, *, root_master=False, signed_derived=False):
     guard()
-    assert type(root_master) is bool
+    assert type(root_master) is bool and type(signed_derived) is bool
+    assert not (root_master and signed_derived)
     if vendor_digest is None:
         vendor_digest = authenticated_vendor_digest()
     assert re.fullmatch(r"[0-9a-f]{64}", vendor_digest)
-    unit = ROOT_UNIT if root_master else UNIT
+    unit = ROOT_UNIT if root_master else DERIVED_UNIT if signed_derived else UNIT
     modules_before = installed_modules()
     assert MODULE not in {line.split()[0] for line in modules_before.splitlines() if line}
     assert not Path("/run/netns", NS).exists()
-    policy_bytes = authenticated_policy()
+    if signed_derived:
+        policy_bytes, signed_unit = authenticated_policy(include_unit=True)
+    else:
+        policy_bytes = authenticated_policy()
     assert installed_modules() == modules_before
     assert not Path("/run/netns", NS).exists()
     assert command("/usr/bin/systemctl", "show", "-p", "LoadState",
                    "--value", unit, check=False).stdout.strip() == "not-found"
     booleans = command("/usr/sbin/getsebool", "-a").stdout
-    owner = command("/usr/bin/rpm", "-qf", "--queryformat=%{NAME}\\n", str(VENDOR))
+    owner = command("/usr/bin/rpm", "-qf", "--queryformat=%{NAME}\n", str(VENDOR))
     assert owner.stdout.strip() == "nginx-core"
     vendor_info = VENDOR.lstat()
     assert stat.S_ISREG(vendor_info.st_mode) and vendor_info.st_uid == 0
@@ -366,6 +535,7 @@ def probe(vendor_digest=None, *, root_master=False):
     loaded = False
     namespace = False
     started = False
+    derived_identity = None
     origin = None
     with tempfile.TemporaryDirectory(prefix=PREFIX, dir="/var/lib") as place:
         root = Path(place)
@@ -380,9 +550,10 @@ def probe(vendor_digest=None, *, root_master=False):
             path.mkdir(mode=0o700)
             # Root master must itself perform NGINX native ownership setup.
             os.chown(path, master_uid, master_gid)
-        pid_dir = root / "pid" if root_master else writable
-        if root_master:
+        pid_dir = root / "pid" if root_master or signed_derived else writable
+        if root_master or signed_derived:
             pid_dir.mkdir(mode=0o750)
+            os.chown(pid_dir, master_uid, master_gid)
         pid_file = pid_dir / "nginx.pid"
         executable = root / "nginx"
         shutil.copyfile(VENDOR, executable)
@@ -421,7 +592,7 @@ location = /{name} {{
 }}
 """
         conf.write_text(f"""
-daemon {'on' if root_master else 'off'};
+daemon {'on' if root_master or signed_derived else 'off'};
 {'user nginx nginx;' if root_master else ''}
 master_process on;
 worker_processes 1;
@@ -462,7 +633,7 @@ location = /health {{ return 204; }}
                         str(cert), str(key), str(conf))
                 command("/usr/bin/chcon", "-t", MODULE + "_exec_t", str(executable))
                 command("/usr/bin/chcon", "-R", "-t", MODULE + "_rw_t", str(writable))
-                if root_master:
+                if root_master or signed_derived:
                     command("/usr/bin/chcon", "-t", MODULE + "_pid_t", str(pid_dir))
                 command("/usr/sbin/ip", "netns", "add", NS)
                 namespace = True
@@ -492,15 +663,22 @@ location = /health {{ return 204; }}
                     "--property=Type=exec", "--property=User=nginx", "--property=Group=nginx",
                     "--property=CapabilityBoundingSet=",
                 ]
-                command("/usr/bin/systemd-run", "--no-block", "--unit=" + unit, *service_properties,
-                        "--property=TimeoutStartSec=25s", "--property=TimeoutStopSec=20s",
-                        "--property=NoNewPrivileges=yes", "--property=UMask=0027",
-                        "--property=ProtectSystem=strict",
-                        "--property=ReadWritePaths=" + str(writable) + (" " + str(pid_dir) if root_master else ""),
-                        "--property=NetworkNamespacePath=/run/netns/" + NS,
-                        "--property=RestrictAddressFamilies=AF_UNIX AF_INET",
-                        "--property=PrivateTmp=yes",
-                        str(executable), "-p", str(root), "-c", str(conf))
+                if signed_derived:
+                    derived_identity = publish_derived_unit(derive_signed_unit(signed_unit, root))
+                    command("/usr/bin/systemctl", "daemon-reload")
+                    assert command("/usr/bin/systemctl", "show", "--value", "-p", "FragmentPath",
+                                   unit).stdout.strip() == str(derived_identity[0])
+                    command("/usr/bin/systemctl", "start", "--no-block", unit)
+                else:
+                    command("/usr/bin/systemd-run", "--no-block", "--unit=" + unit, *service_properties,
+                            "--property=TimeoutStartSec=25s", "--property=TimeoutStopSec=20s",
+                            "--property=NoNewPrivileges=yes", "--property=UMask=0027",
+                            "--property=ProtectSystem=strict", "--property=ProtectHome=yes",
+                            "--property=ReadWritePaths=" + str(writable) + (" " + str(pid_dir) if root_master else ""),
+                            "--property=NetworkNamespacePath=/run/netns/" + NS,
+                            "--property=RestrictAddressFamilies=AF_UNIX AF_INET",
+                            "--property=PrivateTmp=yes",
+                            str(executable), "-e", "stderr", "-p", str(root), "-c", str(conf))
                 deadline = time.monotonic() + 30
                 ready = None
                 while time.monotonic() < deadline:
@@ -593,8 +771,11 @@ location = /health {{ return 204; }}
                     "127.0.0.1:443", "127.0.0.2:8008", "127.0.0.2:8008"]
                 # Exercise the real master/worker reload without changing
                 # executable, domain, capabilities, namespace or filter.
-                command("/usr/bin/systemctl", "kill", "--kill-whom=main",
-                        "--signal=HUP", unit)
+                if signed_derived:
+                    command("/usr/bin/systemctl", "reload", unit)
+                else:
+                    command("/usr/bin/systemctl", "kill", "--kill-whom=main",
+                            "--signal=HUP", unit)
                 for _ in range(100):
                     assert process_identity(pid, executable, master_uid, master_gid,
                                             capabilities=bounding, bounding=bounding) == master
@@ -627,17 +808,28 @@ location = /health {{ return 204; }}
                       "failed replacement and fresh-connect withdrawal", flush=True)
                 assert any(p.is_file() for p in (writable / "cache").rglob("*"))
                 assert command("/usr/sbin/getenforce").stdout.strip() == "Enforcing"
+                if signed_derived:
+                    assert int(pid_file.read_text()) == pid and pid_file.stat().st_uid == account.pw_uid
+                    print("PASS: authenticated signed-unit-derived nonroot forking lifecycle, native ExecStartPre and ExecReload; confined HTTPS cache", flush=True)
                 print("PASS: dedicated enforcing NGINX domain, verified HTTPS MISS/HIT, "
                       "SELinux non-HTTP-port refusal and independent exact-address refusal", flush=True)
             except Exception:
                 if started:
                     start_diagnostics(unit, writable)
+                    if root_master:
+                        try:
+                            credential_probe(root, account)
+                        except Exception as diagnostic:
+                            print("ISOLATED_CREDENTIAL_CANARY_NOT_VERIFIED: " + type(diagnostic).__name__, flush=True)
                 raise
             finally:
                 if started:
-                    command("/usr/bin/systemctl", "stop", unit)
+                    command("/usr/bin/systemctl", "stop", unit, check=derived_identity is not None or not signed_derived)
                     assert command("/usr/bin/systemctl", "is-active", unit,
                                    check=False).stdout.strip() in ("inactive", "unknown")
+                if derived_identity is not None:
+                    remove_derived_unit(derived_identity)
+                    print("PASS: runtime-only derived unit removed after native ExecStop; signed installed unit untouched", flush=True)
                 if origin is not None:
                     if origin.poll() is None:
                         os.killpg(origin.pid, signal.SIGTERM)
@@ -664,4 +856,5 @@ location = /health {{ return 204; }}
 if __name__ == "__main__":
     digest = authenticated_vendor_digest()
     probe(digest)
+    probe(digest, signed_derived=True)
     probe(digest, root_master=True)

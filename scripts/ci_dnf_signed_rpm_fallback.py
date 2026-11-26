@@ -14,6 +14,7 @@ import hashlib
 import os
 from pathlib import Path
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -239,6 +240,159 @@ def _dnf_transaction_test_command(root: Path, package: Path) -> list[str]:
     ]
 
 
+@contextlib.contextmanager
+def _private_dnf4_claim(root: Path):
+    """Fixture-only atomic live-PID publication plus real RPMDB kernel locks.
+
+    Unlike DNF5, DNF4's PID file is created/removed, not a stable inode.
+    Never steal an existing (even stale) PID record. This does not exclude
+    metadata/config readers or prove an installed source-writer lease.
+    """
+    from ci_v06_vm_signed_client_guest import guarded_native_guest
+    guarded_native_guest("almalinux10")
+    assert _native_dnf_transaction_variant() == ("/usr/bin/dnf", "dnf4")
+    assert root.parent == Path("/var/lib") and root.name.startswith("repocache-ci-dnf-root-")
+    assert root.resolve(strict=True) == root and root.stat().st_uid == 0
+    assert stat.S_IMODE(root.stat().st_mode) == 0o700
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "client"))
+    from root_source_boundary import _rename_noreplace
+    lock_dir = root / "var/lib/dnf"
+    rpm_dir = root / "usr/lib/sysimage/rpm"
+    for directory in (lock_dir, rpm_dir):
+        assert directory.resolve(strict=True) == directory
+        for parent in (directory, *directory.parents):
+            info = parent.lstat()
+            assert stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    leaf = "rpmdb_lock.pid"
+    staged = ".repocache-ci-rpmdb-lock.stage"
+    expected = str(os.getpid()).encode("ascii")
+    dirfd = rpmfd = fd = kernel = None
+    published = False
+    def identity(info):
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_uid,
+                info.st_gid, info.st_nlink, info.st_size)
+    def recheck():
+        assert os.getpid() == int(expected)
+        assert identity(os.fstat(fd)) == claim
+        assert identity(os.stat(leaf, dir_fd=dirfd, follow_symlinks=False)) == claim
+        assert os.pread(fd, 32, 0) == expected
+        assert identity(os.fstat(kernel)) == rpm_identity
+        assert identity(os.stat(".rpm.lock", dir_fd=rpmfd, follow_symlinks=False)) == rpm_identity
+        for path, pinned in ((lock_dir, dirfd), (rpm_dir, rpmfd)):
+            actual = path.lstat()
+            held = os.fstat(pinned)
+            assert (actual.st_dev, actual.st_ino) == (held.st_dev, held.st_ino)
+    try:
+        dirfd = os.open(lock_dir, flags)
+        rpmfd = os.open(rpm_dir, flags)
+        # Atomic no-replace avoids publishing an empty PID file for another
+        # native process to claim before our live owner bytes are durable.
+        if os.path.lexists(lock_dir / leaf) or os.path.lexists(lock_dir / staged):
+            raise FileExistsError("Existing DNF4 lock evidence; no takeover")
+        fd = os.open(staged, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW |
+                     os.O_CLOEXEC, 0o600, dir_fd=dirfd)
+        assert os.write(fd, expected) == len(expected)
+        os.fsync(fd)
+        claim = identity(os.fstat(fd))
+        assert claim[3:6] == (0, 0, 1)
+        _rename_noreplace(dirfd, staged, leaf)
+        published = True
+        os.fsync(dirfd)
+        # Native RPM creates this inode during the preceding key import.
+        kernel = os.open(".rpm.lock", os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC |
+                         os.O_NONBLOCK, dir_fd=rpmfd)
+        info = os.fstat(kernel)
+        assert stat.S_ISREG(info.st_mode) and info.st_uid == info.st_gid == 0
+        assert info.st_nlink == 1 and not info.st_mode & 0o022
+        fcntl.flock(kernel, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.lockf(kernel, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        rpm_identity = identity(os.fstat(kernel))
+        recheck()
+        yield recheck
+        recheck()
+    finally:
+        # If anything is ambiguous, preserve the published/staged evidence.
+        # Remove only this process's exact PID record; no stale-lock GC.
+        try:
+            if published and fd is not None:
+                named = os.stat(leaf, dir_fd=dirfd, follow_symlinks=False)
+                if identity(named) != claim or os.pread(fd, 32, 0) != expected:
+                    raise RuntimeError("Foreign DNF4 PID record; retained for review")
+                os.unlink(leaf, dir_fd=dirfd)
+                os.fsync(dirfd)
+        finally:
+            for held in (kernel, fd, rpmfd, dirfd):
+                if held is not None:
+                    os.close(held)
+
+
+def _probe_private_dnf4_claim(root, argv, lock, env):
+    """Exercise the real DNF4 PID protocol, including interrupted ownership."""
+    # Existing foreign or stale records must not be rewritten by our helper.
+    lock.write_bytes(b"99999999")
+    lock.chmod(0o600)
+    foreign = lock.stat()
+    try:
+        with _private_dnf4_claim(root):
+            raise AssertionError("Foreign PID was claimed")
+    except FileExistsError:
+        pass
+    assert lock.stat().st_ino == foreign.st_ino and lock.read_bytes() == b"99999999"
+    lock.unlink()  # only our just-created negative-control fixture
+
+    with _private_dnf4_claim(root) as recheck:
+        info = lock.stat()
+        refused = subprocess.run(argv, stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                 text=True, env=env, timeout=90, check=False)
+        assert refused.returncode == 200 and (
+            f"rpmdb already locked by {os.getpid()}" in refused.stdout.lower()), refused.stdout[-1800:]
+        recheck()
+        assert lock.stat().st_ino == info.st_ino
+        # Real DNF reads repository definitions despite the RPM transaction
+        # lock. No origin access: disabled local canary + cache-only command.
+        repo = root / "etc/yum.repos.d/repocache-lock-reader.repo"
+        repo.write_text("[repocache-lock-reader]\nname=Private read canary\n"
+                        "baseurl=https://127.0.0.1:9/repo/\nenabled=0\n"
+                        "gpgcheck=1\nrepo_gpgcheck=1\n", encoding="ascii")
+        # Use only the existing isolated installroot, config and no-plugin
+        # options. Never run against the installed source directory.
+        prefix = argv[:argv.index("--assumeyes")]
+        read = subprocess.run([*prefix, "--cacheonly", "repolist", "--all"],
+                              stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, text=True, env=env,
+                              timeout=30, check=False)
+        assert read.returncode == 0 and "repocache-lock-reader" in read.stdout, read.stdout[-1800:]
+        recheck()
+        repo.unlink()
+    assert not os.path.lexists(lock)
+    print("PASS: DNF4 atomic private live-PID claim and RPMDB locks; real "
+          "transaction refused while repository config remained readable", flush=True)
+
+    # An interrupted owner leaves exact evidence. Native DNF4 may recover
+    # dead PIDs; REPOCACHE's guarded lab must never silently take them over.
+    child = os.fork()
+    if child == 0:
+        with _private_dnf4_claim(root):
+            os.kill(os.getpid(), signal.SIGKILL)
+        os._exit(77)
+    _, status = os.waitpid(child, 0)
+    assert os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGKILL
+    stale = lock.stat()
+    assert lock.read_bytes() == str(child).encode("ascii")
+    try:
+        with _private_dnf4_claim(root):
+            raise AssertionError("Interrupted DNF4 ownership silently reused")
+    except FileExistsError:
+        pass
+    assert lock.stat().st_ino == stale.st_ino and lock.read_bytes() == str(child).encode("ascii")
+    # Test harness cleanup of its own positively identified dead child only;
+    # not a production recovery policy and never a host lock removal.
+    lock.unlink()
+    print("PASS: interrupted private DNF4 claim preserved and refused; no stale takeover", flush=True)
+
+
 def _probe_dnf_transaction_lock(package: Path, public_key: Path) -> None:
     """Actual installed DNF transaction TEST; isolated RPMDB, no install.
 
@@ -314,6 +468,8 @@ def _probe_dnf_transaction_lock(package: Path, public_key: Path) -> None:
                 lock.unlink()
         finally:
             os.close(fd)
+        if variant == "dnf4":
+            _probe_private_dnf4_claim(root, argv, lock, env)
         positive = subprocess.run(argv, stdin=subprocess.DEVNULL,
                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                   text=True, env=env, timeout=90, check=False)

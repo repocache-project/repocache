@@ -300,3 +300,21 @@ RPM, verifies its signature with the distro key in an isolated RPMDB and
 compares the signed SHA-256 executable digest against the installed bytes.
 Unavailable exact payload or mismatched trust/identity refuses the test;
 no package installation, host RPMDB change or shipped policy is authorized.
+
+The exact previous AlmaLinux run independently verified the distro-signed
+RPM and booted the root master (systemd active). All three workers/cache
+children failed setuid with EPERM. The exact cause is still unverified.
+The next test preserves the four-capability boundary and NoNewPrivileges,
+sets the native NGINX early log to stderr rather than the vendor log,
+records master credentials, namespace map and capability-policy decisions,
+and on failure runs a separate bounded native credential-drop canary in
+that same isolated domain and namespace, without loosening any permissions.
+
+An independent alternative uses the verified installed unit bytes as input,
+requires the exact reviewed service contract, and derives a distinct
+runtime-only unit with a nonroot master, zero capabilities, private paths
+and private network namespace. It retains the original forking type,
+ExecStartPre/ExecStart/ExecReload/ExecStop lifecycle and hardening directives.
+It tests positive and negative TLS/cache/egress, native reload and exact
+runtime unit removal; it does not change or enable the installed signed
+unit, adopt a new production architecture or waive the failing root probe.

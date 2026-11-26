@@ -680,3 +680,30 @@ def test_isolated_selinux_egress_guard_precedes_policy_and_network(monkeypatch):
                         pytest.fail("mutation before native guard"))
     with pytest.raises(AssertionError, match="authorized VM"):
         guest.probe()
+
+
+
+def test_isolated_derived_unit_preserves_signed_contract_and_private_paths():
+    from pathlib import Path
+    from scripts import ci_selinux_nginx_egress_guest as guest
+
+    signed = (Path(__file__).resolve().parents[1] /
+              "docs/examples/systemd/repocache-nginx.service").read_bytes()
+    root = Path("/var/lib/repocache-ci-selinux-test")
+    derived = guest.derive_signed_unit(signed, root).decode("ascii")
+    assert "Type=forking" in derived and "NoNewPrivileges=yes" in derived
+    assert "User=nginx" in derived and "Group=nginx" in derived
+    assert "CapabilityBoundingSet=\n" in derived
+    assert "ProtectHome=yes" in derived and "ProtectSystem=strict" in derived
+    assert "ExecStartPre=" + str(root / "nginx") in derived
+    assert "ExecReload=" + str(root / "nginx") in derived
+    assert "ExecStop=" + str(root / "nginx") in derived
+    assert "/usr/sbin/nginx" not in derived and "/etc/nginx/" not in derived
+    assert "RuntimeDirectory=" not in derived and "[Install]" not in derived
+    for bad in (signed.replace(b"Type=forking", b"Type=exec"),
+                signed.replace(b"NoNewPrivileges=yes", b"NoNewPrivileges=no"),
+                signed.replace(b"KillMode=mixed", b"KillMode=mixed\nExecStartPost=/bin/false")):
+        with pytest.raises(AssertionError):
+            guest.derive_signed_unit(bad, root)
+    with pytest.raises(AssertionError):
+        guest.derive_signed_unit(signed, Path("/"))
