@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import select
 import signal
 import ssl
 import subprocess
@@ -252,7 +253,7 @@ def _alma_fixture_file_context(root: Path):
     guarded_native_guest("almalinux10")
     assert os.getresuid() == (0, 0, 0)
     assert root.parent == Path("/var/tmp")
-    assert re.fullmatch(r"repocache-booted-label-[a-z0-9_]+", root.name)
+    assert re.fullmatch(r"repocache-booted-(?:label|dnf4)-[a-z0-9_]+", root.name)
     assert root.resolve(strict=True) == root
     assert root.stat().st_uid == 0 and root.stat().st_mode & 0o777 == 0o700
     rule = re.escape(str(root)) + "(/.*)?"
@@ -274,7 +275,71 @@ def _alma_fixture_file_context(root: Path):
         guarded_native_guest("almalinux10")
 
 
-def _alma_label_roundtrip(root: Path) -> None:
+def _private_dnf4_setup(root: Path) -> None:
+    """Move only a native-created private RPM lock inode, never a host lock."""
+    from ci_dnf_signed_rpm_fallback import _label_isolated_rpmdb, _run
+    assert pair._is_dnf4_pair_root(root) and root.resolve(strict=True) == root
+    marker = root / pair.DNF4_MARKER
+    with marker.open("xb") as stream:
+        os.fchmod(stream.fileno(), 0o600)
+        stream.write(pair.DNF4_MAGIC)
+    # build() created these known synthetic locks in this fresh fixture.
+    # Remove them before creating DNF4 evidence; no DNF5 fallback.
+    for relative in pair.locks.DNF5:
+        leaf = root / relative
+        assert leaf.is_file() and not leaf.is_symlink() and leaf.read_bytes() == b""
+        leaf.unlink()
+    (root / "var/lib/dnf").mkdir(mode=0o700)
+    with tempfile.TemporaryDirectory(prefix="repocache-ci-rpmdb-", dir="/var/lib") as place:
+        db = Path(place)
+        _label_isolated_rpmdb(db)
+        _run(["/usr/bin/rpm", "--dbpath", place, "--initdb"])
+        _run(["/usr/bin/rpm", "--dbpath", place, "--import",
+              "/etc/pki/rpm-gpg/RPM-GPG-KEY-AlmaLinux-10"])
+        lock = db / ".rpm.lock"
+        info = lock.lstat()
+        assert info.st_uid == 0 and info.st_nlink == 1
+        target = root / "usr/lib/sysimage/rpm/.rpm.lock"
+        assert not os.path.lexists(target)
+        os.rename(lock, target)
+        moved = target.lstat()
+        assert (info.st_dev, info.st_ino) == (moved.st_dev, moved.st_ino)
+
+
+@contextlib.contextmanager
+def _native_dnf4_library_owner(root):
+    """Actual installed DNF4 ProcessLock on this fixed private persistdir."""
+    assert pair._is_dnf4_pair_root(root)
+    code = """
+import dnf.lock, sys
+with dnf.lock.build_rpmdb_lock(sys.argv[1], True):
+    print("DNF4_READY", flush=True)
+    sys.stdin.read()
+"""
+    child = subprocess.Popen(["/usr/bin/python3", "-I", "-B", "-c", code,
+                              str(root / "var/lib/dnf")],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True,
+                             env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"})
+    try:
+        ready, _, _ = select.select([child.stdout], [], [], 20)
+        assert ready and child.stdout.readline().strip() == "DNF4_READY"
+        lock = root / "var/lib/dnf/rpmdb_lock.pid"
+        assert lock.read_bytes() == str(child.pid).encode("ascii")
+        yield lock
+    finally:
+        child.stdin.close()
+        try:
+            rc = child.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait(timeout=10)
+            raise
+        assert rc == 0, child.stderr.read()[-1500:]
+    assert not os.path.lexists(root / "var/lib/dnf/rpmdb_lock.pid")
+
+
+def _alma_label_roundtrip(root: Path, *, dnf4=False) -> None:
     source, _, lock, state = build(root, "dnf")
     old = state / ("candidate-" + IDENT + ".json")
     record = json.loads(old.read_text())
@@ -282,7 +347,7 @@ def _alma_label_roundtrip(root: Path) -> None:
     (root / "etc/os-release").write_text('ID=almalinux\nVERSION_ID="10"\n')
     # Only this freshly created private VM fixture may be normalized to
     # native default labels, never any real host source or trust directory.
-    assert root.parent == Path("/var/tmp") and root.name.startswith("repocache-booted-label-")
+    assert root.parent == Path("/var/tmp") and (root.name.startswith("repocache-booted-label-") or (dnf4 and pair._is_dnf4_pair_root(root)))
     subprocess.run(["/usr/sbin/restorecon", "-RF", str(root)], check=True,
                    timeout=30, capture_output=True)
     # Verify the actual raw policy lookup for every initial private control
@@ -299,6 +364,8 @@ def _alma_label_roundtrip(root: Path) -> None:
                 raise AssertionError("Fixture policy lookup refused " + path.name + detail) from exc
             finally:
                 os.close(fd)
+    if dnf4:
+        _private_dnf4_setup(root)
     os.setxattr(source, "user.repocache-ci", b"preserve")
     baseline = _snapshot(source)
     origin = "https://cache.example.org"
@@ -320,6 +387,19 @@ def _alma_label_roundtrip(root: Path) -> None:
             approved = json.loads((state / ("candidate-" + ident + ".json")).read_text())
             assert approved["schema"] == 3 and approved["source_attributes_sha256"]
             assert boundary.validate(ident, _test_root=root)["source_attributes_matched"]
+            if dnf4:
+                journal = state / ("pair-" + ident + ".json")
+                with _native_dnf4_library_owner(root) as native_lock:
+                    before = native_lock.lstat()
+                    try:
+                        pair.apply_sandbox(root, ident)
+                    except pair.PairRefused:
+                        pass
+                    else:
+                        raise AssertionError("Journal apply bypassed native DNF4 PID lock")
+                    assert _snapshot(source) == baseline and not journal.exists()
+                    assert native_lock.lstat().st_ino == before.st_ino
+                print("PASS: actual DNF4 ProcessLock blocks marked journal apply before intent", flush=True)
             pid = os.fork()
             if pid == 0:
                 def kill_at(active, phase):
@@ -332,11 +412,37 @@ def _alma_label_roundtrip(root: Path) -> None:
             assert os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGKILL
             changed = _snapshot(source)
             assert changed[0] != baseline[0] and changed[-1] == baseline[-1]
+            if dnf4:
+                stale = root / "var/lib/dnf/rpmdb_lock.pid"
+                info = stale.lstat()
+                assert stale.read_bytes() == str(pid).encode("ascii")
+                before_journal = journal.read_bytes()
+                try:
+                    pair.recover_sandbox(root, ident)
+                except pair.PairRefused:
+                    pass
+                else:
+                    raise AssertionError("Journal recovery silently took over stale DNF4 owner")
+                assert _snapshot(source) == changed and journal.read_bytes() == before_journal
+                assert stale.lstat().st_ino == info.st_ino
+                assert stale.read_bytes() == str(pid).encode("ascii")
+                # The fixture owner reaped that exact SIGKILL child.
+                # No general stale PID cleanup or production policy.
+                stale.unlink()
+                parentfd = os.open(stale.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                try:
+                    os.fsync(parentfd)
+                finally:
+                    os.close(parentfd)
             assert pair.recover_sandbox(root, ident)["status"] == "restored"
             restored = _snapshot(source)
             assert restored[0] == baseline[0]
             assert restored[3:6] == baseline[3:6] and restored[-1] == baseline[-1]
             assert pair.recover_sandbox(root, ident)["status"] == "restored"
+            if dnf4:
+                with _native_dnf4_library_owner(root):
+                    assert _snapshot(source) == restored
+                print("PASS: real DNF4 PID scope and native-created RPM lock across labelled SIGKILL journal; stale refusal, explicit fixture-owner cleanup and recovery", flush=True)
     finally:
         boundary.client._catalog = original_catalog
         boundary.client._installed_server_config = original_config
@@ -464,6 +570,12 @@ def main(platform: str) -> None:
             root = Path(work)
             with _alma_fixture_file_context(root):
                 _alma_label_roundtrip(root)
+        from ci_dnf_signed_rpm_fallback import _native_dnf_transaction_variant
+        if _native_dnf_transaction_variant() == ("/usr/bin/dnf", "dnf4"):
+            with tempfile.TemporaryDirectory(prefix="repocache-booted-dnf4-", dir="/var/tmp") as work:
+                root = Path(work)
+                with _alma_fixture_file_context(root):
+                    _alma_label_roundtrip(root, dnf4=True)
     assert installed_sources(platform) == before_sources
     assert installed_packages(platform) == before_packages
     guarded_native_guest(platform)

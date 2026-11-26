@@ -213,3 +213,22 @@ This remains a guarded test, not an installed writer, comprehensive DNF4
 metadata/download lock graph, automatic stale-record recovery or safe
 source-mutation lease. DNF4 and DNF5 evidence must remain distinct.
 Actual booted results are required; no production lock or source is touched.
+
+## DNF4 scope integrated with the marked source journal
+
+The private DNF4 lock protocol is shared by the signed RPM exercise and
+an explicitly reserved marked AlmaLinux VM pair root. A reserved root
+never silently falls back to DNF5 locks. The native RPM lock inode is
+created by RPM in a separate private RPMDB and moved into the marked
+fixture; a real installed DNF4 ProcessLock owner must prevent journal
+intent/publication. The same labelled source journal then executes a real
+SIGKILL while holding its own live PID claim. Recovery must refuse the
+remaining stale PID record without changing the source or journal. Only
+the fixture owner, having reaped its exact child, removes that fixture
+record; recovery then restores bytes, SELinux label and user xattrs, and
+an actual DNF4 ProcessLock can acquire the same persistdir again.
+This test uses the existing synthetic catalog-bound label fixture; it does
+not claim a native CLI transaction or production stale-PID cleanup policy,
+actual signed upstream catalog, full read exclusion or host source writes.
+The shared code lives in the existing sandbox-only module, not the
+installed helper inventory. Exact native evidence remains required.
