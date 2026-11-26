@@ -232,3 +232,23 @@ not claim a native CLI transaction or production stale-PID cleanup policy,
 actual signed upstream catalog, full read exclusion or host source writes.
 The shared code lives in the existing sandbox-only module, not the
 installed helper inventory. Exact native evidence remains required.
+
+## Real catalog-bound DNF4 journal and pre-parsed native reader
+
+The signed-RPM native AlmaLinux exercise additionally uses the actual HTTPS
+catalog and fixture CA for preparation/approval, refuses a foreign CA and
+withdrawn/changed route before marked journal intent, and kills the real
+catalog-bound publication after source replacement. Two native DNF4 Python
+Base/Repo instances read the exact generated inline baseurl list before the
+parent restores the labelled source. Only the child's private mount namespace
+binds the ephemeral metadata key at its compiled absolute key URI; no host
+key or source is altered. Both readers pause before metadata/network work.
+The journal refuses stale PID recovery, then only the fixture owner removes
+its reaped child's exact record and restores bytes, label and xattr with
+catalog offline. One already parsed reader must fail over to the signed
+upstream RPM when cache is unavailable; the other is expected to still
+use a healthy former cache. A fresh reader must use the signed upstream
+only. All three transfers require independent native RPM signature and
+payload digest verification. This is not a production revocation solution:
+a file rewrite cannot revoke already parsed inline DNF URLs. Preserve the
+installed apply guard and original operational acceptance requirements.

@@ -11,10 +11,13 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import hashlib
+import json
 import os
 from pathlib import Path
+import select
 import shutil
 import signal
+import ssl
 import stat
 import subprocess
 import sys
@@ -521,6 +524,282 @@ def probe_booted_vm() -> None:
     _probe_signed_rpm(booted_vm=True)
 
 
+# Only a private mount namespace may resolve the compiled absolute key URI.
+# The child reads the real .repo before the parent's recovery, then uses the
+# same native DNF Base/Repo objects to fetch signed metadata and RPM bytes.
+_STALE_DNF4_READER = r"""
+import dnf, dnf.conf, json, os, shutil, subprocess, sys
+from pathlib import Path
+
+root, work, ca, expected, host_mnt = sys.argv[1:]
+root, work, ca = map(Path, (root, work, ca))
+assert os.getresuid() == (0, 0, 0)
+assert root.parent == Path("/var/tmp") and root.name.startswith("repocache-booted-dnf4-")
+assert root.resolve(strict=True) == root and work.parent == root
+assert os.stat("/proc/self/ns/mnt").st_ino != int(host_mnt)
+assert (root / ".repocache-dnf4-lock-test").read_bytes() == b"REPOCACHE_DNF4_PRIVATE_LOCK_LAB_V1\n"
+keydir = root / "etc/pki/rpm-gpg"
+assert keydir.resolve(strict=True) == keydir
+assert sorted(p.name for p in keydir.iterdir()) == ["repocache-ci-fixture"]
+target = "/etc/pki/rpm-gpg"
+env = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"}
+subprocess.run(["/usr/bin/mount", "--bind", str(keydir), target],
+               env=env, check=True, timeout=15)
+subprocess.run(["/usr/bin/mount", "-o", "remount,bind,ro", target],
+               env=env, check=True, timeout=15)
+assert (Path(target) / "repocache-ci-fixture").read_bytes() == (keydir / "repocache-ci-fixture").read_bytes()
+expected = json.loads(expected)
+conf = dnf.conf.Conf()
+conf.installroot = str(root)
+conf.config_file_path = str(work / "dnf.conf")
+conf.reposdir = [str(root / "etc/yum.repos.d")]
+conf.cachedir = str(work / "cache")
+conf.persistdir = str(work / "persist")
+conf.logdir = str(work / "logs")
+conf.destdir = str(work / "downloads")
+conf.substitutions["releasever"] = "10"
+conf.substitutions["basearch"] = "x86_64"
+conf.module_platform_id = "platform:el10"
+conf.plugins = False
+conf.assumeyes = True
+conf.keepcache = True
+conf.sslverify = True
+conf.sslcacert = str(ca)
+conf.gpgkey_dns_verification = False
+conf.skip_if_unavailable = False
+conf.fastestmirror = False
+with dnf.Base(conf) as base:
+    base.read_all_repos()
+    repos = list(base.repos.iter_enabled())
+    assert len(repos) == 1
+    repo = repos[0]
+    assert repo.id == "baseos" and list(repo.baseurl) == expected
+    assert repo.gpgcheck and repo.repo_gpgcheck and repo.sslverify
+    assert repo.sslcacert == str(ca)
+    assert list(repo.gpgkey) == ["file:///etc/pki/rpm-gpg/repocache-ci-fixture"]
+    print("DNF4_READER_READY", flush=True)
+    assert sys.stdin.readline() == "go\n"
+    base.fill_sack(load_system_repo=False)
+    pkgs = list(base.sack.query().available().filter(name="repocache-ci-rpm-probe"))
+    assert len(pkgs) == 1
+    base.download_packages(pkgs)
+    path = Path(pkgs[0].localPkg())
+    assert path.is_file() and path.resolve(strict=True).is_relative_to(work)
+    shutil.copyfile(path, work / "verified-transfer.rpm")
+    print("DNF4_READER_TRANSFERRED", flush=True)
+"""
+
+
+@contextlib.contextmanager
+def _stale_dnf4_reader(root, label, ca, urls):
+    """Start one bounded actual reader; no network before the ready barrier."""
+    from ci_v06_vm_signed_client_guest import guarded_native_guest
+    import recoverable_fallback_pair_lab as pair
+    guarded_native_guest("almalinux10")
+    assert pair._is_dnf4_pair_root(root)
+    assert label in ("stale-offline", "stale-online", "fresh")
+    work = root / label
+    work.mkdir(mode=0o700)
+    for name in ("cache", "persist", "logs", "downloads"):
+        (work / name).mkdir(mode=0o700)
+    (work / "dnf.conf").write_text("[main]\n", encoding="ascii")
+    host_mnt = str(os.stat("/proc/self/ns/mnt").st_ino)
+    argv = ["/usr/bin/unshare", "--mount", "--propagation", "private", "--",
+            "/usr/bin/python3", "-I", "-B", "-c", _STALE_DNF4_READER,
+            str(root), str(work), str(ca), json.dumps(urls), host_mnt]
+    env = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"}
+    with (work / "reader.stderr").open("w+") as errors:
+        child = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                 stderr=errors, text=True, env=env)
+        try:
+            ready, _, _ = select.select([child.stdout], [], [], 25)
+            if not ready or child.stdout.readline().strip() != "DNF4_READER_READY":
+                errors.seek(0)
+                raise AssertionError("Native DNF4 reader did not parse source: " + errors.read()[-1500:])
+            assert child.poll() is None
+            assert os.stat(f"/proc/{child.pid}/ns/mnt").st_ino != int(host_mnt)
+            yield child, work, errors
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=10)
+            child.stdin.close()
+            child.stdout.close()
+
+
+def _complete_stale_dnf4_reader(reader, expected_bytes, rpmdb):
+    child, work, errors = reader
+    output, _ = child.communicate(input="go\n", timeout=120)
+    errors.seek(0)
+    assert child.returncode == 0 and "DNF4_READER_TRANSFERRED" in output, errors.read()[-2500:]
+    payload = work / "verified-transfer.rpm"
+    assert hashlib.sha256(payload.read_bytes()).digest() == hashlib.sha256(expected_bytes).digest()
+    assert _rpm_signature_verified(_run(["/usr/bin/rpm", "--dbpath", str(rpmdb), "-Kv", str(payload)]))
+
+
+def _probe_dnf4_catalog_stale_reader(base, key, certificate, foreign, primary,
+                                    upstream, expected_bytes, rpmdb):
+    """Real TLS catalog consent + marked DNF4 journal + pre-parsed native readers."""
+    from ci_v06_vm_signed_client_guest import guarded_native_guest, installed_sources, installed_packages
+    from ci_v06_vm_client_privileged_guest import _alma_fixture_file_context, _private_dnf4_setup, _snapshot
+    from smoke_client_recoverable_pair import build, IDENT, sha
+    import root_source_boundary as boundary
+    import recoverable_fallback_pair_lab as pair
+
+    guarded_native_guest("almalinux10")
+    assert _native_dnf_transaction_variant() == ("/usr/bin/dnf", "dnf4")
+    before_sources = installed_sources("almalinux10")
+    before_packages = installed_packages("almalinux10")
+    original_context = boundary._native_tls_context
+    origin = primary.origin.removesuffix("/repo/")
+    route = origin + "/__repocache/repos/approved/"
+    www = base / "www"
+    mapped = www / "__repocache/repos/approved"
+    assert not mapped.exists()
+    shutil.copytree(www / "repo", mapped)
+    catalog = www / ".well-known/repocache/catalog.json"
+    catalog.parent.mkdir(parents=True)
+    def publish(mappings):
+        catalog.write_text(json.dumps({"schema": 1, "repositories": mappings}), encoding="ascii")
+    active = [{"upstream": upstream.origin, "cache": route}]
+    publish(active)
+    try:
+        with tempfile.TemporaryDirectory(prefix="repocache-booted-dnf4-", dir="/var/tmp") as folder:
+            root = Path(folder)
+            with _alma_fixture_file_context(root):
+                source, _, _, state = build(root, "dnf")
+                (state / ("candidate-" + IDENT + ".json")).unlink()
+                raw = ("[baseos]\nname=Private signed DNF fixture\nbaseurl=" + upstream.origin
+                       + "\nenabled=1\ngpgcheck=1\nrepo_gpgcheck=1\n"
+                       "gpgkey=file:///etc/pki/rpm-gpg/repocache-ci-fixture\n").encode("ascii")
+                source.write_bytes(raw)
+                (root / "etc/os-release").write_text('ID=almalinux\nVERSION_ID="10"\n')
+                cfg = root / "etc/repocache-client"
+                cfg.mkdir(mode=0o755)
+                (cfg / "config.json").write_text(json.dumps({"server": origin}), encoding="ascii")
+                (cfg / "config.json").chmod(0o644)
+                keydir = root / "etc/pki/rpm-gpg"
+                keydir.mkdir(parents=True)
+                shutil.copyfile(key, keydir / "repocache-ci-fixture")
+                (keydir / "repocache-ci-fixture").chmod(0o644)
+                _run(["/usr/sbin/restorecon", "-RF", str(root)])
+                _private_dnf4_setup(root)
+                os.setxattr(source, "user.repocache-ci", b"preserve")
+                baseline = _snapshot(source)
+                digest = sha(raw)
+                with boundary.metadata.native_metadata_scope(root):
+                    wrong = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                    wrong.load_verify_locations(cafile=str(foreign))
+                    boundary._native_tls_context = lambda: wrong
+                    primary.hits.clear()
+                    try:
+                        boundary.prepare_current_candidate(digest, digest, _test_root=root)
+                    except boundary.BoundaryRefused:
+                        pass
+                    else:
+                        raise AssertionError("Foreign catalog CA accepted")
+                    assert not primary.hits and not list(state.glob("pending-*.json"))
+                    trusted = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                    trusted.load_verify_locations(cafile=str(certificate))
+                    boundary._native_tls_context = lambda: trusted
+                    prepared = boundary.prepare_current_candidate(digest, digest, _test_root=root)
+                    ident = prepared["managed_id"]
+                    assert prepared["route_sha256"] == sha(route.encode("ascii"))
+                    approved = boundary.approve_current_candidate(
+                        ident, prepared["route_sha256"], _test_root=root)
+                    assert approved["status"] == "approved" and not approved["write_eligible"]
+                    assert _snapshot(source) == baseline
+                    # Withdrawn/changed catalog must refuse while native
+                    # DNF4 scope is acquired, before any journal intent.
+                    for mappings in ([], [{"upstream": upstream.origin,
+                                            "cache": origin + "/__repocache/repos/changed/"}]):
+                        publish(mappings)
+                        try:
+                            pair.apply_catalog_bound_sandbox(root, ident)
+                        except pair.PairRefused:
+                            pass
+                        else:
+                            raise AssertionError("Withdrawn/changed catalog permitted DNF4 apply")
+                        assert _snapshot(source) == baseline
+                        assert not list(state.glob("pair-*.json"))
+                    publish(active)
+                    pid = os.fork()
+                    if pid == 0:
+                        def kill_at(active, phase):
+                            if active == phase:
+                                os.kill(os.getpid(), signal.SIGKILL)
+                        pair._crash = kill_at
+                        pair.apply_catalog_bound_sandbox(root, ident, crash="source")
+                        os._exit(77)
+                    _, status = os.waitpid(pid, 0)
+                    assert os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGKILL
+                    changed = _snapshot(source)
+                    assert changed[0] != baseline[0] and changed[-1] == baseline[-1]
+                    primary.hits.clear()
+                    upstream.hits.clear()
+                    # Both children parse the actual published managed entry
+                    # before recovery. Neither reads metadata at the barrier.
+                    with _stale_dnf4_reader(root, "stale-offline", certificate, [route, upstream.origin]) as offline:
+                        with _stale_dnf4_reader(root, "stale-online", certificate, [route, upstream.origin]) as online:
+                            assert not primary.hits and not upstream.hits
+                            stale = root / "var/lib/dnf/rpmdb_lock.pid"
+                            proof = stale.lstat()
+                            assert stale.read_bytes() == str(pid).encode("ascii")
+                            journal = state / ("pair-" + ident + ".json")
+                            journal_before = journal.read_bytes()
+                            primary.mode = "unavailable"
+                            try:
+                                pair.recover_sandbox(root, ident)
+                            except pair.PairRefused:
+                                pass
+                            else:
+                                raise AssertionError("Stale DNF4 PID silently taken over")
+                            assert _snapshot(source) == changed and journal.read_bytes() == journal_before
+                            assert stale.lstat().st_ino == proof.st_ino
+                            assert stale.read_bytes() == str(pid).encode("ascii")
+                            # Only the known reaped fixture child record.
+                            stale.unlink()
+                            fd = os.open(stale.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                            try:
+                                os.fsync(fd)
+                            finally:
+                                os.close(fd)
+                            assert pair.recover_sandbox(root, ident)["status"] == "restored"
+                            restored = _snapshot(source)
+                            assert restored[0] == baseline[0] and restored[3:6] == baseline[3:6]
+                            assert restored[-1] == baseline[-1]
+                            assert pair.recover_sandbox(root, ident)["status"] == "restored"
+                            assert not primary.hits and not upstream.hits
+                            _complete_stale_dnf4_reader(offline, expected_bytes, rpmdb)
+                            assert primary.hits and upstream.hits
+                            assert any(_RPM_NAME in hit for hit in upstream.hits)
+                            print("PASS: DNF4 reader parsed journal-published entry before SIGKILL recovery; signed HTTPS RPM fallback after cache outage", flush=True)
+                            # Recovery does not revoke already parsed inline
+                            # DNF URLs if the former cache stays available.
+                            primary.hits.clear()
+                            upstream.hits.clear()
+                            primary.mode = "healthy"
+                            _complete_stale_dnf4_reader(online, expected_bytes, rpmdb)
+                            assert any(_RPM_NAME in hit for hit in primary.hits) and not upstream.hits
+                            print("OBSERVED: pre-parsed DNF4 reader still uses healthy former cache after source recovery; reader revocation NOT VERIFIED", flush=True)
+                    primary.hits.clear()
+                    upstream.hits.clear()
+                    with _stale_dnf4_reader(root, "fresh", certificate, [upstream.origin]) as fresh:
+                        _complete_stale_dnf4_reader(fresh, expected_bytes, rpmdb)
+                    assert not primary.hits and any(_RPM_NAME in hit for hit in upstream.hits)
+                    assert _snapshot(source) == restored
+                    print("PASS: actual authenticated catalog-bound DNF4 labelled journal recovery; fresh native reader uses signed upstream only", flush=True)
+    finally:
+        boundary._native_tls_context = original_context
+        primary.mode = "healthy"
+        upstream.mode = "healthy"
+        primary.hits.clear()
+        upstream.hits.clear()
+    assert installed_sources("almalinux10") == before_sources
+    assert installed_packages("almalinux10") == before_packages
+    guarded_native_guest("almalinux10")
+
+
 def _probe_signed_rpm(*, booted_vm: bool = False) -> None:
     with contextlib.ExitStack() as stack:
         folder = stack.enter_context(tempfile.TemporaryDirectory(
@@ -549,6 +828,9 @@ def _probe_signed_rpm(*, booted_vm: bool = False) -> None:
         repomd_signature = base / "www" / "repo/repodata/repomd.xml.asc"
         original_signature = repomd_signature.read_bytes()
         try:
+            if booted_vm and _native_dnf_transaction_variant() == ("/usr/bin/dnf", "dnf4"):
+                _probe_dnf4_catalog_stale_reader(base, key, certificate, wrong_ca,
+                                                 primary, upstream, expected_bytes, rpmdb)
             for cycle, mode1, mode2 in (
                 ("preferred", "healthy", "healthy"),
                 ("fallback", "unavailable", "healthy"),
