@@ -1258,7 +1258,20 @@ def verify_fixed_executable_candidate(native, assets, pins, distribution):
     assert not os.path.lexists(target) and not os.path.lexists(marker)
     before = vendor.lstat()
     label = (os.getxattr(vendor, "security.selinux") if distribution == "almalinux" else None)
-    result = native._stage_authenticated_native_executable_candidate(assets, **pins)
+    policy = None
+    if distribution == "almalinux":
+        from scripts import ci_selinux_nginx_egress_guest as isolated
+        policy = isolated.load_fixed_candidate_policy()
+    result = native._stage_authenticated_native_executable_candidate(
+        assets, **pins, dedicated_selinux=policy is not None)
+    if policy is not None:
+        assert result["dedicated_executable_label_observed"]
+        assert result["dedicated_policy_sha256"] == policy["policy_sha256"]
+        assert os.getxattr(target, "security.selinux").rstrip(b"\0") == policy["executable_context"].encode("ascii")
+    else:
+        assert not result["dedicated_executable_label_observed"]
+        assert result["dedicated_policy_sha256"] is None
+    assert not result["runtime_selinux_policy_verified"]
     assert result["status"] == "NGINX_EXECUTABLE_CANDIDATE_STAGED"
     assert result["native_payload_authenticated_by_installer"]
     assert not result["authorizes_nginx_activation"]
@@ -1288,6 +1301,18 @@ def verify_fixed_executable_candidate(native, assets, pins, distribution):
         os.fsync(out.fileno())
     print("PASS: authenticated fixed native executable installed but not activated; "
           "exact package and release receipt, repeated staging, vendor preserved", flush=True)
+    if policy is not None:
+        # Replace the prior private-copy root-master experiment with its
+        # exact installed-executable counterpart. Only private fixture
+        # config/storage and a runtime-only service are used; the installed
+        # signed unit remains inactive and untouched.
+        subprocess.run(
+            ["/usr/bin/python3", "-B", str(SOURCE / "scripts/ci_selinux_nginx_egress_guest.py"),
+             "--fixed-candidate"], check=True, timeout=600)
+        assert hashlib.sha256(marker.read_bytes()).hexdigest() == result["receipt_sha256"]
+        require_status(OWN, False, False)
+        require_status(VENDOR, False, False)
+        assert native.stage.verify_installed_worker(assets, **pins) == release
 
 
 def verify_fixed_executable_after_reboot(pins):
@@ -1307,7 +1332,14 @@ try:
     record=json.loads(raw)
     assert record["release_source_sha"] == pins["commit"]
     assert record["release_archive_sha256"] == pins["archive_sha256"]
-    observed=candidate._verify_leaf(directory,record["executable_sha256"])
+    dedicated=report["dedicated_policy_sha256"] is not None
+    if dedicated:
+        policy=candidate.signed_owned_nginx_policy_candidate()
+        assert record["dedicated_policy_sha256"] == policy["policy_sha256"] == report["dedicated_policy_sha256"]
+        assert record["executable_context"] == policy["executable_context"]
+    else:
+        assert "dedicated_policy_sha256" not in record and "executable_context" not in record
+    observed=candidate._verify_leaf(directory,record["executable_sha256"],dedicated_selinux=dedicated)
     assert observed[:2] == (record["device"],record["inode"])
     assert observed[6:] == (record["size"],record["mtime_ns"],record["ctime_ns"])
     assert candidate._named(directory,candidate._PENDING) is None
@@ -1317,6 +1349,11 @@ finally:
 """
     subprocess.run(["/usr/bin/python3", "-IS", "-B", "-c", code],
                    input=json.dumps([expected,pins]),text=True,check=True,timeout=30)
+    if expected["dedicated_policy_sha256"] is not None:
+        assert run("/usr/sbin/getenforce").stdout.strip() == "Enforcing"
+        modules = run("/usr/sbin/semodule", "-l").stdout.splitlines()
+        assert "repocache_nginx" in {line.split()[0] for line in modules if line}
+        print("PASS: dedicated executable label and signed policy identity retained across reboot", flush=True)
     assert signed_namespace_unit_candidate() == expected["namespace_unit_candidate"]
     print("PASS: exact fixed executable and authenticated release receipt survive real reboot; no activation authority", flush=True)
     print("PASS: authenticated namespace unit candidate digest is unchanged after reboot", flush=True)

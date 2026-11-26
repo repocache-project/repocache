@@ -109,10 +109,14 @@ def test_fixed_worker_archive_is_reproducible_from_closed_release_sources(tmp_pa
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
         assert archive.namelist() == [
             "__main__.py", "repocache/_signed-owned-nginx.service",
+            "repocache/_signed-owned-nginx.te",
             *(f"repocache/{module}.py" for module in build_native_root_worker.MODULES),
         ]
         assert archive.read("repocache/_signed-owned-nginx.service") == (
             source / "docs/examples/systemd/repocache-nginx.service"
+        ).read_bytes()
+        assert archive.read("repocache/_signed-owned-nginx.te") == (
+            source / "docs/examples/selinux/repocache-nginx.te"
         ).read_bytes()
     target = tmp_path / "server-control-worker"
     target.write_bytes(payload)
@@ -195,3 +199,21 @@ def test_extractor_rejects_extra_or_incomplete_members(tmp_path, name):
             {"version": "0.0.0"},
             system={"ID": "debian", "VERSION_ID": "13"},
         )
+
+
+
+@pytest.mark.parametrize("fault", ["absent", "symlink", "oversized"])
+def test_worker_builder_refuses_untrusted_policy_member(tmp_path, fault):
+    source = _candidate_source(tmp_path)
+    policy = source / "docs/examples/selinux/repocache-nginx.te"
+    raw = policy.read_bytes()
+    if fault == "oversized":
+        policy.write_bytes(b"x" * 16385)
+    else:
+        policy.unlink()
+        if fault == "symlink":
+            foreign = tmp_path / "foreign.te"
+            foreign.write_bytes(raw)
+            policy.symlink_to(foreign)
+    with pytest.raises(ValueError, match="dedicated SELinux policy"):
+        build_native_root_worker.build(source)

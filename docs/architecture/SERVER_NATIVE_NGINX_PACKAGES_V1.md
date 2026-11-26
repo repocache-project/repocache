@@ -964,3 +964,41 @@ and WAL lock; the observer cannot authorize activation or a firewall change.
 No global host rule, vendor service, SELinux boolean or label is modified
 by the observer. The actual installed AlmaLinux upstream gate remains
 mandatory and is not waived by a successful isolated test.
+
+
+
+### Authenticated dedicated-domain policy and executable label
+
+The reviewed SELinux policy candidate is now a closed v0.6 source asset
+and a fixed member of the deterministic authenticated root worker.
+It uses stable REPOCACHE-specific types, with the same policy permissions
+as the existing private enforcing fixture. The reader requires the fixed
+installed zip; it is not a general policy parser or policy installer.
+No stock HTTP domain permission, global boolean or vendor file label
+is modified.
+
+The optional internal AlmaLinux staging mode derives the policy digest
+from the authenticated archive, requires enforcing mode and a separately
+verified loaded policy, and labels only the exclusively created pending
+executable inode before publication. The fixed context and signed policy
+digest are bound into the existing executable receipt together with the
+native package and signed release identities. Repeat staging verifies the
+same inode, bytes, metadata and label; it never relabels an existing
+leaf or adopts an unlabelled receipt. Incomplete placement or label
+failure is preserved and refused. Debian retains the existing unlabeled
+placement. Receipt and policy source consistency are not kernel policy
+attestation or authorization to activate.
+
+The guarded AlmaLinux VM compiles the actual authenticated policy bytes
+and loads only the dedicated module. The previous signed-derived
+root-master peer test now uses the fixed authenticated installed
+executable and its stable domain, rather than a copied fixture binary.
+Private configuration/storage and a never-enabled runtime-only unit
+remain isolated; the existing signed service and stock policy are
+unchanged. The fixed namespace egress, positive/negative TLS routes,
+worker drain, reload, capability and domain continuity, and cleanup
+assertions are retained. The staged executable and dedicated module
+remain in this disposable guest for reboot verification. Actual installed
+service transition, owned path contexts, durable WAL-bound egress,
+ingress and installed data plane remain separate mandatory acceptance
+gates. The existing actual upstream test is not suppressed.

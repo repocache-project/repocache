@@ -573,6 +573,7 @@ def _authenticate_candidate_rpm(work: Path, identity: str) -> tuple[str, str]:
 
 def _stage_authenticated_native_executable_candidate(
     assets: Path, *, commit: str, archive_sha256: str,
+    dedicated_selinux: bool = False,
 ) -> dict:
     """Internal candidate placement only; not a CLI or activation path.
 
@@ -580,17 +581,38 @@ def _stage_authenticated_native_executable_candidate(
     source and native package, retain the existing server-state lock, stage
     only the fixed executable in the existing authenticated worker directory.
     No systemd unit, SELinux policy, vendor label or firewall is modified.
-    Refuse uncertain receipt/placement; never adopt or execute the copy.
+    The optional dedicated mode requires an already loaded, independently
+    verified policy and assigns its fixed label only to the unpublished
+    new inode. Refuse uncertain receipt/placement; never adopt or execute.
     """
     from repocache.server_native_nginx_executable_v1 import (
         NativeExecutableCandidateError, stage_nginx_candidate_with_receipt,
         _identity as executable_identity, _verify_leaf, _read_executable_receipt,
+        _policy_candidate, _POLICY_MEMBER,
     )
     from repocache.server_protected_state_store_v1 import _read_file
     distribution = _native_distro()
+    if type(dedicated_selinux) is not bool or (dedicated_selinux and distribution != "almalinux"):
+        _reject("NATIVE_EXECUTABLE_DEDICATED_POLICY_TARGET_REFUSED")
     require_native_host_preconditions()
     payloads, receipt = stage._authenticated_payloads(
         assets, commit=commit, archive_sha256=archive_sha256, system=None)
+    policy_digest = None
+    labels = None
+    if dedicated_selinux:
+        import io
+        import zipfile
+        labels = _Labels(distribution)
+        # No caller-provided policy bytes or digest. The verified release
+        # archive determines the exact policy embedded in the worker.
+        try:
+            with zipfile.ZipFile(io.BytesIO(payloads[stage.WORKER])) as archive:
+                if (archive.namelist().count(_POLICY_MEMBER) != 1
+                        or not 0 < archive.getinfo(_POLICY_MEMBER).file_size <= 16384):
+                    _reject("NATIVE_EXECUTABLE_DEDICATED_POLICY_REFUSED")
+                policy_digest = _policy_candidate(archive.read(_POLICY_MEMBER))["policy_sha256"]
+        except (KeyError, zipfile.BadZipFile, NativeExecutableCandidateError):
+            _reject("NATIVE_EXECUTABLE_DEDICATED_POLICY_REFUSED")
     expected = stage._json_line(receipt)
     completed = _MARKER + "complete-" + hashlib.sha256(expected).hexdigest()
     with ExitStack() as stack:
@@ -603,6 +625,8 @@ def _stage_authenticated_native_executable_candidate(
         state = stack.enter_context(_locked(
             root, 0, allow_native_package_parent_changes=True))
         def require_boundary():
+            if labels is not None:
+                labels.finish()
             stage._audit_worker_files(Path("/"), payloads)
             if (_read_file(state, _RUNTIME_RECEIPT, 0, 8192) != expected
                     or {name for name in os.listdir(state) if name.startswith(_MARKER)} != {completed}
@@ -661,13 +685,15 @@ def _stage_authenticated_native_executable_candidate(
                 _reject("NATIVE_EXECUTABLE_PACKAGE_CHANGED")
             options = dict(distribution=distribution, package_identity=identity,
                            native_payload_sha256=package_digest, authenticated_sha256=binary_digest,
-                           release_source_sha=commit, release_archive_sha256=archive_sha256)
+                           release_source_sha=commit, release_archive_sha256=archive_sha256,
+                           dedicated_policy_sha256=policy_digest)
             try:
                 result = stage_nginx_candidate_with_receipt(destination, vendor, **options)
                 again = stage_nginx_candidate_with_receipt(destination, vendor, **options)
                 if (again["status"] != "NGINX_EXECUTABLE_CANDIDATE_UNCHANGED"
                         or again["receipt_sha256"] != result["receipt_sha256"]
-                        or _verify_leaf(destination, binary_digest)[:2] !=
+                        or _verify_leaf(destination, binary_digest,
+                                        dedicated_selinux=dedicated_selinux)[:2] !=
                            (result["device"], result["inode"])):
                     _reject("NATIVE_EXECUTABLE_READBACK_REFUSED")
             except NativeExecutableCandidateError:

@@ -1,7 +1,7 @@
 """Descriptor-bound staging of a separately authenticated native NGINX binary.
 
 Internal candidate primitive only. No path from an operator, package download,
-policy installation, relabel, execution, service activation or host permission.
+policy installation, existing-inode relabel, execution, service activation or host permission.
 The caller must independently authenticate the exact distribution payload and
 hold the owned placement transaction. The digest alone is not a trust token.
 """
@@ -13,12 +13,18 @@ import os
 import re
 import stat
 import tarfile
+import zipimport
 from pathlib import PurePosixPath
 
 _MAX = 32 * 1024 * 1024
 _LEAF = "nginx"
 _PENDING = ".repocache-nginx-executable.pending"
 _READ = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+_SIGNED_WORKER = "/usr/libexec/repocache/server-control-worker"
+_POLICY_MEMBER = "repocache/_signed-owned-nginx.te"
+_POLICY_MAX = 16384
+_POLICY_MODULE = "repocache_nginx"
+_EXEC_CONTEXT = b"system_u:object_r:repocache_nginx_exec_t:s0"
 
 
 class NativeExecutableCandidateError(ValueError):
@@ -79,10 +85,59 @@ def _directory(directory):
     return info.st_dev, info.st_ino
 
 
-def _verify_leaf(directory, digest):
+def _policy_candidate(raw: bytes) -> dict:
+    # The policy is a closed signed source asset, never a request payload.
+    # These are consistency checks, not a general SELinux policy validator.
+    if (type(raw) is not bytes or not 1 <= len(raw) <= _POLICY_MAX
+            or any(byte != 10 and not 32 <= byte <= 126 for byte in raw)
+            or not raw.startswith(b"policy_module(repocache_nginx, 1.0.0)\n")):
+        _deny("POLICY_SOURCE_REFUSED")
+    return {
+        "policy_bytes": raw, "policy_sha256": hashlib.sha256(raw).hexdigest(),
+        "module": _POLICY_MODULE, "executable_context": _EXEC_CONTEXT.decode("ascii"),
+        "runtime_selinux_policy_verified": False,
+        "authorizes_policy_installation": False, "authorizes_nginx_activation": False,
+    }
+
+
+def signed_owned_nginx_policy_candidate() -> dict:
+    """Read only the fixed embedded member of the authenticated worker."""
+    loader = __loader__
+    if not isinstance(loader, zipimport.zipimporter) or loader.archive != _SIGNED_WORKER:
+        _deny("SIGNED_POLICY_SOURCE_REQUIRED")
+    try:
+        return _policy_candidate(loader.get_data(_SIGNED_WORKER + "/" + _POLICY_MEMBER))
+    except OSError:
+        _deny("SIGNED_POLICY_SOURCE_UNAVAILABLE")
+
+
+def _verify_dedicated_label(fd):
+    raw = os.getxattr(fd, "security.selinux")
+    if raw not in (_EXEC_CONTEXT, _EXEC_CONTEXT + b"\0"):
+        _deny("DEDICATED_LABEL_REFUSED")
+
+
+def _label_unpublished_executable(fd):
+    """Only the freshly created, private pending inode may be labelled.
+
+    Caller has already authenticated the dedicated policy and retains the
+    owned placement lock. A loaded type alone is not proof of policy bytes.
+    No existing executable or vendor file may enter this operation.
+    """
+    _safe_file(os.fstat(fd))
+    # Require a SELinux-labelled filesystem and refuse unrelated attributes.
+    if set(os.listxattr(fd)) != {"security.selinux"}:
+        _deny("DEDICATED_LABEL_ATTRIBUTES_REFUSED")
+    os.setxattr(fd, "security.selinux", _EXEC_CONTEXT + b"\0")
+    _verify_dedicated_label(fd)
+
+
+def _verify_leaf(directory, digest, *, dedicated_selinux=False):
     fd = os.open(_LEAF, _READ, dir_fd=directory)
     try:
         _, identity = _read_verified(fd, digest)
+        if dedicated_selinux:
+            _verify_dedicated_label(fd)
         named = _named(directory, _LEAF)
         if named is None or _identity(named) != identity:
             _deny("DESTINATION_CHANGED")
@@ -96,6 +151,7 @@ def _verify_leaf(directory, digest):
 def stage_verified_nginx_candidate(
     directory: int, vendor_fd: int, *, authenticated_sha256: str,
     previous_inode: tuple[int, int] | None = None,
+    dedicated_selinux: bool = False,
 ) -> dict:
     """Place fixed leaf in a retained owned directory without overwrite.
 
@@ -109,7 +165,8 @@ def stage_verified_nginx_candidate(
     """
     if (os.getresuid() != (0, 0, 0) or os.getresgid() != (0, 0, 0)
             or type(directory) is not int or type(vendor_fd) is not int
-            or directory == vendor_fd or type(authenticated_sha256) is not str
+            or directory == vendor_fd or type(dedicated_selinux) is not bool
+            or type(authenticated_sha256) is not str
             or not re.fullmatch(r"[0-9a-f]{64}", authenticated_sha256)
             or (previous_inode is not None and (
                 type(previous_inode) is not tuple or len(previous_inode) != 2
@@ -122,7 +179,8 @@ def stage_verified_nginx_candidate(
         raw, source_id = _read_verified(vendor_fd, authenticated_sha256)
         existed = _named(directory, _LEAF) is not None
         if existed:
-            if previous_inode is None or _verify_leaf(directory, authenticated_sha256)[:2] != previous_inode:
+            if previous_inode is None or _verify_leaf(
+                    directory, authenticated_sha256, dedicated_selinux=dedicated_selinux)[:2] != previous_inode:
                 _deny("FOREIGN_DESTINATION")
         elif previous_inode is not None:
             _deny("OWNED_DESTINATION_MISSING")
@@ -135,6 +193,8 @@ def stage_verified_nginx_candidate(
                     stream.write(raw)
                     stream.flush()
                 os.fchmod(fd, 0o755)
+                if dedicated_selinux:
+                    _label_unpublished_executable(fd)
                 os.fsync(fd)
                 _, staged = _read_verified(fd, authenticated_sha256)
                 named = _named(directory, _PENDING)
@@ -159,7 +219,7 @@ def stage_verified_nginx_candidate(
                 os.fsync(directory)
             finally:
                 os.close(fd)
-        copy_id = _verify_leaf(directory, authenticated_sha256)
+        copy_id = _verify_leaf(directory, authenticated_sha256, dedicated_selinux=dedicated_selinux)
         if (_directory(directory) != dir_id
                 or _identity(os.fstat(vendor_fd)) != source_id
                 or copy_id[:2] == source_id[:2]
@@ -174,6 +234,7 @@ def stage_verified_nginx_candidate(
             "authorizes_nginx_activation": False,
             "native_payload_authenticity_verified_by_primitive": False,
             "selinux_domain_verified": False,
+            "dedicated_executable_label_observed": dedicated_selinux,
         }
     except NativeExecutableCandidateError:
         raise
@@ -286,6 +347,7 @@ def stage_nginx_candidate_with_receipt(
     directory: int, vendor_fd: int, *, distribution: str, package_identity: str,
     native_payload_sha256: str, authenticated_sha256: str,
     release_source_sha: str, release_archive_sha256: str,
+    dedicated_policy_sha256: str | None = None,
 ) -> dict:
     """Bind candidate inode to independently authenticated package/release.
 
@@ -306,6 +368,9 @@ def stage_nginx_candidate_with_receipt(
                 (not package_identity.startswith("nginx:amd64=")
                  or _DEB_VERSION.fullmatch(package_identity.removeprefix("nginx:amd64=")) is None))
             or (distribution == "almalinux" and _RPM_ID.fullmatch(package_identity) is None)
+            or (dedicated_policy_sha256 is not None and (
+                distribution != "almalinux" or type(dedicated_policy_sha256) is not str
+                or re.fullmatch(r"[0-9a-f]{64}", dedicated_policy_sha256) is None))
             or type(release_source_sha) is not str
             or re.fullmatch(r"[0-9a-f]{40}", release_source_sha) is None
             or any(type(value) is not str or re.fullmatch(r"[0-9a-f]{64}", value) is None
@@ -321,6 +386,10 @@ def stage_nginx_candidate_with_receipt(
         "release_archive_sha256": release_archive_sha256,
         "authorizes_nginx_activation": False,
     }
+    dedicated = dedicated_policy_sha256 is not None
+    if dedicated:
+        expected.update({"dedicated_policy_sha256": dedicated_policy_sha256,
+                         "executable_context": _EXEC_CONTEXT.decode("ascii")})
     try:
         identity = _directory(directory)
         raw = _read_executable_receipt(directory)
@@ -335,16 +404,16 @@ def stage_nginx_candidate_with_receipt(
                     or type(saved["inode"]) is not int or saved["inode"] <= 0):
                 _deny("RECEIPT_REFUSED")
             previous = (saved["device"], saved["inode"])
-            before = _verify_leaf(directory, authenticated_sha256)
+            before = _verify_leaf(directory, authenticated_sha256, dedicated_selinux=dedicated)
             if (before[:2] != previous or any(type(saved[key]) is not int for key in
                     ("size", "mtime_ns", "ctime_ns")) or before[6:] !=
                     (saved["size"], saved["mtime_ns"], saved["ctime_ns"])):
                 _deny("RECEIPT_CHANGED")
         result = stage_verified_nginx_candidate(
             directory, vendor_fd, authenticated_sha256=authenticated_sha256,
-            previous_inode=previous,
+            previous_inode=previous, dedicated_selinux=dedicated,
         )
-        observed = _verify_leaf(directory, authenticated_sha256)
+        observed = _verify_leaf(directory, authenticated_sha256, dedicated_selinux=dedicated)
         if observed[:2] != (result["device"], result["inode"]):
             _deny("RECEIPT_CHANGED")
         record = {**expected, "device": observed[0], "inode": observed[1],
@@ -354,10 +423,12 @@ def stage_nginx_candidate_with_receipt(
             _write_exclusive(directory, _RECEIPT, encoded, 0, _RECEIPT_MAX)
         if (_read_executable_receipt(directory) != encoded
                 or _directory(directory) != identity
-                or _verify_leaf(directory, authenticated_sha256) != observed):
+                or _verify_leaf(directory, authenticated_sha256, dedicated_selinux=dedicated) != observed):
             _deny("RECEIPT_CHANGED")
         return {**result, "receipt_sha256": hashlib.sha256(encoded).hexdigest(),
-                "receipt_matches_owned_inode": True}
+                "receipt_matches_owned_inode": True,
+                "dedicated_policy_sha256": dedicated_policy_sha256,
+                "runtime_selinux_policy_verified": False}
     except NativeExecutableCandidateError:
         raise
     except (ProtectedStateStoreError, OSError, ValueError, TypeError, RecursionError):

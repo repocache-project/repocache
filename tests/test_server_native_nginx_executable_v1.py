@@ -170,3 +170,119 @@ def test_receipt_refuses_same_inode_metadata_change_and_partial_publication(tmp_
     finally:
         os.close(fd)
         os.close(parent)
+
+
+def test_signed_policy_candidate_is_exact_reviewed_fixture_permissions():
+    from pathlib import Path
+    from repocache import server_native_nginx_executable_v1 as candidate
+    root = Path(__file__).resolve().parents[1]
+    raw = (root / "docs/examples/selinux/repocache-nginx.te").read_bytes()
+    fixture = (root / "scripts/ci_selinux_nginx_egress_fixture.te").read_bytes()
+
+    def rules(data):
+        return [line for line in data.splitlines() if line and not line.startswith(b"#")]
+
+    assert rules(raw) == rules(fixture.replace(b"repocache_ci_nginx", b"repocache_nginx"))
+    report = candidate._policy_candidate(raw)
+    assert report["policy_bytes"] == raw
+    assert report["policy_sha256"] == hashlib.sha256(raw).hexdigest()
+    assert report["module"] == "repocache_nginx"
+    assert report["executable_context"] == "system_u:object_r:repocache_nginx_exec_t:s0"
+    assert not report["authorizes_policy_installation"]
+    assert not report["runtime_selinux_policy_verified"]
+    assert not report["authorizes_nginx_activation"]
+    with pytest.raises(NativeExecutableCandidateError, match="SIGNED_POLICY_SOURCE_REQUIRED"):
+        candidate.signed_owned_nginx_policy_candidate()
+
+
+@pytest.mark.parametrize("raw", [b"", b"policy_module(httpd, 1.0.0)\n",
+                                  b"policy_module(repocache_nginx, 1.0.0)\n\0",
+                                  b" " * 16385, "not bytes"])
+def test_policy_asset_consistency_refuses_invalid_source(raw):
+    from repocache.server_native_nginx_executable_v1 import _policy_candidate
+    with pytest.raises(NativeExecutableCandidateError, match="POLICY_SOURCE_REFUSED"):
+        _policy_candidate(raw)
+
+
+@pytest.mark.skipif(os.geteuid() != 0 or os.getegid() != 0, reason="private root fixture")
+@pytest.mark.parametrize("fault", ["none", "label-denied", "foreign-label", "foreign-attr"])
+def test_dedicated_label_before_publish_and_receipt_binding(tmp_path, monkeypatch, fault):
+    from repocache import server_native_nginx_executable_v1 as candidate
+
+    source = tmp_path / "vendor"
+    source.write_bytes(b"private synthetic native executable")
+    source.chmod(0o755)
+    owned = tmp_path / "owned"
+    owned.mkdir(mode=0o700)
+    parent = os.open(owned, os.O_RDONLY | os.O_DIRECTORY)
+    vendor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+    target = owned / "nginx"
+    pending = owned / candidate._PENDING
+    original = b"system_u:object_r:bin_t:s0\0"
+    label = [original]
+    changes = []
+    real_list, real_get, real_set = os.listxattr, os.getxattr, os.setxattr
+
+    def is_candidate(fd):
+        return (type(fd) is int and fd not in (parent, vendor)
+                and os.readlink("/proc/self/fd/" + str(fd)) in (str(target), str(pending)))
+
+    def listxattr(fd, *args, **kwargs):
+        if is_candidate(fd):
+            return ["security.selinux"] + (["user.foreign"] if fault == "foreign-attr" else [])
+        return real_list(fd, *args, **kwargs)
+
+    def getxattr(fd, name, *args, **kwargs):
+        if is_candidate(fd) and name == "security.selinux":
+            return label[0]
+        return real_get(fd, name, *args, **kwargs)
+
+    def setxattr(fd, name, value, *args, **kwargs):
+        if is_candidate(fd):
+            assert os.readlink("/proc/self/fd/" + str(fd)) == str(pending)
+            assert not target.exists() and name == "security.selinux"
+            changes.append(value)
+            if fault == "label-denied":
+                raise PermissionError("simulated native label refusal")
+            label[0] = original if fault == "foreign-label" else value
+            return
+        return real_set(fd, name, value, *args, **kwargs)
+
+    opts = dict(distribution="almalinux", package_identity="nginx-core-0:1.2-3.x86_64",
+                native_payload_sha256="a" * 64, release_source_sha="b" * 40,
+                release_archive_sha256="c" * 64, dedicated_policy_sha256="d" * 64,
+                authenticated_sha256=hashlib.sha256(source.read_bytes()).hexdigest())
+    try:
+        with monkeypatch.context() as scoped:
+            scoped.setattr(os, "listxattr", listxattr)
+            scoped.setattr(os, "getxattr", getxattr)
+            scoped.setattr(os, "setxattr", setxattr)
+            if fault != "none":
+                with pytest.raises(NativeExecutableCandidateError):
+                    candidate.stage_nginx_candidate_with_receipt(parent, vendor, **opts)
+                assert pending.exists() and not target.exists()
+                assert not (owned / candidate._RECEIPT).exists()
+                with pytest.raises(NativeExecutableCandidateError):
+                    candidate.stage_nginx_candidate_with_receipt(parent, vendor, **opts)
+                return
+            first = candidate.stage_nginx_candidate_with_receipt(parent, vendor, **opts)
+            assert changes == [candidate._EXEC_CONTEXT + b"\0"]
+            assert first["dedicated_executable_label_observed"]
+            assert not first["runtime_selinux_policy_verified"]
+            assert first["dedicated_policy_sha256"] == "d" * 64
+            receipt = (owned / candidate._RECEIPT).read_bytes()
+            again = candidate.stage_nginx_candidate_with_receipt(parent, vendor, **opts)
+            assert again["status"].endswith("UNCHANGED")
+            assert changes == [candidate._EXEC_CONTEXT + b"\0"]
+            for wrong in (None, "e" * 64):
+                with pytest.raises(NativeExecutableCandidateError):
+                    candidate.stage_nginx_candidate_with_receipt(
+                        parent, vendor, **dict(opts, dedicated_policy_sha256=wrong))
+            label[0] = original
+            with pytest.raises(NativeExecutableCandidateError, match="DEDICATED_LABEL_REFUSED"):
+                candidate.stage_nginx_candidate_with_receipt(parent, vendor, **opts)
+            assert (owned / candidate._RECEIPT).read_bytes() == receipt
+            assert target.read_bytes() == source.read_bytes()
+    finally:
+        os.close(vendor)
+        os.close(parent)

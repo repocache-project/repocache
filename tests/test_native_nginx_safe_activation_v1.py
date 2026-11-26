@@ -796,3 +796,29 @@ def test_peer_denial_counter_requires_exact_named_kernel_counter():
         bad = {"nftables": [{"counter": {**data["nftables"][1]["counter"], field: value}}]}
         with pytest.raises(AssertionError):
             parse_denied_packets(bad)
+
+
+
+def test_isolated_fixed_candidate_keeps_authenticated_installed_executable():
+    import configparser
+    from pathlib import Path
+    from scripts import ci_selinux_nginx_egress_guest as guest
+
+    raw = (Path(__file__).resolve().parents[1] /
+           "docs/examples/systemd/repocache-nginx.service").read_bytes()
+    root = Path("/var/lib/repocache-ci-selinux-test")
+    parsed = configparser.ConfigParser(interpolation=None, strict=True)
+    parsed.optionxform = str
+    parsed.read_string(guest.derive_signed_unit(
+        raw, root, root_master=True, fixed_candidate=True).decode("ascii"))
+    service = parsed["Service"]
+    for action in ("ExecStartPre", "ExecStart", "ExecReload", "ExecStop"):
+        assert service[action].startswith("/usr/libexec/repocache/nginx -e stderr -p " + str(root))
+        assert service[action].endswith("-c " + str(root / "nginx.conf"))
+    assert service["NetworkNamespacePath"] == "/run/netns/repocache-nginx"
+    assert service["NoNewPrivileges"] == "yes"
+    assert service["CapabilityBoundingSet"] == "CAP_CHOWN CAP_KILL CAP_SETGID CAP_SETUID"
+    assert "User" not in service and "AmbientCapabilities" not in service
+    assert parsed.sections() == ["Unit", "Service"]
+    with pytest.raises(AssertionError):
+        guest.derive_signed_unit(raw, root, fixed_candidate=True)

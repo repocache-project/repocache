@@ -77,6 +77,14 @@ def build(source: Path) -> bytes:
         if not 1 <= len(unit_bytes) <= 16384:
             raise ValueError("Invalid dedicated NGINX unit size")
         archive.writestr(zipfile.ZipInfo("repocache/_signed-owned-nginx.service"), unit_bytes)
+        policy = source / "docs" / "examples" / "selinux" / "repocache-nginx.te"
+        if (any(parent.is_symlink() for parent in (policy, policy.parent,
+                policy.parent.parent, policy.parent.parent.parent)) or not policy.is_file()):
+            raise ValueError("Missing or unsafe dedicated SELinux policy source")
+        policy_bytes = policy.read_bytes()
+        if not 1 <= len(policy_bytes) <= 16384:
+            raise ValueError("Invalid dedicated SELinux policy size")
+        archive.writestr(zipfile.ZipInfo("repocache/_signed-owned-nginx.te"), policy_bytes)
         for module in MODULES:
             filename = module + ".py"
             path = package / filename

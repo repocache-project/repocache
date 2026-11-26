@@ -47,6 +47,7 @@ V06_EXTRA_FILES = (
     "client/transaction_metadata_sandbox.py",
     "client/transaction_stage.py",
     "docs/examples/nginx/repocache.conf",
+    "docs/examples/selinux/repocache-nginx.te",
     "docs/examples/server-install-v1.json",
     "docs/examples/systemd/repocache-control.service",
     "docs/examples/systemd/repocache-control.socket",

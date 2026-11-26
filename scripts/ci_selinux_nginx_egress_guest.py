@@ -22,8 +22,12 @@ import sys
 import tempfile
 import time
 
-MODULE = "repocache_ci_nginx"
+FIXTURE_MODULE = "repocache_ci_nginx"
+FIXED_MODULE = "repocache_nginx"
+MODULE = FIXTURE_MODULE
 DOMAIN = MODULE + "_t"
+FIXED_EXECUTABLE = Path("/usr/libexec/repocache/nginx")
+FIXED_PROOF = Path("/root/pr237-synthetic-fixture/native-executable-candidate-proof.json")
 UNIT = "repocache-ci-nginx-egress.service"
 ROOT_UNIT = "repocache-ci-nginx-root-egress.service"
 DERIVED_UNIT = "repocache-ci-nginx-derived-egress.service"
@@ -128,7 +132,7 @@ def policy_manifest(commit, archive_digest, manifest_digest, unit_digest, raw_po
         "schema": 1, "scope": "isolated-almalinux10-egress-fixture",
         "key_id": "pr237-synthetic", "commit": commit,
         "archive_sha256": archive_digest, "release_manifest_sha256": manifest_digest,
-        "signed_unit_sha256": unit_digest, "module": MODULE,
+        "signed_unit_sha256": unit_digest, "module": FIXTURE_MODULE,
         "policy_sha256": hashlib.sha256(raw_policy).hexdigest(),
     }, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
 
@@ -205,10 +209,74 @@ def authenticated_policy(*, include_unit=False):
     return result
 
 
-def derive_signed_unit(raw, root, *, root_master=False):
+def authenticated_fixed_policy():
+    """Return the exact signed policy embedded in the verified installed zip."""
+    guard()
+    sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
+                    str(Path(__file__).resolve().parents[1])]
+    from scripts import stage_native_root_worker as stage
+    root = Path("/root/pr237-synthetic-fixture")
+    pins = json.loads((root / "pins.json").read_bytes())
+    release = stage.verify_installed_worker(root / "assets", **pins)
+    assert release["publisher_key_id"] == "pr237-synthetic"
+    code = r"""
+import json,sys,zipimport
+sys.path.insert(0, "/usr/libexec/repocache/server-control-worker")
+from repocache import server_native_nginx_executable_v1 as candidate
+assert isinstance(candidate.__loader__, zipimport.zipimporter)
+assert candidate.__loader__.archive == "/usr/libexec/repocache/server-control-worker"
+report=candidate.signed_owned_nginx_policy_candidate()
+report["policy_text"]=report.pop("policy_bytes").decode("ascii")
+print(json.dumps(report))
+"""
+    report = json.loads(command("/usr/bin/python3", "-IS", "-B", "-c", code).stdout)
+    raw = report.pop("policy_text").encode("ascii")
+    assert report["module"] == FIXED_MODULE
+    assert report["executable_context"] == "system_u:object_r:repocache_nginx_exec_t:s0"
+    assert hashlib.sha256(raw).hexdigest() == report["policy_sha256"]
+    assert not report["authorizes_policy_installation"]
+    assert not report["runtime_selinux_policy_verified"] and not report["authorizes_nginx_activation"]
+    return raw, report
+
+
+def load_fixed_candidate_policy():
+    """Guarded VM-only module installation; retain it through reboot proof."""
+    guard()
+    raw, report = authenticated_fixed_policy()
+    before = installed_modules()
+    assert FIXED_MODULE not in {line.split()[0] for line in before.splitlines() if line}
+    booleans = command("/usr/sbin/getsebool", "-a").stdout
+    vendor = (VENDOR.stat().st_ino, hashlib.sha256(VENDOR.read_bytes()).hexdigest(),
+              os.getxattr(VENDOR, "security.selinux"))
+    with tempfile.TemporaryDirectory(prefix="repocache-signed-policy-", dir="/var/lib") as place:
+        build = Path(place)
+        source = build / (FIXED_MODULE + ".te")
+        with source.open("xb") as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        assert source.read_bytes() == raw
+        command("/usr/bin/make", "-C", str(build), "-f",
+                "/usr/share/selinux/devel/Makefile", FIXED_MODULE + ".pp", timeout=120)
+        command("/usr/sbin/semodule", "-i", str(build / (FIXED_MODULE + ".pp")), timeout=120)
+    after = installed_modules()
+    assert FIXED_MODULE in {line.split()[0] for line in after.splitlines() if line}
+    assert {line for line in after.splitlines() if line.split() and
+            line.split()[0] != FIXED_MODULE} == set(before.splitlines())
+    assert command("/usr/sbin/getsebool", "-a").stdout == booleans
+    assert vendor == (VENDOR.stat().st_ino, hashlib.sha256(VENDOR.read_bytes()).hexdigest(),
+                      os.getxattr(VENDOR, "security.selinux"))
+    guard()
+    print("PASS: compiled authenticated dedicated policy; only dedicated module added in disposable guest", flush=True)
+    return report
+
+
+def derive_signed_unit(raw, root, *, root_master=False, fixed_candidate=False):
     """Strict fixed transformations of authenticated bytes, never a host unit editor."""
     assert type(raw) is bytes and 0 < len(raw) <= 8192
-    assert type(root_master) is bool
+    assert type(root_master) is bool and type(fixed_candidate) is bool
+    assert not fixed_candidate or root_master
     assert root.parent == Path("/var/lib") and re.fullmatch(PREFIX + r"[a-z0-9_]+", root.name)
     # Reuse the signed-worker candidate contract instead of duplicating
     # unit parsing and the root-master capability decision in the fixture.
@@ -232,7 +300,8 @@ def derive_signed_unit(raw, root, *, root_master=False):
     service["ReadWritePaths"] = str(root / "runtime") + " " + str(root / "pid")
     for key in ("ExecStartPre", "ExecStart", "ExecReload", "ExecStop"):
         executable = "/usr/libexec/repocache/nginx" if root_master else "/usr/sbin/nginx"
-        service[key] = (service[key].replace(executable, str(root / "nginx") +
+        target = str(FIXED_EXECUTABLE if fixed_candidate else root / "nginx")
+        service[key] = (service[key].replace(executable, target +
                            " -e stderr -p " + str(root))
                         .replace("/etc/nginx/repocache.d/repocache.conf", str(root / "nginx.conf")))
     # Only the private fixture namespace and paths are substituted. Keep
@@ -787,9 +856,11 @@ def configure_peer_network():
     print("PASS: distinct private client/upstream and service netns linked only by veth, no default routes", flush=True)
 
 
-def probe(evidence=None, *, root_master=False, signed_derived=False):
+def probe(evidence=None, *, root_master=False, signed_derived=False, fixed_candidate=False):
     guard()
     assert type(root_master) is bool and type(signed_derived) is bool
+    assert type(fixed_candidate) is bool and (not fixed_candidate or (root_master and signed_derived))
+    assert MODULE == (FIXED_MODULE if fixed_candidate else FIXTURE_MODULE)
     remote = root_master and signed_derived
     if evidence is None:
         evidence = authenticated_vendor_evidence()
@@ -797,12 +868,20 @@ def probe(evidence=None, *, root_master=False, signed_derived=False):
     assert re.fullmatch(r"[0-9a-f]{64}", vendor_digest)
     unit = (DERIVED_ROOT_UNIT if root_master else DERIVED_UNIT) if signed_derived else (ROOT_UNIT if root_master else UNIT)
     modules_before = installed_modules()
-    assert MODULE not in {line.split()[0] for line in modules_before.splitlines() if line}
+    assert (MODULE in {line.split()[0] for line in modules_before.splitlines() if line}) == fixed_candidate
     assert not any(os.path.lexists(Path("/run/netns", ns)) for ns in (NS, PEER_NS))
     if signed_derived:
         policy_bytes, signed_unit, release = authenticated_policy(include_unit=True)
     else:
         policy_bytes = authenticated_policy()
+    if fixed_candidate:
+        _, policy = authenticated_fixed_policy()
+        proof = json.loads(FIXED_PROOF.read_bytes())
+        assert proof["native_payload_authenticated_by_installer"]
+        assert proof["dedicated_executable_label_observed"]
+        assert proof["dedicated_policy_sha256"] == policy["policy_sha256"]
+        assert proof["release_source_sha"] == release["source_sha"]
+        assert proof["release_archive_sha256"] == release["archive_sha256"]
     assert installed_modules() == modules_before
     assert not Path("/run/netns", NS).exists()
     assert command("/usr/bin/systemctl", "show", "-p", "LoadState",
@@ -856,8 +935,18 @@ def probe(evidence=None, *, root_master=False, signed_derived=False):
             pid_dir.mkdir(mode=0o750)
             os.chown(pid_dir, master_uid, master_gid)
         pid_file = pid_dir / "nginx.pid"
-        executable = root / "nginx"
-        if signed_derived:
+        executable = FIXED_EXECUTABLE if fixed_candidate else root / "nginx"
+        if fixed_candidate:
+            info = executable.lstat()
+            assert stat.S_ISREG(info.st_mode) and info.st_uid == info.st_gid == 0
+            assert stat.S_IMODE(info.st_mode) == 0o755 and info.st_nlink == 1
+            assert (info.st_dev, info.st_ino) == (proof["device"], proof["inode"])
+            assert os.getxattr(executable, "security.selinux").rstrip(b"\0") == (
+                policy["executable_context"].encode("ascii"))
+            assert hashlib.sha256(executable.read_bytes()).hexdigest() == proof["sha256"]
+            fixed_before = (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns,
+                            os.getxattr(executable, "security.selinux"))
+        elif signed_derived:
             # Reuse the authenticated worker's descriptor-bound staging
             # primitive, but only in this guarded private fixture directory.
             code = """
@@ -979,17 +1068,20 @@ location / {{ return 404; }}
             build = Path(build)
             policy = build / (MODULE + ".te")
             # Compile only the bytes authenticated before any policy side effects.
-            policy.write_bytes(policy_bytes)
-            policy.chmod(0o600)
-            assert policy.read_bytes() == policy_bytes
-            command("/usr/bin/make", "-C", str(build), "-f",
-                    "/usr/share/selinux/devel/Makefile", MODULE + ".pp", timeout=120)
+            if not fixed_candidate:
+                policy.write_bytes(policy_bytes)
+                policy.chmod(0o600)
+                assert policy.read_bytes() == policy_bytes
+                command("/usr/bin/make", "-C", str(build), "-f",
+                        "/usr/share/selinux/devel/Makefile", MODULE + ".pp", timeout=120)
             try:
-                command("/usr/sbin/semodule", "-i", str(build / (MODULE + ".pp")), timeout=120)
-                loaded = True
+                if not fixed_candidate:
+                    command("/usr/sbin/semodule", "-i", str(build / (MODULE + ".pp")), timeout=120)
+                    loaded = True
                 command("/usr/bin/chcon", "-t", MODULE + "_ro_t", str(root),
                         str(cert), str(key), str(conf))
-                command("/usr/bin/chcon", "-t", MODULE + "_exec_t", str(executable))
+                if not fixed_candidate:
+                    command("/usr/bin/chcon", "-t", MODULE + "_exec_t", str(executable))
                 command("/usr/bin/chcon", "-R", "-t", MODULE + "_rw_t", str(writable))
                 if root_master or signed_derived:
                     command("/usr/bin/chcon", "-t", MODULE + "_pid_t", str(pid_dir))
@@ -1038,7 +1130,8 @@ location / {{ return 404; }}
                 ]
                 if signed_derived:
                     derived_identity = publish_derived_unit(
-                        derive_signed_unit(signed_unit, root, root_master=root_master), unit)
+                        derive_signed_unit(signed_unit, root, root_master=root_master,
+                                           fixed_candidate=fixed_candidate), unit)
                     command("/usr/bin/systemctl", "daemon-reload")
                     assert command("/usr/bin/systemctl", "show", "--value", "-p", "FragmentPath",
                                    unit).stdout.strip() == str(derived_identity[0])
@@ -1353,15 +1446,38 @@ location / {{ return 404; }}
         assert hashlib.sha256(VENDOR.read_bytes()).hexdigest() == original[1]
         assert os.getxattr(VENDOR, "security.selinux") == original[2]
         guard()
-        print("PASS: isolated SELinux module and netns removed; stock booleans and vendor unchanged",
-              flush=True)
+        if fixed_candidate:
+            now = executable.lstat()
+            assert fixed_before == (now.st_dev, now.st_ino, now.st_mtime_ns, now.st_ctime_ns,
+                                    os.getxattr(executable, "security.selinux"))
+            assert hashlib.sha256(executable.read_bytes()).hexdigest() == proof["sha256"]
+            print("PASS: fixed authenticated executable ran in dedicated signed policy domain; "
+                  "runtime-only unit and namespace removed, staged inode and label unchanged", flush=True)
+        else:
+            print("PASS: isolated SELinux module and netns removed; stock booleans and vendor unchanged",
+                  flush=True)
         print("NOT VERIFIED: signed dedicated service transition, arbitrary custom port labels, "
               "production egress transaction and actual installed cache acceptance", flush=True)
 
 
 if __name__ == "__main__":
-    evidence = authenticated_vendor_evidence()
-    probe(evidence)
-    probe(evidence, signed_derived=True)
-    probe(evidence, root_master=True)
-    probe(evidence, root_master=True, signed_derived=True)
+    guard()
+    if sys.argv[1:] == ["--fixed-candidate"]:
+        # Only this guarded disposable subprocess uses the stable module.
+        # No arbitrary policy, executable or namespace name is accepted.
+        MODULE = FIXED_MODULE
+        DOMAIN = MODULE + "_t"
+        proof = json.loads(FIXED_PROOF.read_bytes())
+        evidence = {
+            "distribution": "almalinux", "package_identity": proof["package_identity"],
+            "native_payload_sha256": proof["native_payload_sha256"],
+            "authenticated_sha256": proof["sha256"],
+        }
+        probe(evidence, root_master=True, signed_derived=True, fixed_candidate=True)
+    elif not sys.argv[1:]:
+        evidence = authenticated_vendor_evidence()
+        probe(evidence)
+        probe(evidence, signed_derived=True)
+        probe(evidence, root_master=True)
+    else:
+        raise SystemExit("Invalid isolated fixture arguments")
