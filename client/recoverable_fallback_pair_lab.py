@@ -362,53 +362,60 @@ def _is_dnf4_pair_root(root: Path) -> bool:
     return root.parent == Path("/var/tmp") and root.name.startswith(DNF4_PAIR_PREFIX)
 
 
+def _require_dnf4(condition: bool) -> None:
+    # This module is part of the source archive, though not the installed
+    # helper. Refuse even if Python is invoked with -O.
+    if not condition:
+        raise locks.LockInspectionRefused("Unsafe private DNF4 lock scope")
+
+
 def _dnf4_fixture_guard(root: Path) -> None:
     """Only fixed root-owned native VM fixtures; no host locks or override."""
     root = Path(root)
-    assert os.getresuid() == (0, 0, 0) and os.getresgid() == (0, 0, 0)
-    assert os.uname().nodename == "pr237-almalinux10"
-    assert not Path("/.dockerenv").exists()
-    assert Path("/proc/1/comm").read_text("ascii").strip() == "systemd"
-    assert _is_dnf4_pair_root(root) or (
-        root.parent == Path("/var/lib") and root.name.startswith("repocache-ci-dnf-root-"))
-    assert root.resolve(strict=True) == root
+    _require_dnf4(os.getresuid() == (0, 0, 0) and os.getresgid() == (0, 0, 0))
+    _require_dnf4(os.uname().nodename == "pr237-almalinux10")
+    _require_dnf4(not Path("/.dockerenv").exists())
+    _require_dnf4(Path("/proc/1/comm").read_text("ascii").strip() == "systemd")
+    _require_dnf4(_is_dnf4_pair_root(root) or (
+        root.parent == Path("/var/lib") and root.name.startswith("repocache-ci-dnf-root-")))
+    _require_dnf4(root.resolve(strict=True) == root)
     parent = root.parent.lstat()
-    assert stat.S_ISDIR(parent.st_mode) and parent.st_uid == 0
+    _require_dnf4(stat.S_ISDIR(parent.st_mode) and parent.st_uid == 0)
     if root.parent == Path("/var/tmp"):
-        assert parent.st_mode & stat.S_ISVTX
+        _require_dnf4(parent.st_mode & stat.S_ISVTX)
     else:
-        assert not parent.st_mode & 0o022
+        _require_dnf4(not parent.st_mode & 0o022)
     env = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"}
 
     def native(*argv):
         result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, text=True, env=env, timeout=15)
-        assert result.returncode == 0
+        _require_dnf4(result.returncode == 0)
         return result.stdout.strip()
 
-    assert native("/usr/bin/systemd-detect-virt", "--vm") in ("qemu", "kvm")
-    assert native("/usr/sbin/getenforce") == "Enforcing"
+    _require_dnf4(native("/usr/bin/systemd-detect-virt", "--vm") in ("qemu", "kvm"))
+    _require_dnf4(native("/usr/sbin/getenforce") == "Enforcing")
     release = Path("/etc/os-release").read_text("ascii")
-    assert re.search(r'^ID="?almalinux"?$', release, re.M)
-    assert re.search(r'^VERSION_ID="?10(?:\.[0-9]+)?"?$', release, re.M)
-    assert not Path("/usr/bin/dnf5").is_file()
-    assert native("/usr/bin/dnf", "--version").splitlines()[0].startswith("4.")
+    _require_dnf4(re.search(r'^ID="?almalinux"?$', release, re.M))
+    _require_dnf4(re.search(r'^VERSION_ID="?10(?:\.[0-9]+)?"?$', release, re.M))
+    _require_dnf4(not Path("/usr/bin/dnf5").is_file())
+    _require_dnf4(native("/usr/bin/dnf", "--version").splitlines()[0].startswith("4."))
     fd = os.open(root, boundary.DIR)
     try:
         info = os.fstat(fd)
-        assert info.st_uid == info.st_gid == 0 and stat.S_IMODE(info.st_mode) == 0o700
+        _require_dnf4(info.st_uid == info.st_gid == 0 and stat.S_IMODE(info.st_mode) == 0o700)
         mark = os.open(DNF4_MARKER, REG, dir_fd=fd)
         try:
             found = os.fstat(mark)
-            assert stat.S_ISREG(found.st_mode) and found.st_uid == found.st_gid == 0
-            assert found.st_nlink == 1 and stat.S_IMODE(found.st_mode) == 0o600
-            assert os.read(mark, len(DNF4_MAGIC) + 1) == DNF4_MAGIC
+            _require_dnf4(stat.S_ISREG(found.st_mode) and found.st_uid == found.st_gid == 0)
+            _require_dnf4(found.st_nlink == 1 and stat.S_IMODE(found.st_mode) == 0o600)
+            _require_dnf4(os.read(mark, len(DNF4_MAGIC) + 1) == DNF4_MAGIC)
             named = os.stat(DNF4_MARKER, dir_fd=fd, follow_symlinks=False)
-            assert (found.st_dev, found.st_ino) == (named.st_dev, named.st_ino)
+            _require_dnf4((found.st_dev, found.st_ino) == (named.st_dev, named.st_ino))
         finally:
             os.close(mark)
         if _is_dnf4_pair_root(root):
-            assert boundary._read_pinned(fd, MARKER, len(MAGIC)) == MAGIC
+            _require_dnf4(boundary._read_pinned(fd, MARKER, len(MAGIC)) == MAGIC)
     finally:
         os.close(fd)
 
@@ -425,13 +432,13 @@ def _dnf4_private_claim(root: Path):
     lock_dir = root / "var/lib/dnf"
     rpm_dir = root / "usr/lib/sysimage/rpm"
     for directory in (lock_dir, rpm_dir):
-        assert directory.resolve(strict=True) == directory
+        _require_dnf4(directory.resolve(strict=True) == directory)
         # The sticky /var/tmp parent is outside this protected private root.
         for parent in (directory, *directory.parents):
             if parent == root.parent:
                 break
             info = parent.lstat()
-            assert stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022
+            _require_dnf4(stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022)
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
     leaf = "rpmdb_lock.pid"
     staged = ".repocache-ci-rpmdb-lock.stage"
@@ -442,16 +449,16 @@ def _dnf4_private_claim(root: Path):
         return (info.st_dev, info.st_ino, info.st_mode, info.st_uid,
                 info.st_gid, info.st_nlink, info.st_size)
     def recheck():
-        assert os.getpid() == int(expected)
-        assert identity(os.fstat(fd)) == claim
-        assert identity(os.stat(leaf, dir_fd=dirfd, follow_symlinks=False)) == claim
-        assert os.pread(fd, 32, 0) == expected
-        assert identity(os.fstat(kernel)) == rpm_identity
-        assert identity(os.stat(".rpm.lock", dir_fd=rpmfd, follow_symlinks=False)) == rpm_identity
+        _require_dnf4(os.getpid() == int(expected))
+        _require_dnf4(identity(os.fstat(fd)) == claim)
+        _require_dnf4(identity(os.stat(leaf, dir_fd=dirfd, follow_symlinks=False)) == claim)
+        _require_dnf4(os.pread(fd, 32, 0) == expected)
+        _require_dnf4(identity(os.fstat(kernel)) == rpm_identity)
+        _require_dnf4(identity(os.stat(".rpm.lock", dir_fd=rpmfd, follow_symlinks=False)) == rpm_identity)
         for path, pinned in ((lock_dir, dirfd), (rpm_dir, rpmfd)):
             actual = path.lstat()
             held = os.fstat(pinned)
-            assert (actual.st_dev, actual.st_ino) == (held.st_dev, held.st_ino)
+            _require_dnf4((actual.st_dev, actual.st_ino) == (held.st_dev, held.st_ino))
     try:
         dirfd = os.open(lock_dir, flags)
         rpmfd = os.open(rpm_dir, flags)
@@ -461,10 +468,10 @@ def _dnf4_private_claim(root: Path):
             raise FileExistsError("Existing DNF4 lock evidence; no takeover")
         fd = os.open(staged, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW |
                      os.O_CLOEXEC, 0o600, dir_fd=dirfd)
-        assert os.write(fd, expected) == len(expected)
+        _require_dnf4(os.write(fd, expected) == len(expected))
         os.fsync(fd)
         claim = identity(os.fstat(fd))
-        assert claim[3:6] == (0, 0, 1)
+        _require_dnf4(claim[3:6] == (0, 0, 1))
         boundary._rename_noreplace(dirfd, staged, leaf)
         published = True
         os.fsync(dirfd)
@@ -472,8 +479,8 @@ def _dnf4_private_claim(root: Path):
         kernel = os.open(".rpm.lock", os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC |
                          os.O_NONBLOCK, dir_fd=rpmfd)
         info = os.fstat(kernel)
-        assert stat.S_ISREG(info.st_mode) and info.st_uid == info.st_gid == 0
-        assert info.st_nlink == 1 and not info.st_mode & 0o022
+        _require_dnf4(stat.S_ISREG(info.st_mode) and info.st_uid == info.st_gid == 0)
+        _require_dnf4(info.st_nlink == 1 and not info.st_mode & 0o022)
         fcntl.flock(kernel, fcntl.LOCK_EX | fcntl.LOCK_NB)
         fcntl.lockf(kernel, fcntl.LOCK_EX | fcntl.LOCK_NB)
         rpm_identity = identity(os.fstat(kernel))

@@ -166,3 +166,23 @@ def test_reserved_dnf4_pair_root_never_falls_back_to_dnf5(monkeypatch):
     with pytest.raises(lab.locks.LockInspectionRefused, match="DNF4"):
         with lab._package_scope(root, "etc/apt/sources.list.d/base.list"):
             pytest.fail("APT accepted in DNF4 fixture")
+
+
+def test_dnf4_guard_refuses_real_root_even_in_optimized_python():
+    import subprocess
+
+    client = Path(__file__).resolve().parents[1] / "client"
+    code = """
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import recoverable_fallback_pair_lab as lab
+try:
+    lab._dnf4_fixture_guard(Path("/"))
+except lab.locks.LockInspectionRefused:
+    raise SystemExit(0)
+raise SystemExit(91)
+"""
+    result = subprocess.run([sys.executable, "-I", "-O", "-c", code, str(client)],
+                            capture_output=True, timeout=15, check=False)
+    assert result.returncode == 0, result.stderr
