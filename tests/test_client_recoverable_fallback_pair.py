@@ -186,3 +186,49 @@ raise SystemExit(91)
     result = subprocess.run([sys.executable, "-I", "-O", "-c", code, str(client)],
                             capture_output=True, timeout=15, check=False)
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("kind", ["file", "directory", "dangling", "fifo"])
+def test_pending_journal_refuses_any_exact_leaf_without_following(tmp_path, kind):
+    ident = "a" * 32
+    path = tmp_path / lab._pending_journal_name(ident)
+    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        lab._refuse_pending_journal(fd, ident)
+        if kind == "file":
+            path.write_bytes(b"partial")
+        elif kind == "directory":
+            path.mkdir()
+        elif kind == "dangling":
+            path.symlink_to(tmp_path / "absent")
+        else:
+            os.mkfifo(path)
+        before = path.lstat()
+        with pytest.raises(lab.PairRefused, match="Pending journal requires manual recovery"):
+            lab._refuse_pending_journal(fd, ident)
+        after = path.lstat()
+        assert (before.st_dev, before.st_ino, before.st_mode) == (
+            after.st_dev, after.st_ino, after.st_mode)
+        # No unrelated transaction ID is blocked by this leaf.
+        lab._refuse_pending_journal(fd, "b" * 32)
+        if kind == "file":
+            assert path.read_bytes() == b"partial"
+        if kind == "dangling":
+            assert not (tmp_path / "absent").exists()
+    finally:
+        os.close(fd)
+
+
+def test_pending_journal_lookup_error_is_not_absence(monkeypatch):
+    def denied(*args, **kwargs):
+        assert kwargs == {"dir_fd": 123, "follow_symlinks": False}
+        raise PermissionError("unavailable")
+    monkeypatch.setattr(lab.os, "stat", denied)
+    with pytest.raises(lab.PairRefused, match="Pending journal state cannot be verified"):
+        lab._refuse_pending_journal(123, "a" * 32)
+
+
+def test_pending_journal_name_uses_validated_id():
+    assert lab._pending_journal_name("a" * 32) == ".pair-" + "a" * 32 + ".pending"
+    with pytest.raises(lab.PairRefused, match="Invalid transaction identifier"):
+        lab._pending_journal_name("../unsafe")

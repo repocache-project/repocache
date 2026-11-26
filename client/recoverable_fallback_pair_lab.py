@@ -106,6 +106,27 @@ def _journal_name(ident: str) -> str:
     return "pair-" + ident + ".json"
 
 
+def _pending_journal_name(ident: str) -> str:
+    _journal_name(ident)  # Validate the ID before constructing a leaf.
+    return ".pair-" + ident + ".pending"
+
+
+def _refuse_pending_journal(fd: int, ident: str) -> None:
+    """Never mistake interrupted journal publication for a clean state.
+
+    Called under the existing exclusive state lock, before reading an old
+    journal or staging any new source. Even a dangling symlink, empty
+    file or matching payload is uncertain; preserve it for manual review.
+    """
+    try:
+        os.stat(_pending_journal_name(ident), dir_fd=fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise PairRefused("Pending journal state cannot be verified") from exc
+    raise PairRefused("Pending journal requires manual recovery")
+
+
 def _source_attrs(journal: dict) -> tuple[tuple[str, bytes], ...]:
     if journal["schema"] in (2, 4):
         return ()
@@ -245,7 +266,7 @@ def _get_journal(fd: int, ident: str) -> dict | None:
 
 def _put_journal(fd: int, ident: str, j: dict) -> None:
     name = _journal_name(ident)
-    temp = ".pair-" + ident + ".pending"
+    temp = _pending_journal_name(ident)
     data = _pack(j)
     if len(data) > JOURNAL_MAX:
         raise PairRefused("Journal too large")
@@ -572,6 +593,7 @@ def _apply_sandbox(root: Path, ident: str, *, crash: str | None,
         with boundary._state(root) as (statefd, owner):
             _sandbox(root, statefd)
             with boundary._exclusive_lock(statefd, owner), contextlib.ExitStack() as scope:
+                _refuse_pending_journal(statefd, ident)
                 journal = _get_journal(statefd, ident)
                 approved = boundary._manifest(statefd, ident)
                 source = journal["source"] if journal is not None else approved["source"]
@@ -890,6 +912,7 @@ def restore_sandbox(root: Path, ident: str, *,
     with boundary._state(root) as (fd, owner):
         _sandbox(root, fd)
         with boundary._exclusive_lock(fd, owner):
+            _refuse_pending_journal(fd, ident)
             j = _get_journal(fd, ident)
             if j is None or j["phase"] not in ("installed", "restore-armed"):
                 raise PairRefused("No committed sandbox transaction to restore")
@@ -908,6 +931,7 @@ def recover_sandbox(root: Path, ident: str) -> dict:
     with boundary._state(root) as (fd, owner):
         _sandbox(root, fd)
         with boundary._exclusive_lock(fd, owner):
+            _refuse_pending_journal(fd, ident)
             j = _get_journal(fd, ident)
             if j is None:
                 return {"status": "no-intent", "write_eligible": False}
