@@ -1187,9 +1187,15 @@ finally:
 def verify_fixed_executable_candidate(native, assets, pins, distribution):
     """Exercise the actual fixed installer candidate in the guarded VM."""
     import stat
-    from ci_v06_vm_signed_client_guest import guarded_native_guest
-    guarded_native_guest({"debian": "debian13", "almalinux": "almalinux10"}[distribution])
     assert __debug__ and os.getresuid() == os.getresgid() == (0, 0, 0)
+    assert socket.gethostname() == "pr237-" + {"debian": "debian13", "almalinux": "almalinux10"}[distribution]
+    assert Path("/proc/1/comm").read_text().strip() == "systemd"
+    assert run("/usr/bin/systemd-detect-virt", "--vm").returncode == 0
+    assert run("/usr/bin/systemd-detect-virt", "--container").returncode != 0
+    assert native._native_distro() == distribution
+    assert ROOT.is_dir() and not ROOT.is_symlink() and ROOT.stat().st_uid == 0
+    if distribution == "almalinux":
+        assert run("/usr/sbin/getenforce").stdout.strip() == "Enforcing"
     release = native.stage.verify_installed_worker(assets, **pins)
     assert release["publisher_key_id"] == "pr237-synthetic"
     target = Path("/usr/libexec/repocache/nginx")
