@@ -715,3 +715,25 @@ def test_isolated_derived_unit_preserves_signed_contract_and_private_paths():
             guest.derive_signed_unit(bad, root)
     with pytest.raises(AssertionError):
         guest.derive_signed_unit(signed, Path("/"))
+
+
+def test_isolated_derived_root_uses_implicit_identity_and_same_four_caps():
+    import configparser
+    from pathlib import Path
+    from scripts import ci_selinux_nginx_egress_guest as guest
+
+    signed = (Path(__file__).resolve().parents[1] /
+              "docs/examples/systemd/repocache-nginx.service").read_bytes()
+    root = Path("/var/lib/repocache-ci-selinux-test")
+    parsed = configparser.ConfigParser(interpolation=None, strict=True)
+    parsed.optionxform = str
+    parsed.read_string(guest.derive_signed_unit(signed, root, root_master=True).decode("ascii"))
+    svc = parsed["Service"]
+    assert "User" not in svc and "Group" not in svc
+    assert svc["CapabilityBoundingSet"].split() == ["CAP_CHOWN", "CAP_KILL", "CAP_SETGID", "CAP_SETUID"]
+    assert "AmbientCapabilities" not in svc
+    assert svc["NoNewPrivileges"] == "yes"
+    assert svc["RestrictAddressFamilies"] == "AF_UNIX AF_INET"
+    assert svc["ProtectSystem"] == "strict" and svc["ProtectHome"] == "yes"
+    assert svc["Type"] == "forking"
+    assert parsed.sections() == ["Unit", "Service"]

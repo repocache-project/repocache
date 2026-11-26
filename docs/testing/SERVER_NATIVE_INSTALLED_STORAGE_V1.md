@@ -336,3 +336,24 @@ POST and upstream redirect, and withdraws DNF with a new rendered
 candidate, real reload and old-worker drain while APT remains usable.
 The fixture does not publish a catalog, mutate the installed signed unit,
 grant an operational route, or validate a production egress transaction.
+
+### Root-master credential setup and signed-derived comparison
+
+Exact prior native evidence: the installed authenticated repository renderer
+passed the nonroot isolated APT/DNF MISS/HIT, POST/redirect and DNF withdrawal
+tests. The root-master and independent Python credential canary both began
+with CapEff/CapPrm=0x61 and CapBnd=0xe1, despite the enforcing kernel policy
+allowing self setuid/setgid. The canary successfully changed groups but
+setuid returned EPERM. The upstream systemd v257 exec-invoke.c
+keep_seccomp_privileges path explicitly drops CAP_SETUID after enforce_user
+when an explicit UID is selected and it is not ambient. This is a
+source-backed hypothesis, not yet a verified diagnosis of the guest build.
+The corrected fixture omits explicit User=root/Group=root, matching the
+signed installed unit's default identity, retains NNP, seccomp and exactly
+the same four-capability bound, and asserts actual root/worker credentials.
+The transient root path retains its direct cache directory; the derived
+root path uses separately owned cache zones under a traversal-only parent.
+After transient success the signed-unit-derived root variant must also pass
+the actual rendered routes, reload/drain, withdrawal, native stop and
+readback of the unchanged installed unit. No production service changes
+or broadened capabilities, policy, firewall or publisher claim are made.

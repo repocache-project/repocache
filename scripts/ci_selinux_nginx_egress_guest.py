@@ -27,6 +27,7 @@ DOMAIN = MODULE + "_t"
 UNIT = "repocache-ci-nginx-egress.service"
 ROOT_UNIT = "repocache-ci-nginx-root-egress.service"
 DERIVED_UNIT = "repocache-ci-nginx-derived-egress.service"
+DERIVED_ROOT_UNIT = "repocache-ci-nginx-derived-root-egress.service"
 CREDENTIAL_UNIT = "repocache-ci-nginx-credential.service"
 NS = "repocache-ci-nginx-egress"
 PREFIX = "repocache-ci-selinux-"
@@ -186,9 +187,10 @@ def authenticated_policy(*, include_unit=False):
     return result
 
 
-def derive_signed_unit(raw, root):
+def derive_signed_unit(raw, root, *, root_master=False):
     """Strict fixed transformations of authenticated bytes, never a host unit editor."""
     assert type(raw) is bytes and 0 < len(raw) <= 8192
+    assert type(root_master) is bool
     assert root.parent == Path("/var/lib") and re.fullmatch(PREFIX + r"[a-z0-9_]+", root.name)
     # Require exact service contract; unexpected upstream unit changes fail
     # closed and must be reviewed rather than silently inherited.
@@ -224,18 +226,25 @@ def derive_signed_unit(raw, root):
         service[key] = (service[key].replace("/usr/sbin/nginx", str(root / "nginx") +
                            " -e stderr -p " + str(root))
                         .replace("/etc/nginx/repocache.d/repocache.conf", str(root / "nginx.conf")))
-    service.update({"User": "nginx", "Group": "nginx", "CapabilityBoundingSet": "",
+    service.update({"CapabilityBoundingSet": MASTER_CAP_NAMES if root_master else "",
                     "NetworkNamespacePath": "/run/netns/" + NS,
                     "RestrictAddressFamilies": "AF_UNIX AF_INET"})
+    if not root_master:
+        service.update({"User": "nginx", "Group": "nginx"})
+    # For the root variant preserve the signed unit's implicit system-manager
+    # identity. With an explicit User=root and seccomp, systemd can consume
+    # CAP_SETUID while setting up the credentials before exec. No ambient
+    # capabilities, bounding-set extension or NNP relaxation is permitted.
     # No [Install] section: this is a runtime-only, never-enabled unit.
     return ("[Unit]\nDescription=REPOCACHE CI derived signed unit\nAfter=network.target\n"
             "[Service]\n" + "".join(key + "=" + value + "\n" for key, value in service.items())
             ).encode("ascii")
 
 
-def publish_derived_unit(raw):
+def publish_derived_unit(raw, unit):
     guard()
-    path = Path("/run/systemd/system") / DERIVED_UNIT
+    assert unit in (DERIVED_UNIT, DERIVED_ROOT_UNIT)
+    path = Path("/run/systemd/system") / unit
     assert path.parent.resolve(strict=True) == path.parent
     assert path.parent.stat().st_uid == 0 and not path.parent.stat().st_mode & 0o022
     # The caller records the exact inode and performs scoped cleanup even if
@@ -259,7 +268,7 @@ def publish_derived_unit(raw):
 
 def remove_derived_unit(identity):
     path, dev, ino, digest = identity
-    assert path == Path("/run/systemd/system") / DERIVED_UNIT
+    assert path.parent == Path("/run/systemd/system") and path.name in (DERIVED_UNIT, DERIVED_ROOT_UNIT)
     info = path.lstat()
     assert (info.st_dev, info.st_ino, info.st_uid, info.st_nlink) == (dev, ino, 0, 1)
     assert hashlib.sha256(path.read_bytes()).hexdigest() == digest
@@ -438,7 +447,6 @@ except OSError as e:
     try:
         result = command("/usr/bin/systemd-run", "--unit=" + CREDENTIAL_UNIT,
                          "--wait", "--pipe", "--collect", "--property=Type=exec",
-                         "--property=User=root", "--property=Group=root",
                          "--property=CapabilityBoundingSet=" + MASTER_CAP_NAMES,
                          "--property=NoNewPrivileges=yes", "--property=ProtectSystem=strict",
                          "--property=ProtectHome=yes", "--property=PrivateTmp=yes",
@@ -613,11 +621,10 @@ def workers(master, executable, uid, gid, *, bounding):
 def probe(vendor_digest=None, *, root_master=False, signed_derived=False):
     guard()
     assert type(root_master) is bool and type(signed_derived) is bool
-    assert not (root_master and signed_derived)
     if vendor_digest is None:
         vendor_digest = authenticated_vendor_digest()
     assert re.fullmatch(r"[0-9a-f]{64}", vendor_digest)
-    unit = ROOT_UNIT if root_master else DERIVED_UNIT if signed_derived else UNIT
+    unit = (DERIVED_ROOT_UNIT if root_master else DERIVED_UNIT) if signed_derived else (ROOT_UNIT if root_master else UNIT)
     modules_before = installed_modules()
     assert MODULE not in {line.split()[0] for line in modules_before.splitlines() if line}
     assert not Path("/run/netns", NS).exists()
@@ -661,10 +668,16 @@ def probe(vendor_digest=None, *, root_master=False, signed_derived=False):
             path = writable / name
             path.mkdir(mode=0o700)
             # Root master must itself perform NGINX native ownership setup.
-            os.chown(path, master_uid, master_gid)
-        legacy = writable / "cache/legacy"
-        legacy.mkdir(mode=0o700)
-        os.chown(legacy, master_uid, master_gid)
+            os.chown(path, master_uid, account.pw_gid)
+        legacy = writable / "cache"
+        if signed_derived:
+            # Parent is traversal-only for the root-master case. Every
+            # actual cache zone is a separate private directory.
+            if root_master:
+                legacy.chmod(0o755)
+            legacy = legacy / "legacy"
+            legacy.mkdir(mode=0o700)
+            os.chown(legacy, master_uid, account.pw_gid)
         pid_dir = root / "pid" if root_master or signed_derived else writable
         if root_master or signed_derived:
             pid_dir.mkdir(mode=0o750)
@@ -711,7 +724,7 @@ location = /{name} {{
             for kind in ("apt", "dnf"):
                 directory = writable / "cache" / ("fixture-" + kind)
                 directory.mkdir(mode=0o700)
-                os.chown(directory, account.pw_uid, account.pw_gid)
+                os.chown(directory, master_uid, account.pw_gid)
             rendered_http, rendered_locations = render_signed_fixture_routes(root)
         conf.write_text(f"""
 daemon {'on' if root_master or signed_derived else 'off'};
@@ -728,7 +741,7 @@ proxy_temp_path {writable}/proxy;
 fastcgi_temp_path {writable}/fastcgi;
 scgi_temp_path {writable}/scgi;
 uwsgi_temp_path {writable}/uwsgi;
-proxy_cache_path {writable}/cache/legacy levels=1:2 keys_zone=fixture:1m use_temp_path=off;
+proxy_cache_path {legacy} levels=1:2 keys_zone=fixture:1m use_temp_path=off;
 {rendered_http}
 server {{
 listen 127.0.0.1:{PORT} ssl;
@@ -782,14 +795,14 @@ location / {{ return 404; }}
                 started = True
                 service_properties = [
                     "--property=Type=forking", "--property=PIDFile=" + str(pid_file),
-                    "--property=User=root", "--property=Group=root",
                     "--property=CapabilityBoundingSet=" + MASTER_CAP_NAMES,
                 ] if root_master else [
                     "--property=Type=exec", "--property=User=nginx", "--property=Group=nginx",
                     "--property=CapabilityBoundingSet=",
                 ]
                 if signed_derived:
-                    derived_identity = publish_derived_unit(derive_signed_unit(signed_unit, root))
+                    derived_identity = publish_derived_unit(
+                        derive_signed_unit(signed_unit, root, root_master=root_master), unit)
                     command("/usr/bin/systemctl", "daemon-reload")
                     assert command("/usr/bin/systemctl", "show", "--value", "-p", "FragmentPath",
                                    unit).stdout.strip() == str(derived_identity[0])
@@ -828,8 +841,15 @@ location / {{ return 404; }}
                 if root_master:
                     assert int(pid_file.read_text()) == pid
                     assert pid_file.stat().st_uid == 0
-                    assert all((writable / name).stat().st_uid == account.pw_uid
-                               for name in ("body", "proxy", "fastcgi", "scgi", "uwsgi", "cache"))
+                    owned = [writable / name for name in ("body", "proxy", "fastcgi", "scgi", "uwsgi")]
+                    owned.append(legacy)
+                    if signed_derived:
+                        owned.extend(writable / "cache" / ("fixture-" + kind)
+                                     for kind in ("apt", "dnf"))
+                        assert (writable / "cache").stat().st_uid == 0
+                    for path in owned:
+                        assert (path.stat().st_uid, path.stat().st_gid) == (account.pw_uid, account.pw_gid)
+                        assert stat.S_IMODE(path.stat().st_mode) == 0o700
                     # Root cannot bypass the namespace-local egress filter.
                     denied = command("/usr/sbin/ip", "netns", "exec", NS, "/usr/bin/curl",
                                      "--silent", "--max-time", "2", "--noproxy", "*",
@@ -982,8 +1002,8 @@ location / {{ return 404; }}
                     assert len(former) == 1
                     command("/usr/bin/systemctl", "reload", unit)
                     for _ in range(100):
-                        assert process_identity(pid, executable, account.pw_uid, account.pw_gid,
-                                                bounding=bounding) == master
+                        assert process_identity(pid, executable, master_uid, master_gid,
+                                                capabilities=bounding, bounding=bounding) == master
                         live = workers(pid, executable, account.pw_uid, account.pw_gid, bounding=bounding)
                         if len(live) == 1 and not live & former:
                             break
@@ -998,8 +1018,10 @@ location / {{ return 404; }}
                     assert (root / "origin-counts").read_text().splitlines() == before_hits + [
                         "127.0.0.1:443", "127.0.0.1:443", "127.0.0.2:8008", "127.0.0.1:443"]
                     print("PASS: authenticated installed renderer APT/DNF private routes; TLS MISS/HIT, POST/redirect refusal, DNF withdrawal after worker drain, APT fresh access", flush=True)
-                    assert int(pid_file.read_text()) == pid and pid_file.stat().st_uid == account.pw_uid
-                    print("PASS: authenticated signed-unit-derived nonroot forking lifecycle, native ExecStartPre and ExecReload; confined HTTPS cache", flush=True)
+                    assert int(pid_file.read_text()) == pid and pid_file.stat().st_uid == master_uid
+                    print("PASS: authenticated signed-unit-derived " +
+                          ("limited-capability root-master" if root_master else "nonroot") +
+                          " forking lifecycle, native ExecStartPre and ExecReload; confined HTTPS cache", flush=True)
                 print("PASS: dedicated enforcing NGINX domain, verified HTTPS MISS/HIT, "
                       "SELinux non-HTTP-port refusal and independent exact-address refusal", flush=True)
             except Exception:
@@ -1053,3 +1075,4 @@ if __name__ == "__main__":
     probe(digest)
     probe(digest, signed_derived=True)
     probe(digest, root_master=True)
+    probe(digest, root_master=True, signed_derived=True)
