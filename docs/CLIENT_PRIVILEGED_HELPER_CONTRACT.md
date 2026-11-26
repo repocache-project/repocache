@@ -191,3 +191,28 @@ The v0.6-only closed release source inventory now includes the trusted
 client staging tool in both the builder and verifier. Historical release
 inventories remain unchanged. This includes a non-activating tool, not
 an installed source writer or a production activation permission.
+
+## Approved isolated APT retained-companion recovery (2026-11-25)
+
+The maintainer explicitly approved implementation, review and validation
+in isolated environments only. New APT test transactions use journal
+schemas 4/5 (metadata-free / metadata-bearing), bound to the original
+approval, compiler bytes and exact inode identities. Before restoring a
+source which may have been read by APT, fsync the upstream-only companion
+candidate and durably journal its inode; atomically replace the known
+cache-bearing companion, verify bytes and ownership, then restore the
+source. Interrupted companion-only publication is conservatively retained;
+an intent which never published a companion may clean its known staged
+inode. Recovery never needs the catalog or issues new consent. The
+retained file stays root:root 0644 without unexpected metadata. Restored
+IDs cannot be reused; missing/foreign inode or contents fail closed. No
+automatic retained-file deletion. Legacy lab schemas keep their explicitly
+separate old test behavior, not a production migration mechanism.
+
+An orphan staged before its intent is durable requires manual inspection;
+no unknown temp deletion or claim of atomic CAS against UID 0. This does
+not revoke a mirror list already fetched by APT, prove quiescence, define
+production retention garbage collection or enable installed writes. Real
+SIGKILL at each new durable boundary and actual booted catalog-bound
+recovery are required; exact-HEAD acceptance remains NOT VERIFIED until
+executed. The public CLI and installed helper remain non-activating.
