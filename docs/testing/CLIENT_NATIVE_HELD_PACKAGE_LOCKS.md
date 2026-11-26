@@ -193,3 +193,23 @@ cache route unchanged is not a revocation solution. A reader that has
 already fetched the old mirror contents is outside this particular proof.
 Do not remove the production apply guard or claim complete concurrency,
 revocation or power-loss acceptance from this test.
+
+## Atomic private DNF4 PID claim and reader distinction
+
+The supported AlmaLinux VM's native DNF4 differs from DNF5: its RPMDB
+PID record is ephemeral, not the stable DNF5 kernel-lock pathname. The
+booted signed-RPM test retains the prior manual lock control and adds a
+fixture-only atomic no-replace publication of a durable live PID, with
+real BSD/POSIX locks on the existing isolated RPMDB transaction inode.
+It refuses foreign or stale PID records, checks exact ownership and
+inode/bytes, and releases only its own claim. A real DNF4 TEST transaction
+must refuse with the live owner PID while a cache-only repolist still reads
+a disabled private repository definition. The post-release TEST transaction
+must succeed without any installed package change. A separate real SIGKILL
+leaves the child PID record, which the next claim must preserve and refuse.
+The test harness removes only its own proven dead-child fixture record.
+
+This remains a guarded test, not an installed writer, comprehensive DNF4
+metadata/download lock graph, automatic stale-record recovery or safe
+source-mutation lease. DNF4 and DNF5 evidence must remain distinct.
+Actual booted results are required; no production lock or source is touched.
