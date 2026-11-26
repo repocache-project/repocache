@@ -216,3 +216,16 @@ production retention garbage collection or enable installed writes. Real
 SIGKILL at each new durable boundary and actual booted catalog-bound
 recovery are required; exact-HEAD acceptance remains NOT VERIFIED until
 executed. The public CLI and installed helper remain non-activating.
+
+### Actual journal recovery with a stale native APT reader
+
+The guarded Debian VM additionally exercises the real retained-companion
+transaction and actual APT parser in the same scenario. A fresh private
+mount namespace exposes the marked fixture's APT directory and native
+lock inodes only to the traced child. The parent remains in its original
+namespace, recovers the actual SIGKILL journal while the reader is paused
+before taking the lists lock, and then resumes APT. The fixture requires
+signed HTTPS metadata from the original upstream, no cache requests, no
+unsandboxed download, preserved journal/companion identity, and unchanged
+host sources. This is not an installed writer, production mount strategy,
+quiescence guarantee, or evidence of revocation of previously fetched data.

@@ -8,9 +8,13 @@ from __future__ import annotations
 
 import ctypes
 import fcntl
+import hashlib
+import json
 import os
 from pathlib import Path
+import shutil
 import signal
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -64,7 +68,8 @@ def _wait_stop(child, deadline):
     raise TimeoutError("APT lists-lock barrier timed out")
 
 
-def _at_lists_lock(child, lock: Path):
+def _at_lists_lock(child, lock: Path, *, namespace_alias=False):
+    expected = lock.stat()
     deadline = time.monotonic() + 45
     assert _wait_stop(child, deadline) == signal.SIGSTOP
     _ptrace(0x4200, child.pid, 0, 0x100001)  # TRACESYSGOOD | EXITKILL
@@ -84,7 +89,13 @@ def _at_lists_lock(child, lock: Path):
                     actual = os.readlink(f"/proc/{child.pid}/fd/{entry.args[0]}")
                 except FileNotFoundError:
                     continue
-                if actual == str(lock):
+                if namespace_alias:
+                    # Only the traced child can hold this exact private inode.
+                    # The path is different inside its mount namespace.
+                    observed = os.stat(f"/proc/{child.pid}/fd/{entry.args[0]}")
+                    if (observed.st_dev, observed.st_ino) == (expected.st_dev, expected.st_ino):
+                        return
+                elif actual == str(lock):
                     return
         elif stopped != signal.SIGTRAP:
             deliver = stopped
@@ -192,6 +203,156 @@ def _cycle(root, primary, upstream, keyring, ca, mode):
     print("PASS: actual APT stale source reader, companion " + mode, flush=True)
 
 
+# Mounts exist only in the new child namespace; no host path is created,
+# relabelled, or unmounted. The parent retains its original namespace.
+_NAMESPACE_TRACE_CHILD = r"""
+import os, sys, subprocess
+from pathlib import Path
+root, view = map(Path, sys.argv[1:3])
+assert os.getresuid() == (0, 0, 0)
+assert root.name == 'transaction' and view == root.parent / 'view'
+assert root.parent.name == 'journal'
+assert root.parent.parent.name.startswith('repocache-booted-apt-reader-')
+assert root.resolve(strict=True) == root and view.resolve(strict=True) == view
+assert os.readlink('/proc/self/ns/mnt') != sys.argv[3]
+assert (root / '.repocache-recoverable-pair-test').is_file()
+subprocess.run(['/usr/bin/mount', '--bind', str(root / 'etc/apt'), '/etc/apt'],
+               check=True, timeout=10)
+subprocess.run(['/usr/bin/mount', '--bind', str(root / 'var'), str(view)],
+               check=True, timeout=10)
+assert os.stat('/etc/apt').st_ino == (root / 'etc/apt').stat().st_ino
+assert view.stat().st_ino == (root / 'var').stat().st_ino
+""" + _TRACE_CHILD
+
+
+def _journal_cycle(case, primary, upstream, keyring, ca):
+    """Prove actual journal recovery, not a manual simulation, for a stale APT reader."""
+    from smoke_client_recoverable_pair import build
+    import recoverable_fallback_pair_lab as pair
+    import root_source_boundary as boundary
+
+    assert case.name == "journal" and case.parent.parent == Path("/tmp")
+    assert case.parent.name.startswith("repocache-booted-apt-reader-")
+    case.mkdir(mode=0o755)
+    case.chmod(0o755)
+    root, view = case / "transaction", case / "view"
+    root.mkdir(mode=0o700)
+    view.mkdir(mode=0o755)
+    source, _, _, state = build(root, "apt")
+    etc = root / "etc/apt"
+    keys = etc / "keyrings"
+    keys.mkdir(mode=0o755)
+    shutil.copyfile(keyring, keys / "repocache-ci.gpg")
+    (keys / "repocache-ci.gpg").chmod(0o644)
+    original = (f"deb [signed-by=/etc/apt/keyrings/repocache-ci.gpg] "
+                f"{upstream.origin} stable main\n").encode("ascii")
+    source.write_bytes(original)
+    for name in ("apt.conf.d", "empty-parts"):
+        (etc / name).mkdir(mode=0o755)
+    (etc / "apt.conf").touch(mode=0o644, exist_ok=False)
+    for relative in ("var/lib/apt/lists/partial", "var/cache/apt/archives/partial",
+                     "var/log/apt"):
+        (root / relative).mkdir(parents=True, mode=0o755)
+    status = root / "var/lib/dpkg/status"
+    status.touch(mode=0o644, exist_ok=False)
+    (root / "etc/os-release").write_text('ID=debian\nVERSION_ID="13"\n')
+    config = root / "etc/repocache-client"
+    config.mkdir(mode=0o755)
+    server = primary.origin.removesuffix("/repo/")
+    route = server + "/__repocache/repos/approved/"
+    (config / "config.json").write_text(json.dumps({"server": server}))
+    (config / "config.json").chmod(0o644)
+    catalog = case.parent / "www/.well-known/repocache/catalog.json"
+    catalog.parent.mkdir(parents=True)
+    catalog.write_text(json.dumps({"schema": 1, "repositories": [
+        {"upstream": upstream.origin, "cache": route}]}))
+    (state / ("candidate-" + "a" * 32 + ".json")).unlink()
+    digest = hashlib.sha256(original).hexdigest()
+    old_context = boundary._native_tls_context
+    trusted = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    trusted.load_verify_locations(cafile=str(ca))
+    try:
+        boundary._native_tls_context = lambda: trusted
+        prepared = boundary.prepare_current_candidate(digest, digest, _test_root=root)
+        ident = prepared["managed_id"]
+        review = boundary.review_current_candidate(ident, _test_root=root)
+        assert review["upstream"] == upstream.origin and review["cache"] == route
+        approved = boundary.approve_current_candidate(
+            ident, review["route_sha256"], _test_root=root)
+        assert approved["status"] == "approved"
+        pid = os.fork()
+        if pid == 0:
+            def kill_at(active, phase):
+                if active == phase:
+                    os.kill(os.getpid(), signal.SIGKILL)
+            pair._crash = kill_at
+            pair.apply_retaining_apt_companion_sandbox(root, ident, crash="source")
+            os._exit(77)
+        _, killed = os.waitpid(pid, 0)
+        assert os.WIFSIGNALED(killed) and os.WTERMSIG(killed) == signal.SIGKILL
+    finally:
+        boundary._native_tls_context = old_context
+    mirror = etc / "mirrors" / ("repocache-" + ident + ".list")
+    assert source.read_bytes() != original and mirror.read_bytes().startswith(route.encode())
+    primary.hits.clear()
+    upstream.hits.clear()
+    primary.mode = "unavailable"
+    config_file = case / "fixture.conf"
+    config_file.write_text(
+        'Dir::Etc "/etc/apt";\nDir::Etc::main "apt.conf";\n'
+        'Dir::Etc::parts "apt.conf.d";\nDir::Etc::sourcelist "sources.list.d/base.list";\n'
+        'Dir::Etc::sourceparts "empty-parts";\n'
+        f'Dir::State "{view}/lib/apt";\nDir::State::status "{view}/lib/dpkg/status";\n'
+        f'Dir::Cache "{view}/cache/apt";\nDir::Log "{view}/log/apt";\n'
+        'APT::Update::Error-Mode "any";\nAcquire::Retries "0";\nAcquire::Languages "none";\n'
+        f'Acquire::https::CaInfo "{ca}";\n'
+        'Acquire::https::Verify-Peer "true";\nAcquire::https::Verify-Host "true";\n',
+        encoding="ascii")
+    env = {"PATH": "/usr/bin:/bin", "LC_ALL": "C", "APT_CONFIG": str(config_file)}
+    parent_ns = os.readlink("/proc/self/ns/mnt")
+    host_apt = Path("/etc/apt").stat()
+    log = case / "output.txt"
+    try:
+        with log.open("xb") as output:
+            child = subprocess.Popen(
+                ["/usr/bin/unshare", "--mount", "--propagation", "private",
+                 sys.executable, "-I", "-c", _NAMESPACE_TRACE_CHILD,
+                 str(root), str(view), parent_ns],
+                env=env, stdin=subprocess.DEVNULL, stdout=output,
+                stderr=subprocess.STDOUT, start_new_session=True)
+            try:
+                _at_lists_lock(child, root / "var/lib/apt/lists/lock",
+                               namespace_alias=True)
+                assert os.readlink(f"/proc/{child.pid}/ns/mnt") != parent_ns
+                assert pair.recover_sandbox(root, ident)["status"] == "restored"
+                assert source.read_bytes() == original
+                assert mirror.read_bytes() == (upstream.origin + "\tpriority:1\n").encode()
+                retained_inode = mirror.stat().st_ino
+                _ptrace(17, child.pid)
+                result = child.wait(timeout=45)
+            finally:
+                if child.returncode is None:
+                    os.killpg(child.pid, signal.SIGKILL)
+                    _, stopped = os.waitpid(child.pid, 0)
+                    child.returncode = os.waitstatus_to_exitcode(stopped)
+        assert result == 0, log.read_text(errors="replace")[-3000:]
+        assert upstream.hits and not primary.hits
+        assert "Download is performed unsandboxed as root" not in log.read_text()
+        assert status.read_bytes() == b""
+        assert pair.recover_sandbox(root, ident)["status"] == "restored"
+        assert mirror.stat().st_ino == retained_inode
+        assert source.read_bytes() == original
+        assert not list(view.iterdir())  # the mount never propagated to the parent
+        assert os.readlink("/proc/self/ns/mnt") == parent_ns
+        now = Path("/etc/apt").stat()
+        assert (now.st_dev, now.st_ino) == (host_apt.st_dev, host_apt.st_ino)
+        print("PASS: actual journal SIGKILL recovery preserves a previously parsed "
+              "APT source in a private mount namespace; signed HTTPS metadata "
+              "from upstream only, no cache or host source mutation", flush=True)
+    finally:
+        primary.mode = "healthy"
+
+
 def probe():
     guarded_native_guest("debian13")
     assert os.uname().machine == "x86_64"
@@ -206,6 +367,7 @@ def probe():
             try:
                 for mode in ("retained", "removed", "upstream-only"):
                     _cycle(base / mode, primary, upstream, keyring, ca, mode)
+                _journal_cycle(base / "journal", primary, upstream, keyring, ca)
             finally:
                 upstream.close()
         finally:
