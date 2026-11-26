@@ -382,3 +382,26 @@ This is an isolated-writer safeguard, not protection against a concurrent
 privileged mount-namespace administrator, an installed host-mount policy,
 or authorization for the installed helper to write. The authenticated
 read-only candidate remains unchanged.
+
+
+### Authenticated private writer campaign
+
+The installed helper remains the same deterministic read-only archive.
+The existing synthetic-signed native campaign separately builds an
+import-only archive from the identical verified v0.6 source and closed
+inventory, adding only the existing sandbox transaction modules. This
+profile is internal to the guarded native test harness, requires the
+disposable campaign key and never enters the normal installer or stage
+CLI. Its direct entry point refuses every argument.
+
+The booted guest retains the archive only as a root-private 0600 file in
+a temporary root-owned directory. A fresh isolated interpreter checks
+the exact archive digest, inode, member inventory and zip import origin
+of every client module before exercising the existing marked APT/DNF
+apply, label, failure, offline recovery and native lock fixtures. The
+actual host root is explicitly refused, the ordinary installed helper
+remains unchanged, and host sources and packages must remain unchanged.
+The native campaign removes the temporary archive on completion.
+This is execution of authenticated private writer code, not installation
+or acceptance of a host source writer, production native exclusion,
+genuine publisher signing or route revocation.

@@ -40,6 +40,11 @@ MODULES = (
     "native_package_lock_observation", "source_metadata_lab", "recovery_journal_v1",
 )
 ENTRYPOINT = b"from root_source_boundary import main\nraise SystemExit(main())\n"
+# The separate private test archive is never installed or dispatched by the CLI.
+_PRIVATE_WRITER_MODULES = MODULES + (
+    "transaction_stage", "transaction_atomic_lab", "recoverable_fallback_pair_lab",
+)
+_PRIVATE_WRITER_ENTRYPOINT = b"raise SystemExit(3)\n"
 DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
 
@@ -48,15 +53,25 @@ class ClientHelperStageError(ValueError):
 
 
 def build(source: Path) -> bytes:
-    """Deterministic isolated OS-Python executable; no ambient imports."""
+    """Deterministic non-activating helper; no ambient imports."""
+    return _build_archive(source, modules=MODULES, entrypoint=ENTRYPOINT)
+
+
+def _build_private_writer(source: Path) -> bytes:
+    """Import-only fixture archive; no command dispatch or installed writer."""
+    return _build_archive(source, modules=_PRIVATE_WRITER_MODULES,
+                          entrypoint=_PRIVATE_WRITER_ENTRYPOINT)
+
+
+def _build_archive(source: Path, *, modules, entrypoint) -> bytes:
     client = source / "client"
     if source.is_symlink() or client.is_symlink() or not client.is_dir():
         raise ClientHelperStageError("CLIENT_HELPER_SOURCE_UNSAFE")
     stream = io.BytesIO(INTERPRETER)
     stream.seek(0, io.SEEK_END)
     with zipfile.ZipFile(stream, "w", compression=zipfile.ZIP_STORED) as archive:
-        archive.writestr(zipfile.ZipInfo("__main__.py"), ENTRYPOINT)
-        for module in MODULES:
+        archive.writestr(zipfile.ZipInfo("__main__.py"), entrypoint)
+        for module in modules:
             file = client / (module + ".py")
             if file.is_symlink() or not file.is_file():
                 raise ClientHelperStageError("CLIENT_HELPER_SOURCE_MISSING")
@@ -69,6 +84,16 @@ def build(source: Path) -> bytes:
 
 def authenticated_payload(asset_directory: Path, *, commit: str,
                           archive_sha256: str, system: dict | None = None):
+    return _authenticated_payload(asset_directory, commit=commit,
+                                  archive_sha256=archive_sha256, system=system,
+                                  private_writer=False)
+
+
+def _authenticated_payload(asset_directory: Path, *, commit: str,
+                           archive_sha256: str, system: dict | None,
+                           private_writer: bool):
+    if type(private_writer) is not bool:
+        raise ClientHelperStageError("CLIENT_HELPER_PROFILE_UNSAFE")
     if (type(commit) is not str or not signatures.HEX40.fullmatch(commit)
             or type(archive_sha256) is not str
             or not signatures.HEX64.fullmatch(archive_sha256)):
@@ -83,12 +108,14 @@ def authenticated_payload(asset_directory: Path, *, commit: str,
     if (identity["schema"] != 1 or identity["repository"] != "repocache-project/repocache"
             or identity["commit"] != commit or identity["archive_sha256"] != archive_sha256):
         raise ClientHelperStageError("CLIENT_HELPER_SIGNED_IDENTITY_MISMATCH")
+    if private_writer and identity["key_id"] != "client-vm-fixture":
+        raise ClientHelperStageError("CLIENT_PRIVATE_WRITER_TEST_KEY_REQUIRED")
     with tempfile.TemporaryDirectory(prefix="repocache-client-helper-verified-") as tmp:
         source, policy = upgrade._extract_verified(
             archive, VERSION, Path(tmp), {"version": "0.0.0"},
             system=system, signed_policy_sha256=identity["policy_sha256"])
         upgrade._verified_dependency_profile(identity, policy, VERSION)
-        payload = build(source)
+        payload = _build_private_writer(source) if private_writer else build(source)
     receipt = {
         "schema_version": 1, "status": "AUTHENTICATED_CLIENT_HELPER_STAGED",
         "version": VERSION, "source_sha": commit, "archive_sha256": archive_sha256,
@@ -97,7 +124,28 @@ def authenticated_payload(asset_directory: Path, *, commit: str,
         "helper_sha256": hashlib.sha256(payload).hexdigest(),
         "authorizes_host_installation": False, "authorizes_source_mutation": False,
     }
+    if private_writer:
+        receipt.update(status="AUTHENTICATED_PRIVATE_WRITER_FIXTURE",
+                       private_fixture_only=True, source_writer_installed=False)
     return payload, receipt
+
+
+def _authenticated_private_writer_fixture(asset_directory: Path, *, platform: str,
+                                          commit: str, archive_sha256: str):
+    """Only the guarded native campaign may obtain import-only writer bytes.
+
+    The ordinary helper builder/installer and CLI cannot select this profile.
+    The actual writer still refuses unmarked or mounted roots and requires
+    the native lock scope. No host write or publisher authorization follows.
+    """
+    from scripts.ci_v06_vm_signed_client_guest import guarded_native_guest
+
+    guarded_native_guest(platform)
+    if os.getresuid() != (0, 0, 0) or os.getresgid() != (0, 0, 0):
+        raise ClientHelperStageError("CLIENT_PRIVATE_WRITER_ROOT_REQUIRED")
+    return _authenticated_payload(asset_directory, commit=commit,
+                                  archive_sha256=archive_sha256, system=None,
+                                  private_writer=True)
 
 
 def _private_write(directory: int, name: str, payload: bytes, mode: int) -> None:
