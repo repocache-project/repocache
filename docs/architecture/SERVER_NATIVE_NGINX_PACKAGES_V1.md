@@ -1002,3 +1002,37 @@ remain in this disposable guest for reboot verification. Actual installed
 service transition, owned path contexts, durable WAL-bound egress,
 ingress and installed data plane remain separate mandatory acceptance
 gates. The existing actual upstream test is not suppressed.
+
+
+### Descriptor-bound policy replacement
+
+The fixed namespace reader and new internal replacement operation share a
+retained nsfs descriptor, parent identity and fixed native program checks.
+Replacement requires a caller-retained ownership witness and exact namespace
+identity, full prior ruleset readback, nft validation, a repeated prior
+readback, one atomic delete-and-create batch for the dedicated table and
+repeated complete proposed readback. The batch is reconstructed from the
+closed grammar; no arbitrary command text, flush, shell or host namespace
+operation is accepted. Exact repeats do not write. Unknown policy, identity
+or ownership drift is refused without an automatic retry or guess.
+
+The WAL-bound internal operation reconstructs both policies from the
+existing durable v3 journal and exact current resource bytes under the
+caller's lock; it requires withdrawn catalog, complete proposed bytes and
+rechecks layout, WAL, resources and namespace ownership at the mutation
+boundary. Compensation only replaces exact proposed policy with prior
+policy before losing the proposed bytes. Partial or foreign evidence is
+refused. No live dispatch, catalog publication, namespace provisioning or
+installed service transition is enabled by this increment.
+
+The guarded native fixed-executable fixture now exercises the authenticated
+worker's retained-fd replacement in its privately created namespace,
+rather than issuing the replacement through ip netns exec. It verifies
+foreign namespace identity refusal, idempotence, prior/replacement complete
+readback, unchanged host rules and real packet behavior. The fixture uses
+its existing isolated addresses and does not certify production namespace
+exclusivity or WAL-driven native activation. A concurrent privileged
+netlink administrator remains outside the lease model; the service and
+namespace ownership lifecycle and complete WAL recovery ordering are
+separate mandatory gates. Root-container synthetic label tests are now
+explicitly executed in the existing root-control protocol workflow.

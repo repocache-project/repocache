@@ -2939,3 +2939,65 @@ def test_live_egress_recovery_refuses_foreign_and_inconsistent_wal():
     with pytest.raises(native.NativeV2TransactionError, match="PROPOSED_WAL_DRIFT"):
         native._owned_live_egress_recovery_candidates(
             _canon(altered), current, distribution="debian", worker_uid=33)
+
+
+
+@pytest.mark.parametrize("fault", ["none", "restore", "catalog", "partial",
+                                    "wal-drift", "resource-drift", "owner-drift"])
+def test_owned_egress_replacement_requires_exact_durable_wal_and_withdrawn_catalog(
+        monkeypatch, fault):
+    old = _owned_bootstrap_resources()
+    new = _owned_generation()
+    wal = native._owned_wal_record(old, new, live=True)
+    current = [{**new, native._CATALOG: None}]
+    if fault == "catalog":
+        current[0] = new
+    elif fault == "partial":
+        current[0] = {**old, native._CATALOG: None}
+    checks = []
+    calls = []
+
+    def exact(fd, raw):
+        assert fd == 101 and raw == wal
+        checks.append("wal")
+        if fault == "wal-drift" and calls:
+            raise native.NativeV2TransactionError("WAL_CHANGED")
+
+    def read(*fds):
+        assert fds == (101, 102, 103)
+        return dict(current[0])
+
+    def owner():
+        checks.append("owner")
+        if fault == "owner-drift" and calls:
+            raise native.NativeV2TransactionError("OWNER_CHANGED")
+
+    def replace(previous, proposed, *, namespace_identity, recheck_owned):
+        assert namespace_identity == (7, 9)
+        calls.append((previous, proposed))
+        if fault == "resource-drift":
+            current[0][native._CATALOG] = b"unexpected"
+        recheck_owned()
+        return {"status": "NAMESPACE_EGRESS_REPLACEMENT_OBSERVED"}
+
+    monkeypatch.setattr(native, "_owned_require_exact_wal", exact)
+    monkeypatch.setattr(native, "_read_owned_resources", read)
+    monkeypatch.setattr(native, "_replace_fixed_namespace_egress", replace)
+    kwargs = dict(wal=wal, distribution="debian", worker_uid=33,
+                  namespace_identity=(7, 9), recheck_namespace_owner=owner,
+                  restore=fault == "restore")
+    if fault in ("none", "restore"):
+        result = native._owned_live_replace_egress_locked(
+            101, 102, 103, lambda: checks.append("layout"), **kwargs)
+        assert result["wal_sha256"] == hashlib.sha256(wal).hexdigest()
+        assert (result["from_generation"], result["to_generation"]) == (
+            (1, 0) if fault == "restore" else (0, 1))
+        assert "8.8.8.8" in calls[0][0 if fault == "restore" else 1]
+        assert "8.8.8.8" not in calls[0][1 if fault == "restore" else 0]
+        assert not result["authorizes_catalog_publication"]
+        assert not result["authorizes_nginx_activation"]
+    else:
+        with pytest.raises(native.NativeV2TransactionError):
+            native._owned_live_replace_egress_locked(
+                101, 102, 103, lambda: checks.append("layout"), **kwargs)
+        assert len(calls) == (0 if fault in ("catalog", "partial") else 1)

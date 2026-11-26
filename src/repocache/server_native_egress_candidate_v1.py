@@ -4,10 +4,12 @@ The existing WAL authenticates exact configuration/include bytes, not kernel
 rules. Reconstruct the exact origin tuples from the canonical upstream
 fragment rather than persist another operator-editable allowlist. Never
 resolve DNS during recovery. The renderer performs no I/O. The separate fixed readback opens a retained
-kernel network namespace and lists rules without mutation or activation.
+kernel network namespace and lists rules. Internal replacement is only for
+an independently owned, locked candidate namespace; no host dispatch.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 import hashlib
 import ipaddress
 import re
@@ -357,13 +359,9 @@ def _namespace_parent_identity(fd):
     return info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid
 
 
-def inspect_fixed_namespace_egress(expected: str) -> dict[str, Any]:
-    """Observe only the fixed service netns and complete closed kernel rules.
-
-    Caller must authenticate expected generation and retain its ownership/WAL
-    lock. The observation is not exclusive namespace ownership, proof of
-    running service identity, ingress, policy installation or write authority.
-    """
+@contextmanager
+def _fixed_namespace_scope():
+    """Retain the one fixed nsfs descriptor and native command identities."""
     import os
     import subprocess
     from contextlib import ExitStack
@@ -372,7 +370,6 @@ def inspect_fixed_namespace_egress(expected: str) -> dict[str, Any]:
     )
 
     try:
-        _closed_ruleset(expected)
         require_native_host_preconditions()
         programs = _safe_readback_programs()
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -413,16 +410,108 @@ def inspect_fixed_namespace_egress(expected: str) -> dict[str, Any]:
                     raise NativeEgressCandidateError("NATIVE_EGRESS_PROGRAM_CHANGED")
 
             recheck()
-            observed = _read_namespace_rules(net)
-            result = verify_namespace_egress_readback(expected, observed)
+            yield net, identity, recheck
             recheck()
-            if verify_namespace_egress_readback(expected, _read_namespace_rules(net)) != result:
-                raise NativeEgressCandidateError("NATIVE_EGRESS_RULES_CHANGED")
-            recheck()
-            return {**result, "fixed_namespace_identity_observed": True,
-                    "namespace_device": identity[0], "namespace_inode": identity[1],
-                    "namespace_exclusivity_verified": False}
     except NativeEgressCandidateError:
         raise
     except (OSError, ValueError, TypeError, OverflowError, subprocess.SubprocessError):
         raise NativeEgressCandidateError("NATIVE_EGRESS_NAMESPACE_READBACK_REFUSED") from None
+
+
+def inspect_fixed_namespace_egress(expected: str) -> dict[str, Any]:
+    """Observe only the fixed service netns and complete closed kernel rules.
+
+    Caller must authenticate expected generation and retain its ownership/WAL
+    lock. This observation grants no namespace exclusivity or write authority.
+    """
+    try:
+        _closed_ruleset(expected)
+    except (ValueError, TypeError, OverflowError, RecursionError):
+        raise NativeEgressCandidateError("NATIVE_EGRESS_NAMESPACE_READBACK_REFUSED") from None
+    with _fixed_namespace_scope() as (net, identity, recheck):
+        result = verify_namespace_egress_readback(expected, _read_namespace_rules(net))
+        recheck()
+        if verify_namespace_egress_readback(expected, _read_namespace_rules(net)) != result:
+            raise NativeEgressCandidateError("NATIVE_EGRESS_RULES_CHANGED")
+        recheck()
+        return {**result, "fixed_namespace_identity_observed": True,
+                "namespace_device": identity[0], "namespace_inode": identity[1],
+                "namespace_exclusivity_verified": False}
+
+
+def _canonical_ruleset(raw: str) -> str:
+    """Reconstruct command bytes from the closed grammar, not input text."""
+    health, rules = _closed_ruleset(raw)
+    return _render_closed_output_rules(
+        health[0], health[1], tuple((address, port) for _, address, port in rules),
+        rules[0][0] if rules else 1,
+    )
+
+
+def _run_namespace_batch(fd, batch, *, validate_only):
+    """One fixed nft transaction via the retained nsfs fd, never a shell."""
+    import subprocess
+    argv = (_NSENTER, "--net=/proc/self/fd/" + str(fd), "--", _NFT,
+            *(("-c",) if validate_only else ()), "-f", "-")
+    result = subprocess.run(
+        argv, input=batch.encode("ascii"), stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, shell=False, cwd="/",
+        env={"PATH": "/usr/sbin:/usr/bin", "LC_ALL": "C"},
+        close_fds=True, pass_fds=(fd,), timeout=10, check=False,
+    )
+    if result.returncode != 0:
+        raise NativeEgressCandidateError("NATIVE_EGRESS_BATCH_REFUSED")
+
+
+def _replace_fixed_namespace_egress(previous: str, proposed: str, *,
+                                    namespace_identity: tuple[int, int],
+                                    recheck_owned) -> dict[str, Any]:
+    """Internal candidate mutation, not exposed through host dispatch.
+
+    Trusted caller retains the namespace ownership and service/WAL lock
+    and supplies only independently authenticated generation rules. A
+    same-shaped foreign table must never be adopted: require its previously
+    recorded namespace identity and caller's ownership recheck. This cannot
+    exclude a concurrent privileged netlink administrator. On uncertainty
+    do not guess, retry or flush; retain durable caller recovery evidence.
+    """
+    try:
+        old = _canonical_ruleset(previous)
+        new = _canonical_ruleset(proposed)
+        if (type(namespace_identity) is not tuple or len(namespace_identity) != 2
+                or any(type(x) is not int or x <= 0 for x in namespace_identity)
+                or not callable(recheck_owned)):
+            raise ValueError("invalid ownership witness")
+    except (ValueError, TypeError, OverflowError, RecursionError):
+        raise NativeEgressCandidateError("NATIVE_EGRESS_REPLACEMENT_INPUT_REFUSED") from None
+    with _fixed_namespace_scope() as (net, identity, recheck):
+        if identity != namespace_identity:
+            raise NativeEgressCandidateError("NATIVE_EGRESS_NAMESPACE_OWNERSHIP_REFUSED")
+
+        def require(expected):
+            recheck_owned()
+            recheck()
+            verify_namespace_egress_readback(expected, _read_namespace_rules(net))
+            recheck()
+            recheck_owned()
+
+        require(old)
+        if old != new:
+            batch = "delete table inet repocache_egress\n" + new
+            _run_namespace_batch(net, batch, validate_only=True)
+            require(old)
+            _run_namespace_batch(net, batch, validate_only=False)
+            require(new)
+        require(new)
+        return {
+            "status": "NAMESPACE_EGRESS_REPLACEMENT_OBSERVED" if old != new else
+                      "NAMESPACE_EGRESS_UNCHANGED",
+            "namespace_device": identity[0], "namespace_inode": identity[1],
+            "previous_sha256": hashlib.sha256(old.encode("ascii")).hexdigest(),
+            "proposed_sha256": hashlib.sha256(new.encode("ascii")).hexdigest(),
+            "ruleset_shape_matches": True,
+            "namespace_exclusivity_verified": False,
+            "runtime_egress_verified": False,
+            "authorizes_nginx_activation": False,
+            "authorizes_catalog_publication": False,
+        }

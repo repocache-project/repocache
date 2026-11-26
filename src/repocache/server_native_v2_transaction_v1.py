@@ -42,7 +42,7 @@ from repocache.server_locked_manifest_reconcile_v1 import (
 )
 from repocache.server_native_egress_candidate_v1 import (
     derive_pinned_egress_candidate, render_namespace_egress_candidate,
-    render_bootstrap_egress_candidate,
+    render_bootstrap_egress_candidate, _replace_fixed_namespace_egress,
 )
 from repocache.server_native_nginx_effective_unit_v1 import (
     EffectiveNginxUnitError, inspect_effective_native_nginx_unit,
@@ -1727,6 +1727,53 @@ def _owned_live_egress_recovery_candidates(
         "authorizes_nginx_activation": False,
         "authorizes_catalog_publication": False,
     }
+
+
+def _owned_live_replace_egress_locked(state_fd: int, nginx_fd: int, public_fd: int,
+                                      check_layout, *, wal: bytes, distribution: str,
+                                      worker_uid: int, namespace_identity: tuple[int, int],
+                                      recheck_namespace_owner, restore: bool) -> dict:
+    """Internal WAL-bound candidate operation, not wired into live dispatch.
+
+    The owning caller must retain the verified service namespace and server
+    state lock, and establish the generation's native worker identity.
+    Catalog withdrawal and all proposed bytes must precede the forward
+    replacement. Recovery before restoring the files replaces only the exact proposed
+    rules with the prior rules. An already restored policy must be observed
+    independently by the caller. An unknown kernel policy is never guessed or overwritten.
+    """
+    if type(restore) is not bool:
+        _deny("OWNED_EGRESS_DIRECTION_INVALID")
+    check_layout()
+    _owned_require_exact_wal(state_fd, wal)
+    current = _read_owned_resources(state_fd, nginx_fd, public_fd)
+    if current[_CATALOG] is not None:
+        _deny("OWNED_EGRESS_CATALOG_NOT_WITHDRAWN")
+    evidence = _owned_live_egress_recovery_candidates(
+        wal, current, distribution=distribution, worker_uid=worker_uid)
+    prior, proposed = evidence["prior"], evidence["proposed"]
+    if proposed is None:
+        # Partial file publication cannot establish proposed kernel policy.
+        # Do not mutate; callers must recover while that evidence is intact.
+        _deny("OWNED_EGRESS_PROPOSED_POLICY_UNVERIFIED")
+
+    def owned():
+        check_layout()
+        _owned_require_exact_wal(state_fd, wal)
+        if _read_owned_resources(state_fd, nginx_fd, public_fd) != current:
+            _deny("OWNED_EGRESS_RESOURCES_CHANGED")
+        recheck_namespace_owner()
+
+    old, new = (proposed, prior) if restore else (prior, proposed)
+    owned()
+    result = _replace_fixed_namespace_egress(
+        old["nft_candidate"], new["nft_candidate"],
+        namespace_identity=namespace_identity, recheck_owned=owned)
+    owned()
+    return {**result, "wal_sha256": evidence["wal_sha256"],
+            "from_generation": old["generation"], "to_generation": new["generation"],
+            "authorizes_catalog_publication": False, "authorizes_nginx_activation": False}
+
 
 
 def _owned_wal_resource_drift(old: dict, new_sha: dict, current: dict,

@@ -654,18 +654,71 @@ print(json.dumps(egress.inspect_fixed_namespace_egress(json.load(sys.stdin))))
     return report
 
 
-def replace_peer_ruleset(previous, proposed):
-    """Only this isolated fixture's already-owned table may be replaced."""
+def replace_peer_ruleset(previous, proposed, *, namespace_identity, pid, executable, master):
+    """Use the authenticated worker's fixed-fd transaction, never a path command."""
     guard()
-    verify_peer_ruleset(previous)
-    batch = "delete table inet repocache_egress\n" + proposed
-    command("/usr/sbin/ip", "netns", "exec", NS, "/usr/sbin/nft", "-c", "-f", "-",
-            input_text=batch)
-    verify_peer_ruleset(previous)
-    command("/usr/sbin/ip", "netns", "exec", NS, "/usr/sbin/nft", "-f", "-",
-            input_text=batch)
+    assert MODULE == FIXED_MODULE and executable == FIXED_EXECUTABLE
+    report = verify_peer_ruleset(previous)
+    assert (report["namespace_device"], report["namespace_inode"]) == namespace_identity
+    host_before = command("/usr/sbin/nft", "--stateless", "--numeric-priority",
+                          "list", "ruleset").stdout
+    binary = executable.stat()
+    code = r"""
+import json,os,sys,zipimport
+from pathlib import Path
+sys.path.insert(0, "/usr/libexec/repocache/server-control-worker")
+from repocache import server_native_egress_candidate_v1 as egress
+assert isinstance(egress.__loader__, zipimport.zipimporter)
+assert egress.__loader__.archive == "/usr/libexec/repocache/server-control-worker"
+old,new,identity,pid,master,binary=json.load(sys.stdin)
+identity=tuple(identity)
+proc=Path("/proc") / str(pid)
+def owned():
+    assert __debug__ and os.getresuid()==os.getresgid()==(0,0,0)
+    assert os.uname().nodename=="pr237-almalinux10"
+    assert Path("/sys/fs/selinux/enforce").read_text().strip()=="1"
+    assert Path("/proc/1/comm").read_text().strip()=="systemd"
+    assert (proc/"stat").read_text().rsplit(")",1)[1].split()[19]==master[1]
+    assert (proc/"attr/current").read_text().split(":")[2]=="repocache_nginx_t"
+    info=(proc/"exe").stat()
+    assert (info.st_dev,info.st_ino)==tuple(binary)
+    ns=(proc/"ns/net").stat()
+    assert (ns.st_dev,ns.st_ino)==identity
+    assert pid==master[0]
+    assert Path("/run/netns/repocache-nginx").stat().st_ino==identity[1]
+    assert Path("/run/netns/repocache-ci-nginx-peer").stat().st_ino!=identity[1]
+opts=dict(namespace_identity=identity,recheck_owned=owned)
+try:
+    egress._replace_fixed_namespace_egress(old+"table ip foreign {}\n",new,**opts)
+except egress.NativeEgressCandidateError:
+    pass
+else:
+    raise AssertionError("Invalid previous rules admitted")
+try:
+    egress._replace_fixed_namespace_egress(old,new,**dict(opts,namespace_identity=(identity[0],identity[1]+1)))
+except egress.NativeEgressCandidateError as exc:
+    assert str(exc).endswith("NAMESPACE_OWNERSHIP_REFUSED")
+else:
+    raise AssertionError("Foreign namespace identity admitted")
+assert egress.inspect_fixed_namespace_egress(old)["ruleset_shape_matches"]
+report=egress._replace_fixed_namespace_egress(old,new,**opts)
+assert report["status"]=="NAMESPACE_EGRESS_REPLACEMENT_OBSERVED"
+assert not report["authorizes_catalog_publication"]
+assert not report["authorizes_nginx_activation"]
+assert not report["runtime_egress_verified"]
+repeat=egress._replace_fixed_namespace_egress(new,new,**opts)
+assert repeat["status"]=="NAMESPACE_EGRESS_UNCHANGED"
+print(json.dumps(report))
+"""
+    result = command("/usr/bin/python3", "-IS", "-B", "-c", code,
+                     input_text=json.dumps([previous, proposed, namespace_identity,
+                                            pid, master, [binary.st_dev, binary.st_ino]]))
+    assert json.loads(result.stdout)["ruleset_shape_matches"]
     verify_peer_ruleset(proposed)
-    print("PASS: exact prior and replacement private namespace ruleset readback", flush=True)
+    assert command("/usr/sbin/nft", "--stateless", "--numeric-priority",
+                   "list", "ruleset").stdout == host_before
+    print("PASS: authenticated retained-fd nft replacement, foreign identity refusal, "
+          "idempotent readback and host rules unchanged", flush=True)
 
 
 def denied_packets():
@@ -1087,6 +1140,8 @@ location / {{ return 404; }}
                     command("/usr/bin/chcon", "-t", MODULE + "_pid_t", str(pid_dir))
                 command("/usr/sbin/ip", "netns", "add", NS)
                 namespace = True
+                created = Path("/run/netns", NS).stat()
+                namespace_identity = (created.st_dev, created.st_ino)
                 command("/usr/sbin/ip", "-n", NS, "link", "set", "lo", "up")
                 if remote:
                     command("/usr/sbin/ip", "netns", "add", PEER_NS)
@@ -1322,7 +1377,9 @@ location / {{ return 404; }}
                     assert counts_path.read_text().splitlines() == before_hits + [
                         first_origin, first_origin]
                     if remote:
-                        replace_peer_ruleset(apt_rules, rendered_rules)
+                        replace_peer_ruleset(apt_rules, rendered_rules,
+                                             namespace_identity=namespace_identity, pid=pid,
+                                             executable=executable, master=master)
                     else:
                         command("/usr/sbin/ip", "netns", "exec", NS, "/usr/sbin/nft", "-f", "-",
                                 input_text="delete table inet repocache_ci\n"
@@ -1375,7 +1432,9 @@ location / {{ return 404; }}
                     else:
                         raise AssertionError("Rendered route withdrawal did not drain old worker")
                     if remote:
-                        replace_peer_ruleset(rendered_rules, next_rules)
+                        replace_peer_ruleset(rendered_rules, next_rules,
+                                             namespace_identity=namespace_identity, pid=pid,
+                                             executable=executable, master=master)
                     else:
                         command("/usr/sbin/ip", "netns", "exec", NS, "/usr/sbin/nft", "-f", "-",
                                 input_text="delete table inet repocache_ci\n" + packet_rules())

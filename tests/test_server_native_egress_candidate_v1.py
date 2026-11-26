@@ -337,3 +337,99 @@ def test_namespace_listing_is_fixed_bounded_and_read_only(monkeypatch, fault):
     finally:
         os.close(fd)
     assert len(calls) == 1
+
+
+
+@pytest.mark.parametrize("fault", ["none", "unchanged", "identity", "foreign", "check",
+                                    "drift", "owner", "post-drift", "syntax"])
+def test_fixed_namespace_replacement_retains_one_descriptor_and_checks_exact_rules(
+        monkeypatch, fault):
+    import contextlib
+    from repocache import server_native_egress_candidate_v1 as egress
+
+    doc, raw = fixture()
+    old = egress.render_namespace_egress_candidate(
+        doc, generation=1, http_fragment=raw, worker_uid=987)["nft_candidate"]
+    doc, raw = fixture(both=False)
+    new = egress.render_namespace_egress_candidate(
+        doc, generation=1, http_fragment=raw, worker_uid=987)["nft_candidate"]
+    identity = (17, 29)
+    fd = 42
+    observed = [old + ("table ip foreign {}\n" if fault == "foreign" else "")]
+    calls = []
+    held = [False]
+
+    @contextlib.contextmanager
+    def scope():
+        held[0] = True
+        try:
+            yield fd, identity, lambda: calls.append("descriptor")
+        finally:
+            held[0] = False
+
+    def owner():
+        assert held[0]
+        calls.append("owner")
+        if fault == "owner" and True in calls:
+            raise NativeEgressCandidateError("OWNER_REFUSED")
+
+    def read(got):
+        assert held[0] and got == fd
+        calls.append("read")
+        return observed[0]
+
+    def batch(got, text, *, validate_only):
+        assert held[0] and got == fd
+        assert text == "delete table inet repocache_egress\n" + new
+        calls.append(validate_only)
+        if validate_only:
+            if fault == "check":
+                raise NativeEgressCandidateError("CHECK_REFUSED")
+            if fault == "drift":
+                observed[0] = new
+        else:
+            observed[0] = old if fault == "post-drift" else new
+
+    monkeypatch.setattr(egress, "_fixed_namespace_scope", scope)
+    monkeypatch.setattr(egress, "_read_namespace_rules", read)
+    monkeypatch.setattr(egress, "_run_namespace_batch", batch)
+    options = dict(namespace_identity=(17, 30) if fault == "identity" else identity,
+                   recheck_owned=owner)
+    if fault in ("none", "unchanged"):
+        proposed = old if fault == "unchanged" else new
+        result = egress._replace_fixed_namespace_egress(old, proposed, **options)
+        assert result["status"] == ("NAMESPACE_EGRESS_UNCHANGED" if fault == "unchanged"
+                                    else "NAMESPACE_EGRESS_REPLACEMENT_OBSERVED")
+        assert not result["authorizes_catalog_publication"]
+        assert not result["authorizes_nginx_activation"]
+        assert not result["runtime_egress_verified"]
+        assert observed[0] == proposed
+        assert [x for x in calls if type(x) is bool] == ([] if fault == "unchanged" else [True, False])
+    else:
+        proposed = new + "flush ruleset\n" if fault == "syntax" else new
+        with pytest.raises(NativeEgressCandidateError):
+            egress._replace_fixed_namespace_egress(old, proposed, **options)
+        assert [x for x in calls if type(x) is bool] == (
+            [True, False] if fault == "post-drift" else
+            [True] if fault in ("check", "drift", "owner") else [])
+    assert not held[0]
+
+
+@pytest.mark.parametrize("validate_only", [True, False])
+def test_fixed_batch_uses_retained_fd_and_fixed_argv(monkeypatch, validate_only):
+    import subprocess
+    from types import SimpleNamespace
+    from repocache import server_native_egress_candidate_v1 as egress
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append(argv)
+        assert kwargs["pass_fds"] == (42,)
+        assert kwargs["shell"] is False and kwargs["close_fds"] is True
+        assert kwargs["input"] == b"fixed batch\n" and kwargs["timeout"] == 10
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    egress._run_namespace_batch(42, "fixed batch\n", validate_only=validate_only)
+    assert calls == [("/usr/bin/nsenter", "--net=/proc/self/fd/42", "--",
+                      "/usr/sbin/nft", *(("-c",) if validate_only else ()), "-f", "-")]
