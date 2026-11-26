@@ -309,22 +309,56 @@ def _observe_companion(root: Path, record: dict) -> str:
 
 
 def _check_observed_phase(record: dict, source: str, companion: str) -> None:
+    # Reachability of the read-only evidence, not permission to recover.
+    # A proposed inode and its predecessor coexist during staging; the
+    # restore and proposed inodes also coexist. Only the freed original
+    # identity may be recycled for a later restore.
+    original, proposed, restored = (
+        record["original_id"], record["proposed_id"], record["restore_id"])
+    apt = record["companion"] is not None
+    retained = record.get("retained_id")
+    if (original == proposed or original[0] != proposed[0]
+            or (restored is not None and
+                (restored == proposed or restored[0] != original[0]))):
+        raise PairRefused("Impossible source journal identity")
+    if apt and (record["mirror_id"] is None or
+                (retained is not None and
+                 retained[0] != record["mirror_id"][0])):
+        raise PairRefused("Impossible companion journal identity")
+    if not apt and companion != "not-applicable":
+        raise PairRefused("Unexpected companion evidence")
     phase = record["phase"]
-    if phase == "installed":
-        if source != "proposed" or companion not in ("not-applicable", "cache-bearing"):
-            raise PairRefused("Installed journal evidence differs")
-    elif phase == "restored":
-        expected = ("not-applicable" if record["companion"] is None else
-                    "upstream-only" if record["retained_id"] is not None else "absent")
-        if source not in ("original", "restored", "original-or-restored") or companion != expected:
-            raise PairRefused("Restored journal evidence differs")
-    elif phase == "armed":
-        if source in ("restored", "original-or-restored") or (source == "proposed" and companion == "absent"):
+    if phase in ("armed", "installed"):
+        if restored is not None or retained is not None:
+            raise PairRefused("Unexpected rollback intent")
+        if phase == "installed":
+            if source != "proposed" or companion != (
+                    "cache-bearing" if apt else "not-applicable"):
+                raise PairRefused("Installed journal evidence differs")
+        elif (source not in ("original", "proposed")
+              or (apt and companion not in ("absent", "cache-bearing"))
+              or (source == "proposed" and companion == "absent")):
             raise PairRefused("Armed journal evidence differs")
+    elif phase == "restored":
+        expected = ("not-applicable" if not apt else
+                    "upstream-only" if retained is not None else "absent")
+        sources = ("original",) if restored is None else ("restored", "original-or-restored")
+        if source not in sources or companion != expected:
+            raise PairRefused("Restored journal evidence differs")
     elif phase == "restore-armed":
-        if companion == "absent" or (source in ("restored", "original-or-restored") and
-                companion not in ("not-applicable", "upstream-only")):
-            raise PairRefused("Rollback journal evidence differs")
+        if apt:
+            if retained is None or companion not in ("cache-bearing", "upstream-only"):
+                raise PairRefused("Rollback companion evidence differs")
+            if restored is None:
+                if source not in ("original", "proposed"):
+                    raise PairRefused("Rollback source evidence differs")
+            elif (source not in ("proposed", "restored", "original-or-restored")
+                  or companion != "upstream-only"):
+                raise PairRefused("Rollback source evidence differs")
+        elif restored is None or source not in ("proposed", "restored", "original-or-restored"):
+            raise PairRefused("Rollback source evidence differs")
+    else:
+        raise PairRefused("Unknown recovery phase")
 
 
 def inspect_local_recovery_record(ident: str, *, _test_root: Path | None = None) -> dict:

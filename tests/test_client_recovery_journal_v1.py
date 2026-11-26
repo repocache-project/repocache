@@ -80,7 +80,10 @@ def test_exact_recovery_record_and_foreign_inode(tmp_path, manager):
 ])
 def test_inconsistent_recovery_phases_are_refused(phase, source, companion):
     record = {"phase": phase, "companion": "etc/apt/mirrors/repocache-example.list",
-              "retained_id": [1, 2]}
+              "original_id": [1, 1], "proposed_id": [1, 2],
+              "mirror_id": [1, 3],
+              "restore_id": [1, 5] if phase in ("restore-armed", "restored") else None,
+              "retained_id": [1, 4] if phase in ("restore-armed", "restored") else None}
     with pytest.raises(PairRefused):
         _check_observed_phase(record, source, companion)
 
@@ -102,3 +105,32 @@ def test_recycled_original_inode_reports_ambiguity_not_new_authority():
         _check_observed_phase({**record, "phase": "armed"}, result, "not-applicable")
     with pytest.raises(PairRefused):
         _classify_source(record, [1, 4], b"original", b"original", b"proposed")
+
+
+@pytest.mark.parametrize("apt,phase,source,companion,restore,retain,allowed", [
+    (True, "armed", "original", "absent", None, None, True),
+    (True, "armed", "proposed", "upstream-only", None, None, False),
+    (True, "restore-armed", "original", "cache-bearing", None, [1, 4], True),
+    (True, "restore-armed", "proposed", "upstream-only", None, [1, 4], True),
+    (True, "restore-armed", "proposed", "cache-bearing", [1, 5], [1, 4], False),
+    (True, "restore-armed", "restored", "upstream-only", [1, 5], [1, 4], True),
+    (True, "restored", "original", "upstream-only", None, [1, 4], True),
+    (True, "restored", "original", "upstream-only", [1, 5], [1, 4], False),
+    (False, "restore-armed", "proposed", "not-applicable", None, None, False),
+    (False, "restore-armed", "proposed", "not-applicable", [1, 5], None, True),
+    (False, "restored", "original", "not-applicable", None, None, True),
+    (False, "restored", "restored", "not-applicable", [1, 2], None, False),
+    (False, "restored", "original-or-restored", "not-applicable", [1, 1], None, True),
+    (False, "installed", "proposed", "not-applicable", [1, 5], None, False),
+])
+def test_readback_only_accepts_reachable_journal_states(
+        apt, phase, source, companion, restore, retain, allowed):
+    record = {"phase": phase, "companion": "private" if apt else None,
+              "original_id": [1, 1], "proposed_id": [1, 2],
+              "mirror_id": [1, 3] if apt else None,
+              "restore_id": restore, "retained_id": retain}
+    if allowed:
+        _check_observed_phase(record, source, companion)
+    else:
+        with pytest.raises(PairRefused):
+            _check_observed_phase(record, source, companion)

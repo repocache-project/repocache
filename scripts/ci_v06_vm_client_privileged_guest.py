@@ -162,6 +162,46 @@ assert "recoverable_fallback_pair_lab" not in sys.modules
             # This test owns the deliberately injected pending leaf.
             pending.unlink()
         print("PASS: authenticated readback refuses pending journal without changes", flush=True)
+        # Preserve the exact owned file as a separate fixture leaf; publish
+        # a different inode with the same content and attributes. The
+        # authenticated read-only helper must refuse for identity, not a
+        # missing label or changed source bytes. Never touch host sources.
+        entry = root / (journal["companion"] or journal["source"])
+        saved = entry.with_name(".repocache-ci-readback-owned")
+        foreign = entry.with_name(".repocache-ci-readback-foreign")
+        assert not os.path.lexists(saved) and not os.path.lexists(foreign)
+        owned = _snapshot(entry)
+        import shutil
+        with foreign.open("xb") as stream:
+            stream.write(owned[0])
+            os.fchown(stream.fileno(), owned[3], owned[4])
+            os.fchmod(stream.fileno(), owned[5] & 0o777)
+        shutil.copystat(entry, foreign, follow_symlinks=False)
+        for name, value in owned[-1]:
+            os.setxattr(foreign, name, value, follow_symlinks=False)
+        replacement = _snapshot(foreign)
+        assert replacement[0] == owned[0] and replacement[3:7] == owned[3:7]
+        assert replacement[-1] == owned[-1] and replacement[1:3] != owned[1:3]
+        os.rename(entry, saved)
+        os.rename(foreign, entry)
+        try:
+            foreign_before = _snapshot(entry)
+            saved_before = _snapshot(saved)
+            denied = subprocess.run(
+                ["/usr/bin/python3", "-IS", "-B", "-c", code, target, str(root), ident],
+                capture_output=True, timeout=20)
+            assert denied.returncode != 0 and b"is not a recorded inode" in denied.stderr, denied.stderr
+            assert _snapshot(entry) == foreign_before and _snapshot(saved) == saved_before
+            assert _snapshot(journal_path) == before
+        finally:
+            os.rename(entry, foreign)
+            os.rename(saved, entry)
+            foreign.unlink()
+        again = json.loads(subprocess.run(
+            ["/usr/bin/python3", "-IS", "-B", "-c", code, target, str(root), ident],
+            check=True, capture_output=True, timeout=20).stdout)
+        assert again == report
+        print("PASS: authenticated readback refuses same-byte foreign inode; owned evidence preserved", flush=True)
 
 
 def _debian_fixture(root: Path) -> None:

@@ -306,3 +306,15 @@ inode incarnation. This is admissible only in a rollback phase, with all
 existing exact metadata and companion checks; no write, rollback completion,
 revocation or native exclusion authority follows. Native fixtures independently
 check the actual restored inode against the recorded restore identity.
+
+The authenticated readback also checks that its observed phase and inode
+relationships are reachable from the actual pair journal sequence. Staged
+original/proposed and proposed/restore inodes must be distinct. A DNF
+rollback-armed record requires a restore inode; an APT rollback-armed
+record requires a retained companion identity, and source replacement
+requires that companion to already be upstream-only. The original inode
+may be recycled only for the later restore. These checks do not inspect
+or authorize pending filesystem writes, and all authority flags stay
+false. Both distro root containers execute the recovery readback tests;
+the booted signed-helper fixture additionally verifies exact-metadata
+same-byte foreign inode refusal without changing the journal.
