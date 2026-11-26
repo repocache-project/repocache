@@ -2880,3 +2880,16 @@ def test_debian_runtime_scratch_is_fixed_and_safe(tmp_path, monkeypatch, fault):
             assert stat.S_IMODE(first.stat().st_mode) == 0o700
     finally:
         os.close(fd)
+
+
+def test_owned_wal_refuses_rehashed_unapproved_egress_tuple():
+    new = _owned_generation()
+    raw = new[native._INCLUDE]
+    assert raw.count(b"server 8.8.8.8:443;") == 1
+    new[native._INCLUDE] = raw.replace(b"server 8.8.8.8:443;", b"server 8.8.8.8:8008;")
+    new[native._OWNED_MANIFEST] = native._owned_manifest_for(
+        new[V2_STATE], new[native._OWNED_MAIN], new[native._INCLUDE], new[native._CATALOG],
+    )
+    with pytest.raises(native.NativeV2TransactionError,
+                       match="OWNED_WAL_EGRESS_CANDIDATE_INVALID"):
+        native._owned_wal_record(_owned_bootstrap_resources(), new)

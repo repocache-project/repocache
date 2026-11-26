@@ -861,3 +861,41 @@ foreign/legacy cases remain refused. Booted VM tests inject a post-start
 fault, require real stop compensation, then reauthenticate and restart the
 unchanged generation after actual reboot. New exact-HEAD evidence is
 required; this is not active-repository or publisher acceptance.
+
+
+### Candidate egress bound to the owned generation (decision A)
+
+The maintainer approved the installable candidate architecture on
+2026-11-26, exclusively for isolated implementation, review and validation
+(#451 comment 7191836320). No production activation or global SELinux,
+routing or firewall modification is authorized.
+
+The signed worker now reconstructs the exact origin IP/port tuples from
+the same validated repository configuration and canonical numeric upstream
+fragment already bound by the owned manifest and WAL. It re-renders each
+selected base origin's pins through the existing strict renderer; disabled,
+extra, missing, noncanonical or unsafe tuples and port drift refuse the
+snapshot. Alternate allowed DNS hosts never create extra connect permission.
+No secondary allowlist, DNS re-resolution on rollback, or new WAL schema is
+needed to derive this candidate. The exact include hash remains the durable
+binding; the candidate reports its upstream fragment hash and generation.
+
+The pure namespace-only nft candidate has a fixed table, default-deny
+output, established TCP replies, root-only local listener health and fresh
+worker connections to exact pairs. No independent address/port sets or
+unrestricted root/DNS egress. It does not invoke nft, install a module,
+create a namespace, configure ingress/routing or authorize exposure.
+An authenticated signed-test worker supplies the candidate rules to the
+existing isolated peer-namespace probe, substituting only the two known
+private peer addresses consistently in renderer and rules after normal
+validation. The probe exercises actual HTTPS MISS/HIT, denial of crossed
+tuples/root fresh connections and generation withdrawal after worker drain.
+
+This increment is not an installed-policy controller. Existing live active
+route refusal is preserved. Remaining work: authenticated native executable
+and dedicated SELinux type placement, verified private network namespace
+and administrator-selected ingress/routing, native rule identity/readback
+and foreign-process refusal, durable application/compensation of rules
+at WAL boundaries, reboot/repair and exact installed-service cache/log
+and catalog evidence on both supported distributions. Never apply the
+candidate rules to the host namespace or promote the disposable test policy.

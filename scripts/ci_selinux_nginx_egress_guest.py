@@ -540,7 +540,7 @@ def request(root, path, *, method="GET", remote=False):
             (root / "headers").read_text().lower())
 
 
-def render_signed_fixture_routes(root, *, dnf_enabled=True, remote=False):
+def render_signed_fixture_routes(root, *, dnf_enabled=True, remote=False, worker_uid):
     """Use the authenticated installed zipapp's actual candidate renderer.
 
     Only the isolated harness substitutes the two loopback tuples after the
@@ -559,6 +559,7 @@ def render_signed_fixture_routes(root, *, dnf_enabled=True, remote=False):
     dep["tls"]["certificate_file"] = str(root / "cert.pem")
     dep["tls"]["private_key_file"] = str(root / "key.pem")
     dep["listen"]["https_port"] = PORT
+    document["expected_state_generation"] = 1 if dnf_enabled else 2
     assert sorted(repo["kind"] for repo in document["repositories"]) == ["apt", "dnf"]
     pins = {}
     for repo in document["repositories"]:
@@ -579,32 +580,54 @@ def render_signed_fixture_routes(root, *, dnf_enabled=True, remote=False):
 import json,sys,zipimport
 sys.path.insert(0, "/usr/libexec/repocache/server-control-worker")
 from repocache import server_nginx_repository_bundle_v1 as bundle
+from repocache import server_native_egress_candidate_v1 as egress
+assert isinstance(egress.__loader__, zipimport.zipimporter)
+assert egress.__loader__.archive == "/usr/libexec/repocache/server-control-worker"
 assert isinstance(bundle.__loader__, zipimport.zipimporter)
 assert bundle.__loader__.archive == "/usr/libexec/repocache/server-control-worker"
-doc,pins,ca=json.load(sys.stdin)
+doc,pins,ca,uid=json.load(sys.stdin)
 result=bundle.render_repository_nginx_bundle_candidate(
     doc,expected_state_generation=doc["expected_state_generation"],
     candidate_pins_by_repository=pins,ca_bundle_path=ca)
+result["egress"]=egress.render_namespace_egress_candidate(
+    doc,generation=doc["expected_state_generation"],
+    http_fragment=result["http_upstream_fragment"].encode("ascii"),worker_uid=uid)
 print(json.dumps(result))
 """
     outcome = command("/usr/bin/python3", "-IS", "-B", "-c", code,
-                      input_text=json.dumps([document, pins, str(root / "cert.pem")]))
+                      input_text=json.dumps([document, pins, str(root / "cert.pem"), worker_uid]))
     bundle = json.loads(outcome.stdout)
     assert bundle["proposed_repository_ids"] == sorted(pins)
     assert bundle["status"] == "MULTI_REPOSITORY_RENDER_CANDIDATE_ONLY"
     assert bundle["authorizes_nginx_activation"] is False
     assert bundle["authorizes_catalog_publication"] is False
     http = bundle["http_upstream_fragment"]
+    egress = bundle["egress"]
+    assert egress["http_sha256"] == hashlib.sha256(http.encode("ascii")).hexdigest()
+    assert egress["generation"] == document["expected_state_generation"]
+    assert egress["destinations"] == [["8.8.8.8", 443]] + (
+        [["8.8.8.8", 8008]] if dnf_enabled else [])
+    assert egress["authorizes_firewall_change"] is False
+    assert egress["runtime_egress_verified"] is False
+    rules = egress["nft_candidate"]
     assert http.count("server 8.8.8.8:443;") == 1
     assert http.count("server 8.8.8.8:8008;") == int(dnf_enabled)
     first, second = (APT_PEER, DNF_PEER) if remote else ("127.0.0.1", "127.0.0.2")
     http = http.replace("server 8.8.8.8:443;", f"server {first}:443;")
     http = http.replace("server 8.8.8.8:8008;", f"server {second}:8008;")
+    # Apply the same exact private-fixture substitution to the authenticated
+    # candidate's rules, only within the already guarded peer topology.
+    assert rules.count("ip daddr 8.8.8.8 tcp dport 443") == 1
+    assert rules.count("ip daddr 8.8.8.8 tcp dport 8008") == int(dnf_enabled)
+    rules = rules.replace("ip daddr 8.8.8.8 tcp dport 443",
+                          f"ip daddr {first} tcp dport 443").replace(
+        "ip daddr 8.8.8.8 tcp dport 8008", f"ip daddr {second} tcp dport 8008")
+    assert "8.8.8.8" not in rules
     locations = bundle["server_location_fragment"]
     marker = "    proxy_cache_valid 200 60s;\n"
     assert locations.count(marker) == len(pins)
     locations = locations.replace(marker, marker + "    add_header X-Cache $upstream_cache_status always;\n")
-    return http, locations
+    return http, locations, rules
 
 
 def process_identity(pid, executable, uid, gid, *, capabilities=0, bounding=None):
@@ -785,7 +808,8 @@ location = /{name} {{
                 directory = writable / "cache" / ("fixture-" + kind)
                 directory.mkdir(mode=0o700)
                 os.chown(directory, master_uid, account.pw_gid)
-            rendered_http, rendered_locations = render_signed_fixture_routes(root, remote=remote)
+            rendered_http, rendered_locations, rendered_rules = render_signed_fixture_routes(
+                root, remote=remote, worker_uid=account.pw_uid)
         conf.write_text(f"""
 daemon {'on' if root_master or signed_derived else 'off'};
 {'user nginx nginx;' if root_master else ''}
@@ -1038,9 +1062,14 @@ location / {{ return 404; }}
                     second_origin = DNF_PEER + ":8008" if remote else "127.0.0.2:8008"
                     if remote:
                         assert not counts_path.exists()
+                        _, _, apt_rules = render_signed_fixture_routes(
+                            root, dnf_enabled=False, remote=True, worker_uid=account.pw_uid)
                         command("/usr/sbin/ip", "netns", "exec", NS, "/usr/sbin/nft",
                                 "-f", "-", input_text="delete table inet repocache_ci\n"
-                                + packet_rules(remote=True))
+                                + apt_rules)
+                        assert "repocache_egress" in command(
+                            "/usr/sbin/ip", "netns", "exec", NS, "/usr/sbin/nft",
+                            "list", "tables").stdout
                         denied = command("/usr/sbin/ip", "netns", "exec", NS, "/usr/bin/curl",
                                          "--silent", "--max-time", "2", "--noproxy", "*",
                                          "--cacert", str(cert), "--resolve", f"localhost:443:{APT_PEER}",
@@ -1061,7 +1090,9 @@ location / {{ return 404; }}
                     assert counts_path.read_text().splitlines() == before_hits + [
                         first_origin, first_origin]
                     command("/usr/sbin/ip", "netns", "exec", NS, "/usr/sbin/nft", "-f", "-",
-                            input_text="delete table inet repocache_ci\n" + packet_rules(custom_https=True, remote=remote))
+                            input_text=("delete table inet repocache_egress\n" + rendered_rules
+                                        if remote else "delete table inet repocache_ci\n"
+                                        + packet_rules(custom_https=True)))
                     first, second = request(root, dnf + "payload", remote=remote), request(root, dnf + "payload", remote=remote)
                     assert first[:2] == second[:2] == (200, PAYLOAD)
                     assert "x-cache: miss" in first[2] and "x-cache: hit" in second[2]
@@ -1077,7 +1108,8 @@ location / {{ return 404; }}
                                    (writable / "cache" / ("fixture-" + kind)).rglob("*"))
                     # New complete candidate omits DNF. Replace only this
                     # root-owned private config; retain the old file label.
-                    next_http, next_locations = render_signed_fixture_routes(root, dnf_enabled=False, remote=remote)
+                    next_http, next_locations, next_rules = render_signed_fixture_routes(
+                        root, dnf_enabled=False, remote=remote, worker_uid=account.pw_uid)
                     old_conf = conf.read_text("ascii")
                     assert old_conf.count(rendered_http) == old_conf.count(rendered_locations) == 1
                     new_conf = old_conf.replace(rendered_http, next_http).replace(
@@ -1109,7 +1141,9 @@ location / {{ return 404; }}
                     else:
                         raise AssertionError("Rendered route withdrawal did not drain old worker")
                     command("/usr/sbin/ip", "netns", "exec", NS, "/usr/sbin/nft", "-f", "-",
-                            input_text="delete table inet repocache_ci\n" + packet_rules(remote=remote))
+                            input_text=("delete table inet repocache_egress\n" + next_rules
+                                        if remote else "delete table inet repocache_ci\n"
+                                        + packet_rules()))
                     assert request(root, dnf + "payload", remote=remote)[0] == 404
                     assert request(root, dnf + "fresh", remote=remote)[0] == 404
                     assert request(root, apt + "fresh", remote=remote)[:2] == (200, PAYLOAD)
@@ -1121,7 +1155,8 @@ location / {{ return 404; }}
                         assert request(root, "remote-wrong-address", remote=True)[0] == 502
                         assert counts_path.read_text().splitlines() == before_hits + [
                             first_origin, first_origin, second_origin, first_origin]
-                        print("PASS: peer client HTTPS ingress and exact remote APT/DNF egress over veth; "
+                        print("PASS: authenticated worker generation-bound egress candidate used in peer namespace; "
+                              "peer client HTTPS ingress and exact remote APT/DNF egress over veth; "
                               "crossed tuples refused, DNF withdrawn after drain, APT still available", flush=True)
                     assert int(pid_file.read_text()) == pid and pid_file.stat().st_uid == master_uid
                     print("PASS: authenticated signed-unit-derived " +

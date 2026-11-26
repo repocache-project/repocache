@@ -39,6 +39,7 @@ from repocache.server_locked_manifest_reconcile_v1 import (
     _validate_proposed_v2_snapshot, preview_proposed_v2_state_transition,
     _verify_current_root_fd,
 )
+from repocache.server_native_egress_candidate_v1 import derive_pinned_egress_candidate
 from repocache.server_native_nginx_effective_unit_v1 import (
     EffectiveNginxUnitError, inspect_effective_native_nginx_unit,
     OWNED_NGINX_CONFIG_MARKER_PREFIX,
@@ -1524,6 +1525,20 @@ def _validate_owned_resources(resources: dict[str, bytes | None], *,
                 or doc["deployment"]["paths"]["state_root"]
                    != "/var/lib/repocache/server"):
             _deny("OWNED_WAL_LAYOUT_UNSUPPORTED")
+        # Recover the exact egress tuple candidate from the same state and
+        # include bytes already bound by the manifest/WAL. Do not persist a
+        # second allowlist or resolve DNS on replay/rollback.
+        header = b"# REPOCACHE managed v2\n"
+        prefix, separator, _ = include.partition(b"\nserver {\n")
+        if not separator or not prefix.startswith(header):
+            _deny("OWNED_WAL_EGRESS_CANDIDATE_INVALID")
+        try:
+            derive_pinned_egress_candidate(
+                doc, generation=snapshot["state_generation"],
+                http_fragment=prefix[len(header):],
+            )
+        except ValueError:
+            _deny("OWNED_WAL_EGRESS_CANDIDATE_INVALID")
         # A manifest pins already verified bytes, not arbitrary directives.
         # This checks the closed dump section shape; deterministic rendering
         # and authentic native exposure are still separate runtime gates.
