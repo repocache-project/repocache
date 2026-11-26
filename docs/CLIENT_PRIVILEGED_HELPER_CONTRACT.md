@@ -229,3 +229,21 @@ signed HTTPS metadata from the original upstream, no cache requests, no
 unsandboxed download, preserved journal/companion identity, and unchanged
 host sources. This is not an installed writer, production mount strategy,
 quiescence guarantee, or evidence of revocation of previously fetched data.
+
+The native stale-reader journal proof also exercises a real deb822
+`.sources` stanza (not just a one-line `.list`). The same authenticated
+catalog preparation/approval, exact native lists-lock syscall barrier,
+SIGKILL and retained-companion recovery run in a separate marked fixture.
+The formerly selected cache is made healthy again after recovery and before
+resuming the previously parsed deb822 reader. The exact approved route serves
+a copy of the signed repository; an authenticated HTTPS positive control
+requires status 200 and byte-identical InRelease and all three package index
+representations. Only those explicit control requests are cleared from the
+observed request log while the native reader remains stopped at the syscall
+barrier. After resume its metadata must still come exclusively from the
+signed upstream, with zero native-reader cache HTTP requests and no
+unsandboxed APT download. Optimized Python execution is refused before the
+native fixture begins. The exact original stanza, ownership/mode and
+retained companion inode are checked after repeated recovery. This tests
+an earlier reader that has not yet fetched the companion; it does not prove
+revocation of already-fetched URLs or authorize an installed source writer.
