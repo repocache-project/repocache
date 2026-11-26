@@ -460,6 +460,72 @@ def _observe_stages(root: Path, record: dict, source: str, companion: str):
     return source_stage, companion_stage
 
 
+def _modern_recovery_record(record: dict) -> bool:
+    return (record["approval"]["schema"] in (2, 3)
+            and (record["companion"] is None or record["schema"] in (4, 5)))
+
+
+def _inspect_record_locked(root: Path, fd: int, ident: str) -> tuple[dict | None, dict]:
+    """Shared readback inside the caller's retained exclusive state lock.
+
+    Never acquires a second lock, mutates anything or confers write
+    authority. The lab writer must retain its separate native lock scope.
+    """
+    if os.getresuid() != (0, 0, 0) or os.getresgid() != (0, 0, 0):
+        raise PairRefused("Recovery record requires root")
+    flags = {
+        "local_rollback_verified": False,
+        "route_revocation_verified": False,
+        "native_exclusion_verified": False,
+        "write_eligible": False,
+    }
+    try:
+        _refuse_pending_journal(fd, ident)
+        journal_name = _journal_name(ident)
+        try:
+            initial = os.stat(journal_name, dir_fd=fd, follow_symlinks=False)
+        except FileNotFoundError:
+            _refuse_pending_journal(fd, ident)
+            if _get_journal(fd, ident) is not None:
+                raise PairRefused("Recovery journal appeared")
+            _refuse_pending_journal(fd, ident)
+            return None, {"status": "no-journal-read-only",
+                          "journal_record_verified": False, **flags}
+        if initial.st_gid != 0:
+            raise PairRefused("Recovery journal group differs")
+        record = _get_journal(fd, ident)
+        if record is None:
+            raise PairRefused("Recovery journal disappeared")
+        if not _modern_recovery_record(record):
+            raise PairRefused("Legacy recovery evidence not eligible")
+        source = _observe_source(root, record)
+        companion = _observe_companion(root, record)
+        _check_observed_phase(record, source, companion)
+        stages = _observe_stages(root, record, source, companion)
+        _refuse_pending_journal(fd, ident)
+        if (_get_journal(fd, ident) != record
+                or _observe_source(root, record) != source
+                or _observe_companion(root, record) != companion
+                or _observe_stages(root, record, source, companion) != stages):
+            raise PairRefused("Recovery evidence changed")
+        final = os.stat(journal_name, dir_fd=fd, follow_symlinks=False)
+        if (initial.st_dev, initial.st_ino, initial.st_ctime_ns) != (
+                final.st_dev, final.st_ino, final.st_ctime_ns):
+            raise PairRefused("Recovery journal identity changed")
+        _refuse_pending_journal(fd, ident)
+        return record, {
+            "status": "record-verified-read-only",
+            "journal_record_verified": True,
+            "phase": record["phase"], "source_state": source,
+            "companion_state": companion,
+            "source_stage_state": stages[0], "companion_stage_state": stages[1],
+            **flags,
+        }
+    except (boundary.BoundaryRefused, pre.PreflightError, OSError,
+            ValueError, TypeError, RecursionError) as exc:
+        raise PairRefused("Recovery record inspection refused") from exc
+
+
 def inspect_local_recovery_record(ident: str, *, _test_root: Path | None = None) -> dict:
     """Internal root-only readback; no recovery, native exclusion or revocation proof.
 
@@ -471,57 +537,11 @@ def inspect_local_recovery_record(ident: str, *, _test_root: Path | None = None)
     if os.getresuid() != (0, 0, 0) or os.getresgid() != (0, 0, 0):
         raise PairRefused("Recovery record requires root")
     root = Path("/") if _test_root is None else Path(_test_root)
-    flags = {
-        "local_rollback_verified": False,
-        "route_revocation_verified": False,
-        "native_exclusion_verified": False,
-        "write_eligible": False,
-    }
     try:
         with boundary._native_metadata_scope(root), boundary._state(root) as (fd, owner):
             with boundary._exclusive_lock(fd, owner):
-                _refuse_pending_journal(fd, ident)
-                journal_name = _journal_name(ident)
-                try:
-                    initial = os.stat(journal_name, dir_fd=fd, follow_symlinks=False)
-                except FileNotFoundError:
-                    _refuse_pending_journal(fd, ident)
-                    if _get_journal(fd, ident) is not None:
-                        raise PairRefused("Recovery journal appeared")
-                    _refuse_pending_journal(fd, ident)
-                    return {"status": "no-journal-read-only",
-                            "journal_record_verified": False, **flags}
-                if initial.st_gid != 0:
-                    raise PairRefused("Recovery journal group differs")
-                record = _get_journal(fd, ident)
-                if record is None:
-                    raise PairRefused("Recovery journal disappeared")
-                if (record["approval"]["schema"] not in (2, 3)
-                        or (record["companion"] is not None and record["schema"] not in (4, 5))):
-                    raise PairRefused("Legacy recovery evidence not eligible")
-                source = _observe_source(root, record)
-                companion = _observe_companion(root, record)
-                _check_observed_phase(record, source, companion)
-                stages = _observe_stages(root, record, source, companion)
-                _refuse_pending_journal(fd, ident)
-                if (_get_journal(fd, ident) != record
-                        or _observe_source(root, record) != source
-                        or _observe_companion(root, record) != companion
-                        or _observe_stages(root, record, source, companion) != stages):
-                    raise PairRefused("Recovery evidence changed")
-                final = os.stat(journal_name, dir_fd=fd, follow_symlinks=False)
-                if (initial.st_dev, initial.st_ino, initial.st_ctime_ns) != (
-                        final.st_dev, final.st_ino, final.st_ctime_ns):
-                    raise PairRefused("Recovery journal identity changed")
-                _refuse_pending_journal(fd, ident)
-                return {
-                    "status": "record-verified-read-only",
-                    "journal_record_verified": True,
-                    "phase": record["phase"], "source_state": source,
-                    "companion_state": companion,
-                    "source_stage_state": stages[0],
-                    "companion_stage_state": stages[1], **flags,
-                }
+                _, report = _inspect_record_locked(root, fd, ident)
+                return report
     except (boundary.BoundaryRefused, pre.PreflightError, OSError,
             ValueError, TypeError, RecursionError) as exc:
         raise PairRefused("Recovery record inspection refused") from exc
