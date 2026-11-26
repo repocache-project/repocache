@@ -97,3 +97,58 @@ def test_inactive_generation_has_no_worker_connections():
     plan = render_namespace_egress_candidate(doc, generation=1, http_fragment=b"", worker_uid=987)
     assert plan["destinations"] == ()
     assert "meta skuid 987" not in plan["nft_candidate"]
+
+
+def test_closed_namespace_readback_accepts_only_format_equivalence():
+    from repocache.server_native_egress_candidate_v1 import verify_namespace_egress_readback
+    doc, raw = fixture()
+    expected = render_namespace_egress_candidate(
+        doc, generation=1, http_fragment=raw, worker_uid=987)["nft_candidate"]
+    observed = expected.replace("priority 0", "priority filter").replace(
+        "meta l4proto tcp", "meta l4proto 6").replace(
+        "counter name denied", 'counter name "denied"').replace(
+        "counter denied { }", "counter denied {\n\t}")
+    report = verify_namespace_egress_readback(expected, observed)
+    assert report["ruleset_shape_matches"]
+    assert not report["runtime_egress_verified"] and not report["authorizes_firewall_change"]
+
+
+@pytest.mark.parametrize("fault", [
+    "foreign-table", "accept-default", "wrong-uid", "wrong-port",
+    "missing-rule", "extra-rule", "related", "reordered", "wrong-health",
+    "duplicate", "extra-verdict", "foreign-counter",
+])
+def test_closed_namespace_readback_refuses_policy_drift(fault):
+    from repocache.server_native_egress_candidate_v1 import verify_namespace_egress_readback
+    doc, raw = fixture()
+    expected = render_namespace_egress_candidate(
+        doc, generation=1, http_fragment=raw, worker_uid=987)["nft_candidate"]
+    line = "        meta skuid 987 ip daddr 1.1.1.1 tcp dport 8008 ct state new accept\n"
+    if fault == "foreign-table":
+        observed = expected + "table ip foreign { }\n"
+    elif fault == "accept-default":
+        observed = expected.replace("policy drop", "policy accept")
+    elif fault == "wrong-uid":
+        observed = expected.replace("skuid 987", "skuid 988")
+    elif fault == "wrong-port":
+        observed = expected.replace("dport 8008", "dport 443")
+    elif fault == "missing-rule":
+        observed = expected.replace(line, "")
+    elif fault == "extra-rule":
+        observed = expected.replace(line, line + line.replace("1.1.1.1", "9.9.9.9"))
+    elif fault == "related":
+        observed = expected.replace("state established", "state established,related")
+    elif fault == "reordered":
+        other = "        meta skuid 987 ip daddr 8.8.8.8 tcp dport 443 ct state new accept\n"
+        observed = expected.replace(line + other, other + line)
+    elif fault == "wrong-health":
+        observed = expected.replace('oifname "lo"', 'oifname "eth0"')
+    elif fault == "duplicate":
+        observed = expected.replace(line, line + line)
+    elif fault == "extra-verdict":
+        observed = expected.replace("counter name denied reject", "accept\n        counter name denied reject")
+    else:
+        observed = expected.replace("counter name denied", "counter name other")
+    assert observed != expected
+    with pytest.raises(NativeEgressCandidateError, match="NATIVE_EGRESS_READBACK_REFUSED"):
+        verify_namespace_egress_readback(expected, observed)

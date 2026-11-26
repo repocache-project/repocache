@@ -149,3 +149,81 @@ def render_namespace_egress_candidate(
         )
     lines.extend(("        counter name denied reject", "    }", "}"))
     return {**plan, "nft_candidate": "\n".join(lines) + "\n"}
+
+
+# Read back the complete dedicated namespace, not just a named chain. Use
+# nft --stateless --numeric-priority list ruleset with no name resolution.
+# This closed grammar ignores formatting only, never rule ordering or
+# arbitrary statements. The caller independently binds the namespace.
+_HEADER = re.compile(
+    r'table inet repocache_egress \{ counter "?denied"? \{ \} '
+    r'chain output \{ type filter hook output priority (?:0|filter); policy drop; '
+    r'meta l4proto (?:tcp|6) ct state established accept '
+    r'meta skuid 0 oifname "lo" (ip6?) daddr ([0-9a-f:.]+) '
+    r'tcp dport ([0-9]{1,5}) ct state new accept (.*) \} \}',
+    re.ASCII,
+)
+_ALLOW = re.compile(
+    r'meta skuid ([0-9]{1,10}) (ip6?) daddr ([0-9a-f:.]+) '
+    r'tcp dport ([0-9]{1,5}) ct state new accept ',
+    re.ASCII,
+)
+
+
+def _readback_tuple(family: str, address: str, port: str) -> tuple[str, int]:
+    value = ipaddress.ip_address(address)
+    number = int(port)
+    if ((family == "ip") != (value.version == 4)
+            or str(value) != address or not 1 <= number <= 65535
+            or str(number) != port):
+        raise ValueError("noncanonical tuple")
+    return address, number
+
+
+def _closed_ruleset(raw: str) -> tuple:
+    if type(raw) is not str or len(raw) > _MAX_FRAGMENT or not raw.isascii():
+        raise ValueError("invalid ruleset")
+    # No comment stripping, case folding, expression rewriting, omitted
+    # chain policy, sets, foreign tables, or reordered rules are accepted.
+    flat = " ".join(raw.split())
+    parsed = _HEADER.fullmatch(flat)
+    if parsed is None:
+        raise ValueError("unexpected ruleset shape")
+    health = _readback_tuple(*parsed.groups()[:3])
+    rest = parsed[4]
+    rules = []
+    while (match := _ALLOW.match(rest)) is not None:
+        uid, family, address, port = match.groups()
+        number = int(uid)
+        if not 0 < number < 2**31 or str(number) != uid:
+            raise ValueError("invalid worker identity")
+        rules.append((number, *_readback_tuple(family, address, port)))
+        rest = rest[match.end():]
+    if (rest not in ('counter name denied reject', 'counter name "denied" reject')
+            or len(rules) != len(set(rules))
+            or len({uid for uid, _, _ in rules}) > 1):
+        raise ValueError("unexpected rule or verdict")
+    return health, tuple(rules)
+
+
+def verify_namespace_egress_readback(expected: str, observed: str) -> dict[str, Any]:
+    """Compare a trusted rendered candidate with complete nft readback.
+
+    The expected string must come from the authenticated generation renderer,
+    not an operator request. No command is executed here. The observed text
+    must be supplied by a separately verified namespace controller using
+    the fixed listing command. This proves shape equality only, not kernel
+    provenance, namespace exclusivity, packet delivery or durable ownership.
+    """
+    try:
+        if _closed_ruleset(expected) != _closed_ruleset(observed):
+            raise ValueError("ruleset differs")
+        return {
+            "status": "NAMESPACE_EGRESS_RULESET_MATCH",
+            "ruleset_shape_matches": True,
+            "runtime_egress_verified": False,
+            "authorizes_firewall_change": False,
+            "authorizes_nginx_activation": False,
+        }
+    except (ValueError, TypeError, OverflowError, RecursionError):
+        raise NativeEgressCandidateError("NATIVE_EGRESS_READBACK_REFUSED") from None

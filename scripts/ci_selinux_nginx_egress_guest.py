@@ -540,6 +540,53 @@ def request(root, path, *, method="GET", remote=False):
             (root / "headers").read_text().lower())
 
 
+def verify_peer_ruleset(expected):
+    """Fixed whole-ruleset listing and signed-worker closed shape check."""
+    guard()
+    namespace = Path("/run/netns", NS)
+    before = namespace.stat()
+    host = Path("/proc/self/ns/net").stat()
+    peer = Path("/run/netns", PEER_NS).stat()
+    identity = (before.st_dev, before.st_ino)
+    assert identity not in ((host.st_dev, host.st_ino), (peer.st_dev, peer.st_ino))
+    observed = command("/usr/sbin/ip", "netns", "exec", NS, "/usr/sbin/nft",
+                       "--stateless", "--numeric-priority", "list", "ruleset").stdout
+    after = namespace.stat()
+    assert (after.st_dev, after.st_ino) == identity
+    code = """
+import json,sys,zipimport
+sys.path.insert(0, "/usr/libexec/repocache/server-control-worker")
+from repocache import server_native_egress_candidate_v1 as egress
+assert isinstance(egress.__loader__, zipimport.zipimporter)
+assert egress.__loader__.archive == "/usr/libexec/repocache/server-control-worker"
+expected,observed=json.load(sys.stdin)
+print(json.dumps(egress.verify_namespace_egress_readback(expected, observed)))
+"""
+    outcome = command("/usr/bin/python3", "-IS", "-B", "-c", code,
+                      input_text=json.dumps([expected, observed]), check=False)
+    if outcome.returncode:
+        raise AssertionError("Authenticated closed ruleset readback refused: " +
+                             observed[-4000:])
+    report = json.loads(outcome.stdout)
+    assert report["ruleset_shape_matches"] and not report["runtime_egress_verified"]
+    assert not report["authorizes_firewall_change"]
+    return report
+
+
+def replace_peer_ruleset(previous, proposed):
+    """Only this isolated fixture's already-owned table may be replaced."""
+    guard()
+    verify_peer_ruleset(previous)
+    batch = "delete table inet repocache_egress\n" + proposed
+    command("/usr/sbin/ip", "netns", "exec", NS, "/usr/sbin/nft", "-c", "-f", "-",
+            input_text=batch)
+    verify_peer_ruleset(previous)
+    command("/usr/sbin/ip", "netns", "exec", NS, "/usr/sbin/nft", "-f", "-",
+            input_text=batch)
+    verify_peer_ruleset(proposed)
+    print("PASS: exact prior and replacement private namespace ruleset readback", flush=True)
+
+
 def denied_packets():
     """Read only the named kernel counter in the already guarded private netns."""
     guard()
@@ -1132,9 +1179,8 @@ location / {{ return 404; }}
                         command("/usr/sbin/ip", "netns", "exec", NS, "/usr/sbin/nft",
                                 "-f", "-", input_text="delete table inet repocache_ci\n"
                                 + apt_rules)
-                        assert "repocache_egress" in command(
-                            "/usr/sbin/ip", "netns", "exec", NS, "/usr/sbin/nft",
-                            "list", "tables").stdout
+                        verify_peer_ruleset(apt_rules)
+                        print("PASS: authenticated closed private namespace ruleset readback", flush=True)
                         before_root = denied_packets()
                         denied = command("/usr/sbin/ip", "netns", "exec", NS, "/usr/bin/curl",
                                          "--silent", "--max-time", "2", "--noproxy", "*",
@@ -1159,10 +1205,12 @@ location / {{ return 404; }}
                         assert request(root, dnf + "payload")[0] == 502
                     assert counts_path.read_text().splitlines() == before_hits + [
                         first_origin, first_origin]
-                    command("/usr/sbin/ip", "netns", "exec", NS, "/usr/sbin/nft", "-f", "-",
-                            input_text=("delete table inet repocache_egress\n" + rendered_rules
-                                        if remote else "delete table inet repocache_ci\n"
-                                        + packet_rules(custom_https=True)))
+                    if remote:
+                        replace_peer_ruleset(apt_rules, rendered_rules)
+                    else:
+                        command("/usr/sbin/ip", "netns", "exec", NS, "/usr/sbin/nft", "-f", "-",
+                                input_text="delete table inet repocache_ci\n"
+                                + packet_rules(custom_https=True))
                     first, second = request(root, dnf + "payload", remote=remote), request(root, dnf + "payload", remote=remote)
                     assert first[:2] == second[:2] == (200, PAYLOAD)
                     assert "x-cache: miss" in first[2] and "x-cache: hit" in second[2]
@@ -1210,10 +1258,11 @@ location / {{ return 404; }}
                         time.sleep(0.1)
                     else:
                         raise AssertionError("Rendered route withdrawal did not drain old worker")
-                    command("/usr/sbin/ip", "netns", "exec", NS, "/usr/sbin/nft", "-f", "-",
-                            input_text=("delete table inet repocache_egress\n" + next_rules
-                                        if remote else "delete table inet repocache_ci\n"
-                                        + packet_rules()))
+                    if remote:
+                        replace_peer_ruleset(rendered_rules, next_rules)
+                    else:
+                        command("/usr/sbin/ip", "netns", "exec", NS, "/usr/sbin/nft", "-f", "-",
+                                input_text="delete table inet repocache_ci\n" + packet_rules())
                     assert request(root, dnf + "payload", remote=remote)[0] == 404
                     assert request(root, dnf + "fresh", remote=remote)[0] == 404
                     assert request(root, apt + "fresh", remote=remote)[:2] == (200, PAYLOAD)

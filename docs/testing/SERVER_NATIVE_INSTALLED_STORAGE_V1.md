@@ -412,3 +412,17 @@ and HTTP 502 or 504. The fresh root connect negative also requires a
 counter increment. This changes neither the candidate allowlist nor its
 default-deny policy, nor installed service acceptance criteria. Native
 revalidation is required.
+
+### Closed namespace rule readback candidate
+
+A pure verifier compares the complete namespace ruleset with the
+already authenticated candidate using the fixed stateless nft listing
+and numeric priority (see nft(8)). It ignores whitespace and the known
+fixed spelling of the numeric filter priority, TCP protocol and named
+counter only. Additional tables, rules, verdicts, policy changes,
+reordered tuples, UID or destination changes refuse. No rule, namespace
+or host trust is inferred from this parser alone. The private native
+fixture binds the namespace identity, checks the old complete ruleset,
+syntax-checks a single atomic table replacement, rechecks the old
+ruleset and verifies the new complete ruleset. Installed lifecycle and
+WAL compensation still require their own authority and native evidence.
