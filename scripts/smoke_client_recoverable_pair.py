@@ -501,10 +501,11 @@ def incomplete_journal_matrix(manager):
                 os.fsync = fail_pending
                 try:
                     (apply if action == "apply" else restore)()
-                except (OSError, pair.PairRefused, boundary.BoundaryRefused) as exc:
-                    # The protected state context wraps OSError, and the
-                    # apply entry adds its own PairRefused. Require the
-                    # original injected exception, not just any refusal.
+                except Exception as exc:
+                    # Different protected directory/state contexts wrap I/O
+                    # errors differently. Require the exact original injected
+                    # exception in the explicit cause chain; any unrelated
+                    # exception fails this test, regardless of its type.
                     cause = exc
                     for _ in range(4):
                         if cause is injected:
