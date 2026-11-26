@@ -540,6 +540,39 @@ def request(root, path, *, method="GET", remote=False):
             (root / "headers").read_text().lower())
 
 
+def denied_packets():
+    """Read only the named kernel counter in the already guarded private netns."""
+    guard()
+    data = json.loads(command("/usr/sbin/ip", "netns", "exec", NS,
+                              "/usr/sbin/nft", "-j", "list", "counter",
+                              "inet", "repocache_egress", "denied").stdout)
+    return parse_denied_packets(data)
+
+
+def parse_denied_packets(data):
+    rows = [entry["counter"] for entry in data["nftables"] if "counter" in entry]
+    assert len(rows) == 1
+    row = rows[0]
+    assert (row["family"], row["table"], row["name"]) == (
+        "inet", "repocache_egress", "denied")
+    assert type(row["packets"]) is int and row["packets"] >= 0
+    return row["packets"]
+
+
+def peer_denied(root, path):
+    # ICMP reject across veth need not reach the connecting process
+    # before proxy_connect_timeout. Require actual packet denial evidence.
+    before = denied_packets()
+    counts = root / "peer-origin-counts"
+    prior = counts.read_bytes() if counts.exists() else None
+    code, _, _ = request(root, path, remote=True)
+    after = denied_packets()
+    assert code in (502, 504) and after > before, (path, code, before, after)
+    assert (counts.read_bytes() if counts.exists() else None) == prior
+    print("PASS: exact peer denial " + path + " HTTP " + str(code) +
+          " kernel denied packets +" + str(after - before), flush=True)
+
+
 def render_signed_fixture_routes(root, *, dnf_enabled=True, remote=False, worker_uid):
     """Use the authenticated installed zipapp's actual candidate renderer.
 
@@ -1102,13 +1135,15 @@ location / {{ return 404; }}
                         assert "repocache_egress" in command(
                             "/usr/sbin/ip", "netns", "exec", NS, "/usr/sbin/nft",
                             "list", "tables").stdout
+                        before_root = denied_packets()
                         denied = command("/usr/sbin/ip", "netns", "exec", NS, "/usr/bin/curl",
                                          "--silent", "--max-time", "2", "--noproxy", "*",
                                          "--cacert", str(cert), "--resolve", f"localhost:443:{APT_PEER}",
                                          "https://localhost/fixture", check=False)
                         assert denied.returncode != 0 and not counts_path.exists()
-                        assert request(root, "remote-wrong-pair", remote=True)[0] == 502
-                        assert request(root, "remote-wrong-address", remote=True)[0] == 502
+                        assert denied_packets() > before_root
+                        peer_denied(root, "remote-wrong-pair")
+                        peer_denied(root, "remote-wrong-address")
                         assert not counts_path.exists()
                     before_hits = counts_path.read_text().splitlines() if counts_path.exists() else []
                     apt = "__repocache/repos/fixture-apt/"
@@ -1118,7 +1153,10 @@ location / {{ return 404; }}
                     assert "x-cache: miss" in first[2] and "x-cache: hit" in second[2]
                     assert request(root, apt + "payload", method="POST", remote=remote)[0] == 403
                     assert request(root, apt + "redirect", remote=remote)[0] == 502
-                    assert request(root, dnf + "payload", remote=remote)[0] == 502
+                    if remote:
+                        peer_denied(root, dnf + "payload")
+                    else:
+                        assert request(root, dnf + "payload")[0] == 502
                     assert counts_path.read_text().splitlines() == before_hits + [
                         first_origin, first_origin]
                     command("/usr/sbin/ip", "netns", "exec", NS, "/usr/sbin/nft", "-f", "-",
@@ -1131,8 +1169,8 @@ location / {{ return 404; }}
                     assert counts_path.read_text().splitlines() == before_hits + [
                         first_origin, first_origin, second_origin]
                     if remote:
-                        assert request(root, "remote-wrong-pair", remote=True)[0] == 502
-                        assert request(root, "remote-wrong-address", remote=True)[0] == 502
+                        peer_denied(root, "remote-wrong-pair")
+                        peer_denied(root, "remote-wrong-address")
                         assert counts_path.read_text().splitlines() == before_hits + [
                             first_origin, first_origin, second_origin]
                     for kind in ("apt", "dnf"):
@@ -1183,8 +1221,8 @@ location / {{ return 404; }}
                         first_origin, first_origin, second_origin, first_origin]
                     print("PASS: authenticated installed renderer APT/DNF private routes; TLS MISS/HIT, POST/redirect refusal, DNF withdrawal after worker drain, APT fresh access", flush=True)
                     if remote:
-                        assert request(root, "remote-wrong-pair", remote=True)[0] == 502
-                        assert request(root, "remote-wrong-address", remote=True)[0] == 502
+                        peer_denied(root, "remote-wrong-pair")
+                        peer_denied(root, "remote-wrong-address")
                         assert counts_path.read_text().splitlines() == before_hits + [
                             first_origin, first_origin, second_origin, first_origin]
                         print("PASS: authenticated worker generation-bound egress candidate used in peer namespace; "

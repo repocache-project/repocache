@@ -247,3 +247,24 @@ native fixture begins. The exact original stanza, ownership/mode and
 retained companion inode are checked after repeated recovery. This tests
 an earlier reader that has not yet fetched the companion; it does not prove
 revocation of already-fetched URLs or authorize an installed source writer.
+
+
+### Incomplete journal publication
+
+A failed journal write/fsync can leave the exact private
+`.pair-<id>.pending` leaf alongside an older committed journal or before
+the first journal exists. Under the existing exclusive state lock, every
+sandbox apply/restore/recover entry now refuses this uncertain state before
+reading the old journal or touching any source, mirror or staging file.
+Any kind of pending leaf (including a dangling symlink) is refused without
+following it; lookup errors are not treated as absence. The file and all
+known and unknown inodes remain available for manual inspection. Do not
+automatically promote, delete or overwrite incomplete journal evidence.
+
+The disposable APT retained-companion and DNF pair tests inject ENOSPC at
+the actual pending-file fsync for each apply and restore publication stage.
+They require the previous journal phase (or absence), pending evidence and
+every fixture file's bytes, inode and metadata to remain unchanged across
+subsequent refusal of all three operations. The injection is a simulated I/O
+failure, not a full-filesystem or power-loss test. There is no new installed
+writer, automatic orphan cleanup, CLI contract or production permission.

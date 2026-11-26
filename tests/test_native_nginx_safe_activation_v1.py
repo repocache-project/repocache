@@ -782,3 +782,15 @@ def test_isolated_remote_egress_is_root_only_and_exact_tuple_bound():
         guest.nft_rules(987, root_master=True, remote=True, negative_port_probe=True)
     with pytest.raises(AssertionError):
         guest.nft_rules(987, root_master=True, remote=1)
+
+
+def test_peer_denial_counter_requires_exact_named_kernel_counter():
+    from scripts.ci_selinux_nginx_egress_guest import parse_denied_packets
+    data = {"nftables": [{"metainfo": {}}, {"counter": {"family": "inet",
+             "table": "repocache_egress", "name": "denied", "packets": 4}}]}
+    assert parse_denied_packets(data) == 4
+    for field, value in (("family", "ip"), ("table", "foreign"),
+                         ("name", "other"), ("packets", True), ("packets", -1)):
+        bad = {"nftables": [{"counter": {**data["nftables"][1]["counter"], field: value}}]}
+        with pytest.raises(AssertionError):
+            parse_denied_packets(bad)

@@ -400,3 +400,15 @@ against the exact signed RPM. Actual process/domain/namespace checks still
 follow. No production placement or automatic repair is enabled; Debian
 package payload binding, fixed installed location, durable receipt and
 lifecycle integration remain NOT VERIFIED.
+
+### Peer denial evidence
+
+The previous enforcing VM reached the remote crossed-tuple negative but
+logged an upstream connect timeout, not an immediate connection refusal.
+A transport status alone is insufficient evidence of packet enforcement.
+The peer negatives now require an increment of the exact namespace-local
+named kernel deny counter for each request, unchanged peer origin counts,
+and HTTP 502 or 504. The fresh root connect negative also requires a
+counter increment. This changes neither the candidate allowlist nor its
+default-deny policy, nor installed service acceptance criteria. Native
+revalidation is required.
