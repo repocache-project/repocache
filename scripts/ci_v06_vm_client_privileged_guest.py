@@ -103,10 +103,9 @@ def _apt_source_read_order(root: Path) -> None:
           "even with all four transaction locks held; release succeeds")
 
 
-def _signed_recovery_readback(root, ident, *, phase, source_state, companion_state):
+def _signed_recovery_readback(root, ident, *, platform, phase, source_state, companion_state):
     """Inspect existing exact lab evidence using only the authenticated zip."""
-    guard_platform = "debian13" if Path("/etc/debian_version").exists() else "almalinux10"
-    guarded_native_guest(guard_platform)
+    guarded_native_guest(platform)
     target = "/usr/libexec/repocache-client/client-source-helper"
     code = """
 import json,sys,zipimport
@@ -236,7 +235,7 @@ def _debian_fixture(root: Path) -> None:
 
     # The catalog is offline. All changes are in the marked private lab root.
     mirror = root / ("etc/apt/mirrors/repocache-" + ident + ".list")
-    _signed_recovery_readback(root, ident, phase="armed",
+    _signed_recovery_readback(root, ident, platform="debian13", phase="armed",
                               source_state="proposed", companion_state="cache-bearing")
     assert pair.recover_sandbox(root, ident)["status"] == "restored"
     restored = _snapshot(source)
@@ -246,7 +245,7 @@ def _debian_fixture(root: Path) -> None:
     retained = _snapshot(mirror)
     assert pair.recover_sandbox(root, ident)["status"] == "restored"
     assert _snapshot(mirror) == retained
-    _signed_recovery_readback(root, ident, phase="restored",
+    _signed_recovery_readback(root, ident, platform="debian13", phase="restored",
                               source_state="restored", companion_state="upstream-only")
     print("PASS: Debian booted root exact HTTPS preparation/approval and sandbox SIGKILL restore with retained upstream-only companion")
 
@@ -449,7 +448,7 @@ def _alma_label_roundtrip(root: Path, *, dnf4=False) -> None:
             assert os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGKILL
             changed = _snapshot(source)
             assert changed[0] != baseline[0] and changed[-1] == baseline[-1]
-            _signed_recovery_readback(root, ident, phase="armed",
+            _signed_recovery_readback(root, ident, platform="almalinux10", phase="armed",
                                       source_state="proposed", companion_state="not-applicable")
             if dnf4:
                 stale = root / "var/lib/dnf/rpmdb_lock.pid"
@@ -478,7 +477,7 @@ def _alma_label_roundtrip(root: Path, *, dnf4=False) -> None:
             assert restored[0] == baseline[0]
             assert restored[3:6] == baseline[3:6] and restored[-1] == baseline[-1]
             assert pair.recover_sandbox(root, ident)["status"] == "restored"
-            _signed_recovery_readback(root, ident, phase="restored",
+            _signed_recovery_readback(root, ident, platform="almalinux10", phase="restored",
                                       source_state="restored", companion_state="not-applicable")
             if dnf4:
                 with _native_dnf4_library_owner(root):

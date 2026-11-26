@@ -10,9 +10,9 @@ import sys
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "client"))
-from recovery_journal_v1 import inspect_local_recovery_record, PairRefused
+from recovery_journal_v1 import inspect_local_recovery_record, PairRefused, _check_observed_phase
 import recoverable_fallback_pair_lab as pair
-from smoke_client_recoverable_pair import build, IDENT
+from scripts.smoke_client_recoverable_pair import build, IDENT
 
 
 @pytest.mark.skipif(os.geteuid() != 0, reason="requires private root-owned fixture")
@@ -66,3 +66,23 @@ def test_exact_recovery_record_and_foreign_inode(tmp_path, manager):
     with pytest.raises(PairRefused, match="recorded inode"):
         inspect_local_recovery_record(IDENT, _test_root=root)
     assert snapshot() == before
+
+
+@pytest.mark.parametrize("phase,source,companion", [
+    ("installed", "original", "cache-bearing"),
+    ("installed", "proposed", "upstream-only"),
+    ("armed", "proposed", "absent"),
+    ("restore-armed", "restored", "cache-bearing"),
+    ("restored", "restored", "cache-bearing"),
+])
+def test_inconsistent_recovery_phases_are_refused(phase, source, companion):
+    record = {"phase": phase, "companion": "etc/apt/mirrors/repocache-example.list",
+              "retained_id": [1, 2]}
+    with pytest.raises(PairRefused):
+        _check_observed_phase(record, source, companion)
+
+
+def test_nonroot_readback_refused_before_inspection(monkeypatch):
+    monkeypatch.setattr(os, "getresuid", lambda: (1000, 0, 0))
+    with pytest.raises(PairRefused, match="requires root"):
+        inspect_local_recovery_record(IDENT)

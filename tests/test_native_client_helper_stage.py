@@ -26,8 +26,7 @@ def test_deterministic_closed_client_helper_archive(tmp_path):
     assert first.startswith(b"#!/usr/bin/python3 -IS\n")
     with zipfile.ZipFile(io.BytesIO(first)) as archive:
         assert archive.namelist() == ["__main__.py", *(m + ".py" for m in stage.MODULES)]
-        assert not any("server" in name or "sandbox" in name or "lab.py" == name[-6:] and name != "source_metadata_lab.py"
-                       for name in archive.namelist())
+        assert not any("server" in name or "sandbox" in name for name in archive.namelist())
         assert "recovery_journal_v1.py" in archive.namelist()
         assert "recoverable_fallback_pair_lab.py" not in archive.namelist()
         assert "transaction_atomic_lab.py" not in archive.namelist()

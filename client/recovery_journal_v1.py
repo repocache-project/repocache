@@ -123,7 +123,7 @@ def _get_journal(fd: int, ident: str) -> dict | None:
     raw = boundary._read_pinned(fd, name, JOURNAL_MAX)
     try:
         j = json.loads(raw.decode("ascii"), object_pairs_hook=_no_duplicates)
-    except (UnicodeError, ValueError) as exc:
+    except (UnicodeError, ValueError, RecursionError) as exc:
         raise PairRefused("Malformed protected journal") from exc
     required = {
         "schema", "id", "phase", "source", "companion",
@@ -339,20 +339,24 @@ def inspect_local_recovery_record(ident: str, *, _test_root: Path | None = None)
         with boundary._native_metadata_scope(root), boundary._state(root) as (fd, owner):
             with boundary._exclusive_lock(fd, owner):
                 _refuse_pending_journal(fd, ident)
-                record = _get_journal(fd, ident)
-                if record is None:
+                journal_name = _journal_name(ident)
+                try:
+                    initial = os.stat(journal_name, dir_fd=fd, follow_symlinks=False)
+                except FileNotFoundError:
                     _refuse_pending_journal(fd, ident)
                     if _get_journal(fd, ident) is not None:
                         raise PairRefused("Recovery journal appeared")
+                    _refuse_pending_journal(fd, ident)
                     return {"status": "no-journal-read-only",
                             "journal_record_verified": False, **flags}
+                if initial.st_gid != 0:
+                    raise PairRefused("Recovery journal group differs")
+                record = _get_journal(fd, ident)
+                if record is None:
+                    raise PairRefused("Recovery journal disappeared")
                 if (record["approval"]["schema"] not in (2, 3)
                         or (record["companion"] is not None and record["schema"] not in (4, 5))):
                     raise PairRefused("Legacy recovery evidence not eligible")
-                journal_name = _journal_name(ident)
-                initial = os.stat(journal_name, dir_fd=fd, follow_symlinks=False)
-                if initial.st_gid != 0:
-                    raise PairRefused("Recovery journal group differs")
                 source = _observe_source(root, record)
                 companion = _observe_companion(root, record)
                 _check_observed_phase(record, source, companion)
@@ -372,5 +376,6 @@ def inspect_local_recovery_record(ident: str, *, _test_root: Path | None = None)
                     "phase": record["phase"], "source_state": source,
                     "companion_state": companion, **flags,
                 }
-    except (boundary.BoundaryRefused, pre.PreflightError, OSError, ValueError, TypeError) as exc:
+    except (boundary.BoundaryRefused, pre.PreflightError, OSError,
+            ValueError, TypeError, RecursionError) as exc:
         raise PairRefused("Recovery record inspection refused") from exc
