@@ -352,6 +352,24 @@ def _debian_fixture(root: Path) -> None:
     finally:
         stage.unlink()
     print("PASS: shared pre-mutation readback refuses foreign stage before companion neutralization", flush=True)
+
+    # A self-bind preserves the exact source inode and metadata but adds
+    # a distinct mount. Refuse it before any recovery side effect.
+    before = tuple(_snapshot(path) for path in (source, mirror, journal))
+    subprocess.run(["/usr/bin/mount", "--bind", str(source), str(source)],
+                   check=True, timeout=15)
+    try:
+        assert tuple(_snapshot(path) for path in (source, mirror, journal)) == before
+        try:
+            pair.recover_sandbox(root, ident)
+        except pair.PairRefused as exc:
+            assert "Mounted fixture resource refused" in str(exc)
+        else:
+            raise AssertionError("Bind-mounted fixture source admitted")
+        assert tuple(_snapshot(path) for path in (source, mirror, journal)) == before
+    finally:
+        subprocess.run(["/usr/bin/umount", str(source)], check=True, timeout=15)
+    print("PASS: real same-inode bind mount refused before recovery writes", flush=True)
     # Interrupt recovery after the real restore inode and journal are durable.
     # The authenticated installed read-only helper must observe that exact
     # stage before the separate lab resumes the rollback, with catalog offline.

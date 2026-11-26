@@ -317,3 +317,69 @@ def test_modern_writer_checks_all_stages_before_any_recovery_write(tmp_path, man
         else:
             pair.recover_sandbox(root, IDENT)
     assert _private_file_snapshot(root) == before
+
+
+def _mount_row(path):
+    return b"42 1 8:1 / " + path + b" rw - ext4 /dev/test rw\n"
+
+
+@pytest.mark.parametrize("where", ["root", "source-parent", "source", "state", "ancestor"])
+@pytest.mark.parametrize("operation", ["apply", "restore", "recover"])
+@pytest.mark.skipif(os.geteuid() != 0, reason="requires private root-owned fixture")
+def test_pair_refuses_mounts_before_any_mutation(tmp_path, monkeypatch, where, operation):
+    root = tmp_path / "fixture space"
+    source, _ = _modern_pair(root, "apt")
+    if operation != "apply":
+        _apply_modern_pair(root, "apt")
+    state = root / "var/lib/repocache-client/approved-entries"
+    path = {"root": root, "source-parent": source.parent, "source": source,
+            "state": state, "ancestor": root.parent}[where]
+    encoded = os.fsencode(path).replace(b"\\", b"\\134").replace(b" ", b"\\040")
+    monkeypatch.setattr(pair, "_read_mountinfo", lambda: _mount_row(encoded))
+    before = _private_file_snapshot(root)
+    with pytest.raises(PairRefused, match="Mounted fixture resource refused"):
+        if operation == "apply":
+            _apply_modern_pair(root, "apt")
+        elif operation == "restore":
+            pair.restore_sandbox(root, IDENT)
+        else:
+            pair.recover_sandbox(root, IDENT)
+    assert _private_file_snapshot(root) == before
+
+
+def test_mountinfo_path_boundaries_and_escapes(tmp_path, monkeypatch):
+    root = tmp_path / "fixture"
+    root.mkdir()
+    assert pair._mountpoint(b"/x\\040y\\011z\\012q\\134r") == b"/x y\tz\nq\\r"
+    for raw in (b"/bad\\999", b"relative", b"/bad\x00"):
+        with pytest.raises(PairRefused, match="Malformed fixture mount evidence"):
+            pair._mountpoint(raw)
+    sibling = os.fsencode(root) + b"-other"
+    monkeypatch.setattr(pair, "_read_mountinfo", lambda: _mount_row(sibling))
+    pair._private_mount_tree(root)
+    monkeypatch.setattr(pair, "_read_mountinfo", lambda: b"invalid\n")
+    with pytest.raises(PairRefused, match="Malformed fixture mount evidence"):
+        pair._private_mount_tree(root)
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="requires private root-owned fixture")
+def test_pair_rechecks_mount_topology_after_native_lock_acquisition(tmp_path, monkeypatch):
+    import contextlib
+
+    root = tmp_path / "fixture"
+    source, _ = _modern_pair(root, "apt")
+    native_scope = pair._package_scope
+    mountinfo = pair._read_mountinfo
+
+    @contextlib.contextmanager
+    def inject_mount(*args, **kwargs):
+        with native_scope(*args, **kwargs) as recheck:
+            monkeypatch.setattr(pair, "_read_mountinfo", lambda:
+                                mountinfo() + _mount_row(os.fsencode(source)))
+            yield recheck
+
+    monkeypatch.setattr(pair, "_package_scope", inject_mount)
+    before = _private_file_snapshot(root)
+    with pytest.raises(PairRefused, match="Mounted fixture resource refused"):
+        _apply_modern_pair(root, "apt")
+    assert _private_file_snapshot(root) == before
