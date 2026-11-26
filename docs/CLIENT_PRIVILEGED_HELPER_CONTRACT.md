@@ -318,3 +318,25 @@ or authorize pending filesystem writes, and all authority flags stay
 false. Both distro root containers execute the recovery readback tests;
 the booted signed-helper fixture additionally verifies exact-metadata
 same-byte foreign inode refusal without changing the journal.
+
+
+### Journal-bound staging evidence
+
+The authenticated read-only candidate also inspects the fixed per-ID
+staging leaves in the exact source and APT companion parent directories.
+It derives expected bytes, inode and metadata only from the verified
+journal phase: an interrupted initial stage may be present or already
+removed by cancellation, but a durable rollback intent still awaiting
+publication requires its recorded restore or retained-companion inode.
+Committed/restored phases refuse unexpected staging leaves, including
+dangling symlinks. Directory and file descriptors, exact identity, mode,
+ownership, attributes, bounded bytes and repeat readback are checked
+without deleting or adopting anything. Reports distinguish absent,
+recorded and non-applicable stages; no-journal does not certify the
+absence of orphan stages. This is a prerequisite for a later writer, not
+permission to recover, exclude native readers or revoke previously acquired
+URLs. Root-container tests cover initial and rollback phases and foreign,
+missing and unexpected stages; the existing booted signed-helper exercise
+adds terminal-stage refusal on both distributions and a Debian SIGKILL
+after durable rollback staging with offline resume. Exact execution is
+required before acceptance; no new CLI operation or host write is enabled.

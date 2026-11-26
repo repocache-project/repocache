@@ -103,7 +103,8 @@ def _apt_source_read_order(root: Path) -> None:
           "even with all four transaction locks held; release succeeds")
 
 
-def _signed_recovery_readback(root, ident, *, platform, phase, source_state, companion_state):
+def _signed_recovery_readback(root, ident, *, platform, phase, source_state, companion_state,
+                              source_stage="absent", companion_stage=None):
     """Inspect existing exact lab evidence using only the authenticated zip."""
     guarded_native_guest(platform)
     target = "/usr/libexec/repocache-client/client-source-helper"
@@ -137,6 +138,10 @@ assert "recoverable_fallback_pair_lab" not in sys.modules
             source_state = "original-or-restored"
     assert (report["phase"], report["source_state"], report["companion_state"]) == (
         phase, source_state, companion_state), report
+    if companion_stage is None:
+        companion_stage = ("not-applicable" if companion_state == "not-applicable" else "absent")
+    assert (report["source_stage_state"], report["companion_stage_state"]) == (
+        source_stage, companion_stage), report
     assert all(report[name] is False for name in (
         "local_rollback_verified", "route_revocation_verified",
         "native_exclusion_verified", "write_eligible"))
@@ -202,6 +207,27 @@ assert "recoverable_fallback_pair_lab" not in sys.modules
             check=True, capture_output=True, timeout=20).stdout)
         assert again == report
         print("PASS: authenticated readback refuses same-byte foreign inode; owned evidence preserved", flush=True)
+        # A terminal journal must not authorize a stray staging leaf. The
+        # negative is an actual guarded private fixture, never a host path.
+        paths = [root / journal["source"]]
+        if journal["companion"] is not None:
+            paths.append(root / journal["companion"])
+        for path in paths:
+            staged = path.with_name(".repocache-atomic-" + ident)
+            assert not os.path.lexists(staged)
+            with staged.open("xb") as stream:
+                os.fchmod(stream.fileno(), 0o600)
+                stream.write(b"foreign fixture stage")
+            try:
+                foreign_stage = _snapshot(staged)
+                denied = subprocess.run(
+                    ["/usr/bin/python3", "-IS", "-B", "-c", code, target, str(root), ident],
+                    capture_output=True, timeout=20)
+                assert denied.returncode != 0 and b"Unexpected recovery stage" in denied.stderr
+                assert _snapshot(staged) == foreign_stage and _snapshot(journal_path) == before
+            finally:
+                staged.unlink()
+        print("PASS: authenticated readback refuses stray stage in terminal journal", flush=True)
 
 
 def _debian_fixture(root: Path) -> None:
@@ -306,6 +332,22 @@ def _debian_fixture(root: Path) -> None:
     mirror = root / ("etc/apt/mirrors/repocache-" + ident + ".list")
     _signed_recovery_readback(root, ident, platform="debian13", phase="armed",
                               source_state="proposed", companion_state="cache-bearing")
+    # Interrupt recovery after the real restore inode and journal are durable.
+    # The authenticated installed read-only helper must observe that exact
+    # stage before the separate lab resumes the rollback, with catalog offline.
+    pid = os.fork()
+    if pid == 0:
+        def kill_restore(active, phase):
+            if active == "recover" and phase == "restore-armed":
+                os.kill(os.getpid(), signal.SIGKILL)
+        pair._crash = kill_restore
+        pair.recover_sandbox(root, ident)
+        os._exit(77)
+    _, status = os.waitpid(pid, 0)
+    assert os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGKILL
+    _signed_recovery_readback(root, ident, platform="debian13", phase="restore-armed",
+                              source_state="proposed", companion_state="upstream-only",
+                              source_stage="recorded")
     assert pair.recover_sandbox(root, ident)["status"] == "restored"
     restored = _snapshot(source)
     assert restored[0] == original[0]

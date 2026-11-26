@@ -134,3 +134,115 @@ def test_readback_only_accepts_reachable_journal_states(
     else:
         with pytest.raises(PairRefused):
             _check_observed_phase(record, source, companion)
+
+
+def _modern_pair(root, manager):
+    root.mkdir(mode=0o700)
+    source, mirror, _, state = build(root, manager)
+    approval = state / ("candidate-" + IDENT + ".json")
+    record = json.loads(approval.read_text())
+    observed = pair.pre.inspect_source(record["source"], root=root)
+    record["schema"] = 2
+    record["source_identity"] = {
+        key: observed[key] for key in pair.boundary.SOURCE_IDENTITY_FIELDS}
+    approval.write_text(json.dumps(record))
+    return source, mirror
+
+
+def _apply_modern_pair(root, manager, crash=None):
+    if manager == "apt":
+        return pair.apply_retaining_apt_companion_sandbox(
+            root, IDENT, current_catalog=False, crash=crash)
+    return pair.apply_sandbox(root, IDENT, crash=crash)
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="requires private root-owned fixture")
+@pytest.mark.parametrize("manager,crash,source_stage,companion_stage", [
+    ("apt", "armed", "recorded", "recorded"),
+    ("apt", "companion", "recorded", "absent"),
+    ("apt", "source", "absent", "absent"),
+    ("dnf", "armed", "recorded", "not-applicable"),
+    ("dnf", "source", "absent", "not-applicable"),
+])
+def test_readback_pins_initial_stages(tmp_path, manager, crash, source_stage, companion_stage):
+    root = tmp_path / "fixture"
+    _modern_pair(root, manager)
+    with pytest.raises(pair.InjectedCrash):
+        _apply_modern_pair(root, manager, crash)
+    report = inspect_local_recovery_record(IDENT, _test_root=root)
+    assert report["phase"] == "armed"
+    assert (report["source_stage_state"], report["companion_stage_state"]) == (
+        source_stage, companion_stage)
+    assert not report["write_eligible"]
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="requires private root-owned fixture")
+@pytest.mark.parametrize("manager,crash,source_stage,companion_stage", [
+    ("apt", "retention-armed", "absent", "recorded"),
+    ("apt", "companion-neutralized", "absent", "absent"),
+    ("apt", "restore-armed", "recorded", "absent"),
+    ("apt", "source-restored", "absent", "absent"),
+    ("dnf", "restore-armed", "recorded", "not-applicable"),
+    ("dnf", "source-restored", "absent", "not-applicable"),
+])
+def test_readback_pins_rollback_stages(tmp_path, manager, crash, source_stage, companion_stage):
+    root = tmp_path / "fixture"
+    _modern_pair(root, manager)
+    _apply_modern_pair(root, manager)
+    with pytest.raises(pair.InjectedCrash):
+        pair.restore_sandbox(root, IDENT, crash=crash)
+    report = inspect_local_recovery_record(IDENT, _test_root=root)
+    assert report["phase"] == "restore-armed"
+    assert (report["source_stage_state"], report["companion_stage_state"]) == (
+        source_stage, companion_stage)
+    assert not report["write_eligible"]
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="requires private root-owned fixture")
+@pytest.mark.parametrize("manager,crash,resource", [
+    ("apt", "retention-armed", "companion"),
+    ("apt", "restore-armed", "source"),
+    ("dnf", "restore-armed", "source"),
+])
+def test_readback_refuses_missing_and_foreign_required_stage(tmp_path, manager, crash, resource):
+    root = tmp_path / "fixture"
+    source, mirror = _modern_pair(root, manager)
+    _apply_modern_pair(root, manager)
+    with pytest.raises(pair.InjectedCrash):
+        pair.restore_sandbox(root, IDENT, crash=crash)
+    path = (mirror if resource == "companion" else source).with_name(
+        ".repocache-atomic-" + IDENT)
+    saved = path.with_name(".fixture-owned-stage")
+    raw = path.read_bytes()
+    mode = path.stat().st_mode & 0o777
+    path.rename(saved)
+    with pytest.raises(PairRefused, match="Required recovery stage missing"):
+        inspect_local_recovery_record(IDENT, _test_root=root)
+    assert saved.read_bytes() == raw and not path.exists()
+    path.write_bytes(raw)
+    path.chmod(mode)
+    foreign = path.stat()
+    with pytest.raises(PairRefused, match="not a recorded inode"):
+        inspect_local_recovery_record(IDENT, _test_root=root)
+    assert path.stat().st_ino == foreign.st_ino and path.read_bytes() == raw
+    assert saved.read_bytes() == raw
+    path.unlink()
+    saved.rename(path)
+    assert inspect_local_recovery_record(IDENT, _test_root=root)["journal_record_verified"]
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="requires private root-owned fixture")
+@pytest.mark.parametrize("manager,restore", [("apt", False), ("apt", True),
+                                            ("dnf", False), ("dnf", True)])
+def test_readback_refuses_unexpected_stage_without_following_symlink(tmp_path, manager, restore):
+    root = tmp_path / "fixture"
+    source, _ = _modern_pair(root, manager)
+    _apply_modern_pair(root, manager)
+    if restore:
+        pair.restore_sandbox(root, IDENT)
+    path = source.with_name(".repocache-atomic-" + IDENT)
+    target = root / "fixture-foreign"
+    path.symlink_to(target)
+    with pytest.raises(PairRefused, match="Unexpected recovery stage"):
+        inspect_local_recovery_record(IDENT, _test_root=root)
+    assert path.is_symlink() and path.readlink() == target and not target.exists()
