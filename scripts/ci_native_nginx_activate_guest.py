@@ -2190,7 +2190,10 @@ finally:
         assert digest(boot_receipt) == policy["receipt_sha256"]
         report = {"policy": policy, "profile": profile,
                   "resources": state_before, "vendor_sha256": digest(VENDOR_CONFIG),
-                  "dropin_sha256": digest(dropin), "pins": pins}
+                  "dropin_sha256": digest(dropin), "pins": pins,
+                  "package_completion_sha256": digest(STATE / ".native-nginx-v1.completed"),
+                  "host_rules_sha256": hashlib.sha256(host_rules.encode("utf-8")).hexdigest(),
+                  "host_booleans_sha256": hashlib.sha256(host_booleans.encode("utf-8")).hexdigest()}
         with evidence_path.open("xb") as stream:
             os.fchmod(stream.fileno(), 0o600)
             stream.write(json.dumps(report, sort_keys=True).encode("ascii"))
@@ -2208,6 +2211,9 @@ finally:
     prior = json.loads(evidence_path.read_bytes())
     assert prior["pins"] == pins and prior["resources"] == state_before
     assert prior["vendor_sha256"] == digest(VENDOR_CONFIG)
+    assert prior["package_completion_sha256"] == digest(STATE / ".native-nginx-v1.completed")
+    assert prior["host_rules_sha256"] == hashlib.sha256(host_rules.encode("utf-8")).hexdigest()
+    assert prior["host_booleans_sha256"] == hashlib.sha256(host_booleans.encode("utf-8")).hexdigest()
     assert prior["policy"]["boot_id"] != boot
     assert digest(dropin) == prior["dropin_sha256"]
     assert digest(profile_receipt) == prior["profile"]["receipt_sha256"]
@@ -2262,6 +2268,7 @@ finally:
                             "list", "ruleset").stdout == host_rules
     assert isolated.command("/usr/sbin/getsebool", "-a").stdout == host_booleans
     assert digest(VENDOR_CONFIG) == prior["vendor_sha256"]
+    assert digest(STATE / ".native-nginx-v1.completed") == prior["package_completion_sha256"]
     print("PASS: exact fixture cleanup and original enabled service, generation, vendor and host policy restored", flush=True)
     print("NOT VERIFIED: automatic boot-time dedicated service activation, active upstream ingress, or pending-WAL inactive recovery", flush=True)
 

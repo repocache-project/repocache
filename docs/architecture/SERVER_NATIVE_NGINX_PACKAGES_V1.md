@@ -1221,8 +1221,10 @@ different boot UUID, no existing fixed namespace, an inactive disabled
 service and unchanged committed resources. The signed worker explicitly
 recreates the empty loopback-only namespace and rolls over the exact
 prior receipt only after default and verify-only stale-boot refusal;
-it verifies the archived prior bytes and current policy, with host
-firewall and SELinux policy unchanged. Exact fixture-only cleanup then
+it verifies the archived prior bytes and current policy. The fixture
+binds the native package completion receipt and hashes of stateless host
+firewall rules and SELinux booleans across the actual reboot, before any
+namespace recreation, then verifies that its operations leave them unchanged. Exact fixture-only cleanup then
 restores the prior enabled legacy service and generation health.
 This is a manual controlled lifecycle witness, not an installed
 automatic boot provisioner or acceptance of active authoritative routes.
