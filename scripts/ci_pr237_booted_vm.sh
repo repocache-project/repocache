@@ -198,6 +198,21 @@ if test "$scenario" = native-installer || test "$scenario" = native-package-inte
       stage=isolated-selinux-egress-failed
       exit "$isolated_selinux_result"
     fi
+    if test "$PR237_PLATFORM" = almalinux10; then
+      stage=committed-boot-intent-prepare
+      sshguest 'sudo /usr/bin/python3 -B /home/pr237ci/source/scripts/ci_native_nginx_activate_guest.py almalinux boot-intent-prepare' > "$out/native-boot-intent-before-reboot.txt" 2>&1 || { cat "$out/native-boot-intent-before-reboot.txt"; exit 1; }
+      stage=committed-boot-intent-real-reboot
+      boot_intent_before="$(sshguest 'cat /proc/sys/kernel/random/boot_id')"
+      test "$boot_intent_before" = "$boot_after"
+      sshguest 'sudo systemctl reboot' >/dev/null 2>&1 || true
+      sleep 8
+      waitssh
+      boot_intent_after="$(sshguest 'cat /proc/sys/kernel/random/boot_id')"
+      test "$boot_intent_after" != "$boot_intent_before"
+      printf 'before=%s\nafter=%s\n' "$boot_intent_before" "$boot_intent_after" > "$out/boot-intent-reboot-ids.txt"
+      stage=committed-boot-intent-after-reboot
+      sshguest 'sudo /usr/bin/python3 -B /home/pr237ci/source/scripts/ci_native_nginx_activate_guest.py almalinux boot-intent-after' > "$out/native-boot-intent-after-reboot.txt" 2>&1 || { cat "$out/native-boot-intent-after-reboot.txt"; exit 1; }
+    fi
     stage=complete
     exit 0
   fi

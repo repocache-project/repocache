@@ -2001,6 +2001,271 @@ finally:
     print("PASS: authenticated namespace unit candidate digest is unchanged after reboot", flush=True)
 
 
+def verify_committed_boot_namespace_reboot_fixture(native, assets, pins, *, after):
+    """Disposable Alma VM: preserve exact committed disabled policy across reboot.
+
+    This is a separate manual lifecycle witness, not a boot-time service
+    installer. Keep the owned NGINX unit disabled and stopped throughout
+    namespace creation/rollover, and restore the original legacy service
+    only after exact fixture-owned cleanup. Ambiguous state is preserved
+    and fails the campaign rather than starting an unverified service.
+    """
+    import base64
+    import pwd
+    from scripts import ci_selinux_nginx_egress_guest as isolated
+    from scripts.ci_pr237_native_socket_guest import https_response
+
+    isolated.guard()
+    require_status(VENDOR, False, False)
+    require_control_worker_idle()
+    assert run("/usr/bin/systemctl", "is-active",
+               "repocache-control.socket").stdout.strip() == "inactive"
+    assert native.stage.verify_installed_worker(assets, **pins)[
+        "publisher_key_id"] == "pr237-synthetic"
+    verify_fixed_executable_after_reboot(pins)
+    state_before = live_wal_resource_hashes()
+    current = json.loads((STATE / "state-v2.json").read_bytes())
+    document = json.loads(base64.b64decode(current["configuration_base64"], validate=True))
+    assert all(repo["desired_state"] == "disabled" for repo in document["repositories"])
+    assert document["deployment"]["listen"]["bind_address"] == "127.0.0.1"
+    assert document["deployment"]["listen"]["https_port"] == 443
+    uid = pwd.getpwnam("nginx").pw_uid
+    boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    host_rules = isolated.command("/usr/sbin/nft", "--stateless", "--numeric-priority",
+                                  "list", "ruleset").stdout
+    host_booleans = isolated.command("/usr/sbin/getsebool", "-a").stdout
+    dropdir = Path("/etc/systemd/system", OWN + ".d")
+    dropin = dropdir / "90-repocache-dedicated.conf"
+    profile_receipt = STATE / ".native-nginx-profile-v1.json"
+    boot_receipt = STATE / ".native-nginx-boot-egress-v1.json"
+    rollover = STATE / ".native-nginx-boot-egress-v1.rollover"
+    history_prefix = ".native-nginx-boot-egress-v1.previous-"
+    ns = Path("/run/netns/repocache-nginx")
+    evidence_path = ROOT / "committed-boot-egress-reboot-fixture.json"
+    executable_proof = json.loads((ROOT / "native-executable-candidate-proof.json").read_text("ascii"))
+
+    def digest(path):
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    def sync_dir(path):
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    def require(*argv):
+        return isolated.command(*argv, timeout=90)
+
+    code = r"""
+import hashlib,json,os,sys,zipimport
+sys.path.insert(0,"/usr/libexec/repocache/server-control-worker")
+from repocache import server_native_egress_candidate_v1 as egress
+from repocache import server_native_nginx_effective_unit_v1 as unit
+from repocache import server_native_nginx_executable_v1 as executable
+from repocache import server_native_v2_transaction_v1 as tx
+from repocache.server_protected_state_store_v1 import _locked
+from repocache.server_protected_state_inspect_v1 import _DIRECTORY_FLAGS
+from repocache.server_root_control_host_preflight_v1 import require_native_host_preconditions
+for module in (egress,unit,executable,tx):
+    assert isinstance(module.__loader__,zipimport.zipimporter)
+    assert module.__loader__.archive=="/usr/libexec/repocache/server-control-worker"
+require_native_host_preconditions()
+action,uid,pins,proof,prior=json.load(sys.stdin)
+root=os.open("/",_DIRECTORY_FLAGS)
+directory=os.open("/usr/libexec/repocache",_DIRECTORY_FLAGS)
+try:
+    with _locked(root,0) as state:
+        tx._require_audited_native_package_for_activation(state,distribution="almalinux")
+        raw=unit._signed_owned_unit_bytes()
+        receipt=executable._read_executable_receipt(directory)
+        assert receipt
+        record=json.loads(receipt)
+        assert hashlib.sha256(receipt).hexdigest()==proof["receipt_sha256"]
+        assert record["release_source_sha"]==pins["commit"]
+        assert record["release_archive_sha256"]==pins["archive_sha256"]
+        assert record["dedicated_policy_sha256"]==executable.signed_owned_nginx_policy_candidate()["policy_sha256"]
+        identity=executable._verify_leaf(directory,record["executable_sha256"],dedicated_selinux=True)
+        assert identity[:2]==(record["device"],record["inode"])
+        assert identity[6:]==(record["size"],record["mtime_ns"],record["ctime_ns"])
+        assert executable._named(directory,executable._PENDING) is None
+
+        def profile(allow):
+            return unit._stage_namespace_dropin_under_lock(
+                root,state,raw,https_port=443,owner_uid=0,owner_gid=0,allow_create=allow)
+
+        if action=="place":
+            unit.inspect_effective_owned_nginx_unit(active=False)
+            result=profile(True)
+        else:
+            observed_profile=profile(False)
+            def stopped():
+                unit.inspect_signed_owned_namespace_unit(https_port=443,active=False)
+                assert profile(False)==observed_profile
+                assert executable._read_executable_receipt(directory)==receipt
+                assert executable._verify_leaf(directory,record["executable_sha256"],dedicated_selinux=True)==identity
+            def namespace_identity():
+                info=os.stat("/run/netns/repocache-nginx",follow_symlinks=False)
+                return (info.st_dev,info.st_ino)
+            def policy(allow, rollover=False):
+                def owned():
+                    stopped()
+                    assert namespace_identity()==net_identity
+                return tx._prepare_owned_committed_boot_egress_locked(
+                    root,state,distribution="almalinux",worker_uid=uid,
+                    namespace_identity=net_identity,
+                    profile_receipt_sha256=observed_profile["receipt_sha256"],
+                    executable_receipt_sha256=hashlib.sha256(receipt).hexdigest(),
+                    recheck_namespace_owner=owned,allow_prepare=allow,
+                    allow_boot_rollover=rollover)
+            if action in ("prepare","rollover"):
+                saved=egress._read_boot_egress_receipt(state,0,0)
+                if action=="prepare":
+                    assert saved is None
+                else:
+                    assert saved and hashlib.sha256(saved).hexdigest()==prior["policy"]["receipt_sha256"]
+                    assert json.loads(saved)["boot_id"]==prior["policy"]["boot_id"]
+                    assert egress._current_boot_id()!=prior["policy"]["boot_id"]
+                # Fresh creation and exact policy preparation retain the
+                # same protected lock and stopped-service witness.
+                creation=egress._create_fixed_loopback_namespace_locked(recheck_owned=stopped)
+                net_identity=namespace_identity()
+                assert (creation["namespace_device"],creation["namespace_inode"])==net_identity
+                assert creation["empty_ruleset_observed"] and creation["loopback_only_observed"]
+                if action=="rollover":
+                    for allow in (False,True):
+                        try:
+                            policy(allow)
+                        except egress.NativeEgressCandidateError as exc:
+                            assert "BOOT_RECEIPT_MISMATCH" in str(exc)
+                        else:
+                            raise AssertionError("Old boot was adopted without explicit rollover")
+                    result=policy(True,rollover=True)
+                    archive=egress._BOOT_EGRESS_HISTORY_PREFIX+prior["policy"]["boot_id"]
+                    assert egress._read_boot_egress_receipt(state,0,0,name=archive)==saved
+                    assert egress._read_boot_egress_receipt(state,0,0,name=egress._BOOT_EGRESS_ROLLOVER) is None
+                else:
+                    result=policy(True)
+                assert result==policy(False)
+                assert result==policy(True)
+                assert result["boot_id"]==creation["boot_id"]
+            elif action=="verify":
+                net_identity=namespace_identity()
+                result=policy(False)
+            else:
+                raise AssertionError("Unknown fixed fixture action")
+        assert not result["authorizes_nginx_activation"]
+        print(json.dumps(result,sort_keys=True))
+finally:
+    os.close(directory)
+    os.close(root)
+"""
+
+    def signed(action, prior=None):
+        result = isolated.command("/usr/bin/python3", "-IS", "-B", "-c", code,
+                                  input_text=json.dumps([action, uid, pins, executable_proof, prior]),
+                                  timeout=180)
+        return json.loads(result.stdout)
+
+    assert not os.path.lexists(ns) and not os.path.lexists(rollover)
+    if not after:
+        require_status(OWN, True, True)
+        assert not os.path.lexists(dropdir) and not os.path.lexists(profile_receipt)
+        assert not os.path.lexists(boot_receipt) and not os.path.lexists(evidence_path)
+        assert not any(p.name.startswith(history_prefix) for p in STATE.iterdir())
+        # Isolated fixture only. Prevent an automatic start with a stale
+        # namespace binding; an incomplete phase must retain its evidence.
+        require("/usr/bin/systemctl", "disable", "--now", OWN)
+        require_status(OWN, False, False)
+        profile = signed("place")
+        require("/usr/bin/systemctl", "daemon-reload")
+        policy = signed("prepare")
+        assert policy["boot_id"] == boot
+        assert policy["generation"] == current["state_generation"]
+        assert policy["generation_manifest_sha256"] == state_before[
+            str(STATE / ".state-v2-owned-nginx.manifest")]
+        assert policy["committed_resources_verified"]
+        assert not policy["authorizes_catalog_publication"]
+        assert digest(profile_receipt) == profile["receipt_sha256"]
+        assert digest(boot_receipt) == policy["receipt_sha256"]
+        report = {"policy": policy, "profile": profile,
+                  "resources": state_before, "vendor_sha256": digest(VENDOR_CONFIG),
+                  "dropin_sha256": digest(dropin), "pins": pins}
+        with evidence_path.open("xb") as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write(json.dumps(report, sort_keys=True).encode("ascii"))
+            stream.flush()
+            os.fsync(stream.fileno())
+        sync_dir(ROOT)
+        require_status(OWN, False, False)
+        assert live_wal_resource_hashes() == state_before
+        assert isolated.command("/usr/sbin/nft", "--stateless", "--numeric-priority",
+                                "list", "ruleset").stdout == host_rules
+        print("PASS: exact committed generation and boot intent durable, dedicated profile staged, service disabled before real reboot", flush=True)
+        return
+
+    require_status(OWN, False, False)
+    prior = json.loads(evidence_path.read_bytes())
+    assert prior["pins"] == pins and prior["resources"] == state_before
+    assert prior["vendor_sha256"] == digest(VENDOR_CONFIG)
+    assert prior["policy"]["boot_id"] != boot
+    assert digest(dropin) == prior["dropin_sha256"]
+    assert digest(profile_receipt) == prior["profile"]["receipt_sha256"]
+    old_receipt = boot_receipt.read_bytes()
+    assert hashlib.sha256(old_receipt).hexdigest() == prior["policy"]["receipt_sha256"]
+    assert not any(p.name.startswith(history_prefix) for p in STATE.iterdir())
+    result = signed("rollover", prior)
+    assert result["boot_id"] == boot
+    assert result["generation"] == prior["policy"]["generation"]
+    assert result["generation_manifest_sha256"] == prior["policy"]["generation_manifest_sha256"]
+    assert result["ruleset_sha256"] == prior["policy"]["ruleset_sha256"]
+    assert result["committed_resources_verified"]
+    assert not result["authorizes_catalog_publication"]
+    assert signed("verify") == result
+    archive = STATE / (history_prefix + prior["policy"]["boot_id"])
+    assert archive.read_bytes() == old_receipt
+    assert digest(boot_receipt) == result["receipt_sha256"]
+    assert not os.path.lexists(rollover)
+    assert live_wal_resource_hashes() == state_before
+    assert isolated.command("/usr/sbin/nft", "--stateless", "--numeric-priority",
+                            "list", "ruleset").stdout == host_rules
+    require_status(OWN, False, False)
+    print("PASS: real reboot discarded old namespace; explicit signed recreation and receipt rollover preserved prior exact evidence and committed generation", flush=True)
+
+    # The disposable fixture owns these exact leaves. Verify all of them
+    # and the stopped service before fixture-only removal, then restore
+    # the original service. Never try to clean up an ambiguous failure.
+    assert digest(profile_receipt) == prior["profile"]["receipt_sha256"]
+    assert digest(dropin) == prior["dropin_sha256"]
+    assert set(p.name for p in dropdir.iterdir()) == {dropin.name}
+    assert (ns.stat().st_dev, ns.stat().st_ino) == (
+        result["namespace_device"], result["namespace_inode"])
+    require("/usr/sbin/ip", "netns", "delete", "repocache-nginx")
+    assert not os.path.lexists(ns)
+    assert digest(boot_receipt) == result["receipt_sha256"]
+    assert archive.read_bytes() == old_receipt
+    boot_receipt.unlink()
+    archive.unlink()
+    profile_receipt.unlink()
+    sync_dir(STATE)
+    dropin.unlink()
+    dropdir.rmdir()
+    sync_dir(dropdir.parent)
+    require("/usr/bin/systemctl", "daemon-reload")
+    require("/usr/bin/systemctl", "enable", "--now", OWN)
+    require_status(OWN, True, True)
+    require_status(VENDOR, False, False)
+    response = https_response("/__repocache/healthz")
+    assert ("x-repocache-generation: " + str(current["state_generation"])).encode() in response.lower()
+    assert live_wal_resource_hashes() == state_before
+    assert isolated.command("/usr/sbin/nft", "--stateless", "--numeric-priority",
+                            "list", "ruleset").stdout == host_rules
+    assert isolated.command("/usr/sbin/getsebool", "-a").stdout == host_booleans
+    assert digest(VENDOR_CONFIG) == prior["vendor_sha256"]
+    print("PASS: exact fixture cleanup and original enabled service, generation, vendor and host policy restored", flush=True)
+    print("NOT VERIFIED: automatic boot-time dedicated service activation, active upstream ingress, or pending-WAL inactive recovery", flush=True)
+
+
 def verify_guest(distribution: str, phase: str) -> None:
     assert os.getresuid() == (0, 0, 0)
     assert Path("/proc/1/comm").read_text().strip() == "systemd"
@@ -2179,12 +2444,20 @@ def verify_guest(distribution: str, phase: str) -> None:
             "native_package_file_integrity_verified"] is True
         print("PASS: separate REPOCACHE service survives real reboot with vendor service disabled and package integrity intact", flush=True)
         print("NOT VERIFIED: authoritative active repository transaction/catalog, pending-WAL inactive recovery, final publisher-signed release", flush=True)
+    elif phase in ("boot-intent-prepare", "boot-intent-after"):
+        assert distribution == "almalinux"
+        verify_committed_boot_namespace_reboot_fixture(
+            native, assets, pins, after=phase == "boot-intent-after")
+        assert hashlib.sha256(completion.read_bytes()).hexdigest() == receipt
+        assert hashlib.sha256(VENDOR_CONFIG.read_bytes()).hexdigest() == vendor_conf
+        assert inspect_stock_nginx_package_file_integrity()[
+            "native_package_file_integrity_verified"] is True
     else:
         raise AssertionError("invalid test phase")
 
 
 if __name__ == "__main__":
     if (len(sys.argv) != 3 or sys.argv[1] not in ("debian", "almalinux")
-            or sys.argv[2] not in ("activate", "after")):
-        raise SystemExit("Usage: ci_native_nginx_activate_guest.py debian|almalinux activate|after")
+            or sys.argv[2] not in ("activate", "after", "boot-intent-prepare", "boot-intent-after")):
+        raise SystemExit("Usage: ci_native_nginx_activate_guest.py debian|almalinux activate|after|boot-intent-prepare|boot-intent-after")
     verify_guest(sys.argv[1], sys.argv[2])

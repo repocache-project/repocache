@@ -1206,3 +1206,25 @@ direct guest ip commands; it verifies refusal on repetition and
 unchanged host rules before the profile and boot-intent steps.
 The production lifecycle, actual reboot-time recreation and explicit
 administrator ingress remain separate mandatory gates.
+
+
+### Real reboot witness for committed boot intent
+
+The AlmaLinux enforcing disposable native activation campaign adds one
+additional real reboot after the existing signed-worker service/WAL
+exercise. It stops and disables the fixture-owned service, stages its
+exact signed profile and creates the fixed namespace under the retained
+state lock, deriving the default-deny rules from the actual committed
+disabled-route generation. It preserves the boot receipt and independent
+release/profile/resource hashes. After the kernel reboot it requires a
+different boot UUID, no existing fixed namespace, an inactive disabled
+service and unchanged committed resources. The signed worker explicitly
+recreates the empty loopback-only namespace and rolls over the exact
+prior receipt only after default and verify-only stale-boot refusal;
+it verifies the archived prior bytes and current policy, with host
+firewall and SELinux policy unchanged. Exact fixture-only cleanup then
+restores the prior enabled legacy service and generation health.
+This is a manual controlled lifecycle witness, not an installed
+automatic boot provisioner or acceptance of active authoritative routes.
+Ambiguous or failed fixture preparation is preserved and fails the
+campaign. No production service or boot activation authority is added.
