@@ -834,9 +834,20 @@ def test_signed_activation_routes_published_wal_only_with_authenticated_caller(
     monkeypatch.setattr(host, "_recover_enabled_inactive_owned_wal_under_lock",
                         lambda *args: calls.append(args) or {"status": "RECOVERY"})
     proof = lambda: None
-    result = host._activate_audited_native_nginx_under_lock(
-        11, "debian", host._BOOTSTRAP_CONFIG, root_fd=10, unit_bytes=b"signed",
-        recheck_signed_worker=proof if signed else None)
+    if pending:
+        def reject_unowned(*args):
+            raise host.NativeV2TransactionError("PENDING")
+        monkeypatch.setattr(host, "_no_conflicting_pending", reject_unowned)
+    def invoke():
+        return host._activate_audited_native_nginx_under_lock(
+            11, "debian", host._BOOTSTRAP_CONFIG, root_fd=10, unit_bytes=b"signed",
+            recheck_signed_worker=proof if signed else None)
+    if pending and not signed:
+        with pytest.raises(host.NativeV2TransactionError, match="PENDING"):
+            invoke()
+        assert not calls and not state["commands"]
+        return
+    result = invoke()
     if signed and pending:
         assert calls == [(10, 11, "debian", b"signed", b"wal", proof)]
         assert result == {"status": "RECOVERY"}
@@ -847,13 +858,22 @@ def test_signed_activation_routes_published_wal_only_with_authenticated_caller(
 
 
 @pytest.mark.parametrize("fault", ["none", "start", "health", "wal-unlink",
-                                    "foreign-master", "disabled", "active"])
+                                    "foreign-master", "disabled", "active",
+                                    "vendor-enabled", "vendor-active"])
 def test_signed_pending_inactive_recovery_preserves_enablement_and_exact_authority(
         monkeypatch, fault):
     from contextlib import contextmanager
     state = _setup(monkeypatch)
     state["enabled"] = fault != "disabled"
     state["active"] = fault == "active"
+    original_vendor = host._nginx_systemctl
+    def vendor(action):
+        if fault == "vendor-enabled" and action == "is-enabled":
+            return 0, b"enabled\n"
+        if fault == "vendor-active" and action == "is-active":
+            return 0, b"active\n"
+        return original_vendor(action)
+    monkeypatch.setattr(host, "_nginx_systemctl", vendor)
     calls = []
     wal = [b"wal"]
     old = {host._CATALOG: b"prior", "other": b"bytes"}
@@ -925,7 +945,7 @@ def test_signed_pending_inactive_recovery_preserves_enablement_and_exact_authori
     else:
         with pytest.raises(stage.WorkerStageError):
             invoke()
-        if fault in ("disabled", "active"):
+        if fault in ("disabled", "active", "vendor-enabled", "vendor-active"):
             assert not calls and not state["commands"]
         elif fault == "start":
             assert calls == ["prepare"] and state["commands"] == ["start"]

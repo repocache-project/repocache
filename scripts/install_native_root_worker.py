@@ -1270,8 +1270,10 @@ def _recover_enabled_inactive_owned_wal_under_lock(
             def fixed_owner():
                 recheck_signed_worker()
                 _nginx_inactive_vendor_service(distribution)
-                if (_read_exact_owned_unit_at(root_fd, unit_bytes, owner_uid=0,
-                                             owner_gid=0) != unit_identity
+                if (_nginx_systemctl("is-enabled") != (1, b"disabled\n")
+                        or _nginx_systemctl("is-active") != (3, b"inactive\n")
+                        or _read_exact_owned_unit_at(root_fd, unit_bytes, owner_uid=0,
+                                                    owner_gid=0) != unit_identity
                         or _own_systemctl("is-enabled") != (0, b"enabled\n")
                         or prepare_installed_storage(distribution, allow_create=False) != storage):
                     _reject("NATIVE_ACTIVATION_MANAGED_STATE_CHANGED")
