@@ -3673,7 +3673,7 @@ def test_dedicated_health_child_timeout_and_preflight_do_not_signal_foreign_pid(
 
 
 @pytest.mark.parametrize("fault", ["none", "active-route", "nonloopback", "pending",
-                                    "policy", "policy-drift", "storage-drift", "scratch-drift",
+                                    "policy", "policy-drift", "storage-drift", "scratch-drift", "scratch-service",
                                     "enabled", "start", "health",
                                     "foreign-master", "generation-drift"])
 def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
@@ -3804,6 +3804,11 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
         inode = 3 if fault == "scratch-drift" and scratch_reads >= 2 else 2
         return ((1,), {"scratch": (inode,)})
     monkeypatch.setattr(native, "_owned_alma_runtime_temps", inspect_scratch)
+    def service_scratch(pid, expected):
+        assert running and pid == 123 and expected == ((1,), {"scratch": (2,)})
+        if fault == "scratch-service":
+            raise native.NativeV2TransactionError("SCRATCH_MOUNT_REFUSED")
+    monkeypatch.setattr(native, "_verify_owned_alma_runtime_service_view", service_scratch)
     monkeypatch.setattr(native, "verify_service_storage_mounts", lambda pid: None)
     monkeypatch.setattr(native.pwd, "getpwnam", lambda name: SimpleNamespace(pw_uid=33))
     # The fixture already has an owned lock; the mocked layout is the
@@ -3817,6 +3822,7 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
         result = invoke()
         assert result["status"] == "OWNED_DEDICATED_COMMITTED_START_OBSERVED"
         assert result["service_storage_mounts_verified"]
+        assert result["service_scratch_mounts_verified"]
         assert not result["enablement_changed"]
         assert calls == ["start", "health"] and running
     else:
@@ -3826,6 +3832,7 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
                          "policy": [], "policy-drift": [], "storage-drift": [], "scratch-drift": [],
                          "enabled": [],
                          "start": ["start", "stop"], "health": ["start", "health", "stop"],
+                         "scratch-service": ["start", "health", "stop"],
                          "foreign-master": ["start", "health"],
                          "generation-drift": ["start", "health"]}[fault]
         assert running == (fault in ("foreign-master", "generation-drift"))

@@ -709,13 +709,21 @@ def prepare_and_interrupt_live_wal(distribution: str, native, assets, pins) -> N
     assert staged["expected_generation"] == 0
     bootstrap = OWN_CONFIG.read_bytes()
     def vendor_temp_identity():
-        if distribution != "debian":
-            return {}
+        if distribution == "debian":
+            parent, body = Path("/var/lib/nginx"), "body"
+        else:
+            parent, body = Path("/var/lib/nginx/tmp"), "client_body"
         result = {}
-        for name in ("body", "proxy", "fastcgi", "scgi", "uwsgi"):
-            info = Path("/var/lib/nginx", name).lstat()
+        for name in (body, "proxy", "fastcgi", "scgi", "uwsgi"):
+            path = parent / name
+            if not os.path.lexists(path):
+                result[name] = None
+                continue
+            info = path.lstat()
             result[name] = (info.st_dev, info.st_ino, info.st_mode,
-                            info.st_uid, info.st_gid)
+                            info.st_uid, info.st_gid,
+                            os.getxattr(path, "security.selinux", follow_symlinks=False)
+                            if distribution == "almalinux" else b"")
         return result
     vendor_temps = vendor_temp_identity()
     run_live_wal(distribution, "fail-reload")
@@ -728,15 +736,18 @@ def prepare_and_interrupt_live_wal(distribution: str, native, assets, pins) -> N
     assert vendor_temp_identity() == vendor_temps
     verify_dedicated_socket(bootstrap=True)
     assert vendor_temp_identity() == vendor_temps
-    if distribution == "debian":
-        from repocache.server_native_v2_transaction_v1 import _owned_debian_runtime_temps
-        root = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
-        try:
+    from repocache.server_native_v2_transaction_v1 import (
+        _owned_debian_runtime_temps, _owned_alma_runtime_temps)
+    root = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        if distribution == "debian":
             _, scratch = _owned_debian_runtime_temps(root, require_all=True)
-            assert len(scratch) == 5
-        finally:
-            os.close(root)
-        print("PASS: Debian managed syntax and confined APPLY preserve vendor temp metadata and use five private runtime paths", flush=True)
+        else:
+            _, scratch = _owned_alma_runtime_temps(root, dedicated=False)
+        assert len(scratch) == 5
+    finally:
+        os.close(root)
+    print("PASS: " + distribution + " managed syntax and confined APPLY preserve vendor temp metadata and use five private runtime paths", flush=True)
     old = live_wal_resource_hashes()
     run_live_wal(distribution, "repeat")
     run_live_wal(distribution, "reload")
@@ -2511,7 +2522,9 @@ try:
                         assert not witness["authorizes_nginx_activation"]
                         assert not witness["authorizes_catalog_publication"]
                         storage.verify_service_storage_mounts(witness["main_pid"])
-                        assert len(tx._owned_alma_runtime_temps(root,dedicated=True)[1])==5
+                        scratch=tx._owned_alma_runtime_temps(root,dedicated=True)
+                        assert len(scratch[1])==5
+                        tx._verify_owned_alma_runtime_service_view(witness["main_pid"],scratch)
                         assert tx._verify_tls_pair(root,document,verify_identity=True)==leaf
                         assert policy(False,active=True)==observed_policy
                         unchanged()
@@ -2697,6 +2710,7 @@ finally:
                 raise
             assert started["status"] == "OWNED_DEDICATED_COMMITTED_START_OBSERVED"
             assert started["service_storage_mounts_verified"] and not started["enablement_changed"]
+            assert started["service_scratch_mounts_verified"]
             require_status(OWN, True, False)
             witnessed = signed("verify-committed-active")
             assert witnessed["main_pid"] == started["main_pid"]

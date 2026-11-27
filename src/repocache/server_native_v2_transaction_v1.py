@@ -1532,6 +1532,34 @@ def _owned_alma_runtime_temps(root_fd: int, *, dedicated: bool,
         _deny(code)
 
 
+def _verify_owned_alma_runtime_service_view(pid: int, expected: tuple) -> None:
+    """Compare the signed master's private mount view with retained host leaves."""
+    code = "OWNED_CONTEXT_RUNTIME_TEMP_UNVERIFIED"
+    if type(pid) is not int or not 2 <= pid < 2**31 or os.geteuid() != 0:
+        _deny(code)
+    try:
+        ns_path = f"/proc/{pid}/ns/mnt"
+        def identity(info):
+            return info.st_dev, info.st_ino
+        namespace = identity(os.stat(ns_path))
+        if namespace == identity(os.stat("/proc/self/ns/mnt")):
+            _deny(code)
+        # This one kernel-owned proc link intentionally resolves to the
+        # already authenticated master's root; all descendants are nofollow.
+        fd = os.open(f"/proc/{pid}/root", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            if (_owned_alma_runtime_temps(fd, dedicated=True) != expected
+                    or identity(os.fstat(fd)) != identity(os.stat(f"/proc/{pid}/root"))
+                    or identity(os.stat(ns_path)) != namespace):
+                _deny(code)
+        finally:
+            os.close(fd)
+    except NativeV2TransactionError:
+        raise
+    except (OSError, ValueError, TypeError):
+        _deny(code)
+
+
 def _probe_owned_context_locked(
     root_fd: int, state_fd: int, include: bytes | None, *,
     managed_main: bytes | None = None,
@@ -3154,16 +3182,19 @@ def _start_owned_committed_dedicated_locked(
                         or policy(True) != before_policy):
                     _deny("OWNED_DEDICATED_START_POSTCHECK_FAILED")
                 verify_service_storage_mounts(started["main_pid_observed"])
+                _verify_owned_alma_runtime_service_view(started["main_pid_observed"], scratch)
                 _require_audited_native_package_for_activation(state, distribution="almalinux")
                 fixed_systemctl("is-enabled")
                 exact()
                 if (_inspect_signed_owned_namespace_runtime(
                         https_port=port, namespace_identity=namespace_identity,
                         executable_identity=executable_identity) != started
+                        or _owned_alma_runtime_temps(root_fd, dedicated=True) != scratch
                         or policy(True) != before_policy):
                     _deny("OWNED_DEDICATED_START_POSTCHECK_FAILED")
                 return {**witness, "status": "OWNED_DEDICATED_COMMITTED_START_OBSERVED",
                         "storage": storage, "service_storage_mounts_verified": True,
+                        "service_scratch_mounts_verified": True,
                         "enablement_changed": False}
             except Exception:
                 try:

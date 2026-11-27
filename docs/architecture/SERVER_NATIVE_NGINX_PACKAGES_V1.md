@@ -1409,6 +1409,9 @@ uses its already-authenticated writable type, not its PID type. Existing
 foreign/partial leaves are refused, not relabelled, and no vendor files,
 SELinux rules, systemd permissions or persistent cache paths are changed.
 The isolated committed start requires all five prepared leaves and
-rechecks identity across the actual start and TLS/catalog witness. Native
-legacy reboot, dedicated start and systemd runtime cleanup remain NOT
+rechecks identity across the actual start and TLS/catalog witness, including
+the signed master's private mount view. The previous unreleased Alma managed
+main (without explicit scratch paths) is not silently adopted by the new
+renderer/WAL validator. Native legacy reboot, dedicated start and systemd
+runtime cleanup remain NOT
 VERIFIED at the new revision until executed guest evidence is inspected.
