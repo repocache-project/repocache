@@ -512,6 +512,7 @@ def test_fixed_namespace_initialization_requires_empty_owned_scope(monkeypatch, 
 @pytest.mark.parametrize("fault", [
     "none", "before-nft", "after-nft", "foreign", "identical", "boot",
     "namespace", "generation", "profile", "executable", "manifest", "rules",
+    "expected-absent", "expected-existing",
 ])
 def test_boot_egress_receipt_binds_intent_and_exact_resume(tmp_path, monkeypatch, fault):
     import contextlib
@@ -574,6 +575,11 @@ def test_boot_egress_receipt_binds_intent_and_exact_resume(tmp_path, monkeypatch
         with pytest.raises(NativeEgressCandidateError, match="BOOT_INTENT_REQUIRED"):
             prepare(False)
         assert not receipt.exists()
+        if fault == "expected-existing":
+            with pytest.raises(NativeEgressCandidateError, match="BOOT_RECEIPT_CHANGED"):
+                prepare(expected_previous_receipt=b"previous")
+            assert not receipt.exists() and not writes
+            return
         if fault in ("before-nft", "after-nft"):
             with pytest.raises(NativeEgressCandidateError, match="BOOT_PREPARATION_REFUSED"):
                 prepare()
@@ -596,6 +602,13 @@ def test_boot_egress_receipt_binds_intent_and_exact_resume(tmp_path, monkeypatch
             assert receipt.read_bytes() == durable and receipt.stat().st_ino == inode
         assert writes == ([True, False, True, False] if fault == "before-nft" else [True, False])
         saved = receipt.read_bytes()
+        if fault == "expected-absent":
+            writes.clear()
+            with pytest.raises(NativeEgressCandidateError, match="BOOT_RECEIPT_CHANGED"):
+                prepare(expected_previous_receipt=None)
+            assert receipt.read_bytes() == saved and not writes
+            assert prepare(False, expected_previous_receipt=saved) == result
+            return
         changes = {}
         if fault == "boot":
             boot[0] = "2f8f3d9c-17c2-4a45-a013-1d781b9796af"
