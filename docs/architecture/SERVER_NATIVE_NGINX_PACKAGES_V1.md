@@ -1311,3 +1311,15 @@ and same-boot adoption remain refused. This internal candidate operation
 neither starts the service nor clears the WAL or publishes the catalog;
 installed dispatch, real boot ordering and native recovery evidence remain
 separate.
+
+A separate readback-only prior-WAL policy check uses the same retained scope
+and refuses all preparation/rollover operations. The enforcing AlmaLinux
+guest now retains the existing committed-boot test and adds a second native
+reboot scenario: interrupt an actual live signed-test generation, stop the
+fixture, prepare the prior bytes, retain the exact WAL inode/hash and
+withdrawn catalog through fresh namespace creation and reboot rollover,
+refuse committed-path adoption, verify the resulting closed policy without
+mutation, and restore the fixture's original legacy service using explicit
+authenticated recovery after exact profile cleanup. This is candidate kernel
+and recovery evidence only when executed, not installed dedicated activation
+or active upstream ingress authority.

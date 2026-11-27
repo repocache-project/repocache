@@ -825,12 +825,12 @@ finally:
 
 
 def verify_stopped_wal_preparation_fixture(distribution, native, assets, pins):
-    """Actual stopped service, signed-worker prior-byte recovery, fixture start.
+    """Actual stopped service, signed-worker prior-byte and explicit recovery.
 
     Preserve the earlier reboot/active broker test. Repeat its interrupted
     proposal, retain the WAL and withhold catalog publication while stopped,
-    then explicitly start the prior fixture generation and let the existing
-    confined recovery protocol finish. No installed inactive dispatch added.
+    then exercise the existing authenticated activation entry point and retry.
+    No automatic dedicated boot activation is claimed.
     """
     from scripts.ci_pr237_native_socket_guest import command, https_response
 
@@ -2133,8 +2133,8 @@ finally:
     print("PASS: authenticated namespace unit candidate digest is unchanged after reboot", flush=True)
 
 
-def verify_committed_boot_namespace_reboot_fixture(native, assets, pins, *, after):
-    """Disposable Alma VM: preserve exact committed disabled policy across reboot.
+def verify_committed_boot_namespace_reboot_fixture(native, assets, pins, *, after, pending=False):
+    """Disposable Alma VM: preserve exact committed or prepared prior policy.
 
     This is a separate manual lifecycle witness, not a boot-time service
     installer. Keep the owned NGINX unit disabled and stopped throughout
@@ -2155,7 +2155,14 @@ def verify_committed_boot_namespace_reboot_fixture(native, assets, pins, *, afte
     assert native.stage.verify_installed_worker(assets, **pins)[
         "publisher_key_id"] == "pr237-synthetic"
     verify_fixed_executable_after_reboot(pins)
-    state_before = live_wal_resource_hashes()
+    wal = STATE / ".state-v2-owned-nginx.pending"
+    catalog = Path("/var/lib/repocache/public/catalog.json")
+    evidence_path = ROOT / ("pending-wal-boot-egress-reboot-fixture.json" if pending
+                            else "committed-boot-egress-reboot-fixture.json")
+    saved = json.loads(evidence_path.read_bytes()) if after else None
+    state_before = saved["resources"] if after and pending else live_wal_resource_hashes()
+    wal_hash = saved["wal_sha256"] if after and pending else None
+    wal_inode = saved["wal_inode"] if after and pending else None
     current = json.loads((STATE / "state-v2.json").read_bytes())
     document = json.loads(base64.b64decode(current["configuration_base64"], validate=True))
     assert all(repo["desired_state"] == "disabled" for repo in document["repositories"])
@@ -2173,11 +2180,21 @@ def verify_committed_boot_namespace_reboot_fixture(native, assets, pins, *, afte
     rollover = STATE / ".native-nginx-boot-egress-v1.rollover"
     history_prefix = ".native-nginx-boot-egress-v1.previous-"
     ns = Path("/run/netns/repocache-nginx")
-    evidence_path = ROOT / "committed-boot-egress-reboot-fixture.json"
     executable_proof = json.loads((ROOT / "native-executable-candidate-proof.json").read_text("ascii"))
 
     def digest(path):
         return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    def require_prior_resources():
+        if pending:
+            assert wal_hash and wal_inode
+            assert digest(wal) == wal_hash and wal.stat().st_ino == wal_inode
+            assert not catalog.exists()
+            assert all(digest(Path(name)) == checksum for name, checksum in
+                       state_before.items() if name != str(catalog))
+        else:
+            assert not wal.exists()
+            assert live_wal_resource_hashes() == state_before
 
     def sync_dir(path):
         fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -2203,7 +2220,7 @@ for module in (egress,unit,executable,tx):
     assert isinstance(module.__loader__,zipimport.zipimporter)
     assert module.__loader__.archive=="/usr/libexec/repocache/server-control-worker"
 require_native_host_preconditions()
-action,uid,pins,proof,prior=json.load(sys.stdin)
+action,uid,pins,proof,prior,pending,wal_hash=json.load(sys.stdin)
 root=os.open("/",_DIRECTORY_FLAGS)
 directory=os.open("/usr/libexec/repocache",_DIRECTORY_FLAGS)
 try:
@@ -2226,7 +2243,28 @@ try:
             return unit._stage_namespace_dropin_under_lock(
                 root,state,raw,https_port=443,owner_uid=0,owner_gid=0,allow_create=allow)
 
-        if action=="place":
+        pending_raw=tx._read_file(state,tx._OWNED_WAL,0,tx._MAX_WAL)
+        if pending:
+            assert pending_raw and hashlib.sha256(pending_raw).hexdigest()==wal_hash
+        else:
+            assert pending_raw is None
+
+        if action=="restore":
+            assert pending
+            from repocache.server_native_installed_storage_v1 import prepare_installed_storage
+            observed=unit.inspect_effective_owned_nginx_unit(active=False)
+            exact=unit._read_exact_owned_unit_at(root,raw,owner_uid=0,owner_gid=0)
+            storage=prepare_installed_storage("almalinux",allow_create=False)
+            def stopped_prior():
+                assert unit.inspect_effective_owned_nginx_unit(active=False)==observed
+                assert unit._read_exact_owned_unit_at(root,raw,owner_uid=0,owner_gid=0)==exact
+                assert prepare_installed_storage("almalinux",allow_create=False)==storage
+            with tx._owned_layout_locked(root,state,recovering=True) as layout:
+                result=tx._prepare_owned_inactive_wal_rollback_locked(
+                    *layout,distribution="almalinux",expected_wal=pending_raw,
+                    recheck_stopped_owner=stopped_prior)
+            assert result["catalog_withdrawn"] and result["recovery_required"]
+        elif action=="place":
             unit.inspect_effective_owned_nginx_unit(active=False)
             result=profile(True)
         else:
@@ -2243,6 +2281,14 @@ try:
                 def owned():
                     stopped()
                     assert namespace_identity()==net_identity
+                if pending:
+                    assert not allow and not rollover
+                    return tx._verify_owned_prepared_wal_boot_egress_locked(
+                        root,state,distribution="almalinux",worker_uid=uid,
+                        expected_wal=pending_raw,namespace_identity=net_identity,
+                        profile_receipt_sha256=observed_profile["receipt_sha256"],
+                        executable_receipt_sha256=hashlib.sha256(receipt).hexdigest(),
+                        recheck_stopped_owner=owned)
                 return tx._prepare_owned_committed_boot_egress_locked(
                     root,state,distribution="almalinux",worker_uid=uid,
                     namespace_identity=net_identity,
@@ -2259,6 +2305,26 @@ try:
                     assert json.loads(saved)["boot_id"]==prior["policy"]["boot_id"]
                     assert egress._current_boot_id()!=prior["policy"]["boot_id"]
                 def fresh(rollover=False):
+                    if pending:
+                        # The committed path must not adopt even an exact
+                        # pending generation; only the WAL-bound path may run.
+                        try:
+                            tx._create_owned_committed_boot_egress_locked(
+                                root,state,distribution="almalinux",worker_uid=uid,
+                                profile_receipt_sha256=observed_profile["receipt_sha256"],
+                                executable_receipt_sha256=hashlib.sha256(receipt).hexdigest(),
+                                recheck_stopped_owner=stopped,allow_boot_rollover=rollover)
+                        except tx.NativeV2TransactionError:
+                            pass
+                        else:
+                            raise AssertionError("Committed path adopted pending WAL")
+                        assert not os.path.lexists("/run/netns/repocache-nginx")
+                        return tx._create_owned_prepared_wal_boot_egress_locked(
+                            root,state,distribution="almalinux",worker_uid=uid,
+                            expected_wal=pending_raw,
+                            profile_receipt_sha256=observed_profile["receipt_sha256"],
+                            executable_receipt_sha256=hashlib.sha256(receipt).hexdigest(),
+                            recheck_stopped_owner=stopped,allow_boot_rollover=rollover)
                     return tx._create_owned_committed_boot_egress_locked(
                         root,state,distribution="almalinux",worker_uid=uid,
                         profile_receipt_sha256=observed_profile["receipt_sha256"],
@@ -2281,7 +2347,7 @@ try:
                 net_identity=namespace_identity()
                 assert (result["namespace_device"],result["namespace_inode"])==net_identity
                 assert result==policy(False)
-                assert result==policy(True)
+                assert result==policy(False if pending else True)
                 assert result["boot_id"]==egress._current_boot_id()
             elif action=="verify":
                 net_identity=namespace_identity()
@@ -2297,7 +2363,8 @@ finally:
 
     def signed(action, prior=None):
         result = isolated.command("/usr/bin/python3", "-IS", "-B", "-c", code,
-                                  input_text=json.dumps([action, uid, pins, executable_proof, prior]),
+                                  input_text=json.dumps([action, uid, pins, executable_proof, prior,
+                                                         pending, wal_hash]),
                                   timeout=180)
         return json.loads(result.stdout)
 
@@ -2307,10 +2374,21 @@ finally:
         assert not os.path.lexists(dropdir) and not os.path.lexists(profile_receipt)
         assert not os.path.lexists(boot_receipt) and not os.path.lexists(evidence_path)
         assert not any(p.name.startswith(history_prefix) for p in STATE.iterdir())
+        # A genuine interrupted live transaction supplies the pending WAL
+        # for the second scenario. Stop/disable the fixture before preparing
+        # the old files; no synthetic journal or automatic activation.
+        if pending:
+            run_live_wal("almalinux", "interrupt")
+            wal_hash, wal_inode = digest(wal), wal.stat().st_ino
+            assert not catalog.exists()
         # Isolated fixture only. Prevent an automatic start with a stale
         # namespace binding; an incomplete phase must retain its evidence.
         require("/usr/bin/systemctl", "disable", "--now", OWN)
         require_status(OWN, False, False)
+        if pending:
+            prepared = signed("restore")
+            assert prepared["wal_sha256"] == wal_hash
+            require_prior_resources()
         profile = signed("place")
         require("/usr/bin/systemctl", "daemon-reload")
         policy = signed("prepare")
@@ -2318,7 +2396,11 @@ finally:
         assert policy["generation"] == current["state_generation"]
         assert policy["generation_manifest_sha256"] == state_before[
             str(STATE / ".state-v2-owned-nginx.manifest")]
-        assert policy["committed_resources_verified"]
+        if pending:
+            assert policy["prior_resources_verified"] and policy["recovery_required"]
+            assert policy["wal_sha256"] == wal_hash and policy["catalog_withdrawn"]
+        else:
+            assert policy["committed_resources_verified"]
         assert not policy["authorizes_catalog_publication"]
         assert digest(profile_receipt) == profile["receipt_sha256"]
         assert digest(boot_receipt) == policy["receipt_sha256"]
@@ -2328,6 +2410,8 @@ finally:
                   "package_completion_sha256": digest(STATE / ".native-nginx-v1.completed"),
                   "host_rules_sha256": hashlib.sha256(host_rules.encode("utf-8")).hexdigest(),
                   "host_booleans_sha256": hashlib.sha256(host_booleans.encode("utf-8")).hexdigest()}
+        if pending:
+            report.update(wal_sha256=wal_hash, wal_inode=wal_inode)
         with evidence_path.open("xb") as stream:
             os.fchmod(stream.fileno(), 0o600)
             stream.write(json.dumps(report, sort_keys=True).encode("ascii"))
@@ -2335,15 +2419,17 @@ finally:
             os.fsync(stream.fileno())
         sync_dir(ROOT)
         require_status(OWN, False, False)
-        assert live_wal_resource_hashes() == state_before
+        require_prior_resources()
         assert isolated.command("/usr/sbin/nft", "--stateless", "--numeric-priority",
                                 "list", "ruleset").stdout == host_rules
-        print("PASS: exact committed generation and boot intent durable, dedicated profile staged, service disabled before real reboot", flush=True)
+        print("PASS: exact " + ("prepared pending WAL" if pending else "committed generation") +
+              " and boot intent durable, dedicated profile staged, service disabled before real reboot", flush=True)
         return
 
     require_status(OWN, False, False)
-    prior = json.loads(evidence_path.read_bytes())
+    prior = saved
     assert prior["pins"] == pins and prior["resources"] == state_before
+    require_prior_resources()
     assert prior["vendor_sha256"] == digest(VENDOR_CONFIG)
     assert prior["package_completion_sha256"] == digest(STATE / ".native-nginx-v1.completed")
     assert prior["host_rules_sha256"] == hashlib.sha256(host_rules.encode("utf-8")).hexdigest()
@@ -2359,18 +2445,23 @@ finally:
     assert result["generation"] == prior["policy"]["generation"]
     assert result["generation_manifest_sha256"] == prior["policy"]["generation_manifest_sha256"]
     assert result["ruleset_sha256"] == prior["policy"]["ruleset_sha256"]
-    assert result["committed_resources_verified"]
+    if pending:
+        assert result["prior_resources_verified"] and result["recovery_required"]
+        assert result["wal_sha256"] == wal_hash and result["catalog_withdrawn"]
+    else:
+        assert result["committed_resources_verified"]
     assert not result["authorizes_catalog_publication"]
     assert signed("verify") == result
     archive = STATE / (history_prefix + prior["policy"]["boot_id"])
     assert archive.read_bytes() == old_receipt
     assert digest(boot_receipt) == result["receipt_sha256"]
     assert not os.path.lexists(rollover)
-    assert live_wal_resource_hashes() == state_before
+    require_prior_resources()
     assert isolated.command("/usr/sbin/nft", "--stateless", "--numeric-priority",
                             "list", "ruleset").stdout == host_rules
     require_status(OWN, False, False)
-    print("PASS: real reboot discarded old namespace; explicit signed recreation and receipt rollover preserved prior exact evidence and committed generation", flush=True)
+    print("PASS: real reboot discarded old namespace; explicit signed recreation and receipt rollover preserved exact " +
+          ("pending WAL and withdrawn prior generation" if pending else "committed generation"), flush=True)
 
     # The disposable fixture owns these exact leaves. Verify all of them
     # and the stopped service before fixture-only removal, then restore
@@ -2392,7 +2483,17 @@ finally:
     dropdir.rmdir()
     sync_dir(dropdir.parent)
     require("/usr/bin/systemctl", "daemon-reload")
-    require("/usr/bin/systemctl", "enable", "--now", OWN)
+    if pending:
+        require_prior_resources()
+        # Restore the fixture's enablement without starting. Only the
+        # authenticated inactive-WAL recovery may publish the old catalog.
+        require("/usr/bin/systemctl", "enable", OWN)
+        require_status(OWN, False, True)
+        recovered = native.activate_authenticated_native_nginx(assets, **pins)
+        assert recovered["state_generation"] == current["state_generation"]
+        assert not wal.exists()
+    else:
+        require("/usr/bin/systemctl", "enable", "--now", OWN)
     require_status(OWN, True, True)
     require_status(VENDOR, False, False)
     response = https_response("/__repocache/healthz")
@@ -2404,7 +2505,9 @@ finally:
     assert digest(VENDOR_CONFIG) == prior["vendor_sha256"]
     assert digest(STATE / ".native-nginx-v1.completed") == prior["package_completion_sha256"]
     print("PASS: exact fixture cleanup and original enabled service, generation, vendor and host policy restored", flush=True)
-    print("NOT VERIFIED: automatic boot-time dedicated service activation, active upstream ingress, or pending-WAL inactive recovery", flush=True)
+    if pending:
+        print("PASS: real interrupted WAL survives dedicated namespace reboot rollover; signed legacy recovery restores prior TLS/catalog after fixture-only cleanup", flush=True)
+    print("NOT VERIFIED: automatic dedicated service boot activation, active upstream ingress or installed dedicated pending-WAL dispatch", flush=True)
 
 
 def verify_guest(distribution: str, phase: str) -> None:
@@ -2585,11 +2688,13 @@ def verify_guest(distribution: str, phase: str) -> None:
         assert inspect_stock_nginx_package_file_integrity()[
             "native_package_file_integrity_verified"] is True
         print("PASS: separate REPOCACHE service survives real reboot with vendor service disabled and package integrity intact", flush=True)
-        print("NOT VERIFIED: authoritative active repository transaction/catalog, pending-WAL inactive recovery, final publisher-signed release", flush=True)
-    elif phase in ("boot-intent-prepare", "boot-intent-after"):
+        print("NOT VERIFIED: authoritative active repository transaction/catalog, installed dedicated namespace pending-WAL recovery, final publisher-signed release", flush=True)
+    elif phase in ("boot-intent-prepare", "boot-intent-after",
+                   "pending-boot-intent-prepare", "pending-boot-intent-after"):
         assert distribution == "almalinux"
         verify_committed_boot_namespace_reboot_fixture(
-            native, assets, pins, after=phase == "boot-intent-after")
+            native, assets, pins, after=phase.endswith("-after"),
+            pending=phase.startswith("pending-"))
         assert hashlib.sha256(completion.read_bytes()).hexdigest() == receipt
         assert hashlib.sha256(VENDOR_CONFIG.read_bytes()).hexdigest() == vendor_conf
         assert inspect_stock_nginx_package_file_integrity()[
@@ -2600,6 +2705,7 @@ def verify_guest(distribution: str, phase: str) -> None:
 
 if __name__ == "__main__":
     if (len(sys.argv) != 3 or sys.argv[1] not in ("debian", "almalinux")
-            or sys.argv[2] not in ("activate", "after", "boot-intent-prepare", "boot-intent-after")):
-        raise SystemExit("Usage: ci_native_nginx_activate_guest.py debian|almalinux activate|after|boot-intent-prepare|boot-intent-after")
+            or sys.argv[2] not in ("activate", "after", "boot-intent-prepare", "boot-intent-after",
+                                   "pending-boot-intent-prepare", "pending-boot-intent-after")):
+        raise SystemExit("Usage: ci_native_nginx_activate_guest.py debian|almalinux activate|after|boot-intent-prepare|boot-intent-after|pending-boot-intent-prepare|pending-boot-intent-after")
     verify_guest(sys.argv[1], sys.argv[2])
