@@ -2564,6 +2564,69 @@ def _owned_live_finish(state_fd: int, nginx_fd: int, public_fd: int,
     _unlink_known(state_fd, _OWNED_WAL, wal, 0, _MAX_WAL)
 
 
+def _prepare_owned_inactive_wal_rollback_locked(
+    state_fd: int, nginx_fd: int, public_fd: int, check_layout, *,
+    distribution: str, expected_wal: bytes, recheck_stopped_owner,
+) -> dict:
+    """Restore prior bytes while the authenticated owned service is stopped.
+
+    Only a trusted lifecycle caller retaining the original root/state lock
+    and fixed layout may invoke this internal preparation. A published v3
+    WAL remains the recovery authority, and the catalog stays withdrawn.
+    No process, namespace, enablement, syntax or publication operation is
+    performed. Active-route predecessors and unpublished WALs are refused.
+    """
+    if (type(distribution) is not str or distribution not in _CA
+            or type(expected_wal) is not bytes
+            or not 1 <= len(expected_wal) <= _MAX_WAL
+            or not callable(recheck_stopped_owner)):
+        _deny("OWNED_INACTIVE_WAL_INPUT_INVALID")
+
+    def stopped_layout():
+        check_layout()
+        _owned_require_exact_wal(state_fd, expected_wal)
+        recheck_stopped_owner()
+        check_layout()
+        _owned_require_exact_wal(state_fd, expected_wal)
+
+    stopped_layout()
+    old, hashes = _decode_owned_wal(expected_wal, distribution=distribution)
+    if _json(expected_wal, limit=_MAX_WAL)["version"] != 3:
+        _deny("OWNED_LIVE_WAL_REQUIRED")
+    snapshot = _validate_owned_resources(old, distribution=distribution)
+    _owned_socket_require_inactive_routes(snapshot)
+    expected = _read_owned_resources(state_fd, nginx_fd, public_fd)
+    _owned_wal_resource_drift(old, hashes, expected, unpublished=False,
+                              catalog_withdrawal=True)
+    _owned_live_guard(state_fd, nginx_fd, public_fd, stopped_layout,
+                      expected_wal, expected)
+    _owned_cleanup_stages(state_fd, nginx_fd, public_fd, old, hashes)
+    # Cleanup may only remove WAL-owned stages; it must not change targets.
+    _owned_live_guard(state_fd, nginx_fd, public_fd, stopped_layout,
+                      expected_wal, expected)
+    for name, after in ((_CATALOG, None), (_OWNED_MAIN, old[_OWNED_MAIN]),
+                        (_INCLUDE, old[_INCLUDE]), (V2_STATE, old[V2_STATE]),
+                        (_OWNED_MANIFEST, old[_OWNED_MANIFEST])):
+        _owned_live_write(state_fd, nginx_fd, public_fd, stopped_layout,
+                          expected_wal, expected, name, after)
+    prior_withdrawn = {**old, _CATALOG: None}
+    if expected != prior_withdrawn:
+        _deny("OWNED_INACTIVE_WAL_RESTORE_DRIFT")
+    _owned_check_stages_absent(state_fd, nginx_fd, public_fd)
+    _owned_live_guard(state_fd, nginx_fd, public_fd, stopped_layout,
+                      expected_wal, prior_withdrawn)
+    return {
+        "status": "OWNED_INACTIVE_WAL_PRIOR_BYTES_PREPARED",
+        "wal_sha256": hashlib.sha256(expected_wal).hexdigest(),
+        "prior_generation": None if snapshot is None else snapshot["state_generation"],
+        "catalog_withdrawn": True,
+        "recovery_required": True,
+        "runtime_verified": False,
+        "authorizes_nginx_activation": False,
+        "authorizes_catalog_publication": False,
+    }
+
+
 def _recover_owned_live_locked(root_fd: int, state_fd: int, nginx_fd: int,
                                public_fd: int, check_layout, *,
                                expected_wal: bytes | None = None) -> dict:

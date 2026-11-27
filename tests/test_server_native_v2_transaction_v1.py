@@ -3144,3 +3144,102 @@ def test_fresh_boot_namespace_retains_committed_resources_before_creation(
             assert calls == (["create"] if kind != "active" and fault == "drift" else [])
     if kind == "active" or fault != "drift":
         assert _fixture_resource_bytes(paths) == old
+
+
+@pytest.mark.parametrize("initial", [True, False])
+@pytest.mark.parametrize("boundary", ["none", "catalog", "main", "include", "state", "manifest"])
+def test_inactive_live_wal_prepare_preserves_wal_and_withdraws_catalog(
+        filesystem, monkeypatch, initial, boundary):
+    old = _owned_bootstrap_resources() if initial else _owned_generation(active=False)
+    new = _owned_generation(1 if initial else 2,
+                            previous=None if initial else json.loads(old[V2_STATE]),
+                            active=False)
+    paths = _owned_fixture_paths(filesystem, new)
+    fd, state, _, _, events = filesystem
+    wal = native._owned_wal_record(old, new, live=True)
+    record = state / native._OWNED_WAL
+    record.write_bytes(wal)
+    record.chmod(0o600)
+    inode = record.stat().st_ino
+    target = {"catalog": native._CATALOG, "main": native._OWNED_MAIN,
+              "include": native._INCLUDE, "state": V2_STATE,
+              "manifest": native._OWNED_MANIFEST}.get(boundary)
+    actual = native._owned_write_resource
+
+    def interrupted(*args):
+        actual(*args)
+        if args[3] == target:
+            assert record.read_bytes() == wal
+            assert not paths[native._CATALOG].exists()
+            raise _OwnedFixturePowerLoss()
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("Inactive byte preparation reached runtime or publication")
+
+    for name in ("_owned_live_observe", "_owned_live_validate",
+                 "_owned_live_reload", "_owned_live_finish"):
+        monkeypatch.setattr(native, name, unexpected)
+
+    def prepare():
+        with native._owned_fixture_layout(fd, recovering=True) as layout:
+            return native._prepare_owned_inactive_wal_rollback_locked(
+                *layout, distribution="debian", expected_wal=wal,
+                recheck_stopped_owner=lambda: None)
+
+    if boundary != "none":
+        with monkeypatch.context() as m:
+            m.setattr(native, "_owned_write_resource", interrupted)
+            with pytest.raises(_OwnedFixturePowerLoss):
+                prepare()
+        assert record.read_bytes() == wal
+        assert not paths[native._CATALOG].exists()
+    result = prepare()
+    assert result["status"] == "OWNED_INACTIVE_WAL_PRIOR_BYTES_PREPARED"
+    assert result["wal_sha256"] == hashlib.sha256(wal).hexdigest()
+    assert result["prior_generation"] == (None if initial else 1)
+    assert result["catalog_withdrawn"] and result["recovery_required"]
+    assert not result["runtime_verified"]
+    assert not result["authorizes_nginx_activation"]
+    assert not result["authorizes_catalog_publication"]
+    assert _fixture_resource_bytes(paths) == {**old, native._CATALOG: None}
+    assert record.read_bytes() == wal and record.stat().st_ino == inode
+    assert prepare() == result
+    assert not events
+
+
+@pytest.mark.parametrize("fault", ["active-prior", "v2", "unpublished",
+                                    "foreign-target", "foreign-stage",
+                                    "changed-wal", "stopped-owner"])
+def test_inactive_live_wal_prepare_refuses_before_target_effects(
+        filesystem, fault):
+    old = _owned_generation(active=fault == "active-prior")
+    new = _owned_generation(2, previous=json.loads(old[V2_STATE]), active=False)
+    paths = _owned_fixture_paths(filesystem, new)
+    fd, state, _, _, events = filesystem
+    wal = native._owned_wal_record(old, new, live=fault != "v2")
+    record = state / (native._OWNED_WAL_TMP if fault == "unpublished" else native._OWNED_WAL)
+    record.write_bytes(wal)
+    record.chmod(0o600)
+    if fault == "foreign-target":
+        paths[native._INCLUDE].write_bytes(b"foreign")
+    if fault == "foreign-stage":
+        stage = paths[native._INCLUDE].parent / native._OWNED_STAGES[native._INCLUDE]
+        stage.write_bytes(b"foreign")
+        stage.chmod(0o644)
+    before = _fixture_resource_bytes(paths)
+
+    def stopped():
+        if fault == "stopped-owner":
+            raise native.NativeV2TransactionError("OWNER_CHANGED")
+
+    with native._owned_fixture_layout(fd, recovering=True) as layout:
+        with pytest.raises(native.NativeV2TransactionError):
+            native._prepare_owned_inactive_wal_rollback_locked(
+                *layout, distribution="debian",
+                expected_wal=b"changed" if fault == "changed-wal" else wal,
+                recheck_stopped_owner=stopped)
+    assert _fixture_resource_bytes(paths) == before
+    assert record.read_bytes() == wal
+    if fault == "foreign-stage":
+        assert stage.read_bytes() == b"foreign"
+    assert not events

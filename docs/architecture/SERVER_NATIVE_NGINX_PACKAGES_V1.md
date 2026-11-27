@@ -1246,3 +1246,21 @@ mutation boundary. The signed native reboot witness exercises this
 composition. Ambiguous pending rollover and same-boot creation remain
 refused. This internal path requires an authenticated stopped-service
 caller and grants no installed dispatch or service start authority.
+
+
+### Inactive live-WAL rollback preparation
+
+A stopped-service lifecycle caller may prepare the exact previous v3
+WAL resource bytes under the original protected lock and fixed layout.
+The caller must authenticate service exclusion, release, package and
+storage identity; the preparation rechecks that stopped ownership and
+the same published WAL before and after target writes. It refuses an
+active-route predecessor, unpublished or changed WAL, foreign resources
+and unsafe stages. The catalog remains withdrawn, even after all prior
+configuration/state/manifest bytes have been restored. The original
+published WAL remains durable across retries and power interruption.
+This is a recovery preparation, not evidence of native syntax, namespace
+ownership, service start, health or rollback completion. No installed
+dispatch or catalog publication is enabled. A subsequent authenticated
+runtime recovery must verify the prior service before final publication
+and WAL removal.
