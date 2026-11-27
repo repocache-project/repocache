@@ -91,3 +91,15 @@ stderr, malformed JSON or source drift fails the test. Native execution
 remains NOT VERIFIED until the exact-HEAD booted Debian and AlmaLinux
 campaign completes; no installed source writer, active catalog or real
 publisher acceptance is claimed.
+
+## DNF4 private lock directory continuity (#24)
+
+The disposable DNF4 PID/RPMDB lock scope rewalks the fixed directories
+from the private root without following symlinks, checks ownership and
+permissions, and binds them to the retained directory descriptors before
+publication, during revalidation and before claim cleanup. Unsafe parent
+or leaf drift refuses further operations and retains the exact PID claim
+for fixture review; the native test restores only its own disposable
+permissions and removes its verified claim. The mechanism remains
+fixture-only: it does not exclude earlier readers or authorize installed
+source mutation.
