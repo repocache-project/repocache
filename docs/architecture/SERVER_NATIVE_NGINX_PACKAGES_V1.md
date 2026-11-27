@@ -1415,3 +1415,20 @@ main (without explicit scratch paths) is not silently adopted by the new
 renderer/WAL validator. Native legacy reboot, dedicated start and systemd
 runtime cleanup remain NOT
 VERIFIED at the new revision until executed guest evidence is inspected.
+
+
+### Prepared prior-generation dedicated start (isolated candidate)
+
+The internal signed lifecycle candidate can explicitly start a managed,
+disabled-route, loopback-only prior generation from an exact published v3
+WAL and its already prepared, withdrawn resources. It reuses the committed
+start's fixed unit, native package, receipt, namespace/egress, TLS, storage,
+scratch, listener and master checks. A pending or changed WAL cannot enter
+the committed path. The prepared path never changes the WAL, catalog,
+enablement or configuration, and reports recovery still required. A failed
+start is compensated only for a still-exact owned master; uncertain or
+foreign state is retained. The disposable native witness requires an
+actual start after namespace reboot rollover, a fresh TLS catalog 404,
+and preservation of the exact WAL and prior resources across stop.
+This is not installed pending-WAL dispatch or recovery finalization.
+Publication and journal removal remain a separate unverified phase.

@@ -2558,32 +2558,39 @@ try:
                 net_identity=namespace_identity()
                 result=policy(False)
             elif action=="prepare-committed-runtime":
-                assert not pending
                 owner(False)
                 prepared=tx._owned_alma_runtime_temps(
                     root,dedicated=True,allow_create=True,inactive=True)
                 assert tx._owned_alma_runtime_temps(root,dedicated=True,inactive=True)==prepared
                 result={"scratch_count":len(prepared[1]),"authorizes_nginx_activation":False}
             elif action=="start-committed":
-                assert not pending
-                result=tx._start_owned_committed_dedicated_locked(
+                entry=(tx._start_owned_prepared_wal_dedicated_locked if pending else
+                       tx._start_owned_committed_dedicated_locked)
+                result=entry(
                     root,state,namespace_identity=namespace_identity(),
+                    **({"expected_wal":pending_raw} if pending else {}),
                     executable_identity=identity[:2],
                     profile_receipt_sha256=observed_profile["receipt_sha256"],
                     executable_receipt_sha256=hashlib.sha256(receipt).hexdigest(),
                     recheck_authenticated_owner=receipts)
             elif action in ("prepare-committed-storage","verify-committed-active"):
-                # Exercise the actual committed generation, not a rewritten
-                # synthetic include. No pending-WAL publication authority.
-                assert not pending
+                # Exercise exact committed or prepared prior resources,
+                # never a rewritten synthetic include or pending publication.
                 net_identity=namespace_identity()
                 active=action=="verify-committed-active"
+                assert not (pending and active)
                 observed_policy=policy(False,active=active)
-                with tx._owned_layout_locked(root,state,recovering=False) as layout:
+                with tx._owned_layout_locked(root,state,recovering=pending) as layout:
                     state_fd,nginx_fd,public_fd,check_layout=layout
                     exact=tx._read_owned_resources(state_fd,nginx_fd,public_fd)
-                    snapshot=tx._validate_owned_resources(exact,distribution="almalinux")
-                    assert snapshot and exact[tx._CATALOG]
+                    if pending:
+                        tx._owned_require_exact_wal(state_fd,pending_raw)
+                        prior,_=tx._decode_owned_wal(pending_raw,distribution="almalinux")
+                        assert exact=={**prior,tx._CATALOG:None}
+                    else:
+                        prior=exact
+                    snapshot=tx._validate_owned_resources(prior,distribution="almalinux")
+                    assert snapshot and prior[tx._CATALOG]
                     tx._owned_socket_require_inactive_routes(snapshot)
                     document=tx.parse_install_bytes(base64.b64decode(
                         snapshot["configuration_base64"],validate=True),for_apply=True)
@@ -2733,19 +2740,19 @@ finally:
     print("PASS: real reboot discarded old namespace; explicit signed recreation and receipt rollover preserved exact " +
           ("pending WAL and withdrawn prior generation" if pending else "committed generation"), flush=True)
 
-    if not pending:
-        # Prove the existing committed generation can actually start with
-        # the recreated namespace. Unlike the earlier private data-plane
-        # fixture, keep the real WAL/manifest-bound main/include/catalog
-        # bytes unchanged. Fresh test-only storage and labels are placed
-        # while stopped; no production migration is performed.
+    if after:
+        # Prove exact committed and prepared prior generations start with
+        # the recreated namespace. Keep the WAL/manifest-bound resources
+        # unchanged; pending catalog must remain withdrawn. Fresh isolated
+        # storage and labels are placed while stopped, not migrated.
         cache = Path(document["deployment"]["paths"]["cache_root"])
         log = Path(document["deployment"]["paths"]["log_root"])
         runtime = Path("/run/repocache-nginx")
         fixed = (cache, cache.parent / ".repocache-managed.owner-v1",
                  log, log.parent / ".repocache-managed.owner-v1")
-        backups = tuple(p.with_name(".ci-boot-legacy-" + p.name) for p in fixed)
-        archived = tuple(p.with_name(".ci-boot-dedicated-" + p.name) for p in fixed)
+        prefix = ".ci-pending-boot-" if pending else ".ci-boot-"
+        backups = tuple(p.with_name(prefix + "legacy-" + p.name) for p in fixed)
+        archived = tuple(p.with_name(prefix + "dedicated-" + p.name) for p in fixed)
         assert not any(os.path.lexists(p) for p in (*backups, *archived, runtime))
         assert not list(cache.iterdir()) and not list(log.iterdir())
         for parent in (cache.parent, log.parent):
@@ -2762,7 +2769,7 @@ finally:
             Path("/etc/repocache/tls"),
             Path(document["deployment"]["tls"]["certificate_file"]),
             Path(document["deployment"]["tls"]["private_key_file"]),
-            catalog.parent, catalog,
+            catalog.parent, *((catalog,) if not pending else ()),
         )
         with contextlib.ExitStack() as stack:
             labels = []
@@ -2797,15 +2804,32 @@ finally:
             except Exception:
                 print(run("/usr/bin/journalctl", "-u", OWN, "-n", "20", "--no-pager").stdout[-4000:], flush=True)
                 raise
-            assert started["status"] == "OWNED_DEDICATED_COMMITTED_START_OBSERVED"
+            assert started["status"] == ("OWNED_DEDICATED_PREPARED_WAL_START_OBSERVED" if pending
+                                         else "OWNED_DEDICATED_COMMITTED_START_OBSERVED")
             assert started["service_storage_mounts_verified"] and not started["enablement_changed"]
             assert started["service_scratch_mounts_verified"]
             require_status(OWN, True, False)
-            witnessed = signed("verify-committed-active")
-            assert witnessed["main_pid"] == started["main_pid"]
-            assert witnessed["listener_inode"] == started["listener_inode"]
+            if pending:
+                assert started["wal_sha256"] == wal_hash
+                assert started["catalog_withdrawn"] and started["recovery_required"]
+                # Independently prove a fresh TLS client cannot retrieve
+                # a catalog even though the exact prior master is healthy.
+                response = subprocess.run(
+                    ["/usr/sbin/ip", "netns", "exec", "repocache-nginx",
+                     "/usr/bin/python3", "-IS", "-B", "-c",
+                     "import sys;sys.path.insert(0,'/home/pr237ci/combined');"
+                     "from scripts.ci_pr237_native_socket_guest import https_response;"
+                     "sys.stdout.buffer.write(https_response('/.well-known/repocache/catalog.json'))"],
+                    check=True, capture_output=True, timeout=15).stdout
+                assert response.startswith(b"HTTP/1.1 404 "), response.split(b"\r\n")[0]
+                witnessed = started
+            else:
+                witnessed = signed("verify-committed-active")
+                assert witnessed["main_pid"] == started["main_pid"]
+                assert witnessed["listener_inode"] == started["listener_inode"]
             assert witnessed["storage"] == prepared_storage
-            assert witnessed["catalog_observed"] and witnessed["generation"] == current["state_generation"]
+            assert witnessed["catalog_observed"] == (not pending)
+            assert witnessed["generation"] == current["state_generation"]
             assert witnessed["listener_inode"] > 0
             require_prior_resources()
             require("/usr/bin/systemctl", "stop", OWN)
@@ -2827,7 +2851,10 @@ finally:
                 fixture_move_same_parent_noreplace(backup, source)
             assert not os.path.lexists(runtime)
         require_prior_resources()
-        print("PASS: actual signed dedicated unit starts exact committed generation after namespace reboot rollover; pinned TLS and exact catalog served, then stops without changing prior bytes", flush=True)
+        if pending:
+            print("PASS: actual signed dedicated unit starts exact prepared prior generation after namespace reboot rollover; pinned TLS, catalog HTTP 404, exact WAL retained, then stops", flush=True)
+        else:
+            print("PASS: actual signed dedicated unit starts exact committed generation after namespace reboot rollover; pinned TLS and exact catalog served, then stops without changing prior bytes", flush=True)
 
     # The disposable fixture owns these exact leaves. Verify all of them
     # and the stopped service before fixture-only removal, then restore
