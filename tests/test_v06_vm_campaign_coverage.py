@@ -9,6 +9,16 @@ from scripts.collect_v06_vm_campaign_coverage import SCENARIOS, collect
 HEAD = "1" * 40
 
 
+def guest_facts(platform: str) -> str:
+    distro, version = ("debian", "13") if platform == "debian13" else ("almalinux", "10.3")
+    return (
+        f'ID="{distro}"\nVERSION_ID="{version}"\n'
+        "Linux fixture 6.12.0 #1 SMP x86_64 GNU/Linux\n"
+        "systemd\nrunning\nqemu\n"
+        + ("Enforcing\n" if platform == "almalinux10" else "")
+    )
+
+
 def test_missing_evidence_fails_closed(tmp_path: Path) -> None:
     observed = collect(tmp_path, "debian13", "smoke", HEAD)
     assert observed["scenario_status"] == "NOT_VERIFIED"
@@ -35,10 +45,7 @@ def test_complete_guest_scenario_never_implies_original_acceptance(
         "Last phase: complete\nVM exercise: PASS\n",
         encoding="utf-8",
     )
-    distro = "debian" if platform == "debian13" else "almalinux"
-    (tmp_path / "facts.txt").write_text(
-        f"ID={distro}\nsystemd\nEnforcing\n", encoding="utf-8",
-    )
+    (tmp_path / "facts.txt").write_text(guest_facts(platform), encoding="utf-8")
     observed = collect(tmp_path, platform, scenario, HEAD)
     assert observed["scenario_status"] == "EXECUTED"
     assert observed["full_original_issue_acceptance"] == "NOT_VERIFIED"
@@ -59,7 +66,7 @@ def test_p02_partial_coverage_requires_exact_log_and_completed_guest(tmp_path: P
         f"Source HEAD: {HEAD}\nLast phase: complete\nVM exercise: PASS\n",
         encoding="utf-8",
     )
-    (tmp_path / "facts.txt").write_text("ID=debian\nsystemd\n", encoding="utf-8")
+    (tmp_path / "facts.txt").write_text(guest_facts("debian13"), encoding="utf-8")
     log = tmp_path / "native-cache-data-plane.txt"
     log.write_text("PASS: booted native VM stock NGINX disposable HTTPS APT/DNF MISS/HIT",
                    encoding="utf-8")
@@ -105,9 +112,7 @@ def test_native_lifecycle_evidence_requires_final_guest_markers(tmp_path: Path) 
         f"Source HEAD: {HEAD}\nLast phase: complete\nVM exercise: PASS\n",
         encoding="utf-8",
     )
-    (tmp_path / "facts.txt").write_text(
-        "ID=almalinux\nsystemd\nEnforcing\n", encoding="utf-8",
-    )
+    (tmp_path / "facts.txt").write_text(guest_facts("almalinux10"), encoding="utf-8")
     result = collect(tmp_path, "almalinux10", "native-lifecycle", HEAD)
     assert result["scenario_status"] == "NOT_VERIFIED"
     assert result["other_campaigns"]["P0-2"] == "NOT_VERIFIED"
@@ -126,6 +131,41 @@ def test_native_lifecycle_evidence_requires_final_guest_markers(tmp_path: Path) 
     assert all(row["acceptance"] == "NOT_VERIFIED" for row in result["criteria"])
 
 
+@pytest.mark.parametrize("platform, original, replacement", [
+    ("debian13", 'VERSION_ID="13"', 'VERSION_ID="12"'),
+    ("almalinux10", 'VERSION_ID="10.3"', 'VERSION_ID="9.7"'),
+    ("almalinux10", 'VERSION_ID="10.3"', 'VERSION_ID="100"'),
+    ("debian13", 'ID="debian"', 'ID_LIKE="debian"\nID="ubuntu"'),
+    ("debian13", 'ID="debian"', 'ID="debian-derived"'),
+    ("debian13", 'ID="debian"', 'ID="debian"\nID="ubuntu"'),
+    ("debian13", 'VERSION_ID="13"', 'VERSION_ID="13"\nVERSION_ID="12"'),
+    ("debian13", 'VERSION_ID="13"\n', ''),
+    ("debian13", "x86_64 GNU/Linux", "aarch64 GNU/Linux"),
+    ("debian13", "\nqemu\n", "\ndocker\n"),
+    ("debian13", "\nsystemd\n", "\ninit\n"),
+    ("almalinux10", "\nEnforcing\n", "\nPermissive\n"),
+    ("almalinux10", "\nEnforcing\n", "\nEnforcing\nDisabled\n"),
+])
+def test_guest_identity_mismatch_never_counts_as_exercised(
+    tmp_path: Path, platform: str, original: str, replacement: str,
+) -> None:
+    for name in SCENARIOS["smoke"]["files"]:
+        (tmp_path / name).write_text("fixture", encoding="utf-8")
+    (tmp_path / "sha.txt").write_text(HEAD, encoding="utf-8")
+    (tmp_path / "summary.md").write_text(
+        f"## PR #237 — {platform} smoke experimental booted VM\n"
+        f"Source HEAD: {HEAD}\nLast phase: complete\nVM exercise: PASS\n",
+        encoding="utf-8",
+    )
+    facts = guest_facts(platform)
+    assert original in facts
+    (tmp_path / "facts.txt").write_text(facts.replace(original, replacement), encoding="utf-8")
+    result = collect(tmp_path, platform, "smoke", HEAD)
+    assert not result["guest_identity_verified"]
+    assert result["scenario_status"] == "NOT_VERIFIED"
+    assert all(row["coverage"] == "NOT_VERIFIED" for row in result["criteria"])
+
+
 def test_booted_nginx_invalid_candidate_requires_exact_recovery_marker(tmp_path: Path) -> None:
     """A basic HIT alone must not claim staged syntax/rollback coverage."""
     for name in SCENARIOS["smoke"]["files"]:
@@ -136,9 +176,7 @@ def test_booted_nginx_invalid_candidate_requires_exact_recovery_marker(tmp_path:
         f"Source HEAD: {HEAD}\nLast phase: complete\nVM exercise: PASS\n",
         encoding="utf-8",
     )
-    (tmp_path / "facts.txt").write_text(
-        "ID=almalinux\nsystemd\nEnforcing\n", encoding="utf-8",
-    )
+    (tmp_path / "facts.txt").write_text(guest_facts("almalinux10"), encoding="utf-8")
     native = tmp_path / "native-cache-data-plane.txt"
     native.write_text(
         "PASS: booted native VM stock NGINX disposable HTTPS APT/DNF MISS/HIT\n",

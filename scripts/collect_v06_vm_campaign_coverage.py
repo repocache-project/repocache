@@ -64,6 +64,34 @@ SCENARIOS = {
 }
 
 
+def _guest_identity_matches(facts: str, platform: str) -> bool:
+    """Match the recorded os-release, uname, PID1 and VM identity.
+
+    This is an evidence consistency check, not guest attestation.
+    """
+    lines = facts.splitlines()
+    expected_id, major = ("debian", "13") if platform == "debian13" else ("almalinux", "10")
+    for key, pattern in (
+        ("ID", expected_id),
+        ("VERSION_ID", major + r"(?:\.[0-9]+)*"),
+    ):
+        values = [line[len(key) + 1:] for line in lines if line.startswith(key + "=")]
+        if len(values) != 1 or not re.fullmatch(
+            rf'(?:{pattern}|"{pattern}"|\'{pattern}\')', values[0]
+        ):
+            return False
+    kernels = [line for line in lines if line.startswith("Linux ")]
+    if len(kernels) != 1 or not re.fullmatch(r"Linux .+ x86_64 GNU/Linux", kernels[0]):
+        return False
+    if lines.count("systemd") != 1 or sum(lines.count(v) for v in ("qemu", "kvm")) != 1:
+        return False
+    return platform != "almalinux10" or (
+        lines.count("Enforcing") == 1
+        and "Permissive" not in lines
+        and "Disabled" not in lines
+    )
+
+
 def collect(path: Path, platform: str, scenario: str, expected_head: str) -> dict:
     if platform not in ("debian13", "almalinux10"):
         raise ValueError("unsupported platform")
@@ -77,12 +105,7 @@ def collect(path: Path, platform: str, scenario: str, expected_head: str) -> dic
     observed_head = (path / "sha.txt").read_text(encoding="utf-8").strip() if "sha.txt" not in missing else None
     summary = (path / "summary.md").read_text(encoding="utf-8") if "summary.md" not in missing else ""
     facts = (path / "facts.txt").read_text(encoding="utf-8") if "facts.txt" not in missing else ""
-    expected_image = "debian" if platform == "debian13" else "almalinux"
-    facts_valid = (f"ID={expected_image}" in facts or f'ID="{expected_image}"' in facts) and (
-        re.search(r"(?m)^systemd\s*$", facts) is not None
-    )
-    if platform == "almalinux10":
-        facts_valid = facts_valid and re.search(r"(?m)^Enforcing\s*$", facts) is not None
+    facts_valid = _guest_identity_matches(facts, platform)
     completed = (
         not missing
         and observed_head == expected_head
