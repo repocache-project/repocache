@@ -1297,3 +1297,17 @@ compensated by stopping or declaring success. Both booted guests
 exercise the existing signed entry point, including failure before
 start and exact retry; this does not establish automatic dedicated
 namespace boot ordering or active authoritative routes.
+
+
+For a published v3 WAL whose prior files have already been restored while
+the signed owned service is stopped, a separate retained generation scope
+now requires the exact WAL, exact prior bytes, withdrawn catalog and absence
+of stages. It derives only the prior canonical boot-policy identity (the
+same identity as the committed predecessor), not the proposed policy. The
+existing fresh loopback namespace/receipt creation sequence is shared; it
+retains the WAL and stopped-owner guard before and after each operation.
+Active predecessors, partial bytes, foreign stages, mismatched receipts
+and same-boot adoption remain refused. This internal candidate operation
+neither starts the service nor clears the WAL or publishes the catalog;
+installed dispatch, real boot ordering and native recovery evidence remain
+separate.

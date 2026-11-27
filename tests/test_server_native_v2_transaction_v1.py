@@ -3322,3 +3322,112 @@ def test_finish_inactive_wal_requires_prior_runtime_and_exact_publication(
     else:
         assert _fixture_resource_bytes(paths) == withdrawn and record.read_bytes() == wal
     assert events == ([False] if fault in ("pre-health", "owner-drift") else [False, True])
+
+
+@pytest.mark.parametrize("kind", ["bootstrap", "disabled", "active"])
+@pytest.mark.parametrize("fault", ["none", "missing-wal", "v2", "orphan",
+                                    "unprepared", "owner", "wal-drift", "resource-drift"])
+def test_prepared_wal_boot_namespace_requires_exact_prior_and_keeps_catalog_withdrawn(
+        filesystem, monkeypatch, kind, fault):
+    rootfd, state, _, _, _ = filesystem
+    old = (_owned_bootstrap_resources() if kind == "bootstrap" else
+           _owned_generation(active=kind == "active"))
+    new = _owned_generation(1 if kind == "bootstrap" else 2,
+                            previous=None if kind == "bootstrap" else json.loads(old[V2_STATE]),
+                            active=False)
+    withdrawn = {**old, native._CATALOG: None}
+    current = new if fault == "unprepared" else withdrawn
+    paths = _owned_fixture_paths(filesystem, current)
+    wal = native._owned_wal_record(old, new, live=fault != "v2")
+    record = state / native._OWNED_WAL
+    if fault != "missing-wal":
+        record.write_bytes(wal)
+        record.chmod(0o600)
+    if fault == "orphan":
+        orphan = paths[native._OWNED_MAIN].parent / native._OWNED_STAGES[native._OWNED_MAIN]
+        orphan.write_bytes(b"foreign")
+        orphan.chmod(0o644)
+    calls = []
+    boot = "12345678-1234-1234-1234-123456789abc"
+
+    def owner():
+        if fault == "owner":
+            raise native.NativeV2TransactionError("OWNER_CHANGED")
+
+    def intent(got_state, rules, **kw):
+        assert got_state == statefd and "8.8.8.8" not in rules
+        assert kw["generation"] == (0 if kind == "bootstrap" else 1)
+        if kind != "bootstrap":
+            assert kw["generation_manifest_sha256"] == hashlib.sha256(
+                old[native._OWNED_MANIFEST]).hexdigest()
+        return boot, b"prior receipt"
+
+    def create(*, recheck_owned):
+        recheck_owned()
+        calls.append("create")
+        if fault == "wal-drift":
+            record.write_bytes(b"foreign")
+        if fault == "resource-drift":
+            paths[native._OWNED_MAIN].write_bytes(b"foreign")
+        recheck_owned()
+        return {"boot_id": boot, "namespace_device": 17, "namespace_inode": 29,
+                "loopback_only_observed": True, "empty_ruleset_observed": True}
+
+    def prepare(got_root, got_state, rules, **kw):
+        assert (got_root, got_state) == (rootfd, statefd)
+        assert kw["namespace_identity"] == (17, 29)
+        assert kw["expected_previous_receipt"] == b"prior receipt"
+        assert kw["allow_boot_rollover"] and kw["allow_prepare"]
+        kw["recheck_owned"]()
+        calls.append("prepare")
+        return {"boot_id": boot, "namespace_device": 17, "namespace_inode": 29}
+
+    monkeypatch.setattr(native, "_fresh_boot_egress_intent_locked", intent)
+    monkeypatch.setattr(native, "_create_fixed_loopback_namespace_locked", create)
+    monkeypatch.setattr(native, "_prepare_boot_egress_locked", prepare)
+    with native._locked(rootfd, 0) as statefd:
+        def invoke():
+            return native._create_owned_prepared_wal_boot_egress_locked(
+                rootfd, statefd, distribution="debian", worker_uid=33,
+                expected_wal=wal, profile_receipt_sha256="a"*64,
+                executable_receipt_sha256="b"*64, recheck_stopped_owner=owner,
+                allow_boot_rollover=True)
+        if kind != "active" and fault == "none":
+            result = invoke()
+            assert calls == ["create", "prepare"]
+            assert result["prior_resources_verified"] and result["recovery_required"]
+            assert result["catalog_withdrawn"]
+            assert result["wal_sha256"] == hashlib.sha256(wal).hexdigest()
+            assert "committed_resources_verified" not in result
+            assert not result["authorizes_nginx_activation"]
+            assert not result["authorizes_catalog_publication"]
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                invoke()
+            assert calls == (["create"] if kind != "active" and fault in
+                             ("wal-drift", "resource-drift") else [])
+    if fault == "missing-wal":
+        assert not record.exists()
+    else:
+        assert record.read_bytes() == (b"foreign" if calls and fault == "wal-drift" else wal)
+    if not (calls and fault == "resource-drift"):
+        assert _fixture_resource_bytes(paths) == current
+
+
+def test_prepared_wal_boot_egress_scope_expires(filesystem):
+    rootfd, state, _, _, _ = filesystem
+    old = _owned_bootstrap_resources()
+    new = _owned_generation(active=False)
+    _owned_fixture_paths(filesystem, old)
+    wal = native._owned_wal_record(old, new, live=True)
+    record = state / native._OWNED_WAL
+    record.write_bytes(wal)
+    record.chmod(0o600)
+    with native._locked(rootfd, 0) as statefd:
+        with native._owned_prepared_wal_boot_egress_generation_locked(
+                rootfd, statefd, distribution="debian", worker_uid=33,
+                expected_wal=wal) as (plan, recheck):
+            assert plan["generation"] == 0
+            recheck()
+        with pytest.raises(native.NativeV2TransactionError, match="SCOPE_EXPIRED"):
+            recheck()

@@ -1675,6 +1675,23 @@ def _owned_generation_egress(resources, *, distribution: str, worker_uid: int):
     return plan
 
 
+def _owned_boot_egress_plan(resources, *, distribution: str, worker_uid: int):
+    """Bind canonical prior bytes to the existing boot-receipt identity."""
+    plan = _owned_generation_egress(
+        resources, distribution=distribution, worker_uid=worker_uid)
+    manifest = resources[_OWNED_MANIFEST]
+    if manifest is None:
+        # Generation zero uses its exact bootstrap resource inventory.
+        manifest = _canonical({
+            "schema_version": 1,
+            "service_domain": _OWNED_WAL_DOMAIN,
+            "bootstrap_generation": 0,
+            "resources_sha256": {name: _hash(resources[name]) for name in _OWNED_ORDER},
+        }, limit=_OWNED_LIMIT[_OWNED_MANIFEST])
+    return {**plan, "generation_manifest_sha256": _hash(manifest),
+            "authorizes_catalog_publication": False}
+
+
 @contextmanager
 def _owned_committed_boot_egress_generation_locked(
     root_fd: int, state_fd: int, *, distribution: str, worker_uid: int,
@@ -1692,21 +1709,9 @@ def _owned_committed_boot_egress_generation_locked(
     with _owned_layout_locked(root_fd, state_fd, recovering=False) as layout:
         state, nginx, public, check_layout = layout
         current = _read_owned_resources(state, nginx, public)
-        plan = _owned_generation_egress(
-            current, distribution=distribution, worker_uid=worker_uid)
-        manifest = current[_OWNED_MANIFEST]
-        if manifest is None:
-            # Generation zero has no managed manifest. Domain-separate the
-            # exact bootstrap resource inventory; never treat it as v2.
-            manifest = _canonical({
-                "schema_version": 1,
-                "service_domain": _OWNED_WAL_DOMAIN,
-                "bootstrap_generation": 0,
-                "resources_sha256": {name: _hash(current[name]) for name in _OWNED_ORDER},
-            }, limit=_OWNED_LIMIT[_OWNED_MANIFEST])
-        evidence = {**plan, "generation_manifest_sha256": _hash(manifest),
-                    "committed_resources_verified": True,
-                    "authorizes_catalog_publication": False}
+        evidence = {**_owned_boot_egress_plan(
+            current, distribution=distribution, worker_uid=worker_uid),
+            "committed_resources_verified": True}
         active = True
 
         def recheck():
@@ -1786,56 +1791,148 @@ def _create_owned_committed_boot_egress_locked(
     with _owned_committed_boot_egress_generation_locked(
             root_fd, state_fd, distribution=distribution, worker_uid=worker_uid,
     ) as (plan, recheck):
-        if plan["destinations"]:
-            _deny("OWNED_BOOT_EGRESS_ACTIVE_ROUTES_REFUSED")
+        return {**_create_owned_boot_egress_from_plan_locked(
+            root_fd, state_fd, plan, recheck,
+            profile_receipt_sha256=profile_receipt_sha256,
+            executable_receipt_sha256=executable_receipt_sha256,
+            recheck_stopped_owner=recheck_stopped_owner,
+            allow_boot_rollover=allow_boot_rollover),
+            "committed_resources_verified": True}
 
-        def owned():
+
+@contextmanager
+def _owned_prepared_wal_boot_egress_generation_locked(
+    root_fd: int, state_fd: int, *, distribution: str, worker_uid: int,
+    expected_wal: bytes,
+):
+    """Retain prepared prior bytes and withdrawn catalog under the exact v3 WAL.
+
+    This does not repair files, publish a catalog, remove the WAL or authorize
+    service activation. A trusted stopped-service caller must first complete
+    the existing prior-byte preparation and independently prove ownership.
+    """
+    if (type(distribution) is not str or distribution not in _CA
+            or type(expected_wal) is not bytes
+            or not 1 <= len(expected_wal) <= _MAX_WAL):
+        _deny("OWNED_BOOT_EGRESS_INPUT_INVALID")
+    with _owned_layout_locked(root_fd, state_fd, recovering=True) as layout:
+        state, nginx, public, check_layout = layout
+        _owned_require_exact_wal(state, expected_wal)
+        old, _ = _decode_owned_wal(expected_wal, distribution=distribution)
+        if _json(expected_wal, limit=_MAX_WAL)["version"] != 3:
+            _deny("OWNED_LIVE_WAL_REQUIRED")
+        snapshot = _validate_owned_resources(old, distribution=distribution)
+        _owned_socket_require_inactive_routes(snapshot)
+        withdrawn = {**old, _CATALOG: None}
+        active = True
+
+        def recheck():
+            if not active:
+                _deny("OWNED_BOOT_EGRESS_SCOPE_EXPIRED")
+            _owned_live_guard(state, nginx, public, check_layout,
+                              expected_wal, withdrawn)
+            _owned_check_stages_absent(state, nginx, public)
+            _owned_live_guard(state, nginx, public, check_layout,
+                              expected_wal, withdrawn)
+
+        try:
             recheck()
-            recheck_stopped_owner()
+            plan = _owned_boot_egress_plan(
+                old, distribution=distribution, worker_uid=worker_uid)
             recheck()
+            yield plan, recheck
+            recheck()
+        finally:
+            active = False
 
-        def intent():
-            return _fresh_boot_egress_intent_locked(
-                state_fd, plan["nft_candidate"], generation=plan["generation"],
-                generation_manifest_sha256=plan["generation_manifest_sha256"],
-                profile_receipt_sha256=profile_receipt_sha256,
-                executable_receipt_sha256=executable_receipt_sha256,
-                allow_boot_rollover=allow_boot_rollover)
 
-        owned()
-        before = intent()
+def _create_owned_prepared_wal_boot_egress_locked(
+    root_fd: int, state_fd: int, *, distribution: str, worker_uid: int,
+    expected_wal: bytes, profile_receipt_sha256: str,
+    executable_receipt_sha256: str, recheck_stopped_owner,
+    allow_boot_rollover: bool = False,
+) -> dict:
+    """Candidate-only fresh namespace from the WAL's prepared prior generation.
 
-        def before_create():
-            owned()
-            if intent() != before:
-                _deny("OWNED_BOOT_EGRESS_INTENT_CHANGED")
-            owned()
+    Uses the same exact boot/profile/executable/ruleset receipt as committed
+    preparation. Only the prior closed loopback policy may be created; no
+    pending proposed policy, same-boot adoption or active-route authority.
+    The journal and withdrawn resources remain intact on every outcome.
+    """
+    if (not callable(recheck_stopped_owner) or type(allow_boot_rollover) is not bool
+            or not _valid_sha(profile_receipt_sha256)
+            or not _valid_sha(executable_receipt_sha256)):
+        _deny("OWNED_BOOT_EGRESS_INPUT_INVALID")
+    with _owned_prepared_wal_boot_egress_generation_locked(
+            root_fd, state_fd, distribution=distribution, worker_uid=worker_uid,
+            expected_wal=expected_wal,
+    ) as (plan, recheck):
+        result = _create_owned_boot_egress_from_plan_locked(
+            root_fd, state_fd, plan, recheck,
+            profile_receipt_sha256=profile_receipt_sha256,
+            executable_receipt_sha256=executable_receipt_sha256,
+            recheck_stopped_owner=recheck_stopped_owner,
+            allow_boot_rollover=allow_boot_rollover)
+        return {**result, "prior_resources_verified": True,
+                "recovery_required": True, "catalog_withdrawn": True,
+                "wal_sha256": hashlib.sha256(expected_wal).hexdigest()}
 
-        before_create()
-        creation = _create_fixed_loopback_namespace_locked(recheck_owned=before_create)
-        before_create()
-        if (creation["boot_id"] != before[0]
-                or not creation["loopback_only_observed"]
-                or not creation["empty_ruleset_observed"]):
-            _deny("OWNED_BOOT_EGRESS_CREATION_UNVERIFIED")
-        identity = (creation["namespace_device"], creation["namespace_inode"])
-        result = _prepare_boot_egress_locked(
-            root_fd, state_fd, plan["nft_candidate"],
-            namespace_identity=identity, generation=plan["generation"],
+
+def _create_owned_boot_egress_from_plan_locked(
+    root_fd: int, state_fd: int, plan: dict, recheck, *,
+    profile_receipt_sha256: str, executable_receipt_sha256: str,
+    recheck_stopped_owner, allow_boot_rollover: bool,
+) -> dict:
+    """Shared private creation sequence; caller retains exact generation scope."""
+    if plan["destinations"]:
+        _deny("OWNED_BOOT_EGRESS_ACTIVE_ROUTES_REFUSED")
+
+    def owned():
+        recheck()
+        recheck_stopped_owner()
+        recheck()
+
+    def intent():
+        return _fresh_boot_egress_intent_locked(
+            state_fd, plan["nft_candidate"], generation=plan["generation"],
             generation_manifest_sha256=plan["generation_manifest_sha256"],
             profile_receipt_sha256=profile_receipt_sha256,
             executable_receipt_sha256=executable_receipt_sha256,
-            recheck_owned=owned, allow_prepare=True,
-            allow_boot_rollover=allow_boot_rollover,
-            expected_previous_receipt=before[1])
+            allow_boot_rollover=allow_boot_rollover)
+
+    owned()
+    before = intent()
+
+    def before_create():
         owned()
-        if (result["boot_id"] != before[0]
-                or (result["namespace_device"], result["namespace_inode"]) != identity):
-            _deny("OWNED_BOOT_EGRESS_CREATION_CHANGED")
-        return {**result, "generation_manifest_sha256": plan["generation_manifest_sha256"],
-                "committed_resources_verified": True,
-                "authorizes_nginx_activation": False,
-                "authorizes_catalog_publication": False}
+        if intent() != before:
+            _deny("OWNED_BOOT_EGRESS_INTENT_CHANGED")
+        owned()
+
+    before_create()
+    creation = _create_fixed_loopback_namespace_locked(recheck_owned=before_create)
+    before_create()
+    if (creation["boot_id"] != before[0]
+            or not creation["loopback_only_observed"]
+            or not creation["empty_ruleset_observed"]):
+        _deny("OWNED_BOOT_EGRESS_CREATION_UNVERIFIED")
+    identity = (creation["namespace_device"], creation["namespace_inode"])
+    result = _prepare_boot_egress_locked(
+        root_fd, state_fd, plan["nft_candidate"],
+        namespace_identity=identity, generation=plan["generation"],
+        generation_manifest_sha256=plan["generation_manifest_sha256"],
+        profile_receipt_sha256=profile_receipt_sha256,
+        executable_receipt_sha256=executable_receipt_sha256,
+        recheck_owned=owned, allow_prepare=True,
+        allow_boot_rollover=allow_boot_rollover,
+        expected_previous_receipt=before[1])
+    owned()
+    if (result["boot_id"] != before[0]
+            or (result["namespace_device"], result["namespace_inode"]) != identity):
+        _deny("OWNED_BOOT_EGRESS_CREATION_CHANGED")
+    return {**result, "generation_manifest_sha256": plan["generation_manifest_sha256"],
+            "authorizes_nginx_activation": False,
+            "authorizes_catalog_publication": False}
 
 
 def _owned_live_egress_recovery_candidates(
