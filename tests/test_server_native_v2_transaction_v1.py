@@ -3788,6 +3788,7 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
         nonlocal foreign
         assert running and catalog_bytes == (None if prepared else catalog)
         assert kwargs["publish"] == (not prepared)
+        assert kwargs.get("require_withdrawn", False) == prepared
         kwargs["recheck_owned"]()
         calls.append("health")
         if fault == "generation-drift":
@@ -3980,3 +3981,21 @@ def test_alma_runtime_scratch_fresh_only_and_exact_identity(tmp_path, monkeypatc
                     assert not first.exists()
     finally:
         os.close(fd)
+
+
+@pytest.mark.parametrize("status", [404, 200, 403, 301, 500])
+def test_dedicated_withdrawn_catalog_requires_fresh_pinned_tls_404(monkeypatch, status):
+    doc = document(1)
+    leaf = "a" * 64
+    calls = []
+    def request(got_doc, path, maximum, *, expected_leaf_sha256):
+        assert got_doc is doc and expected_leaf_sha256 == leaf
+        calls.append((path, maximum))
+        return f"HTTP/1.1 {status} Test\r\nContent-Length: 0\r\n\r\n".encode("ascii")
+    monkeypatch.setattr(native, "_fixed_https_get", request)
+    if status == 404:
+        native._require_dedicated_catalog_withdrawn((doc, 1, leaf))
+    else:
+        with pytest.raises(native.NativeV2TransactionError, match="WITHDRAWAL_UNVERIFIED"):
+            native._require_dedicated_catalog_withdrawn((doc, 1, leaf))
+    assert calls == [("/.well-known/repocache/catalog.json", 8192)]

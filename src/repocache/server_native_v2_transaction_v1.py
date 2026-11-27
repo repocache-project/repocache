@@ -2889,8 +2889,22 @@ def _owned_live_health_bound(root_fd: int, identity: tuple, context: tuple,
         _deny("OWNED_LIVE_LISTENER_CHANGED")
 
 
+def _require_dedicated_catalog_withdrawn(context: tuple) -> None:
+    """A fresh pinned TLS client must observe the withdrawn catalog as 404."""
+    document, _, leaf = context
+    if document is None or not _valid_sha(leaf):
+        _deny("OWNED_DEDICATED_CATALOG_WITHDRAWAL_UNVERIFIED")
+    response = _fixed_https_get(
+        document, "/.well-known/repocache/catalog.json", 8192,
+        expected_leaf_sha256=leaf)
+    header, _ = response.split(b"\r\n\r\n", 1)
+    if not header.startswith(b"HTTP/1.1 404 "):
+        _deny("OWNED_DEDICATED_CATALOG_WITHDRAWAL_UNVERIFIED")
+
+
 def _run_dedicated_health_child(net: int, namespace_identity: tuple[int, int],
-                                context: tuple, catalog: bytes | None, *, publish: bool) -> None:
+                                context: tuple, catalog: bytes | None, *, publish: bool,
+                                require_withdrawn: bool = False) -> None:
     """Run only the fixed local health read in a bounded disposable child.
 
     Never switch the caller's network namespace or expose an arbitrary
@@ -2912,6 +2926,8 @@ def _run_dedicated_health_child(net: int, namespace_identity: tuple[int, int],
             if (seen.st_dev, seen.st_ino) != namespace_identity:
                 os._exit(1)
             _owned_live_health(context, catalog, publish=publish)
+            if require_withdrawn:
+                _require_dedicated_catalog_withdrawn(context)
         except BaseException:
             os._exit(1)
         os._exit(0)
@@ -2952,7 +2968,7 @@ def _run_dedicated_health_child(net: int, namespace_identity: tuple[int, int],
 def _owned_dedicated_live_health_bound(
     root_fd: int, context: tuple, catalog: bytes | None, *, publish: bool,
     namespace_identity: tuple[int, int], executable_identity: tuple[int, int],
-    recheck_owned,
+    recheck_owned, require_withdrawn: bool = False,
 ) -> dict:
     """Observe the fixed signed dedicated listener and pinned local health.
 
@@ -2969,6 +2985,7 @@ def _owned_dedicated_live_health_bound(
         _inspect_signed_owned_namespace_runtime,
     )
     if (not callable(recheck_owned) or type(publish) is not bool
+            or type(require_withdrawn) is not bool or (require_withdrawn and publish)
             or type(context) is not tuple or len(context) != 3
             or (publish and type(catalog) is not bytes)
             or (not publish and catalog is not None)
@@ -2980,7 +2997,7 @@ def _owned_dedicated_live_health_bound(
     document, generation, leaf = context
     try:
         if document is None:
-            if generation is not None or leaf is not None or publish:
+            if generation is not None or leaf is not None or publish or require_withdrawn:
                 _deny("OWNED_DEDICATED_HEALTH_INPUT_INVALID")
             port = 8008
         else:
@@ -3022,7 +3039,9 @@ def _owned_dedicated_live_health_bound(
                     identity, context, same_master, namespace_identity=current)
 
             before = listener()
-            _run_dedicated_health_child(net, current, context, catalog, publish=publish)
+            _run_dedicated_health_child(
+                net, current, context, catalog, publish=publish,
+                **({"require_withdrawn": True} if require_withdrawn else {}))
             if listener() != before or observe() != first:
                 _deny("OWNED_LIVE_LISTENER_CHANGED")
             return {"status": "OWNED_DEDICATED_HEALTH_OBSERVED",
@@ -3227,6 +3246,7 @@ def _start_owned_dedicated_generation_locked(
                     _deny("OWNED_DEDICATED_START_OWNER_CHANGED")
                 witness = _owned_dedicated_live_health_bound(
                     root_fd, context, resources[_CATALOG], publish=not recovering,
+                    **({"require_withdrawn": True} if recovering else {}),
                     namespace_identity=namespace_identity,
                     executable_identity=executable_identity, recheck_owned=exact)
                 if (witness["main_pid"] != started["main_pid_observed"]
