@@ -3042,6 +3042,46 @@ def _start_owned_committed_dedicated_locked(
     executable_identity: tuple[int, int], profile_receipt_sha256: str,
     executable_receipt_sha256: str, recheck_authenticated_owner,
 ) -> dict:
+    """Start only an exact committed, disabled-route dedicated generation."""
+    return _start_owned_dedicated_generation_locked(
+        root_fd, state_fd, namespace_identity=namespace_identity,
+        executable_identity=executable_identity,
+        profile_receipt_sha256=profile_receipt_sha256,
+        executable_receipt_sha256=executable_receipt_sha256,
+        recheck_authenticated_owner=recheck_authenticated_owner,
+        expected_wal=None)
+
+
+def _start_owned_prepared_wal_dedicated_locked(
+    root_fd: int, state_fd: int, *, namespace_identity: tuple[int, int],
+    executable_identity: tuple[int, int], profile_receipt_sha256: str,
+    executable_receipt_sha256: str, expected_wal: bytes,
+    recheck_authenticated_owner,
+) -> dict:
+    """Start exact prepared prior bytes while retaining WAL and withdrawal.
+
+    No recovery completion, catalog publication or WAL removal is implied.
+    Only the authenticated isolated lifecycle caller under the original
+    lock may invoke this; a subsequent phase must independently prove and
+    finalize recovery. Bootstrap and active-route predecessors are refused.
+    """
+    if type(expected_wal) is not bytes or not 1 <= len(expected_wal) <= _MAX_WAL:
+        _deny("OWNED_DEDICATED_START_INPUT_INVALID")
+    return _start_owned_dedicated_generation_locked(
+        root_fd, state_fd, namespace_identity=namespace_identity,
+        executable_identity=executable_identity,
+        profile_receipt_sha256=profile_receipt_sha256,
+        executable_receipt_sha256=executable_receipt_sha256,
+        recheck_authenticated_owner=recheck_authenticated_owner,
+        expected_wal=expected_wal)
+
+
+def _start_owned_dedicated_generation_locked(
+    root_fd: int, state_fd: int, *, namespace_identity: tuple[int, int],
+    executable_identity: tuple[int, int], profile_receipt_sha256: str,
+    executable_receipt_sha256: str, recheck_authenticated_owner,
+    expected_wal: bytes | None,
+) -> dict:
     """Explicit isolated-candidate start of an already prepared profile.
 
     The trusted signed lifecycle caller holds the original state lock,
@@ -3049,10 +3089,11 @@ def _start_owned_committed_dedicated_locked(
     and profile receipts and dedicated labels/policy, and prepares the
     stopped service's storage and boot namespace. This is NOT socket
     dispatch, an installer CLI, namespace provisioning or automatic boot.
-    Only a disabled, inactive AlmaLinux service and a committed managed
-    loopback generation with no active routes or pending WAL are accepted.
-    Neither enablement nor configuration, receipts, policy or catalog may
-    change. On failure stop only the exact, still-owned active master.
+    Only a disabled, inactive AlmaLinux service and a managed loopback
+    generation with no active routes is accepted. A pending WAL must be
+    explicitly supplied and bind exact prepared prior bytes and withdrawal.
+    Neither enablement nor configuration, receipts, policy, WAL or catalog
+    may change. On failure stop only the exact, still-owned active master.
     """
     from repocache.server_native_nginx_effective_unit_v1 import (
         inspect_signed_owned_namespace_unit, _inspect_signed_owned_namespace_runtime,
@@ -3088,11 +3129,25 @@ def _start_owned_committed_dedicated_locked(
         elif type(result.returncode) is not int or result.returncode != 0:
             _deny("OWNED_DEDICATED_START_COMMAND_FAILED")
 
+    if expected_wal is not None and (type(expected_wal) is not bytes
+                                     or not 1 <= len(expected_wal) <= _MAX_WAL):
+        _deny("OWNED_DEDICATED_START_INPUT_INVALID")
+    recovering = expected_wal is not None
     try:
-        with _owned_layout_locked(root_fd, state_fd, recovering=False) as layout:
+        with _owned_layout_locked(root_fd, state_fd, recovering=recovering) as layout:
             state, nginx, public, check_layout = layout
             resources = _read_owned_resources(state, nginx, public)
-            snapshot = _validate_owned_resources(resources, distribution="almalinux")
+            if recovering:
+                _owned_require_exact_wal(state, expected_wal)
+                prior, _ = _decode_owned_wal(expected_wal, distribution="almalinux")
+                if _json(expected_wal, limit=_MAX_WAL)["version"] != 3:
+                    _deny("OWNED_LIVE_WAL_REQUIRED")
+                if resources != {**prior, _CATALOG: None}:
+                    _deny("OWNED_DEDICATED_START_PRIOR_NOT_PREPARED")
+                _owned_check_stages_absent(state, nginx, public)
+            else:
+                prior = resources
+            snapshot = _validate_owned_resources(prior, distribution="almalinux")
             if snapshot is None:
                 _deny("OWNED_DEDICATED_START_MANAGED_REQUIRED")
             _owned_socket_require_inactive_routes(snapshot)
@@ -3103,7 +3158,7 @@ def _start_owned_committed_dedicated_locked(
                 _deny("OWNED_DEDICATED_START_LOOPBACK_REQUIRED")
             port = listen["https_port"]
             worker = pwd.getpwnam("nginx")
-            plan = _owned_boot_egress_plan(resources, distribution="almalinux",
+            plan = _owned_boot_egress_plan(prior, distribution="almalinux",
                                            worker_uid=worker.pw_uid)
             if plan["destinations"]:
                 _deny("OWNED_BOOT_EGRESS_ACTIVE_ROUTES_REFUSED")
@@ -3118,7 +3173,10 @@ def _start_owned_committed_dedicated_locked(
 
             def exact():
                 check_layout()
-                _no_conflicting_owned_wal_pending(state)
+                if recovering:
+                    _owned_require_exact_wal(state, expected_wal)
+                else:
+                    _no_conflicting_owned_wal_pending(state)
                 _owned_check_stages_absent(state, nginx, public)
                 if _read_owned_resources(state, nginx, public) != resources:
                     _deny("OWNED_DEDICATED_START_GENERATION_CHANGED")
@@ -3168,11 +3226,11 @@ def _start_owned_committed_dedicated_locked(
                         or policy(True) != before_policy):
                     _deny("OWNED_DEDICATED_START_OWNER_CHANGED")
                 witness = _owned_dedicated_live_health_bound(
-                    root_fd, context, resources[_CATALOG], publish=True,
+                    root_fd, context, resources[_CATALOG], publish=not recovering,
                     namespace_identity=namespace_identity,
                     executable_identity=executable_identity, recheck_owned=exact)
                 if (witness["main_pid"] != started["main_pid_observed"]
-                        or not witness["catalog_observed"]
+                        or witness["catalog_observed"] != (not recovering)
                         or witness["generation"] != snapshot["state_generation"]
                         or _inspect_signed_owned_namespace_runtime(
                             https_port=port, namespace_identity=namespace_identity,
@@ -3194,10 +3252,16 @@ def _start_owned_committed_dedicated_locked(
                         or _owned_alma_runtime_temps(root_fd, dedicated=True) != scratch
                         or policy(True) != before_policy):
                     _deny("OWNED_DEDICATED_START_POSTCHECK_FAILED")
-                return {**witness, "status": "OWNED_DEDICATED_COMMITTED_START_OBSERVED",
-                        "storage": storage, "service_storage_mounts_verified": True,
-                        "service_scratch_mounts_verified": True,
-                        "enablement_changed": False}
+                result = {**witness, "status": "OWNED_DEDICATED_COMMITTED_START_OBSERVED",
+                          "storage": storage, "service_storage_mounts_verified": True,
+                          "service_scratch_mounts_verified": True,
+                          "enablement_changed": False}
+                if recovering:
+                    result.update(
+                        status="OWNED_DEDICATED_PREPARED_WAL_START_OBSERVED",
+                        wal_sha256=hashlib.sha256(expected_wal).hexdigest(),
+                        catalog_withdrawn=True, recovery_required=True)
+                return result
             except Exception:
                 try:
                     fixed_systemctl("is-enabled")
