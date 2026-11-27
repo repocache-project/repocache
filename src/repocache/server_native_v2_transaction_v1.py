@@ -2821,6 +2821,9 @@ def _owned_dedicated_live_health_bound(
                     or not _valid_sha(leaf)):
                 _deny("OWNED_DEDICATED_HEALTH_INPUT_INVALID")
             port = listen["https_port"]
+            # Use only the normalized, validated snapshot for the listener
+            # and child protocol, not a second view of caller-owned data.
+            context = (validated, generation, leaf)
         with _fixed_namespace_scope() as (net, current, recheck):
             if current != namespace_identity:
                 _deny("OWNED_DEDICATED_HEALTH_NAMESPACE_CHANGED")

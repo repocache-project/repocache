@@ -3633,3 +3633,41 @@ def test_resume_prepared_wal_boot_egress_requires_existing_exact_receipt(
         assert paths[native._CATALOG].read_bytes() == b"foreign"
     else:
         assert _fixture_resource_bytes(paths) == withdrawn
+
+
+@pytest.mark.parametrize("fault", ["timeout", "reaped", "thread", "handler"])
+def test_dedicated_health_child_timeout_and_preflight_do_not_signal_foreign_pid(
+        monkeypatch, fault):
+    import signal
+    import threading
+    from types import SimpleNamespace
+    calls = []
+    monkeypatch.setattr(threading, "active_count", lambda: 2 if fault == "thread" else 1)
+    monkeypatch.setattr(signal, "getsignal",
+                        lambda signum: signal.SIG_IGN if fault == "handler" else signal.SIG_DFL)
+    times = iter([0, 46])
+    monkeypatch.setattr(native, "time", SimpleNamespace(monotonic=lambda: next(times)))
+    def fork():
+        calls.append("fork")
+        return 123
+    def wait(pid, mode):
+        assert pid == 123
+        calls.append(("wait", mode))
+        if fault == "reaped" and calls.count(("wait", 1)) == 2:
+            raise ChildProcessError
+        return 0, 0
+    def kill(pid, sig):
+        assert (pid, sig) == (123, signal.SIGKILL)
+        calls.append("kill")
+    monkeypatch.setattr(native, "os", SimpleNamespace(
+        listdir=lambda path: ["1"], setns=lambda *args: None, CLONE_NEWNET=1,
+        fork=fork, WNOHANG=1, waitpid=wait, kill=kill))
+    with pytest.raises(native.NativeV2TransactionError):
+        native._run_dedicated_health_child(11, (17, 29), (None, None, None), None,
+                                          publish=False)
+    if fault == "timeout":
+        assert calls == ["fork", ("wait", 1), ("wait", 1), "kill", ("wait", 0)]
+    elif fault == "reaped":
+        assert calls == ["fork", ("wait", 1), ("wait", 1)]
+    else:
+        assert not calls
