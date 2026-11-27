@@ -1115,3 +1115,19 @@ It verifies the same receipt before fixture-only cleanup; an incomplete
 placement is preserved and must not trigger a legacy restart. This remains
 a temporary isolated candidate transition, not reboot-time activation or
 the generation-bound WAL lifecycle.
+
+
+### Initial service namespace policy
+
+The fixed namespace actuator now has a separate initial-publication
+candidate: require the caller's fresh namespace identity and ownership
+witness, an empty complete kernel ruleset, closed canonical policy, native
+syntax check, a repeated empty readback and one descriptor-bound nft
+transaction. Any existing table, including identical bytes, is refused;
+a repeat requires read-only evidence, not adoption. No flush, deletion,
+host interface/routing change or arbitrary command is available. The
+guarded AlmaLinux service fixture exercises this from the authenticated
+worker on its newly created loopback-only namespace, checks refusal of
+repeat initialization and unchanged host rules before actual service start.
+Durable boot-scoped namespace ownership, generation-bound creation/recovery
+and administrator ingress remain separate gates.

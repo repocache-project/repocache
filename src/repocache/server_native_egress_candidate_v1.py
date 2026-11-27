@@ -463,6 +463,61 @@ def _run_namespace_batch(fd, batch, *, validate_only):
         raise NativeEgressCandidateError("NATIVE_EGRESS_BATCH_REFUSED")
 
 
+def _initialize_fixed_namespace_egress(proposed: str, *,
+                                       namespace_identity: tuple[int, int],
+                                       recheck_owned) -> dict[str, Any]:
+    """Install one closed table only in a freshly owned empty service netns.
+
+    The trusted caller must retain the namespace creation witness and
+    state lock, prove the service cannot start yet, and independently
+    authenticate the generation. An existing table, even byte-identical,
+    is not adopted. No host, link, routing, flush or delete operation is
+    available. A later exact repeat is a separate read-only observation.
+    This is not yet a boot-time provisioner or a concurrent root lease.
+    """
+    try:
+        canonical = _canonical_ruleset(proposed)
+        if (type(namespace_identity) is not tuple or len(namespace_identity) != 2
+                or any(type(x) is not int or x <= 0 for x in namespace_identity)
+                or not callable(recheck_owned)):
+            raise ValueError("invalid ownership witness")
+    except (ValueError, TypeError, OverflowError, RecursionError):
+        raise NativeEgressCandidateError("NATIVE_EGRESS_INITIALIZATION_INPUT_REFUSED") from None
+    with _fixed_namespace_scope() as (net, identity, recheck):
+        if identity != namespace_identity:
+            raise NativeEgressCandidateError("NATIVE_EGRESS_NAMESPACE_OWNERSHIP_REFUSED")
+
+        def require_empty():
+            recheck_owned()
+            recheck()
+            observed = _read_namespace_rules(net)
+            if type(observed) is not str or observed.strip():
+                raise NativeEgressCandidateError("NATIVE_EGRESS_NAMESPACE_NOT_EMPTY")
+            recheck()
+            recheck_owned()
+
+        require_empty()
+        _run_namespace_batch(net, canonical, validate_only=True)
+        require_empty()
+        _run_namespace_batch(net, canonical, validate_only=False)
+        for _ in range(2):
+            recheck_owned()
+            recheck()
+            verify_namespace_egress_readback(canonical, _read_namespace_rules(net))
+            recheck()
+            recheck_owned()
+        return {
+            "status": "NAMESPACE_EGRESS_INITIALIZATION_OBSERVED",
+            "namespace_device": identity[0], "namespace_inode": identity[1],
+            "proposed_sha256": hashlib.sha256(canonical.encode("ascii")).hexdigest(),
+            "ruleset_shape_matches": True,
+            "namespace_exclusivity_verified": False,
+            "runtime_egress_verified": False,
+            "authorizes_nginx_activation": False,
+            "authorizes_catalog_publication": False,
+        }
+
+
 def _replace_fixed_namespace_egress(previous: str, proposed: str, *,
                                     namespace_identity: tuple[int, int],
                                     recheck_owned) -> dict[str, Any]:

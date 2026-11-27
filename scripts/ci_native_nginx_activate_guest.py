@@ -1298,6 +1298,25 @@ try:
         elif action in ("unit-inactive","unit-active"):
             result=unit.inspect_signed_owned_namespace_unit(
                 https_port=443,active=action=="unit-active")
+        elif action=="egress-initialize":
+            # Test-only witness from the namespace just exclusively created
+            # by the guarded guest. No installed request supplies these values.
+            identity=tuple(doc["identity"])
+            def owned():
+                unit.inspect_effective_owned_nginx_unit(active=False)
+                info=os.stat("/run/netns/repocache-nginx",follow_symlinks=False)
+                assert (info.st_dev,info.st_ino)==identity
+            options=dict(namespace_identity=identity,recheck_owned=owned)
+            result=egress._initialize_fixed_namespace_egress(doc["rules"],**options)
+            try:
+                egress._initialize_fixed_namespace_egress(doc["rules"],**options)
+            except egress.NativeEgressCandidateError as exc:
+                assert "NAMESPACE_NOT_EMPTY" in str(exc)
+            else:
+                raise AssertionError("Existing namespace table was adopted")
+            observed=egress.inspect_fixed_namespace_egress(doc["rules"])
+            assert observed["ruleset_shape_matches"]
+            assert (observed["namespace_device"],observed["namespace_inode"])==identity
         elif action in ("unit-place","unit-verify-placement"):
             raw=unit._signed_owned_unit_bytes()
             def prepare(allow):
@@ -1502,10 +1521,14 @@ finally:
             require("/usr/sbin/ip", "-n", "repocache-nginx", "link", "set", "lo", "up")
             assert {x["ifname"] for x in json.loads(require(
                 "/usr/sbin/ip", "-n", "repocache-nginx", "-j", "link", "show").stdout)} == {"lo"}
-            isolated.command("/usr/sbin/ip", "netns", "exec", "repocache-nginx",
-                             "/usr/sbin/nft", "-c", "-f", "-", input_text=rules)
-            isolated.command("/usr/sbin/ip", "netns", "exec", "repocache-nginx",
-                             "/usr/sbin/nft", "-f", "-", input_text=rules)
+            initialized = signed("egress-initialize", {"rules": rules, "identity": list(ns_identity)})
+            assert initialized["status"] == "NAMESPACE_EGRESS_INITIALIZATION_OBSERVED"
+            assert initialized["ruleset_shape_matches"]
+            assert not initialized["authorizes_nginx_activation"]
+            assert (initialized["namespace_device"], initialized["namespace_inode"]) == ns_identity
+            assert isolated.command("/usr/sbin/nft", "--stateless", "--numeric-priority",
+                                    "list", "ruleset").stdout == host_rules
+            print("PASS: signed retained-fd initialization of fresh empty owned namespace; existing table refused", flush=True)
             placement_attempted = True
             placement = signed("unit-place")
             unit_placed = True

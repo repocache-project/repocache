@@ -433,3 +433,77 @@ def test_fixed_batch_uses_retained_fd_and_fixed_argv(monkeypatch, validate_only)
     egress._run_namespace_batch(42, "fixed batch\n", validate_only=validate_only)
     assert calls == [("/usr/bin/nsenter", "--net=/proc/self/fd/42", "--",
                       "/usr/sbin/nft", *(("-c",) if validate_only else ()), "-f", "-")]
+
+
+@pytest.mark.parametrize("fault", [
+    "none", "identity", "foreign", "identical", "check", "drift",
+    "owner", "post-drift", "syntax",
+])
+def test_fixed_namespace_initialization_requires_empty_owned_scope(monkeypatch, fault):
+    import contextlib
+    from repocache import server_native_egress_candidate_v1 as egress
+
+    doc, raw = fixture()
+    expected = egress.render_namespace_egress_candidate(
+        doc, generation=1, http_fragment=raw, worker_uid=987)["nft_candidate"]
+    identity = (17, 29)
+    observed = [("table ip foreign {}\n" if fault == "foreign" else
+                 expected if fault == "identical" else "")]
+    events = []
+    held = [False]
+
+    @contextlib.contextmanager
+    def scope():
+        held[0] = True
+        try:
+            yield 42, identity, lambda: events.append("descriptor")
+        finally:
+            held[0] = False
+
+    def owner():
+        assert held[0]
+        events.append("owner")
+        if fault == "owner" and True in events:
+            raise NativeEgressCandidateError("OWNER_REFUSED")
+
+    def read(fd):
+        assert held[0] and fd == 42
+        events.append("read")
+        return observed[0]
+
+    def batch(fd, raw, *, validate_only):
+        assert held[0] and fd == 42 and raw == expected
+        events.append(validate_only)
+        if validate_only:
+            if fault == "check":
+                raise NativeEgressCandidateError("CHECK_REFUSED")
+            if fault == "drift":
+                observed[0] = expected
+        else:
+            observed[0] = "" if fault == "post-drift" else expected
+
+    monkeypatch.setattr(egress, "_fixed_namespace_scope", scope)
+    monkeypatch.setattr(egress, "_read_namespace_rules", read)
+    monkeypatch.setattr(egress, "_run_namespace_batch", batch)
+    options = dict(namespace_identity=(17, 30) if fault == "identity" else identity,
+                   recheck_owned=owner)
+    proposed = expected + "flush ruleset\n" if fault == "syntax" else expected
+    if fault == "none":
+        result = egress._initialize_fixed_namespace_egress(proposed, **options)
+        assert result["status"] == "NAMESPACE_EGRESS_INITIALIZATION_OBSERVED"
+        assert not result["authorizes_catalog_publication"]
+        assert not result["authorizes_nginx_activation"]
+        assert not result["runtime_egress_verified"]
+        assert observed[0] == expected
+        assert [x for x in events if type(x) is bool] == [True, False]
+        events.clear()
+        with pytest.raises(NativeEgressCandidateError, match="NAMESPACE_NOT_EMPTY"):
+            egress._initialize_fixed_namespace_egress(proposed, **options)
+        assert [x for x in events if type(x) is bool] == []
+    else:
+        with pytest.raises(NativeEgressCandidateError):
+            egress._initialize_fixed_namespace_egress(proposed, **options)
+        assert [x for x in events if type(x) is bool] == (
+            [True, False] if fault == "post-drift" else
+            [True] if fault in ("check", "drift", "owner") else [])
+    assert not held[0]
