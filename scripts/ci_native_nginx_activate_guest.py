@@ -2180,6 +2180,22 @@ with ExitStack() as stack:
     print("PASS: authenticated namespace unit candidate digest is unchanged after reboot", flush=True)
 
 
+def fixture_move_same_parent_noreplace(source: Path, target: Path) -> None:
+    """Move an isolated guest fixture leaf without replacing foreign data."""
+    from repocache.server_native_installed_storage_v1 import _rename_directory_noreplace
+
+    if source.parent != target.parent or os.path.lexists(target):
+        raise AssertionError("Unsafe fixture move")
+    fd = os.open(source.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        # The storage helper requires distinct source and destination
+        # dirfd arguments, even for a same-directory rename.
+        _rename_directory_noreplace(fd, source.name, fd, target.name)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def verify_committed_boot_namespace_reboot_fixture(native, assets, pins, *, after, pending=False):
     """Disposable Alma VM: preserve exact committed or prepared prior policy.
 
@@ -2610,7 +2626,6 @@ finally:
         # fixture, keep the real WAL/manifest-bound main/include/catalog
         # bytes unchanged. Fresh test-only storage and labels are placed
         # while stopped; no production migration is performed.
-        from repocache.server_native_installed_storage_v1 import _rename_directory_noreplace
         cache = Path(document["deployment"]["paths"]["cache_root"])
         log = Path(document["deployment"]["paths"]["log_root"])
         runtime = Path("/run/repocache-nginx")
@@ -2623,15 +2638,6 @@ finally:
         for parent in (cache.parent, log.parent):
             assert not any(p.name.startswith((".repocache-repository-", ".repocache-metrics-"))
                            for p in parent.iterdir())
-
-        def move(source, target):
-            assert source.parent == target.parent and not os.path.lexists(target)
-            fd = os.open(source.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-            try:
-                _rename_directory_noreplace(fd, source.name, target.name)
-                os.fsync(fd)
-            finally:
-                os.close(fd)
 
         def file_identity(path):
             info = path.lstat()
@@ -2660,7 +2666,7 @@ finally:
                 assert set(os.listxattr(fd)) == {"security.selinux"}
                 labels.append((path, fd, ident, os.getxattr(fd, "security.selinux")))
             for source, backup in zip(fixed, backups):
-                move(source, backup)
+                fixture_move_same_parent_noreplace(source, backup)
             prepared_storage = signed("prepare-committed-storage")["storage"]
             for path, fd, ident, _ in labels:
                 assert file_identity(path) == ident
@@ -2696,10 +2702,10 @@ finally:
                 os.setxattr(fd, "security.selinux", label)
                 assert os.getxattr(fd, "security.selinux") == label
             for source, target in zip(fixed, archived):
-                move(source, target)
+                fixture_move_same_parent_noreplace(source, target)
             for source, backup, ident in zip(fixed, backups, identities):
                 assert file_identity(backup) == ident
-                move(backup, source)
+                fixture_move_same_parent_noreplace(backup, source)
             if runtime.exists():
                 assert not list(runtime.iterdir())
                 runtime.rmdir()

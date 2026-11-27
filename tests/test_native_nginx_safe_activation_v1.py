@@ -956,3 +956,58 @@ def test_signed_pending_inactive_recovery_preserves_enablement_and_exact_authori
         else:
             assert state["commands"] == ["start"] and state["active"]
     assert state["enabled"] == (fault != "disabled")
+
+
+
+@pytest.mark.parametrize("directory", [False, True])
+def test_fixture_storage_move_uses_actual_noreplace_api(tmp_path, directory):
+    from scripts.ci_native_nginx_activate_guest import fixture_move_same_parent_noreplace
+
+    source = tmp_path / "legacy"
+    target = tmp_path / "backup"
+    if directory:
+        source.mkdir()
+    else:
+        source.write_bytes(b"owner marker")
+    before = source.stat()
+    fixture_move_same_parent_noreplace(source, target)
+    assert not source.exists()
+    assert (target.stat().st_dev, target.stat().st_ino) == (before.st_dev, before.st_ino)
+    fixture_move_same_parent_noreplace(target, source)
+    assert source.stat().st_ino == before.st_ino
+    assert not target.exists()
+
+
+def test_fixture_storage_move_refuses_foreign_destination(tmp_path, monkeypatch):
+    from scripts.ci_native_nginx_activate_guest import fixture_move_same_parent_noreplace
+    from repocache import server_native_installed_storage_v1 as storage
+
+    source = tmp_path / "legacy"
+    target = tmp_path / "backup"
+    source.write_bytes(b"owned")
+    target.write_bytes(b"foreign")
+    with pytest.raises(AssertionError, match="Unsafe fixture move"):
+        fixture_move_same_parent_noreplace(source, target)
+    target.unlink()
+    original = storage._rename_directory_noreplace
+    def race(parent, stage, directory, name):
+        target.write_bytes(b"foreign")
+        return original(parent, stage, directory, name)
+    monkeypatch.setattr(storage, "_rename_directory_noreplace", race)
+    with pytest.raises(storage.InstalledStorageError, match="DATA_PUBLICATION_REFUSED"):
+        fixture_move_same_parent_noreplace(source, target)
+    assert source.read_bytes() == b"owned"
+    assert target.read_bytes() == b"foreign"
+
+
+def test_fixture_storage_move_refuses_other_parent(tmp_path):
+    from scripts.ci_native_nginx_activate_guest import fixture_move_same_parent_noreplace
+
+    source = tmp_path / "legacy"
+    source.write_bytes(b"owned")
+    other = tmp_path / "other"
+    other.mkdir()
+    with pytest.raises(AssertionError, match="Unsafe fixture move"):
+        fixture_move_same_parent_noreplace(source, other / "backup")
+    assert source.read_bytes() == b"owned"
+    assert not list(other.iterdir())
