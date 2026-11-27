@@ -520,6 +520,8 @@ def _initialize_fixed_namespace_egress(proposed: str, *,
 
 _BOOT_EGRESS_RECEIPT = ".native-nginx-boot-egress-v1.json"
 _BOOT_EGRESS_RECEIPT_MAX = 4096
+_BOOT_EGRESS_ROLLOVER = ".native-nginx-boot-egress-v1.rollover"
+_BOOT_EGRESS_HISTORY_PREFIX = ".native-nginx-boot-egress-v1.previous-"
 _BOOT_ID = re.compile(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}", re.ASCII)
 _SHA256 = re.compile(r"[0-9a-f]{64}", re.ASCII)
 
@@ -544,24 +546,29 @@ def _current_boot_id() -> str:
         os.close(fd)
 
 
-def _read_boot_egress_receipt(state_fd: int, owner: int, group: int) -> bytes | None:
+def _read_boot_egress_receipt(state_fd: int, owner: int, group: int, *,
+                             name: str = _BOOT_EGRESS_RECEIPT) -> bytes | None:
     import os
     from repocache.server_protected_state_inspect_v1 import _FILE_FLAGS, _identity
     from repocache.server_protected_state_store_v1 import _read_file
     limit = _BOOT_EGRESS_RECEIPT_MAX
-    raw = _read_file(state_fd, _BOOT_EGRESS_RECEIPT, owner, limit)
+    if name not in (_BOOT_EGRESS_RECEIPT, _BOOT_EGRESS_ROLLOVER) and (
+            not name.startswith(_BOOT_EGRESS_HISTORY_PREFIX)
+            or _BOOT_ID.fullmatch(name[len(_BOOT_EGRESS_HISTORY_PREFIX):]) is None):
+        raise NativeEgressCandidateError("NATIVE_EGRESS_BOOT_RECEIPT_NAME_REFUSED")
+    raw = _read_file(state_fd, name, owner, limit)
     if raw is None:
         return None
-    fd = os.open(_BOOT_EGRESS_RECEIPT, _FILE_FLAGS, dir_fd=state_fd)
+    fd = os.open(name, _FILE_FLAGS, dir_fd=state_fd)
     try:
         info = os.fstat(fd)
         if (info.st_gid != group
                 or set(os.listxattr(fd)) - {"security.selinux"}
                 or _identity(info) != _identity(os.stat(
-                    _BOOT_EGRESS_RECEIPT, dir_fd=state_fd, follow_symlinks=False))
+                    name, dir_fd=state_fd, follow_symlinks=False))
                 or os.read(fd, limit + 1) != raw
                 or _identity(os.fstat(fd)) != _identity(info)
-                or _identity(os.stat(_BOOT_EGRESS_RECEIPT, dir_fd=state_fd,
+                or _identity(os.stat(name, dir_fd=state_fd,
                                      follow_symlinks=False)) != _identity(info)):
             raise NativeEgressCandidateError("NATIVE_EGRESS_BOOT_RECEIPT_REFUSED")
         return raw
@@ -569,11 +576,101 @@ def _read_boot_egress_receipt(state_fd: int, owner: int, group: int) -> bytes | 
         os.close(fd)
 
 
+def _rollover_boot_egress_receipt_locked(
+    state_fd: int, saved: bytes, expected: bytes, *, owner: int, group: int,
+    guard, require_empty,
+) -> None:
+    """Archive exact prior intent and atomically publish a new boot intent.
+
+    Only a separately proven, newly created empty namespace can reach
+    this helper. No policy changes or stale namespace deletion occur here.
+    The previous generation, manifest, executable/profile and rules must
+    match exactly; only the boot UUID and namespace identity may differ.
+    Archive and staging collisions are preserved. A completed archive or
+    stage can be resumed only while the exact previous current receipt is
+    still present and the namespace remains empty.
+    """
+    import os
+    from repocache.server_protected_state_inspect_v1 import _FILE_FLAGS, _identity
+    from repocache.server_protected_state_store_v1 import _json, _write_exclusive
+
+    limit = _BOOT_EGRESS_RECEIPT_MAX
+    previous = _json(saved, limit=limit)
+    current = _json(expected, limit=limit)
+    if (type(previous) is not dict or set(previous) != set(current)
+            or type(previous.get("boot_id")) is not str
+            or _BOOT_ID.fullmatch(previous["boot_id"]) is None
+            or previous["boot_id"] == current["boot_id"]
+            or any(type(previous.get(k)) is not int or previous[k] <= 0
+                   for k in ("namespace_device", "namespace_inode"))
+            or any(type(previous[k]) is not type(current[k]) or previous[k] != current[k]
+                   for k in current if k not in ("boot_id", "namespace_device", "namespace_inode"))):
+        raise NativeEgressCandidateError("NATIVE_EGRESS_BOOT_ROLLOVER_REFUSED")
+    archive = _BOOT_EGRESS_HISTORY_PREFIX + previous["boot_id"]
+
+    def read(name):
+        return _read_boot_egress_receipt(state_fd, owner, group, name=name)
+
+    def verify_current():
+        guard()
+        require_empty()
+        if read(_BOOT_EGRESS_RECEIPT) != saved:
+            raise NativeEgressCandidateError("NATIVE_EGRESS_BOOT_RECEIPT_CHANGED")
+        guard()
+
+    def durable(name, raw):
+        verify_current()
+        found = read(name)
+        if found is None:
+            _write_exclusive(state_fd, name, raw, owner, limit)
+        elif found != raw:
+            raise NativeEgressCandidateError("NATIVE_EGRESS_BOOT_ROLLOVER_COLLISION")
+        # A prior interruption may have left complete bytes before fsync.
+        # Revalidate and fsync the same named descriptor before publication.
+        fd = os.open(name, _FILE_FLAGS, dir_fd=state_fd)
+        try:
+            before = _identity(os.fstat(fd))
+            if (os.read(fd, limit + 1) != raw or
+                    _identity(os.stat(name, dir_fd=state_fd, follow_symlinks=False)) != before
+                    or read(name) != raw or _identity(os.fstat(fd)) != before):
+                raise NativeEgressCandidateError("NATIVE_EGRESS_BOOT_ROLLOVER_COLLISION")
+            os.fsync(fd)
+            if (_identity(os.fstat(fd)) != before
+                    or _identity(os.stat(name, dir_fd=state_fd, follow_symlinks=False)) != before):
+                raise NativeEgressCandidateError("NATIVE_EGRESS_BOOT_ROLLOVER_COLLISION")
+        finally:
+            os.close(fd)
+        os.fsync(state_fd)
+        verify_current()
+
+    # Reject an unknown stage before making even the archival write.
+    verify_current()
+    stage = read(_BOOT_EGRESS_ROLLOVER)
+    if stage is not None and (stage != expected or read(archive) != saved):
+        raise NativeEgressCandidateError("NATIVE_EGRESS_BOOT_ROLLOVER_COLLISION")
+    durable(archive, saved)
+    durable(_BOOT_EGRESS_ROLLOVER, expected)
+    verify_current()
+    if read(archive) != saved or read(_BOOT_EGRESS_ROLLOVER) != expected:
+        raise NativeEgressCandidateError("NATIVE_EGRESS_BOOT_ROLLOVER_COLLISION")
+    # Replace only the verified previous current record, never an
+    # unowned pathname. Both the archive and stage are already durable.
+    os.replace(_BOOT_EGRESS_ROLLOVER, _BOOT_EGRESS_RECEIPT,
+               src_dir_fd=state_fd, dst_dir_fd=state_fd)
+    os.fsync(state_fd)
+    guard()
+    require_empty()
+    if (read(archive) != saved or read(_BOOT_EGRESS_RECEIPT) != expected
+            or read(_BOOT_EGRESS_ROLLOVER) is not None):
+        raise NativeEgressCandidateError("NATIVE_EGRESS_BOOT_ROLLOVER_CHANGED")
+
+
 def _prepare_boot_egress_locked(
     root_fd: int, state_fd: int, proposed: str, *,
     namespace_identity: tuple[int, int], generation: int,
     generation_manifest_sha256: str, profile_receipt_sha256: str,
     executable_receipt_sha256: str, recheck_owned, allow_prepare: bool,
+    allow_boot_rollover: bool = False,
 ) -> dict[str, Any]:
     """Bind initial namespace rules to a durable, boot-specific intent.
 
@@ -584,8 +681,11 @@ def _prepare_boot_egress_locked(
     of those prerequisites. Verify-only may observe an active service
     if its caller independently binds that service to this namespace.
     No installed dispatcher calls this internal candidate. A different
-    boot, generation or namespace is refused, not automatically adopted
-    or garbage-collected. No host routing or service action is performed.
+    boot is refused by default. Explicit rollover additionally requires
+    the caller's fresh-namespace creation witness, an empty ruleset and
+    the identical committed generation and receipt bindings. A different
+    generation or same-boot inode is never adopted. No host routing or
+    service action is performed; old boot evidence is preserved.
     """
     import os
     import stat
@@ -604,7 +704,9 @@ def _prepare_boot_egress_locked(
                 or any(type(value) is not str or _SHA256.fullmatch(value) is None
                        for value in (generation_manifest_sha256, profile_receipt_sha256,
                                      executable_receipt_sha256))
-                or not callable(recheck_owned) or type(allow_prepare) is not bool):
+                or not callable(recheck_owned) or type(allow_prepare) is not bool
+                or type(allow_boot_rollover) is not bool
+                or (allow_boot_rollover and not allow_prepare)):
             raise NativeEgressCandidateError("NATIVE_EGRESS_BOOT_INPUT_REFUSED")
         owner, group = os.geteuid(), os.getegid()
         with ExitStack() as stack:
@@ -656,6 +758,11 @@ def _prepare_boot_egress_locked(
             if type(observed) is not str:
                 raise NativeEgressCandidateError("NATIVE_EGRESS_BOOT_RULES_REFUSED")
             if saved is None:
+                if (_read_boot_egress_receipt(state_fd, owner, group,
+                                              name=_BOOT_EGRESS_ROLLOVER) is not None
+                        or any(name.startswith(_BOOT_EGRESS_HISTORY_PREFIX)
+                               for name in os.listdir(state_fd))):
+                    raise NativeEgressCandidateError("NATIVE_EGRESS_BOOT_INTENT_COLLISION")
                 if not allow_prepare or observed.strip():
                     # No adoption of an existing table, even identical.
                     raise NativeEgressCandidateError("NATIVE_EGRESS_BOOT_INTENT_REQUIRED")
@@ -665,9 +772,20 @@ def _prepare_boot_egress_locked(
                 _write_exclusive(state_fd, _BOOT_EGRESS_RECEIPT, expected, owner,
                                  _BOOT_EGRESS_RECEIPT_MAX)
             elif saved != expected:
-                # Old boot, different generation, foreign namespace or
-                # receipt drift are preserved for explicit reconciliation.
-                raise NativeEgressCandidateError("NATIVE_EGRESS_BOOT_RECEIPT_MISMATCH")
+                if not allow_boot_rollover or observed.strip():
+                    raise NativeEgressCandidateError("NATIVE_EGRESS_BOOT_RECEIPT_MISMATCH")
+
+                def require_empty():
+                    raw = _read_namespace_rules(net)
+                    if type(raw) is not str or raw.strip():
+                        raise NativeEgressCandidateError("NATIVE_EGRESS_NAMESPACE_NOT_EMPTY")
+
+                _rollover_boot_egress_receipt_locked(
+                    state_fd, saved, expected, owner=owner, group=group,
+                    guard=guard, require_empty=require_empty)
+            if _read_boot_egress_receipt(state_fd, owner, group,
+                                         name=_BOOT_EGRESS_ROLLOVER) is not None:
+                raise NativeEgressCandidateError("NATIVE_EGRESS_BOOT_ROLLOVER_COLLISION")
             check_receipt()
             observed = _read_namespace_rules(net)
             if not observed.strip():

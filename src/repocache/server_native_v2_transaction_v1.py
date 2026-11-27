@@ -1729,6 +1729,7 @@ def _prepare_owned_committed_boot_egress_locked(
     root_fd: int, state_fd: int, *, distribution: str, worker_uid: int,
     namespace_identity: tuple[int, int], profile_receipt_sha256: str,
     executable_receipt_sha256: str, recheck_namespace_owner, allow_prepare: bool,
+    allow_boot_rollover: bool = False,
 ) -> dict:
     """Connect committed generation evidence to the boot receipt candidate.
 
@@ -1736,7 +1737,9 @@ def _prepare_owned_committed_boot_egress_locked(
     internal function. No installed dispatch, namespace creation, pending
     WAL recovery or service start authority is introduced.
     """
-    if not callable(recheck_namespace_owner) or type(allow_prepare) is not bool:
+    if (not callable(recheck_namespace_owner) or type(allow_prepare) is not bool
+            or type(allow_boot_rollover) is not bool
+            or (allow_boot_rollover and not allow_prepare)):
         _deny("OWNED_BOOT_EGRESS_INPUT_INVALID")
     with _owned_committed_boot_egress_generation_locked(
             root_fd, state_fd, distribution=distribution, worker_uid=worker_uid,
@@ -1753,7 +1756,8 @@ def _prepare_owned_committed_boot_egress_locked(
             generation_manifest_sha256=plan["generation_manifest_sha256"],
             profile_receipt_sha256=profile_receipt_sha256,
             executable_receipt_sha256=executable_receipt_sha256,
-            recheck_owned=owned, allow_prepare=allow_prepare)
+            recheck_owned=owned, allow_prepare=allow_prepare,
+            allow_boot_rollover=allow_boot_rollover)
         owned()
         return {**result, "generation_manifest_sha256": plan["generation_manifest_sha256"],
                 "committed_resources_verified": True,

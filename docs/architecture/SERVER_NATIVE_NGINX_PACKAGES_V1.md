@@ -1167,3 +1167,22 @@ disabled-generation evidence before its synthetic route experiment.
 A pending WAL must still be recovered without starting an unverified
 service; the boot-time unit and stale boot reconciliation are not yet
 implemented. No live dispatch or active catalog authority is introduced.
+
+
+### Explicit boot receipt rollover
+
+A separate opt-in candidate supports the same committed generation on a
+new kernel boot, only with the trusted lifecycle caller's independently
+verified fresh-namespace creation witness and complete empty kernel
+ruleset. Compare the old canonical intent with the new intent: the boot
+UUID must change, and all generation, manifest, profile, executable and
+policy digests must remain identical. A same-boot inode substitution or
+unmatched generation is refused. Preserve the previous exact receipt in
+a fixed boot-UUID-named history leaf before publishing the next intent by
+one fsynced same-directory replacement. A complete archive and stage may
+resume only with the exact previous current receipt and fresh empty
+namespace still present. Foreign or partial evidence is not removed or
+adopted, and a missing current record with history cannot silently reset.
+Read-only mode never rolls over. No automatic history pruning, namespace
+creation, installed boot service, ingress or actual reboot acceptance is
+claimed by this candidate; detached tests cover both publication sides.

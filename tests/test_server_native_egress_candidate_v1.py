@@ -619,3 +619,112 @@ def test_boot_egress_receipt_binds_intent_and_exact_resume(tmp_path, monkeypatch
     finally:
         os.close(statefd)
         os.close(rootfd)
+
+
+@pytest.mark.parametrize("fault", ["none", "before-replace", "foreign-stage",
+                                    "foreign-archive", "same-boot", "generation",
+                                    "not-empty", "missing-current"])
+def test_boot_rollover_preserves_prior_receipt_and_resumes_exactly(tmp_path, monkeypatch, fault):
+    import contextlib
+    import json
+    import os
+    from repocache import server_native_egress_candidate_v1 as egress
+
+    doc, raw = fixture()
+    expected = egress.render_namespace_egress_candidate(
+        doc, generation=1, http_fragment=raw, worker_uid=987)["nft_candidate"]
+    old_boot = "1f8f3d9c-17c2-4a45-a013-1d781b9796af"
+    boot = [old_boot]
+    identity = [17, 29]
+    observed = [""]
+    writes = []
+    state = tmp_path / "var/lib/repocache/server"
+    state.mkdir(parents=True)
+    state.chmod(0o700)
+    receipt = state / egress._BOOT_EGRESS_RECEIPT
+    archive = state / (egress._BOOT_EGRESS_HISTORY_PREFIX + old_boot)
+    stage = state / egress._BOOT_EGRESS_ROLLOVER
+    rootfd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    statefd = os.open(state, os.O_RDONLY | os.O_DIRECTORY)
+
+    @contextlib.contextmanager
+    def scope():
+        yield 42, tuple(identity), lambda: None
+
+    def batch(fd, raw, *, validate_only):
+        assert fd == 42 and raw == expected and receipt.is_file()
+        writes.append(validate_only)
+        if not validate_only:
+            observed[0] = expected
+
+    monkeypatch.setattr(egress, "_fixed_namespace_scope", scope)
+    monkeypatch.setattr(egress, "_current_boot_id", lambda: boot[0])
+    monkeypatch.setattr(egress, "_read_namespace_rules", lambda fd: observed[0])
+    monkeypatch.setattr(egress, "_run_namespace_batch", batch)
+
+    def prepare(allow=True, rollover=False, generation=1):
+        return egress._prepare_boot_egress_locked(
+            rootfd, statefd, expected, namespace_identity=tuple(identity),
+            generation=generation, generation_manifest_sha256="a" * 64,
+            profile_receipt_sha256="b" * 64, executable_receipt_sha256="c" * 64,
+            recheck_owned=lambda: None, allow_prepare=allow,
+            allow_boot_rollover=rollover)
+
+    try:
+        prepare()
+        saved = receipt.read_bytes()
+        writes.clear()
+        if fault != "same-boot":
+            boot[0] = "2f8f3d9c-17c2-4a45-a013-1d781b9796af"
+        identity[1] += 1
+        observed[0] = expected if fault == "not-empty" else ""
+        with pytest.raises(NativeEgressCandidateError, match="BOOT_RECEIPT_MISMATCH"):
+            prepare()
+        assert receipt.read_bytes() == saved and not archive.exists() and not writes
+        if fault == "foreign-stage":
+            stage.write_bytes(b"foreign")
+            stage.chmod(0o600)
+        elif fault == "foreign-archive":
+            archive.write_bytes(b"foreign")
+            archive.chmod(0o600)
+        elif fault == "missing-current":
+            archive.write_bytes(saved)
+            archive.chmod(0o600)
+            receipt.unlink()
+        if fault in ("foreign-stage", "foreign-archive", "same-boot",
+                     "generation", "not-empty", "missing-current"):
+            with pytest.raises(NativeEgressCandidateError):
+                prepare(rollover=True, generation=2 if fault == "generation" else 1)
+            assert not writes
+            if fault == "missing-current":
+                assert not receipt.exists() and archive.read_bytes() == saved
+            else:
+                assert receipt.read_bytes() == saved
+            if fault == "foreign-stage":
+                assert stage.read_bytes() == b"foreign" and not archive.exists()
+            if fault == "foreign-archive":
+                assert archive.read_bytes() == b"foreign" and not stage.exists()
+            return
+        if fault == "before-replace":
+            def interrupted(*args, **kwargs):
+                raise OSError("interrupted before atomic publication")
+            with monkeypatch.context() as m:
+                m.setattr(os, "replace", interrupted)
+                with pytest.raises(NativeEgressCandidateError, match="BOOT_PREPARATION_REFUSED"):
+                    prepare(rollover=True)
+            assert receipt.read_bytes() == archive.read_bytes() == saved
+            assert stage.is_file() and not writes
+            staged_inode = stage.stat().st_ino
+        result = prepare(rollover=True)
+        assert result["boot_id"] == boot[0]
+        assert result["namespace_inode"] == identity[1]
+        assert archive.read_bytes() == saved
+        assert json.loads(receipt.read_bytes())["boot_id"] == boot[0]
+        assert not stage.exists() and writes == [True, False]
+        if fault == "before-replace":
+            assert receipt.stat().st_ino == staged_inode
+        assert prepare(False) == result == prepare()
+        assert writes == [True, False]
+    finally:
+        os.close(statefd)
+        os.close(rootfd)
