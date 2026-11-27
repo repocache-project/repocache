@@ -2504,7 +2504,7 @@ finally:
         result = isolated.command("/usr/bin/python3", "-IS", "-B", "-c", code,
                                   input_text=json.dumps([action, uid, pins, executable_proof, prior,
                                                          pending, wal_hash]),
-                                  timeout=180)
+                                  timeout=300 if action in ("start-committed", "verify-committed-active") else 180)
         return json.loads(result.stdout)
 
     assert not os.path.lexists(ns) and not os.path.lexists(rollover)

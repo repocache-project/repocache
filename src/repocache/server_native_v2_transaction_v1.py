@@ -2906,7 +2906,8 @@ def _start_owned_committed_dedicated_locked(
         _safe_native_systemctl()
         result = subprocess.run(
             (_SYSTEMCTL, action, _OWNED_WAL_DOMAIN), shell=False,
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE if action == "is-enabled" else subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, cwd="/", env=_ENV,
             timeout=40 if action != "is-enabled" else 5,
             close_fds=True, start_new_session=True, check=False)
@@ -2949,7 +2950,6 @@ def _start_owned_committed_dedicated_locked(
                 if _read_owned_resources(state, nginx, public) != resources:
                     _deny("OWNED_DEDICATED_START_GENERATION_CHANGED")
                 recheck_authenticated_owner()
-                fixed_systemctl("is-enabled")
 
             def owner(active):
                 exact()
@@ -2967,6 +2967,7 @@ def _start_owned_committed_dedicated_locked(
                     recheck_owned=lambda: owner(active), allow_prepare=False,
                     allow_boot_rollover=False)
 
+            fixed_systemctl("is-enabled")
             stopped = owner(False)
             if stopped["main_pid_observed"] != 0:
                 _deny("OWNED_DEDICATED_START_OWNER_REFUSED")
@@ -2975,6 +2976,7 @@ def _start_owned_committed_dedicated_locked(
             if owner(False) != stopped or _verify_tls_pair(
                     root_fd, document, verify_identity=True) != leaf:
                 _deny("OWNED_DEDICATED_START_OWNER_CHANGED")
+            fixed_systemctl("is-enabled")
             started = None
             try:
                 # PID1 executes the exact signed ExecStartPre syntax check
@@ -3004,12 +3006,19 @@ def _start_owned_committed_dedicated_locked(
                     _deny("OWNED_DEDICATED_START_POSTCHECK_FAILED")
                 verify_service_storage_mounts(started["main_pid_observed"])
                 _require_audited_native_package_for_activation(state, distribution="almalinux")
+                fixed_systemctl("is-enabled")
                 exact()
+                if (_inspect_signed_owned_namespace_runtime(
+                        https_port=port, namespace_identity=namespace_identity,
+                        executable_identity=executable_identity) != started
+                        or policy(True) != before_policy):
+                    _deny("OWNED_DEDICATED_START_POSTCHECK_FAILED")
                 return {**witness, "status": "OWNED_DEDICATED_COMMITTED_START_OBSERVED",
                         "storage": storage, "service_storage_mounts_verified": True,
                         "enablement_changed": False}
             except Exception:
                 try:
+                    fixed_systemctl("is-enabled")
                     exact()
                     try:
                         inactive = owner(False)
@@ -3027,8 +3036,10 @@ def _start_owned_committed_dedicated_locked(
                                 https_port=port, namespace_identity=namespace_identity,
                                 executable_identity=executable_identity) != active:
                             _deny("OWNED_DEDICATED_START_RECOVERY_REQUIRED")
+                        fixed_systemctl("is-enabled")
                         fixed_systemctl("stop")
                         inactive = owner(False)
+                    fixed_systemctl("is-enabled")
                     if inactive != stopped or policy(False) != before_policy:
                         _deny("OWNED_DEDICATED_START_RECOVERY_REQUIRED")
                 except Exception:
