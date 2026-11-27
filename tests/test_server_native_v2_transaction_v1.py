@@ -3672,12 +3672,13 @@ def test_dedicated_health_child_timeout_and_preflight_do_not_signal_foreign_pid(
         assert not calls
 
 
+@pytest.mark.parametrize("prepared", [False, True])
 @pytest.mark.parametrize("fault", ["none", "active-route", "nonloopback", "pending",
                                     "policy", "policy-drift", "storage-drift", "scratch-drift", "scratch-service",
                                     "enabled", "start", "health",
                                     "foreign-master", "generation-drift"])
 def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
-        filesystem, monkeypatch, fault):
+        filesystem, monkeypatch, fault, prepared):
     from contextlib import contextmanager
     from types import SimpleNamespace
     from repocache import server_native_nginx_effective_unit_v1 as unit
@@ -3697,10 +3698,23 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
     resources = {V2_STATE: raw, native._OWNED_MAIN: main, native._INCLUDE: include,
                  native._CATALOG: catalog, native._OWNED_MANIFEST:
                      native._owned_manifest_for(raw, main, include, catalog)}
+    wal = None
+    if prepared:
+        next_cfg = {**cfg, "expected_state_generation": 2}
+        next_raw = _canon(snapshot(generation=2, previous=json.loads(raw), doc=next_cfg))
+        next_main, next_include, next_catalog = native._render_owned_managed_candidate(
+            next_cfg, 2, "almalinux",
+            {"repo-0": {"mirror0.example.invalid": ["8.8.8.8"]}} if fault == "active-route" else {})
+        new = {V2_STATE: next_raw, native._OWNED_MAIN: next_main,
+               native._INCLUDE: next_include, native._CATALOG: next_catalog,
+               native._OWNED_MANIFEST:
+                   native._owned_manifest_for(next_raw, next_main, next_include, next_catalog)}
+        wal = native._owned_wal_record(resources, new, live=True)
+        resources = {**resources, native._CATALOG: None}
     paths = _owned_fixture_paths(filesystem, resources)
-    if fault == "pending":
+    if fault == "pending" or prepared:
         pending = state / native._OWNED_WAL
-        pending.write_bytes(b"existing pending evidence")
+        pending.write_bytes(b"existing pending evidence" if fault == "pending" else wal)
         pending.chmod(0o600)
     calls = []
     running = False
@@ -3716,9 +3730,9 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
 
     @contextmanager
     def layout(root, statefd, *, recovering):
-        assert root == rootfd and not recovering
+        assert root == rootfd and recovering == prepared
         with native._locked(rootfd, 0) as locked_state:
-            with real_layout(rootfd, locked_state, recovering=False) as result:
+            with real_layout(rootfd, locked_state, recovering=recovering) as result:
                 yield result
 
     def observe(*, https_port, active):
@@ -3772,7 +3786,8 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
 
     def health(root, context, catalog_bytes, **kwargs):
         nonlocal foreign
-        assert running and catalog_bytes == catalog and kwargs["publish"]
+        assert running and catalog_bytes == (None if prepared else catalog)
+        assert kwargs["publish"] == (not prepared)
         kwargs["recheck_owned"]()
         calls.append("health")
         if fault == "generation-drift":
@@ -3781,7 +3796,7 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
         if fault in ("health", "foreign-master"):
             foreign = fault == "foreign-master"
             raise native.NativeV2TransactionError("TLS_REFUSED")
-        return {"main_pid": 123, "catalog_observed": True, "generation": 1,
+        return {"main_pid": 123, "catalog_observed": not prepared, "generation": 1,
                 "listener_inode": 1234, "authorizes_nginx_activation": False,
                 "authorizes_catalog_publication": False}
 
@@ -3814,13 +3829,21 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
     # The fixture already has an owned lock; the mocked layout is the
     # existing descriptor-only fixture and no real systemctl runs.
     def invoke():
-        return native._start_owned_committed_dedicated_locked(
+        entry = (native._start_owned_prepared_wal_dedicated_locked if prepared else
+                 native._start_owned_committed_dedicated_locked)
+        return entry(
             rootfd, 0, namespace_identity=ns, executable_identity=exe,
+            **({"expected_wal": wal} if prepared else {}),
             profile_receipt_sha256="a"*64, executable_receipt_sha256="b"*64,
             recheck_authenticated_owner=lambda: None)
     if fault == "none":
         result = invoke()
-        assert result["status"] == "OWNED_DEDICATED_COMMITTED_START_OBSERVED"
+        assert result["status"] == ("OWNED_DEDICATED_PREPARED_WAL_START_OBSERVED" if prepared
+                                    else "OWNED_DEDICATED_COMMITTED_START_OBSERVED")
+        if prepared:
+            assert result["catalog_withdrawn"] and result["recovery_required"]
+            assert result["wal_sha256"] == hashlib.sha256(wal).hexdigest()
+            assert not result["catalog_observed"]
         assert result["service_storage_mounts_verified"]
         assert result["service_scratch_mounts_verified"]
         assert not result["enablement_changed"]
@@ -3845,8 +3868,8 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
     expected = ({**resources, native._CATALOG: b"foreign catalog"}
                 if fault == "generation-drift" else resources)
     assert _fixture_resource_bytes(paths) == expected
-    if fault == "pending":
-        assert pending.read_bytes() == b"existing pending evidence"
+    if fault == "pending" or prepared:
+        assert pending.read_bytes() == (b"existing pending evidence" if fault == "pending" else wal)
 
 
 
