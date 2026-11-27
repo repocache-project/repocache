@@ -1,5 +1,4 @@
 """Hosted VM runner preparation never disables APT authentication."""
-import os
 import stat
 import subprocess
 from types import SimpleNamespace
@@ -25,6 +24,7 @@ def test_update_and_install_share_exact_source_and_security_options(monkeypatch)
         "Acquire::AllowInsecureRepositories=false",
         "Acquire::AllowDowngradeToInsecureRepositories=false",
         "APT::Get::AllowUnauthenticated=false",
+        "APT::Update::Error-Mode=any",
     ):
         assert required in options
     assert update[-2:] == ["update", "-qq"]

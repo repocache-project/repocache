@@ -46,6 +46,7 @@ def prepare() -> None:
         "-o", "Acquire::AllowInsecureRepositories=false",
         "-o", "Acquire::AllowDowngradeToInsecureRepositories=false",
         "-o", "APT::Get::AllowUnauthenticated=false",
+        "-o", "APT::Update::Error-Mode=any",
     ]
     subprocess.run(["sudo", "-n", *apt, "update", "-qq"],
                    check=True, stdin=subprocess.DEVNULL)
