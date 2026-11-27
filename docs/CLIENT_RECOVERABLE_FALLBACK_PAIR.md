@@ -151,3 +151,23 @@ files remain strict read-only label checks, never automatically relabelled.
 No SELinux permission or enforcement change, new production writer, or
 actual native PASS is inferred. Re-execute the native positive and negative
 recovery paths on the new source HEAD.
+
+
+## Mid-transaction catalog withdrawal
+
+For modern catalog-bound journals, a fresh authenticated route observation
+is required before staging, after durable intent, after APT companion
+publication (when present), and after source publication before the
+installed journal transition. A refused observation after intent triggers
+offline compensation under the already retained client and package locks.
+Compensation uses the exact recorded source and stage identities; a
+published APT companion is retained with only the original upstream.
+A foreign inode or other unsafe recovery condition refuses compensation,
+preserves evidence and reports recovery required. Previously committed
+transactions are not implicitly restored by an idempotent apply retry.
+The final observation is not a server-side lease, nor does local
+compensation revoke any route or prevent stale readers from using
+previously parsed configuration. Server withdrawal, complete native
+exclusion, and an installed source writer remain separate gates.
+The native Debian fixture withdraws the actual private HTTPS catalog
+after companion and source publication in separate guarded roots.
