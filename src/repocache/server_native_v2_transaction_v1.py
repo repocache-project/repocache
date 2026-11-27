@@ -43,7 +43,8 @@ from repocache.server_locked_manifest_reconcile_v1 import (
 from repocache.server_native_egress_candidate_v1 import (
     derive_pinned_egress_candidate, render_namespace_egress_candidate,
     render_bootstrap_egress_candidate, _replace_fixed_namespace_egress,
-    _prepare_boot_egress_locked,
+    _prepare_boot_egress_locked, _fresh_boot_egress_intent_locked,
+    _create_fixed_loopback_namespace_locked,
 )
 from repocache.server_native_nginx_effective_unit_v1 import (
     EffectiveNginxUnitError, inspect_effective_native_nginx_unit,
@@ -1759,6 +1760,77 @@ def _prepare_owned_committed_boot_egress_locked(
             recheck_owned=owned, allow_prepare=allow_prepare,
             allow_boot_rollover=allow_boot_rollover)
         owned()
+        return {**result, "generation_manifest_sha256": plan["generation_manifest_sha256"],
+                "committed_resources_verified": True,
+                "authorizes_nginx_activation": False,
+                "authorizes_catalog_publication": False}
+
+
+def _create_owned_committed_boot_egress_locked(
+    root_fd: int, state_fd: int, *, distribution: str, worker_uid: int,
+    profile_receipt_sha256: str, executable_receipt_sha256: str,
+    recheck_stopped_owner, allow_boot_rollover: bool = False,
+) -> dict:
+    """Prepare a fresh loopback-only namespace from committed disabled state.
+
+    The authenticated lifecycle caller retains the state lock and proves
+    service exclusion, native package and signed profile/executable identity.
+    Keep the exact committed resource scope across creation and policy
+    preparation. Neither active-route ingress nor same-boot adoption,
+    service start, installed dispatch or catalog publication is authorized.
+    """
+    if (not callable(recheck_stopped_owner) or type(allow_boot_rollover) is not bool
+            or not _valid_sha(profile_receipt_sha256)
+            or not _valid_sha(executable_receipt_sha256)):
+        _deny("OWNED_BOOT_EGRESS_INPUT_INVALID")
+    with _owned_committed_boot_egress_generation_locked(
+            root_fd, state_fd, distribution=distribution, worker_uid=worker_uid,
+    ) as (plan, recheck):
+        if plan["destinations"]:
+            _deny("OWNED_BOOT_EGRESS_ACTIVE_ROUTES_REFUSED")
+
+        def owned():
+            recheck()
+            recheck_stopped_owner()
+            recheck()
+
+        def intent():
+            return _fresh_boot_egress_intent_locked(
+                state_fd, plan["nft_candidate"], generation=plan["generation"],
+                generation_manifest_sha256=plan["generation_manifest_sha256"],
+                profile_receipt_sha256=profile_receipt_sha256,
+                executable_receipt_sha256=executable_receipt_sha256,
+                allow_boot_rollover=allow_boot_rollover)
+
+        owned()
+        before = intent()
+
+        def before_create():
+            owned()
+            if intent() != before:
+                _deny("OWNED_BOOT_EGRESS_INTENT_CHANGED")
+            owned()
+
+        before_create()
+        creation = _create_fixed_loopback_namespace_locked(recheck_owned=before_create)
+        before_create()
+        if (creation["boot_id"] != before[0]
+                or not creation["loopback_only_observed"]
+                or not creation["empty_ruleset_observed"]):
+            _deny("OWNED_BOOT_EGRESS_CREATION_UNVERIFIED")
+        identity = (creation["namespace_device"], creation["namespace_inode"])
+        result = _prepare_boot_egress_locked(
+            root_fd, state_fd, plan["nft_candidate"],
+            namespace_identity=identity, generation=plan["generation"],
+            generation_manifest_sha256=plan["generation_manifest_sha256"],
+            profile_receipt_sha256=profile_receipt_sha256,
+            executable_receipt_sha256=executable_receipt_sha256,
+            recheck_owned=owned, allow_prepare=True,
+            allow_boot_rollover=allow_boot_rollover)
+        owned()
+        if (result["boot_id"] != before[0]
+                or (result["namespace_device"], result["namespace_inode"]) != identity):
+            _deny("OWNED_BOOT_EGRESS_CREATION_CHANGED")
         return {**result, "generation_manifest_sha256": plan["generation_manifest_sha256"],
                 "committed_resources_verified": True,
                 "authorizes_nginx_activation": False,

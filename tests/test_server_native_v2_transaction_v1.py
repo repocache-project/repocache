@@ -3074,3 +3074,72 @@ def test_committed_boot_egress_generation_recheck_expires(filesystem):
             recheck()
         with pytest.raises(native.NativeV2TransactionError, match="SCOPE_EXPIRED"):
             recheck()
+
+
+@pytest.mark.parametrize("kind", ["bootstrap", "disabled", "active"])
+@pytest.mark.parametrize("fault", ["none", "pending", "orphan", "intent", "owner", "drift"])
+def test_fresh_boot_namespace_retains_committed_resources_before_creation(
+        filesystem, monkeypatch, kind, fault):
+    rootfd, state, _, _, _ = filesystem
+    old = (_owned_bootstrap_resources() if kind == "bootstrap" else
+           _owned_generation(active=kind == "active"))
+    paths = _owned_fixture_paths(filesystem, old)
+    if fault == "pending":
+        (state / native._OWNED_WAL).write_bytes(b"pending")
+        (state / native._OWNED_WAL).chmod(0o600)
+    elif fault == "orphan":
+        orphan = paths[native._OWNED_MAIN].parent / native._OWNED_STAGES[native._OWNED_MAIN]
+        orphan.write_bytes(b"orphan")
+        orphan.chmod(0o644)
+    calls = []
+    boot = "12345678-1234-1234-1234-123456789abc"
+
+    def owner():
+        if fault == "owner":
+            raise native.NativeV2TransactionError("OWNER_CHANGED")
+
+    def intent(got_state, rules, **kw):
+        assert got_state == statefd
+        if fault == "intent":
+            raise native.NativeV2TransactionError("INTENT_REFUSED")
+        return boot, None
+
+    def create(*, recheck_owned):
+        recheck_owned()
+        calls.append("create")
+        if fault == "drift":
+            paths[native._OWNED_MAIN].write_bytes(b"foreign")
+        recheck_owned()
+        return {"boot_id": boot, "namespace_device": 17, "namespace_inode": 29,
+                "loopback_only_observed": True, "empty_ruleset_observed": True}
+
+    def prepare(got_root, got_state, rules, **kw):
+        assert (got_root, got_state) == (rootfd, statefd)
+        assert kw["namespace_identity"] == (17, 29)
+        assert kw["generation"] == (0 if kind == "bootstrap" else 1)
+        assert kw["allow_prepare"] and not kw["allow_boot_rollover"]
+        kw["recheck_owned"]()
+        calls.append("prepare")
+        return {"boot_id": boot, "namespace_device": 17, "namespace_inode": 29}
+
+    monkeypatch.setattr(native, "_fresh_boot_egress_intent_locked", intent)
+    monkeypatch.setattr(native, "_create_fixed_loopback_namespace_locked", create)
+    monkeypatch.setattr(native, "_prepare_boot_egress_locked", prepare)
+    with native._locked(rootfd, 0) as statefd:
+        def invoke():
+            return native._create_owned_committed_boot_egress_locked(
+                rootfd, statefd, distribution="debian", worker_uid=33,
+                profile_receipt_sha256="a"*64, executable_receipt_sha256="b"*64,
+                recheck_stopped_owner=owner)
+        if kind != "active" and fault == "none":
+            result = invoke()
+            assert calls == ["create", "prepare"]
+            assert result["committed_resources_verified"]
+            assert not result["authorizes_nginx_activation"]
+            assert not result["authorizes_catalog_publication"]
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                invoke()
+            assert calls == (["create"] if kind != "active" and fault == "drift" else [])
+    if kind == "active" or fault != "drift":
+        assert _fixture_resource_bytes(paths) == old

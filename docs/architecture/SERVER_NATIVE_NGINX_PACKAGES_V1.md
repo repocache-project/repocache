@@ -1224,9 +1224,21 @@ prior receipt only after default and verify-only stale-boot refusal;
 it verifies the archived prior bytes and current policy. The fixture
 binds the native package completion receipt and hashes of stateless host
 firewall rules and SELinux booleans across the actual reboot, before any
-namespace recreation, then verifies that its operations leave them unchanged. Exact fixture-only cleanup then
+namespace recreation, then verifies that its operations leave them
+unchanged. Exact fixture-only cleanup then
 restores the prior enabled legacy service and generation health.
 This is a manual controlled lifecycle witness, not an installed
 automatic boot provisioner or acceptance of active authoritative routes.
 Ambiguous or failed fixture preparation is preserved and fails the
 campaign. No production service or boot activation authority is added.
+
+
+The fresh committed-boot orchestration retains the exact five-resource
+scope before and across fixed loopback namespace creation and policy
+preparation. It refuses active destinations, pending WAL/stages,
+unverified owner or changed boot intent before policy preparation.
+The read-only intent preflight checks prior canonical bindings and
+requires explicit stale-boot rollover before any new namespace is
+created; ambiguous pending rollover and same-boot creation remain
+refused. This internal path requires an authenticated stopped-service
+caller and grants no installed dispatch or service start authority.

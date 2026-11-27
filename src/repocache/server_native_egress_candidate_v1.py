@@ -740,6 +740,73 @@ def _read_boot_egress_receipt(state_fd: int, owner: int, group: int, *,
         os.close(fd)
 
 
+def _require_prior_boot_bindings(previous, current) -> None:
+    """Only boot and kernel namespace identities may differ."""
+    if (type(previous) is not dict or set(previous) != set(current)
+            or type(previous.get("boot_id")) is not str
+            or _BOOT_ID.fullmatch(previous["boot_id"]) is None
+            or previous["boot_id"] == current["boot_id"]
+            or any(type(previous.get(k)) is not int or previous[k] <= 0
+                   for k in ("namespace_device", "namespace_inode"))
+            or any(type(previous[k]) is not type(current[k]) or previous[k] != current[k]
+                   for k in current if k not in ("boot_id", "namespace_device", "namespace_inode"))):
+        raise NativeEgressCandidateError("NATIVE_EGRESS_BOOT_ROLLOVER_REFUSED")
+
+
+def _fresh_boot_egress_intent_locked(
+    state_fd: int, proposed: str, *, generation: int,
+    generation_manifest_sha256: str, profile_receipt_sha256: str,
+    executable_receipt_sha256: str, allow_boot_rollover: bool,
+) -> tuple[str, bytes | None]:
+    """Read-only preflight before creating an absent fixed namespace.
+
+    Check persistent bindings before the first kernel effect. The actual
+    namespace identity is not known yet; the retained namespace preparation
+    verifies it independently. Pending rollover or same-boot recovery is
+    deliberately not adopted by this fresh-creation path.
+    """
+    import os
+    from repocache.server_protected_state_store_v1 import _json
+
+    if (type(allow_boot_rollover) is not bool
+            or type(generation) is not int or not 0 <= generation <= MAX_INT
+            or any(type(value) is not str or _SHA256.fullmatch(value) is None
+                   for value in (generation_manifest_sha256, profile_receipt_sha256,
+                                 executable_receipt_sha256))):
+        raise NativeEgressCandidateError("NATIVE_EGRESS_FRESH_BOOT_INPUT_REFUSED")
+    canonical = _canonical_ruleset(proposed)
+    boot = _current_boot_id()
+    owner, group = os.geteuid(), os.getegid()
+    saved = _read_boot_egress_receipt(state_fd, owner, group)
+    if _read_boot_egress_receipt(state_fd, owner, group, name=_BOOT_EGRESS_ROLLOVER) is not None:
+        raise NativeEgressCandidateError("NATIVE_EGRESS_BOOT_ROLLOVER_COLLISION")
+    if saved is None:
+        if allow_boot_rollover or any(name.startswith(_BOOT_EGRESS_HISTORY_PREFIX)
+                                      for name in os.listdir(state_fd)):
+            raise NativeEgressCandidateError("NATIVE_EGRESS_BOOT_INTENT_COLLISION")
+    else:
+        if not allow_boot_rollover:
+            raise NativeEgressCandidateError("NATIVE_EGRESS_BOOT_RECEIPT_MISMATCH")
+        previous = _json(saved, limit=_BOOT_EGRESS_RECEIPT_MAX)
+        expected = {
+            "schema_version": 1,
+            "boot_id": boot,
+            "namespace_device": 1,
+            "namespace_inode": 1,
+            "generation": generation,
+            "generation_manifest_sha256": generation_manifest_sha256,
+            "profile_receipt_sha256": profile_receipt_sha256,
+            "executable_receipt_sha256": executable_receipt_sha256,
+            "ruleset_sha256": hashlib.sha256(canonical.encode("ascii")).hexdigest(),
+            "authorizes_nginx_activation": False,
+        }
+        _require_prior_boot_bindings(previous, expected)
+        archive = _BOOT_EGRESS_HISTORY_PREFIX + previous["boot_id"]
+        if _read_boot_egress_receipt(state_fd, owner, group, name=archive) not in (None, saved):
+            raise NativeEgressCandidateError("NATIVE_EGRESS_BOOT_ROLLOVER_COLLISION")
+    return boot, saved
+
+
 def _rollover_boot_egress_receipt_locked(
     state_fd: int, saved: bytes, expected: bytes, *, owner: int, group: int,
     guard, require_empty,
@@ -761,15 +828,7 @@ def _rollover_boot_egress_receipt_locked(
     limit = _BOOT_EGRESS_RECEIPT_MAX
     previous = _json(saved, limit=limit)
     current = _json(expected, limit=limit)
-    if (type(previous) is not dict or set(previous) != set(current)
-            or type(previous.get("boot_id")) is not str
-            or _BOOT_ID.fullmatch(previous["boot_id"]) is None
-            or previous["boot_id"] == current["boot_id"]
-            or any(type(previous.get(k)) is not int or previous[k] <= 0
-                   for k in ("namespace_device", "namespace_inode"))
-            or any(type(previous[k]) is not type(current[k]) or previous[k] != current[k]
-                   for k in current if k not in ("boot_id", "namespace_device", "namespace_inode"))):
-        raise NativeEgressCandidateError("NATIVE_EGRESS_BOOT_ROLLOVER_REFUSED")
+    _require_prior_boot_bindings(previous, current)
     archive = _BOOT_EGRESS_HISTORY_PREFIX + previous["boot_id"]
 
     def read(name):
