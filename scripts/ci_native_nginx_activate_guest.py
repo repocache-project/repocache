@@ -2381,6 +2381,36 @@ try:
                     archive=egress._BOOT_EGRESS_HISTORY_PREFIX+prior["policy"]["boot_id"]
                     assert egress._read_boot_egress_receipt(state,0,0,name=archive)==saved
                     assert egress._read_boot_egress_receipt(state,0,0,name=egress._BOOT_EGRESS_ROLLOVER) is None
+                elif pending:
+                    # Real interruption after the WAL-bound boot intent is
+                    # durable but before any nftables initialization.
+                    import signal
+                    pid=os.fork()
+                    if pid==0:
+                        def interrupt(*args,**kw):
+                            os.kill(os.getpid(),signal.SIGKILL)
+                        egress._initialize_fixed_namespace_egress=interrupt
+                        fresh()
+                        os._exit(77)
+                    _,status=os.waitpid(pid,0)
+                    assert os.WIFSIGNALED(status) and os.WTERMSIG(status)==signal.SIGKILL
+                    saved=egress._read_boot_egress_receipt(state,0,0)
+                    assert saved
+                    net_identity=namespace_identity()
+                    try:
+                        policy(False)
+                    except egress.NativeEgressCandidateError as exc:
+                        assert "BOOT_POLICY_PENDING" in str(exc)
+                    else:
+                        raise AssertionError("Verify-only initialized pending WAL policy")
+                    result=tx._resume_owned_prepared_wal_boot_egress_locked(
+                        root,state,distribution="almalinux",worker_uid=uid,
+                        expected_wal=pending_raw,namespace_identity=net_identity,
+                        profile_receipt_sha256=observed_profile["receipt_sha256"],
+                        executable_receipt_sha256=hashlib.sha256(receipt).hexdigest(),
+                        recheck_stopped_owner=stopped)
+                    assert egress._read_boot_egress_receipt(state,0,0)==saved
+                    assert result["receipt_sha256"]==hashlib.sha256(saved).hexdigest()
                 else:
                     result=fresh()
                 net_identity=namespace_identity()
@@ -2461,6 +2491,8 @@ finally:
         require_prior_resources()
         assert isolated.command("/usr/sbin/nft", "--stateless", "--numeric-priority",
                                 "list", "ruleset").stdout == host_rules
+        if pending:
+            print("PASS: pending-WAL boot intent survives SIGKILL; verify-only refuses and exact same-boot resume preserves receipt", flush=True)
         print("PASS: exact " + ("prepared pending WAL" if pending else "committed generation") +
               " and boot intent durable, dedicated profile staged, service disabled before real reboot", flush=True)
         return

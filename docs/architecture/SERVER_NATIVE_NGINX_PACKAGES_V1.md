@@ -1353,3 +1353,11 @@ TLS generation marker, and requires refusal of a mismatched certificate
 leaf. It rechecks the exact boot policy before and after the observation.
 The synthetic fixture does not publish its routes as an authoritative
 catalog, and this test does not establish durable installed activation.
+
+If initialization is interrupted after the prepared-WAL boot receipt
+becomes durable, the same-boot resume path requires that existing exact
+receipt and a separately verified stopped owner. It cannot create or
+adopt a receipt, roll over another boot, change the generation, or publish
+the catalog. The native pending-WAL reboot fixture injects SIGKILL at
+this boundary, proves that verify-only refuses the empty policy, resumes
+the exact receipt, and then exercises the subsequent real reboot.

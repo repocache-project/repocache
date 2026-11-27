@@ -44,7 +44,7 @@ from repocache.server_native_egress_candidate_v1 import (
     derive_pinned_egress_candidate, render_namespace_egress_candidate,
     render_bootstrap_egress_candidate, _replace_fixed_namespace_egress,
     _prepare_boot_egress_locked, _fresh_boot_egress_intent_locked,
-    _create_fixed_loopback_namespace_locked,
+    _create_fixed_loopback_namespace_locked, _read_boot_egress_receipt,
 )
 from repocache.server_native_nginx_effective_unit_v1 import (
     EffectiveNginxUnitError, inspect_effective_native_nginx_unit,
@@ -1853,7 +1853,41 @@ def _verify_owned_prepared_wal_boot_egress_locked(
     recheck_stopped_owner,
 ) -> dict:
     """Read back the exact prepared prior policy; never create or replace it."""
-    if (not callable(recheck_stopped_owner)
+    return _check_owned_prepared_wal_boot_egress_locked(
+        root_fd, state_fd, distribution=distribution, worker_uid=worker_uid,
+        expected_wal=expected_wal, namespace_identity=namespace_identity,
+        profile_receipt_sha256=profile_receipt_sha256,
+        executable_receipt_sha256=executable_receipt_sha256,
+        recheck_stopped_owner=recheck_stopped_owner, resume=False)
+
+
+def _resume_owned_prepared_wal_boot_egress_locked(
+    root_fd: int, state_fd: int, *, distribution: str, worker_uid: int,
+    expected_wal: bytes, namespace_identity: tuple[int, int],
+    profile_receipt_sha256: str, executable_receipt_sha256: str,
+    recheck_stopped_owner,
+) -> dict:
+    """Resume only an existing exact same-boot receipt under the pending WAL.
+
+    A missing receipt, foreign namespace or different boot is refused.
+    The independently authenticated owner must prove service exclusion;
+    an empty table alone is never enough to claim ownership.
+    """
+    return _check_owned_prepared_wal_boot_egress_locked(
+        root_fd, state_fd, distribution=distribution, worker_uid=worker_uid,
+        expected_wal=expected_wal, namespace_identity=namespace_identity,
+        profile_receipt_sha256=profile_receipt_sha256,
+        executable_receipt_sha256=executable_receipt_sha256,
+        recheck_stopped_owner=recheck_stopped_owner, resume=True)
+
+
+def _check_owned_prepared_wal_boot_egress_locked(
+    root_fd: int, state_fd: int, *, distribution: str, worker_uid: int,
+    expected_wal: bytes, namespace_identity: tuple[int, int],
+    profile_receipt_sha256: str, executable_receipt_sha256: str,
+    recheck_stopped_owner, resume: bool,
+) -> dict:
+    if (type(resume) is not bool or not callable(recheck_stopped_owner)
             or not _valid_sha(profile_receipt_sha256)
             or not _valid_sha(executable_receipt_sha256)):
         _deny("OWNED_BOOT_EGRESS_INPUT_INVALID")
@@ -1870,13 +1904,24 @@ def _verify_owned_prepared_wal_boot_egress_locked(
             recheck()
 
         owned()
+        options = {}
+        if resume:
+            saved = _read_boot_egress_receipt(state_fd, 0, 0)
+            if saved is None:
+                _deny("OWNED_BOOT_EGRESS_RESUME_RECEIPT_REQUIRED")
+            # CAS against this exact durable receipt. The underlying helper
+            # independently checks its boot, inode, generation and rule
+            # bindings before initializing an empty policy.
+            options["expected_previous_receipt"] = saved
+            owned()
         result = _prepare_boot_egress_locked(
             root_fd, state_fd, plan["nft_candidate"],
             namespace_identity=namespace_identity, generation=plan["generation"],
             generation_manifest_sha256=plan["generation_manifest_sha256"],
             profile_receipt_sha256=profile_receipt_sha256,
             executable_receipt_sha256=executable_receipt_sha256,
-            recheck_owned=owned, allow_prepare=False, allow_boot_rollover=False)
+            recheck_owned=owned, allow_prepare=resume, allow_boot_rollover=False,
+            **options)
         owned()
         return {**result, "generation_manifest_sha256": plan["generation_manifest_sha256"],
                 "prior_resources_verified": True, "recovery_required": True,

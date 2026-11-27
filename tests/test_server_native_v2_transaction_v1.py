@@ -3572,3 +3572,64 @@ def test_dedicated_health_parent_reaps_only_fixed_child(monkeypatch, exit_status
     else:
         invoke()
     assert calls == [(123, 1)]
+
+
+@pytest.mark.parametrize("fault", ["none", "missing-receipt", "owner", "receipt-race", "catalog-drift"])
+def test_resume_prepared_wal_boot_egress_requires_existing_exact_receipt(
+        filesystem, monkeypatch, fault):
+    rootfd, state, _, _, _ = filesystem
+    old = _owned_generation(active=False)
+    new = _owned_generation(2, previous=json.loads(old[V2_STATE]), active=False)
+    withdrawn = {**old, native._CATALOG: None}
+    paths = _owned_fixture_paths(filesystem, withdrawn)
+    wal = native._owned_wal_record(old, new, live=True)
+    record = state / native._OWNED_WAL
+    record.write_bytes(wal)
+    record.chmod(0o600)
+    calls = []
+
+    def stopped():
+        if fault == "owner":
+            raise native.NativeV2TransactionError("OWNER_CHANGED")
+
+    def receipt(got_state, owner, group):
+        assert (got_state, owner, group) == (statefd, 0, 0)
+        return None if fault == "missing-receipt" else b"exact prior intent"
+
+    def prepare(got_root, got_state, rules, **kw):
+        assert (got_root, got_state) == (rootfd, statefd)
+        assert kw["namespace_identity"] == (17, 29)
+        assert kw["allow_prepare"] and not kw["allow_boot_rollover"]
+        assert kw["expected_previous_receipt"] == b"exact prior intent"
+        assert kw["generation"] == 1
+        calls.append("prepare")
+        if fault == "receipt-race":
+            raise native.NativeV2TransactionError("RECEIPT_CHANGED")
+        if fault == "catalog-drift":
+            paths[native._CATALOG].write_bytes(b"foreign")
+        kw["recheck_owned"]()
+        return {"status": "NATIVE_EGRESS_BOOT_RECEIPT_VERIFIED"}
+
+    monkeypatch.setattr(native, "_read_boot_egress_receipt", receipt)
+    monkeypatch.setattr(native, "_prepare_boot_egress_locked", prepare)
+    with native._locked(rootfd, 0) as statefd:
+        def invoke():
+            return native._resume_owned_prepared_wal_boot_egress_locked(
+                rootfd, statefd, distribution="debian", worker_uid=33,
+                expected_wal=wal, namespace_identity=(17, 29),
+                profile_receipt_sha256="a"*64, executable_receipt_sha256="b"*64,
+                recheck_stopped_owner=stopped)
+        if fault == "none":
+            result = invoke()
+            assert result["recovery_required"] and result["catalog_withdrawn"]
+            assert not result["authorizes_nginx_activation"]
+            assert not result["authorizes_catalog_publication"]
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                invoke()
+    assert calls == ([] if fault in ("owner", "missing-receipt") else ["prepare"])
+    assert record.read_bytes() == wal
+    if fault == "catalog-drift":
+        assert paths[native._CATALOG].read_bytes() == b"foreign"
+    else:
+        assert _fixture_resource_bytes(paths) == withdrawn
