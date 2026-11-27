@@ -296,6 +296,26 @@ def _probe_private_dnf4_claim(root, argv, lock, env):
         recheck()
         repo.unlink()
     assert not os.path.lexists(lock)
+    # Losing a POSIX lock in this process does not remove its PID claim
+    # or change the RPMDB lock inode. The exact kernel witness must refuse.
+    import native_package_lock_observation as held_locks
+    rpm_lock = root / "usr/lib/sysimage/rpm/.rpm.lock"
+    before = rpm_lock.stat()
+    try:
+        with _private_dnf4_claim(root) as recheck:
+            os.close(os.open(rpm_lock, os.O_RDONLY | os.O_CLOEXEC))
+            assert rpm_lock.stat() == before
+            assert lock.read_bytes() == str(os.getpid()).encode("ascii")
+            recheck()
+    except held_locks.LockInspectionRefused as exc:
+        assert "kernel lock scope drift" in str(exc)
+    else:
+        raise AssertionError("Lost private DNF4 POSIX lock was accepted")
+    assert not os.path.lexists(lock)
+    with _private_dnf4_claim(root) as recheck:
+        recheck()
+    assert not os.path.lexists(lock)
+    print("PASS: native DNF4 detects lost RPMDB POSIX lock despite exact PID and unchanged inode", flush=True)
     print("PASS: DNF4 atomic private live-PID claim and RPMDB locks; real "
           "transaction refused while repository config remained readable", flush=True)
 

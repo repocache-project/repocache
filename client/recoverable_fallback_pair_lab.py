@@ -329,8 +329,10 @@ def _dnf4_private_claim(root: Path):
         _require_dnf4(identity(os.fstat(fd)) == claim)
         _require_dnf4(identity(os.stat(leaf, dir_fd=dirfd, follow_symlinks=False)) == claim)
         _require_dnf4(os.pread(fd, 32, 0) == expected)
-        _require_dnf4(identity(os.fstat(kernel)) == rpm_identity)
+        kernel_info = os.fstat(kernel)
+        _require_dnf4(identity(kernel_info) == rpm_identity)
         _require_dnf4(identity(os.stat(".rpm.lock", dir_fd=rpmfd, follow_symlinks=False)) == rpm_identity)
+        locks._require_held_kernel_locks(kernel, kernel_info, int(expected))
         for path, pinned in ((lock_dir, dirfd), (rpm_dir, rpmfd)):
             actual = path.lstat()
             held = os.fstat(pinned)

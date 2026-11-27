@@ -362,3 +362,69 @@ def test_revalidation_cannot_be_reused_by_a_different_process(tmp_path, monkeypa
             with pytest.raises(locks.LockInspectionRefused, match="scope expired"):
                 recheck()
         recheck()
+
+
+@pytest.mark.parametrize("manager,names", [("apt", locks.APT), ("dnf5", locks.DNF5)])
+def test_same_process_close_releases_posix_without_inode_drift(tmp_path, manager, names):
+    paths = setup_locks(tmp_path, names)
+    selected = paths[names[0]]
+    before = selected.stat()
+    with pytest.raises(locks.LockInspectionRefused, match="kernel lock scope drift"):
+        with locks.hold_existing_native_package_locks(
+                manager, root=tmp_path, revalidation=True) as recheck:
+            recheck()
+            extra = os.open(selected, os.O_RDONLY | os.O_CLOEXEC)
+            os.close(extra)
+            assert selected.stat() == before
+            assert _competing_process(selected, "flock") == 17
+            assert _competing_process(selected, "posix") == 0
+            recheck()
+    for family in ("flock", "posix"):
+        assert _competing_process(selected, family) == 0
+    # No lock or process-local guard leaks on refusal.
+    with locks.hold_existing_native_package_locks(manager, root=tmp_path):
+        assert _competing_process(selected, "posix") == 17
+
+
+def test_lost_posix_lock_detected_on_successful_scope_exit(tmp_path):
+    paths = setup_locks(tmp_path, locks.APT)
+    with pytest.raises(locks.LockInspectionRefused, match="kernel lock scope drift"):
+        with locks.hold_existing_native_package_locks("apt", root=tmp_path):
+            os.close(os.open(paths[locks.APT[-1]], os.O_RDONLY | os.O_CLOEXEC))
+    assert _competing_process(paths[locks.APT[-1]], "flock") == 0
+
+
+@pytest.mark.parametrize("fault", ["none", "missing", "owner", "device", "inode",
+                                  "partial", "read", "duplicate", "unknown", "oversize"])
+def test_kernel_fdinfo_requires_exact_full_range_write_locks(tmp_path, fault):
+    path = tmp_path / "lock"
+    path.touch()
+    info = path.stat()
+    pid = os.getpid()
+    address = f"{os.major(info.st_dev):x}:{os.minor(info.st_dev):x}:{info.st_ino}"
+    first = f"lock:\t1: FLOCK ADVISORY WRITE {pid} {address} 0 EOF\n"
+    second = f"lock:\t2: POSIX ADVISORY WRITE {pid} {address} 0 EOF\n"
+    if fault == "missing":
+        second = ""
+    elif fault == "owner":
+        second = second.replace(f"WRITE {pid} ", f"WRITE {pid + 1} ")
+    elif fault == "device":
+        second = second.replace(address, f"{os.major(info.st_dev) + 1:x}:{os.minor(info.st_dev):x}:{info.st_ino}")
+    elif fault == "inode":
+        second = second.replace(address, f"{os.major(info.st_dev):x}:{os.minor(info.st_dev):x}:{info.st_ino + 1}")
+    elif fault == "partial":
+        second = second.replace("0 EOF", "0 15")
+    elif fault == "read":
+        second = second.replace("WRITE", "READ")
+    elif fault == "duplicate":
+        second += first
+    elif fault == "unknown":
+        second = second.replace("POSIX", "OFDLCK")
+    elif fault == "oversize":
+        second += "x" * locks._FDINFO_MAX
+    raw = "pos:\t0\nflags:\t02000002\n" + first + second
+    if fault == "none":
+        locks._require_kernel_lock_records(raw, info, pid)
+    else:
+        with pytest.raises(locks.LockInspectionRefused):
+            locks._require_kernel_lock_records(raw, info, pid)

@@ -57,6 +57,54 @@ def _active_records(text: str) -> set[tuple[int, int, int]]:
     return observed
 
 
+_FD_LOCK = re.compile(
+    r"^lock:\s*\d+:\s*(FLOCK|POSIX)\s+ADVISORY\s+WRITE\s+"
+    r"(\d+)\s+([0-9a-fA-F]+):([0-9a-fA-F]+):(\d+)\s+0\s+EOF$",
+    re.ASCII,
+)
+_FDINFO_MAX = 16384
+
+
+def _require_kernel_lock_records(text: str, info: os.stat_result, pid: int) -> None:
+    """Require both whole-file write locks on the exact retained inode.
+
+    A second same-process open/close can release POSIX locks without
+    changing any inode metadata. Neither path equality nor flock alone
+    proves that the POSIX lock still exists. Never re-acquire on drift.
+    """
+    if type(text) is not str or not text.isascii() or len(text) > _FDINFO_MAX:
+        raise LockInspectionRefused("Native kernel lock evidence unavailable")
+    expected = (pid, os.major(info.st_dev), os.minor(info.st_dev), info.st_ino)
+    families = set()
+    for line in text.splitlines():
+        if not line.startswith("lock:"):
+            continue
+        match = _FD_LOCK.fullmatch(line)
+        if match is None:
+            raise LockInspectionRefused("Native kernel lock scope drift")
+        family, owner, major, minor, inode = match.groups()
+        if (family in families or
+                (int(owner), int(major, 16), int(minor, 16), int(inode)) != expected):
+            raise LockInspectionRefused("Native kernel lock scope drift")
+        families.add(family)
+    if families != {"POSIX", "FLOCK"}:
+        raise LockInspectionRefused("Native kernel lock scope drift")
+
+
+def _require_held_kernel_locks(fd: int, info: os.stat_result, pid: int) -> None:
+    """Read only kernel fdinfo; never reopen the locked filesystem inode."""
+    try:
+        if os.getpid() != pid:
+            raise LockInspectionRefused("Native kernel lock scope expired")
+        with open(f"/proc/self/fdinfo/{fd}", "r", encoding="ascii") as handle:
+            text = handle.read(_FDINFO_MAX + 1)
+        _require_kernel_lock_records(text, info, pid)
+    except (OSError, UnicodeError, OverflowError, ValueError) as exc:
+        if isinstance(exc, LockInspectionRefused):
+            raise
+        raise LockInspectionRefused("Native kernel lock evidence unavailable") from exc
+
+
 def _pinned_lock_stat(root: Path, relative: str, *, owner: int):
     """Inspect a native lock leaf through pinned nofollow parent dirfds."""
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -203,10 +251,12 @@ def hold_existing_native_package_locks(
             raise LockInspectionRefused("Native package lock scope expired")
         try:
             for relative, lockfd, expected in witnesses:
-                if (fingerprint(os.fstat(lockfd)) != expected
+                info = os.fstat(lockfd)
+                if (fingerprint(info) != expected
                         or fingerprint(_pinned_lock_stat(
                             root, relative, owner=expected_owner)) != expected):
                     raise LockInspectionRefused("Native package lock scope drift")
+                _require_held_kernel_locks(lockfd, info, scope_pid)
         except (OSError, OverflowError, TypeError) as exc:
             raise LockInspectionRefused("Native package lock scope drift") from exc
 
