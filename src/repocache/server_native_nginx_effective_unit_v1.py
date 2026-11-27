@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from contextlib import ExitStack
 import os
+import re
 import socket
 import time
 import zipimport
@@ -809,6 +810,143 @@ def inspect_signed_owned_namespace_unit(*, https_port: int, active: bool) -> dic
         raise
     except (OSError, ValueError, TypeError):
         _deny("NAMESPACE_UNIT_UNVERIFIED")
+
+
+def _validate_dedicated_master_status(raw: bytes, *, https_port: int) -> None:
+    """Verify the exact root-master capability and credential boundary."""
+    if (type(raw) is not bytes or not 1 <= len(raw) <= 65536
+            or type(https_port) is not int or not 1 <= https_port <= 65535):
+        _deny("NAMESPACE_MASTER_STATUS_REFUSED")
+    keys = {b"Uid", b"Gid", b"CapEff", b"CapPrm", b"CapBnd", b"CapAmb", b"NoNewPrivs"}
+    found = {}
+    for line in raw.splitlines():
+        key, sep, value = line.partition(b":")
+        if key in keys:
+            if not sep or key in found:
+                _deny("NAMESPACE_MASTER_STATUS_REFUSED")
+            found[key] = value.strip()
+    if (set(found) != keys
+            or any(found[k].split() != [b"0"] * 4 for k in (b"Uid", b"Gid"))
+            or found[b"NoNewPrivs"] != b"1"):
+        _deny("NAMESPACE_MASTER_STATUS_REFUSED")
+    # CAP_CHOWN, CAP_KILL, CAP_SETGID, CAP_SETUID, and (only for
+    # a low listener) CAP_NET_BIND_SERVICE. Never add DAC_OVERRIDE.
+    expected = (1 << 0) | (1 << 5) | (1 << 6) | (1 << 7)
+    if https_port < 1024:
+        expected |= 1 << 10
+    for key in (b"CapEff", b"CapPrm", b"CapBnd", b"CapAmb"):
+        if (re.fullmatch(rb"[0-9a-f]{16}", found[key]) is None
+                or int(found[key], 16) != (0 if key == b"CapAmb" else expected)):
+            _deny("NAMESPACE_MASTER_CAPABILITIES_REFUSED")
+
+
+def _sample_dedicated_master_runtime(pid: int, *, https_port: int,
+                                     namespace_identity: tuple[int, int],
+                                     executable_identity: tuple[int, int]) -> tuple:
+    """Read bounded kernel evidence from the observed master, never signal it."""
+    if type(pid) is not int or not 2 <= pid <= 2**31 - 1:
+        _deny("INVALID_MAIN_PID")
+    from repocache.server_protected_state_inspect_v1 import _DIRECTORY_FLAGS
+    with ExitStack() as stack:
+        proc = os.open("/proc", _DIRECTORY_FLAGS)
+        stack.callback(os.close, proc)
+        master = os.open(str(pid), _DIRECTORY_FLAGS, dir_fd=proc)
+        stack.callback(os.close, master)
+        info = os.fstat(master)
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0
+                or info.st_gid != 0 or info.st_mode & 0o022):
+            _deny("NAMESPACE_MASTER_PROCESS_REFUSED")
+        process_identity = (info.st_dev, info.st_ino)
+
+        def read(parent, name, limit):
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK |
+                         os.O_CLOEXEC, dir_fd=parent)
+            try:
+                seen = os.fstat(fd)
+                if not stat.S_ISREG(seen.st_mode) or seen.st_uid != 0:
+                    _deny("NAMESPACE_MASTER_PROC_REFUSED")
+                data = bytearray()
+                while len(data) <= limit:
+                    block = os.read(fd, min(8192, limit + 1 - len(data)))
+                    if not block:
+                        break
+                    data.extend(block)
+                if not data or len(data) > limit:
+                    _deny("NAMESPACE_MASTER_PROC_REFUSED")
+                return bytes(data)
+            finally:
+                os.close(fd)
+
+        def identity_at(name):
+            value = os.stat(name, dir_fd=master)
+            return value.st_dev, value.st_ino
+
+        userns = os.stat("/proc/1/ns/user")
+        if (identity_at("ns/net") != namespace_identity
+                or identity_at("ns/user") != (userns.st_dev, userns.st_ino)
+                or identity_at("exe") != executable_identity):
+            _deny("NAMESPACE_MASTER_BINDING_REFUSED")
+        attr = os.open("attr", _DIRECTORY_FLAGS, dir_fd=master)
+        stack.callback(os.close, attr)
+        domain = read(attr, "current", 4096).rstrip(b"\x00\n")
+        if domain != b"system_u:system_r:repocache_nginx_t:s0":
+            _deny("NAMESPACE_MASTER_DOMAIN_REFUSED")
+        _validate_dedicated_master_status(read(master, "status", 65536),
+                                          https_port=https_port)
+        current = os.stat(str(pid), dir_fd=proc, follow_symlinks=False)
+        if ((current.st_dev, current.st_ino) != process_identity
+                or identity_at("ns/net") != namespace_identity
+                or identity_at("exe") != executable_identity
+                or identity_at("ns/user") != (userns.st_dev, userns.st_ino)):
+            _deny("NAMESPACE_MASTER_BINDING_CHANGED")
+        return process_identity
+
+
+def _inspect_signed_owned_namespace_runtime(*, https_port: int,
+                                            namespace_identity: tuple[int, int],
+                                            executable_identity: tuple[int, int]) -> dict:
+    """Bind the exact signed active unit to its retained dedicated netns.
+
+    Identities must come from the separately authenticated boot/profile and
+    executable receipts under the caller's existing state lock. This checks
+    the master only, not the workers, policy module, storage or TLS; it never
+    authorizes start, stop, reload, kernel mutation or catalog publication.
+    """
+    from repocache.server_native_egress_candidate_v1 import (
+        _fixed_namespace_scope, NativeEgressCandidateError,
+    )
+    if (type(https_port) is not int or not 1 <= https_port <= 65535
+            or any(type(pair) is not tuple or len(pair) != 2
+                   or any(type(value) is not int or value <= 0 for value in pair)
+                   for pair in (namespace_identity, executable_identity))):
+        _deny("NAMESPACE_RUNTIME_INPUT_REFUSED")
+    try:
+        with _fixed_namespace_scope() as (net, identity, recheck):
+            if identity != namespace_identity:
+                _deny("NAMESPACE_MASTER_BINDING_REFUSED")
+            observed = inspect_signed_owned_namespace_unit(https_port=https_port, active=True)
+            pid = observed["main_pid_observed"]
+            def sample():
+                recheck()
+                result = _sample_dedicated_master_runtime(
+                    pid, https_port=https_port, namespace_identity=identity,
+                    executable_identity=executable_identity)
+                recheck()
+                return result
+            first = sample()
+            if (inspect_signed_owned_namespace_unit(
+                    https_port=https_port, active=True) != observed or sample() != first):
+                _deny("NAMESPACE_MASTER_BINDING_CHANGED")
+            return {**observed, "master_process_identity": first,
+                    "master_namespace_identity": identity,
+                    "master_executable_identity": executable_identity,
+                    "runtime_namespace_verified": True,
+                    "runtime_master_domain_verified": True,
+                    "runtime_master_capabilities_verified": True}
+    except EffectiveNginxUnitError:
+        raise
+    except (NativeEgressCandidateError, OSError, TypeError, ValueError, OverflowError):
+        _deny("NAMESPACE_RUNTIME_UNVERIFIED")
 
 
 def inspect_signed_owned_nginx_unit() -> dict[str, Any]:

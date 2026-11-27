@@ -1471,8 +1471,14 @@ try:
                     assert (info.st_dev,info.st_ino)==identity
                     observed=unit.inspect_signed_owned_namespace_unit(https_port=443,active=active)
                     if active:
-                        current=os.stat("/proc/"+str(observed["main_pid_observed"])+"/ns/net")
-                        assert (current.st_dev,current.st_ino)==identity
+                        runtime=unit._inspect_signed_owned_namespace_runtime(
+                            https_port=443,namespace_identity=identity,
+                            executable_identity=inode[:2])
+                        assert runtime["main_pid_observed"]==observed["main_pid_observed"]
+                        assert runtime["runtime_namespace_verified"]
+                        assert runtime["runtime_master_domain_verified"]
+                        assert runtime["runtime_master_capabilities_verified"]
+                        assert not runtime["authorizes_nginx_activation"]
                     assert unit._stage_namespace_dropin_under_lock(
                         root,state,raw,https_port=443,owner_uid=0,owner_gid=0,allow_create=False)==profile
                     assert executable._read_executable_receipt(directory)==receipt

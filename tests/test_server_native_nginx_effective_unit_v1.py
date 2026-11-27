@@ -631,3 +631,87 @@ def test_namespace_profile_refuses_unowned_exact_directory(tmp_path, directory_n
     finally:
         os.close(statefd)
         os.close(rootfd)
+
+
+def _dedicated_status(port, **changes):
+    cap = (1 << 0) | (1 << 5) | (1 << 6) | (1 << 7)
+    if port < 1024:
+        cap |= 1 << 10
+    fields = {"Uid": "0 0 0 0", "Gid": "0 0 0 0",
+              "CapEff": f"{cap:016x}", "CapPrm": f"{cap:016x}",
+              "CapBnd": f"{cap:016x}", "CapAmb": "0000000000000000",
+              "NoNewPrivs": "1"}
+    fields.update(changes)
+    return "".join(f"{key}:\t{value}\n" for key, value in fields.items()).encode()
+
+
+@pytest.mark.parametrize("port", [443, 8008])
+def test_dedicated_master_status_exact_capability_boundary(port):
+    unit._validate_dedicated_master_status(_dedicated_status(port), https_port=port)
+
+
+@pytest.mark.parametrize("changes", [
+    {"Uid": "0 0 1 0"}, {"Gid": "0 0 0 1"}, {"NoNewPrivs": "0"},
+    {"CapEff": "00000000000004e3"}, {"CapBnd": "00000000000004e3"},
+    {"CapPrm": "00000000000004e3"}, {"CapAmb": "0000000000000400"},
+    {"CapEff": "4e1"}, {"CapEff": "00000000000000e1"},
+])
+def test_dedicated_master_status_refuses_credential_or_capability_drift(changes):
+    with pytest.raises(EffectiveNginxUnitError):
+        unit._validate_dedicated_master_status(_dedicated_status(443, **changes), https_port=443)
+
+
+def test_dedicated_master_status_refuses_duplicate_missing_or_oversize():
+    raw = _dedicated_status(443)
+    for bad in (raw + b"Uid: 0 0 0 0\n", raw.split(b"CapAmb:")[0], b"a" * 65537):
+        with pytest.raises(EffectiveNginxUnitError):
+            unit._validate_dedicated_master_status(bad, https_port=443)
+
+
+@pytest.mark.parametrize("fault", ["none", "namespace", "owner", "master", "scope"])
+def test_dedicated_runtime_readback_binds_fixed_namespace_and_exact_unit(monkeypatch, fault):
+    from contextlib import contextmanager
+    from repocache import server_native_egress_candidate_v1 as egress
+    samples = []
+    calls = []
+
+    @contextmanager
+    def scope():
+        def recheck():
+            if fault == "scope" and samples:
+                raise egress.NativeEgressCandidateError("CHANGED")
+        yield 11, (17, 29) if fault != "namespace" else (17, 30), recheck
+
+    def observe(*, https_port, active):
+        assert (https_port, active) == (443, True)
+        calls.append(1)
+        return {"main_pid_observed": 123 if fault != "owner" or len(calls) == 1 else 124,
+                "authorizes_nginx_activation": False,
+                "runtime_selinux_verified": False}
+
+    def sample(pid, **kw):
+        assert pid == 123
+        assert kw == {"https_port": 443, "namespace_identity": (17, 29),
+                      "executable_identity": (31, 41)}
+        samples.append(1)
+        return (51, 61 if fault != "master" or len(samples) == 1 else 62)
+
+    monkeypatch.setattr(egress, "_fixed_namespace_scope", scope)
+    monkeypatch.setattr(unit, "inspect_signed_owned_namespace_unit", observe)
+    monkeypatch.setattr(unit, "_sample_dedicated_master_runtime", sample)
+    def invoke():
+        return unit._inspect_signed_owned_namespace_runtime(
+            https_port=443, namespace_identity=(17, 29), executable_identity=(31, 41))
+    if fault == "none":
+        result = invoke()
+        assert result["master_process_identity"] == (51, 61)
+        assert result["runtime_namespace_verified"]
+        assert result["runtime_master_domain_verified"]
+        assert result["runtime_master_capabilities_verified"]
+        assert not result["authorizes_nginx_activation"]
+        assert not result["runtime_selinux_verified"]
+        assert len(samples) == 2
+    else:
+        with pytest.raises(EffectiveNginxUnitError):
+            invoke()
+        assert len(samples) == {"namespace": 0, "owner": 1, "master": 2, "scope": 1}[fault]

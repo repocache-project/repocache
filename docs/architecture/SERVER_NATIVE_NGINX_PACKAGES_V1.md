@@ -1323,3 +1323,15 @@ mutation, and restore the fixture's original legacy service using explicit
 authenticated recovery after exact profile cleanup. This is candidate kernel
 and recovery evidence only when executed, not installed dedicated activation
 or active upstream ingress authority.
+
+The installed signed worker has an additional read-only active master
+observer. It retains the fixed network namespace descriptor, binds the
+exact signed unit and expected executable inode to the kernel process,
+checks initial-user-namespace membership, the dedicated SELinux master
+domain, root credentials, no-new-privileges and the exact minimal
+capability masks (including low-port binding only when needed), and
+repeats process/unit/namespace observations. The actual enforcing native
+fixture now uses it during the active boot-receipt check. This does not
+prove the effective SELinux policy, worker credentials, storage, listener
+or TLS, which remain independently checked; no start or stop authority
+follows from the observation.
