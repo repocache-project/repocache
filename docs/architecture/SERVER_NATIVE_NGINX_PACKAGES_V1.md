@@ -1274,3 +1274,13 @@ explicit fixture-only start. The existing confined recovery then verifies
 the prior generation and completes catalog publication and WAL removal.
 This adds native evidence for the preparation/composition, not an
 installed inactive recovery entry point or automatic boot provisioner.
+
+A separate internal finalizer now requires the exact withdrawn prior
+resources, the same published v3 WAL, an authenticated active-unit
+witness and actual prior-generation health/listener/TLS observation
+before writing the previous catalog. It verifies the published catalog
+and exact runtime again before clearing the journal. A failed check may
+withdraw only the exact owned catalog while the same WAL and other
+resources remain intact; a foreign change or uncertain unlink never
+produces a successful recovery report. This is not yet wired to the
+installed activation command.

@@ -2627,6 +2627,78 @@ def _prepare_owned_inactive_wal_rollback_locked(
     }
 
 
+def _finish_owned_inactive_wal_rollback_locked(
+    root_fd: int, state_fd: int, nginx_fd: int, public_fd: int, check_layout, *,
+    distribution: str, expected_wal: bytes, expected_unit: bytes,
+    recheck_active_owner,
+) -> dict:
+    """Finalize prepared prior bytes only after an authenticated start.
+
+    The trusted signed installer retains the same state lock, layout and
+    unit identity. No start/stop or reload is performed here. Publication
+    follows proof of the prior generation, exact listener and TLS leaf;
+    an uncertain WAL unlink is never reported as completed recovery.
+    """
+    if (type(distribution) is not str or distribution not in _CA
+            or type(expected_wal) is not bytes
+            or not 1 <= len(expected_wal) <= _MAX_WAL
+            or type(expected_unit) is not bytes or not expected_unit
+            or not callable(recheck_active_owner)):
+        _deny("OWNED_INACTIVE_WAL_INPUT_INVALID")
+    _owned_require_exact_wal(state_fd, expected_wal)
+    old, _ = _decode_owned_wal(expected_wal, distribution=distribution)
+    if _json(expected_wal, limit=_MAX_WAL)["version"] != 3:
+        _deny("OWNED_LIVE_WAL_REQUIRED")
+    snapshot = _validate_owned_resources(old, distribution=distribution)
+    _owned_socket_require_inactive_routes(snapshot)
+    expected = {**old, _CATALOG: None}
+
+    def active_layout():
+        check_layout()
+        _owned_require_exact_wal(state_fd, expected_wal)
+        recheck_active_owner()
+        check_layout()
+        _owned_require_exact_wal(state_fd, expected_wal)
+
+    _owned_live_guard(state_fd, nginx_fd, public_fd, active_layout,
+                      expected_wal, expected)
+    _owned_check_stages_absent(state_fd, nginx_fd, public_fd)
+    identity = _owned_live_observe(root_fd, expected_unit=expected_unit)
+    context = _owned_live_validate(root_fd, state_fd, old)
+    _owned_live_health_bound(root_fd, identity, context, None,
+                            publish=False, expected_unit=expected_unit)
+    _owned_live_guard(state_fd, nginx_fd, public_fd, active_layout,
+                      expected_wal, expected)
+    try:
+        _owned_live_write(state_fd, nginx_fd, public_fd, active_layout,
+                          expected_wal, expected, _CATALOG, old[_CATALOG])
+        _owned_live_health_bound(root_fd, identity, context, old[_CATALOG],
+                                publish=True, expected_unit=expected_unit)
+        if (expected != old
+                or _owned_live_observe(root_fd, expected_unit=expected_unit) != identity
+                or _owned_live_validate(root_fd, state_fd, old) != context):
+            _deny("OWNED_LIVE_RECOVERY_DRIFT")
+        _owned_live_finish(state_fd, nginx_fd, public_fd, active_layout,
+                           expected_wal, expected)
+    except Exception:
+        # A write may have completed before a post-write guard failed.
+        # Withdraw only the exact prior catalog under the same still
+        # published WAL and unchanged non-catalog resources; a missing
+        # or changed journal cannot authorize any compensating effect.
+        current_wal = _read_file(state_fd, _OWNED_WAL, 0, _MAX_WAL)
+        if current_wal == expected_wal:
+            current = _read_owned_resources(state_fd, nginx_fd, public_fd)
+            if current == old:
+                _owned_live_write(state_fd, nginx_fd, public_fd, check_layout,
+                                  expected_wal, current, _CATALOG, None)
+        raise
+    return {
+        "status": "OWNED_INACTIVE_WAL_ROLLBACK_OBSERVED",
+        "prior_generation": None if snapshot is None else snapshot["state_generation"],
+        "recovery_required": False,
+    }
+
+
 def _recover_owned_live_locked(root_fd: int, state_fd: int, nginx_fd: int,
                                public_fd: int, check_layout, *,
                                expected_wal: bytes | None = None) -> dict:

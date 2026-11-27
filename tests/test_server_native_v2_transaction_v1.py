@@ -3243,3 +3243,82 @@ def test_inactive_live_wal_prepare_refuses_before_target_effects(
     if fault == "foreign-stage":
         assert stage.read_bytes() == b"foreign"
     assert not events
+
+
+@pytest.mark.parametrize("fault", ["none", "pre-health", "post-health", "owner-drift",
+                                    "catalog-drift", "wal-unlink"])
+def test_finish_inactive_wal_requires_prior_runtime_and_exact_publication(
+        filesystem, monkeypatch, fault):
+    old = _owned_generation(active=False)
+    new = _owned_generation(2, previous=json.loads(old[V2_STATE]), active=False)
+    withdrawn = {**old, native._CATALOG: None}
+    paths = _owned_fixture_paths(filesystem, withdrawn)
+    root, state, _, _, _ = filesystem
+    wal = native._owned_wal_record(old, new, live=True)
+    record = state / native._OWNED_WAL
+    record.write_bytes(wal)
+    record.chmod(0o600)
+    events = []
+    identity = (123, (1, 2))
+    context = ({}, 1, "a"*64)
+
+    def observe(fd, *, expected_unit):
+        assert fd == root and expected_unit == b"signed"
+        return identity
+
+    def validate(fd, state_fd, resources):
+        assert fd == root and resources == old
+        return context
+
+    def health(fd, observed, checked, catalog, *, publish, expected_unit):
+        assert (fd, observed, checked, expected_unit) == (root, identity, context, b"signed")
+        assert record.read_bytes() == wal
+        assert _fixture_resource_bytes(paths) == (old if publish else withdrawn)
+        assert catalog == (old[native._CATALOG] if publish else None)
+        events.append(publish)
+        if fault == "pre-health" and not publish:
+            raise native.NativeV2TransactionError("PRE_HEALTH")
+        if fault == "post-health" and publish:
+            raise native.NativeV2TransactionError("POST_HEALTH")
+        if fault == "catalog-drift" and publish:
+            paths[native._CATALOG].write_bytes(b"foreign")
+            raise native.NativeV2TransactionError("CATALOG_CHANGED")
+
+    def owner():
+        if fault == "owner-drift" and paths[native._CATALOG].exists():
+            raise native.NativeV2TransactionError("OWNER_CHANGED")
+
+    monkeypatch.setattr(native, "_owned_live_observe", observe)
+    monkeypatch.setattr(native, "_owned_live_validate", validate)
+    monkeypatch.setattr(native, "_owned_live_health_bound", health)
+    if fault == "wal-unlink":
+        actual_unlink = native._unlink_known
+
+        def unlink(*args):
+            actual_unlink(*args)
+            if args[1] == native._OWNED_WAL:
+                raise OSError("uncertain fsync after WAL unlink")
+        monkeypatch.setattr(native, "_unlink_known", unlink)
+
+    with native._owned_fixture_layout(root, recovering=True) as layout:
+        def finish():
+            return native._finish_owned_inactive_wal_rollback_locked(
+                root, *layout, distribution="debian", expected_wal=wal,
+                expected_unit=b"signed", recheck_active_owner=owner)
+        if fault == "none":
+            assert finish() == {
+                "status": "OWNED_INACTIVE_WAL_ROLLBACK_OBSERVED",
+                "prior_generation": 1, "recovery_required": False,
+            }
+        else:
+            with pytest.raises((native.NativeV2TransactionError, OSError)):
+                finish()
+
+    if fault in ("none", "wal-unlink"):
+        assert _fixture_resource_bytes(paths) == old and not record.exists()
+    elif fault == "catalog-drift":
+        assert paths[native._CATALOG].read_bytes() == b"foreign"
+        assert record.read_bytes() == wal
+    else:
+        assert _fixture_resource_bytes(paths) == withdrawn and record.read_bytes() == wal
+    assert events == ([False] if fault in ("pre-health", "owner-drift") else [False, True])
