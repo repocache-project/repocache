@@ -296,6 +296,27 @@ def _dnf4_fixture_guard(root: Path) -> None:
         os.close(fd)
 
 
+def _dnf4_check_lock_directory(root: Path, directory: Path, *, pinned=None) -> None:
+    """Rewalk the fixed private directory without following symlinks."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    with contextlib.ExitStack() as opened:
+        current = os.open(root, flags)
+        opened.callback(os.close, current)
+        info = os.fstat(current)
+        _require_dnf4(info.st_uid == info.st_gid == 0 and
+                      stat.S_ISDIR(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o700)
+        for segment in directory.relative_to(root).parts:
+            current = os.open(segment, flags, dir_fd=current)
+            opened.callback(os.close, current)
+            info = os.fstat(current)
+            _require_dnf4(stat.S_ISDIR(info.st_mode) and info.st_uid == 0
+                          and not info.st_mode & 0o022)
+        if pinned is not None:
+            held = os.fstat(pinned)
+            _require_dnf4((info.st_dev, info.st_ino, info.st_uid, info.st_gid, info.st_mode) ==
+                          (held.st_dev, held.st_ino, held.st_uid, held.st_gid, held.st_mode))
+
+
 @contextlib.contextmanager
 def _dnf4_private_claim(root: Path):
     """Fixture-only atomic live-PID publication plus real RPMDB kernel locks.
@@ -308,13 +329,7 @@ def _dnf4_private_claim(root: Path):
     lock_dir = root / "var/lib/dnf"
     rpm_dir = root / "usr/lib/sysimage/rpm"
     for directory in (lock_dir, rpm_dir):
-        _require_dnf4(directory.resolve(strict=True) == directory)
-        # The sticky /var/tmp parent is outside this protected private root.
-        for parent in (directory, *directory.parents):
-            if parent == root.parent:
-                break
-            info = parent.lstat()
-            _require_dnf4(stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022)
+        _dnf4_check_lock_directory(root, directory)
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
     leaf = "rpmdb_lock.pid"
     staged = ".repocache-ci-rpmdb-lock.stage"
@@ -324,8 +339,12 @@ def _dnf4_private_claim(root: Path):
     def identity(info):
         return (info.st_dev, info.st_ino, info.st_mode, info.st_uid,
                 info.st_gid, info.st_nlink, info.st_size)
+    def check_directories():
+        _dnf4_check_lock_directory(root, lock_dir, pinned=dirfd)
+        _dnf4_check_lock_directory(root, rpm_dir, pinned=rpmfd)
     def recheck():
         _require_dnf4(os.getpid() == int(expected))
+        check_directories()
         _require_dnf4(identity(os.fstat(fd)) == claim)
         _require_dnf4(identity(os.stat(leaf, dir_fd=dirfd, follow_symlinks=False)) == claim)
         _require_dnf4(os.pread(fd, 32, 0) == expected)
@@ -333,13 +352,11 @@ def _dnf4_private_claim(root: Path):
         _require_dnf4(identity(kernel_info) == rpm_identity)
         _require_dnf4(identity(os.stat(".rpm.lock", dir_fd=rpmfd, follow_symlinks=False)) == rpm_identity)
         locks._require_held_kernel_locks(kernel, kernel_info, int(expected))
-        for path, pinned in ((lock_dir, dirfd), (rpm_dir, rpmfd)):
-            actual = path.lstat()
-            held = os.fstat(pinned)
-            _require_dnf4((actual.st_dev, actual.st_ino) == (held.st_dev, held.st_ino))
+        check_directories()
     try:
         dirfd = os.open(lock_dir, flags)
         rpmfd = os.open(rpm_dir, flags)
+        check_directories()
         # Atomic no-replace avoids publishing an empty PID file for another
         # native process to claim before our live owner bytes are durable.
         if os.path.lexists(lock_dir / leaf) or os.path.lexists(lock_dir / staged):
@@ -370,6 +387,9 @@ def _dnf4_private_claim(root: Path):
         # Remove only this process's exact PID record; no stale-lock GC.
         try:
             if published and fd is not None:
+                # A changed ancestor can invalidate the ownership boundary
+                # even when the retained PID inode and bytes still match.
+                check_directories()
                 named = os.stat(leaf, dir_fd=dirfd, follow_symlinks=False)
                 if identity(named) != claim or os.pread(fd, 32, 0) != expected:
                     raise RuntimeError("Foreign DNF4 PID record; retained for review")

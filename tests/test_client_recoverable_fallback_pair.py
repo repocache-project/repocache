@@ -232,3 +232,48 @@ def test_pending_journal_name_uses_validated_id():
     assert lab._pending_journal_name("a" * 32) == ".pair-" + "a" * 32 + ".pending"
     with pytest.raises(lab.PairRefused, match="Invalid transaction identifier"):
         lab._pending_journal_name("../unsafe")
+
+
+
+@pytest.mark.parametrize("fault", ["none", "root-mode", "parent-mode",
+                                    "leaf-mode", "symlink", "replacement", "owner"])
+def test_dnf4_rewalk_checks_private_directory_and_retained_identity(tmp_path, monkeypatch, fault):
+    root = tmp_path / "private"
+    root.mkdir(mode=0o700)
+    parent = root / "var"
+    parent.mkdir(mode=0o755)
+    directory = parent / "lib"
+    directory.mkdir(mode=0o755)
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    real_fstat = os.fstat
+    # CI need not run as root: model root ownership only for this fixture's
+    # directory stat results; modes and inode identities remain real.
+    def fixture_fstat(number):
+        info = real_fstat(number)
+        values = list(info)
+        values[4] = 1 if fault == "owner" and info.st_ino == parent.stat().st_ino else 0
+        values[5] = 0
+        return os.stat_result(values)
+
+    try:
+        if fault == "root-mode":
+            root.chmod(0o755)
+        elif fault == "parent-mode":
+            parent.chmod(0o775)
+        elif fault == "leaf-mode":
+            directory.chmod(0o777)
+        elif fault == "symlink":
+            directory.rename(parent / "previous")
+            directory.symlink_to(parent / "previous", target_is_directory=True)
+        elif fault == "replacement":
+            directory.rename(parent / "previous")
+            directory.mkdir(mode=0o755)
+        with monkeypatch.context() as patch:
+            patch.setattr(lab.os, "fstat", fixture_fstat)
+            if fault == "none":
+                lab._dnf4_check_lock_directory(root, directory, pinned=fd)
+            else:
+                with pytest.raises((lab.locks.LockInspectionRefused, OSError)):
+                    lab._dnf4_check_lock_directory(root, directory, pinned=fd)
+    finally:
+        os.close(fd)
