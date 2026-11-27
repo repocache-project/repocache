@@ -3118,6 +3118,7 @@ def test_fresh_boot_namespace_retains_committed_resources_before_creation(
         assert kw["namespace_identity"] == (17, 29)
         assert kw["generation"] == (0 if kind == "bootstrap" else 1)
         assert kw["allow_prepare"] and not kw["allow_boot_rollover"]
+        assert kw["expected_previous_receipt"] is None
         kw["recheck_owned"]()
         calls.append("prepare")
         return {"boot_id": boot, "namespace_device": 17, "namespace_inode": 29}

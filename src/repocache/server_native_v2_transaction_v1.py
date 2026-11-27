@@ -1826,7 +1826,8 @@ def _create_owned_committed_boot_egress_locked(
             profile_receipt_sha256=profile_receipt_sha256,
             executable_receipt_sha256=executable_receipt_sha256,
             recheck_owned=owned, allow_prepare=True,
-            allow_boot_rollover=allow_boot_rollover)
+            allow_boot_rollover=allow_boot_rollover,
+            expected_previous_receipt=before[1])
         owned()
         if (result["boot_id"] != before[0]
                 or (result["namespace_device"], result["namespace_inode"]) != identity):

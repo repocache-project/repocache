@@ -839,3 +839,65 @@ def test_loopback_only_readback_requires_native_link_shape(monkeypatch, fault):
     else:
         with pytest.raises(NativeEgressCandidateError, match="LOOPBACK_REFUSED"):
             egress._require_loopback_only(42, up=True)
+
+
+@pytest.mark.parametrize("fault", ["first", "explicit-missing", "stale", "implicit",
+                                    "same-boot", "generation", "profile", "executable",
+                                    "rules", "pending", "foreign-archive", "orphan-history"])
+def test_fresh_boot_intent_preflight_is_read_only(tmp_path, monkeypatch, fault):
+    import os
+    from repocache import server_native_egress_candidate_v1 as egress
+    from repocache.server_protected_state_store_v1 import _canonical
+
+    old_boot = "1f8f3d9c-17c2-4a45-a013-1d781b9796af"
+    new_boot = "2f8f3d9c-17c2-4a45-a013-1d781b9796af"
+    boot = old_boot if fault == "same-boot" else new_boot
+    monkeypatch.setattr(egress, "_current_boot_id", lambda: boot)
+    rules = egress.render_bootstrap_egress_candidate(worker_uid=33)["nft_candidate"]
+    previous = {
+        "schema_version": 1, "boot_id": old_boot,
+        "namespace_device": 17, "namespace_inode": 29,
+        "generation": 0, "generation_manifest_sha256": "a"*64,
+        "profile_receipt_sha256": "b"*64, "executable_receipt_sha256": "c"*64,
+        "ruleset_sha256": hashlib.sha256(rules.encode("ascii")).hexdigest(),
+        "authorizes_nginx_activation": False,
+    }
+    for kind, field, value in (
+        ("generation", "generation", 1), ("profile", "profile_receipt_sha256", "d"*64),
+        ("executable", "executable_receipt_sha256", "e"*64), ("rules", "ruleset_sha256", "f"*64),
+    ):
+        if fault == kind:
+            previous[field] = value
+    raw = _canonical(previous, limit=egress._BOOT_EGRESS_RECEIPT_MAX)
+    receipt = tmp_path / egress._BOOT_EGRESS_RECEIPT
+    archive = tmp_path / (egress._BOOT_EGRESS_HISTORY_PREFIX + old_boot)
+    stage = tmp_path / egress._BOOT_EGRESS_ROLLOVER
+
+    def place(path, content):
+        path.write_bytes(content)
+        path.chmod(0o600)
+
+    if fault not in ("first", "explicit-missing", "orphan-history"):
+        place(receipt, raw)
+    if fault == "pending":
+        place(stage, b"foreign")
+    if fault == "foreign-archive":
+        place(archive, b"foreign")
+    if fault == "orphan-history":
+        place(archive, raw)
+    before = {path.name: path.read_bytes() for path in tmp_path.iterdir()}
+    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        def invoke():
+            return egress._fresh_boot_egress_intent_locked(
+                fd, rules, generation=0, generation_manifest_sha256="a"*64,
+                profile_receipt_sha256="b"*64, executable_receipt_sha256="c"*64,
+                allow_boot_rollover=fault not in ("first", "implicit", "orphan-history"))
+        if fault in ("first", "stale"):
+            assert invoke() == (boot, raw if fault == "stale" else None)
+        else:
+            with pytest.raises(NativeEgressCandidateError):
+                invoke()
+        assert {path.name: path.read_bytes() for path in tmp_path.iterdir()} == before
+    finally:
+        os.close(fd)

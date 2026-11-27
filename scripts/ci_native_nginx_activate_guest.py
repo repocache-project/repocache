@@ -2126,29 +2126,31 @@ try:
                     assert saved and hashlib.sha256(saved).hexdigest()==prior["policy"]["receipt_sha256"]
                     assert json.loads(saved)["boot_id"]==prior["policy"]["boot_id"]
                     assert egress._current_boot_id()!=prior["policy"]["boot_id"]
-                # Fresh creation and exact policy preparation retain the
-                # same protected lock and stopped-service witness.
-                creation=egress._create_fixed_loopback_namespace_locked(recheck_owned=stopped)
-                net_identity=namespace_identity()
-                assert (creation["namespace_device"],creation["namespace_inode"])==net_identity
-                assert creation["empty_ruleset_observed"] and creation["loopback_only_observed"]
+                def fresh(rollover=False):
+                    return tx._create_owned_committed_boot_egress_locked(
+                        root,state,distribution="almalinux",worker_uid=uid,
+                        profile_receipt_sha256=observed_profile["receipt_sha256"],
+                        executable_receipt_sha256=hashlib.sha256(receipt).hexdigest(),
+                        recheck_stopped_owner=stopped,allow_boot_rollover=rollover)
                 if action=="rollover":
-                    for allow in (False,True):
-                        try:
-                            policy(allow)
-                        except egress.NativeEgressCandidateError as exc:
-                            assert "BOOT_RECEIPT_MISMATCH" in str(exc)
-                        else:
-                            raise AssertionError("Old boot was adopted without explicit rollover")
-                    result=policy(True,rollover=True)
+                    try:
+                        fresh()
+                    except egress.NativeEgressCandidateError as exc:
+                        assert "BOOT_RECEIPT_MISMATCH" in str(exc)
+                    else:
+                        raise AssertionError("Old boot was adopted without explicit rollover")
+                    assert not os.path.lexists("/run/netns/repocache-nginx")
+                    result=fresh(rollover=True)
                     archive=egress._BOOT_EGRESS_HISTORY_PREFIX+prior["policy"]["boot_id"]
                     assert egress._read_boot_egress_receipt(state,0,0,name=archive)==saved
                     assert egress._read_boot_egress_receipt(state,0,0,name=egress._BOOT_EGRESS_ROLLOVER) is None
                 else:
-                    result=policy(True)
+                    result=fresh()
+                net_identity=namespace_identity()
+                assert (result["namespace_device"],result["namespace_inode"])==net_identity
                 assert result==policy(False)
                 assert result==policy(True)
-                assert result["boot_id"]==creation["boot_id"]
+                assert result["boot_id"]==egress._current_boot_id()
             elif action=="verify":
                 net_identity=namespace_identity()
                 result=policy(False)

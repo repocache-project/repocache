@@ -888,12 +888,16 @@ def _rollover_boot_egress_receipt_locked(
         raise NativeEgressCandidateError("NATIVE_EGRESS_BOOT_ROLLOVER_CHANGED")
 
 
+_UNSPECIFIED_BOOT_RECEIPT = object()
+
+
 def _prepare_boot_egress_locked(
     root_fd: int, state_fd: int, proposed: str, *,
     namespace_identity: tuple[int, int], generation: int,
     generation_manifest_sha256: str, profile_receipt_sha256: str,
     executable_receipt_sha256: str, recheck_owned, allow_prepare: bool,
     allow_boot_rollover: bool = False,
+    expected_previous_receipt: bytes | None | object = _UNSPECIFIED_BOOT_RECEIPT,
 ) -> dict[str, Any]:
     """Bind initial namespace rules to a durable, boot-specific intent.
 
@@ -929,7 +933,10 @@ def _prepare_boot_egress_locked(
                                      executable_receipt_sha256))
                 or not callable(recheck_owned) or type(allow_prepare) is not bool
                 or type(allow_boot_rollover) is not bool
-                or (allow_boot_rollover and not allow_prepare)):
+                or (allow_boot_rollover and not allow_prepare)
+                or (expected_previous_receipt is not _UNSPECIFIED_BOOT_RECEIPT
+                    and expected_previous_receipt is not None
+                    and type(expected_previous_receipt) is not bytes)):
             raise NativeEgressCandidateError("NATIVE_EGRESS_BOOT_INPUT_REFUSED")
         owner, group = os.geteuid(), os.getegid()
         with ExitStack() as stack:
@@ -977,6 +984,9 @@ def _prepare_boot_egress_locked(
 
             guard()
             saved = receipt()
+            if (expected_previous_receipt is not _UNSPECIFIED_BOOT_RECEIPT
+                    and saved != expected_previous_receipt):
+                raise NativeEgressCandidateError("NATIVE_EGRESS_BOOT_RECEIPT_CHANGED")
             observed = _read_namespace_rules(net)
             if type(observed) is not str:
                 raise NativeEgressCandidateError("NATIVE_EGRESS_BOOT_RULES_REFUSED")

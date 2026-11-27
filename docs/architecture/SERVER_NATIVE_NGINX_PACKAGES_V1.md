@@ -1220,7 +1220,8 @@ release/profile/resource hashes. After the kernel reboot it requires a
 different boot UUID, no existing fixed namespace, an inactive disabled
 service and unchanged committed resources. The signed worker explicitly
 recreates the empty loopback-only namespace and rolls over the exact
-prior receipt only after default and verify-only stale-boot refusal;
+prior receipt only after default stale-boot refusal without creating a
+namespace;
 it verifies the archived prior bytes and current policy. The fixture
 binds the native package completion receipt and hashes of stateless host
 firewall rules and SELinux booleans across the actual reboot, before any
@@ -1239,6 +1240,8 @@ preparation. It refuses active destinations, pending WAL/stages,
 unverified owner or changed boot intent before policy preparation.
 The read-only intent preflight checks prior canonical bindings and
 requires explicit stale-boot rollover before any new namespace is
-created; ambiguous pending rollover and same-boot creation remain
+created; the observed previous receipt is compared again at the policy
+mutation boundary. The signed native reboot witness exercises this
+composition. Ambiguous pending rollover and same-boot creation remain
 refused. This internal path requires an authenticated stopped-service
 caller and grants no installed dispatch or service start authority.
