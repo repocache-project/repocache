@@ -230,7 +230,8 @@ assert "recoverable_fallback_pair_lab" not in sys.modules
         print("PASS: authenticated readback refuses stray stage in terminal journal", flush=True)
 
 
-def _debian_fixture(root: Path) -> None:
+def _debian_fixture(root: Path, *, withdrawal: str | None = None) -> None:
+    assert withdrawal in (None, "companion", "source")
     source, _, lock, state = build(root, "apt")
     original = _snapshot(source)
     old = state / ("candidate-" + IDENT + ".json")
@@ -309,7 +310,44 @@ def _debian_fixture(root: Path) -> None:
             assert not list(source.parent.glob(".repocache-atomic-*"))
         catalog.write_text(json.dumps({"schema": 1, "repositories": [
             {"upstream": record["upstream"], "cache": route}]}))
-        # Kill after actual private source publication while both authenticated
+        if withdrawal is not None:
+            # Change only the private HTTPS catalog at a durable publication
+            # boundary; the next real authenticated fetch must refuse it.
+            original_crash = pair._crash
+            observed = []
+            def withdraw_at(active, phase):
+                if phase == withdrawal:
+                    observed.append(_snapshot(source))
+                    catalog.write_text(json.dumps({"schema": 1, "repositories": []}))
+            pair._crash = withdraw_at
+            try:
+                try:
+                    pair.apply_retaining_apt_companion_sandbox(root, ident)
+                except pair.PairRefused as exc:
+                    assert "exact local transaction restored" in str(exc), exc
+                else:
+                    raise AssertionError("Mid-transaction catalog withdrawal committed")
+            finally:
+                pair._crash = original_crash
+            assert len(observed) == 1
+            assert (observed[0][0] != original[0]) == (withdrawal == "source")
+            restored = _snapshot(source)
+            assert restored[0] == original[0]
+            assert restored[3:6] == original[3:6] and restored[-1] == original[-1]
+            if withdrawal == "companion":
+                assert restored[1:3] == original[1:3]
+            mirror = root / ("etc/apt/mirrors/repocache-" + ident + ".list")
+            assert mirror.read_bytes() == (record["upstream"] + "\tpriority:1\n").encode("ascii")
+            assert not list(root.rglob(".repocache-atomic-*"))
+            _signed_recovery_readback(
+                root, ident, platform="debian13", phase="restored",
+                source_state="original" if withdrawal == "companion" else "restored",
+                companion_state="upstream-only")
+            assert pair.recover_sandbox(root, ident)["status"] == "restored"
+            print("PASS: real HTTPS catalog withdrawal after " + withdrawal +
+                  " publication compensated locally; no server revocation claim", flush=True)
+            return
+        # Kill after actual private source publication while authenticated
         # route checks succeeded. The parent will recover with server offline.
         pid = os.fork()
         if pid == 0:
@@ -787,6 +825,10 @@ def _run_private_fixtures(platform: str) -> None:
             probe_stale_reader()
         else:
             _alma_label_refusal(root)
+    if platform == "debian13":
+        for withdrawal in ("companion", "source"):
+            with tempfile.TemporaryDirectory(prefix="repocache-booted-withdraw-", dir="/tmp") as work:
+                _debian_fixture(Path(work), withdrawal=withdrawal)
     if platform == "almalinux10":
         # Native raw lookup returned ENOENT on both private temp locations.
         # Use a test-only local file-context rule, not a production bypass.
