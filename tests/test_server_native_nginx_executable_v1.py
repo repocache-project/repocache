@@ -306,3 +306,77 @@ def test_dedicated_label_before_publish_and_receipt_binding(tmp_path, monkeypatc
     finally:
         os.close(vendor)
         os.close(parent)
+
+
+@pytest.mark.skipif(os.geteuid() != 0 or os.getegid() != 0, reason="private root fixture")
+@pytest.mark.parametrize("fault", ["none", "missing", "receipt-pin", "release", "package",
+                                    "payload", "binary", "foreign-field", "pending",
+                                    "foreign-inode", "metadata"])
+def test_readonly_executable_receipt_reuses_exact_placement_contract(tmp_path, fault):
+    from repocache import server_native_nginx_executable_v1 as candidate
+    import json
+    source = tmp_path / "vendor"
+    source.write_bytes(b"synthetic authenticated native executable")
+    source.chmod(0o755)
+    owned = tmp_path / "owned"
+    owned.mkdir(mode=0o700)
+    opts = dict(distribution="debian", package_identity="nginx:amd64=1.2-3",
+                native_payload_sha256="a"*64, release_source_sha="b"*40,
+                release_archive_sha256="c"*64,
+                authenticated_sha256=hashlib.sha256(source.read_bytes()).hexdigest())
+    parent = os.open(owned, os.O_RDONLY | os.O_DIRECTORY)
+    vendor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        report = candidate.stage_nginx_candidate_with_receipt(parent, vendor, **opts)
+        options = {**opts, "expected_receipt_sha256": report["receipt_sha256"]}
+        receipt = owned / candidate._RECEIPT
+        leaf = owned / "nginx"
+        if fault == "missing":
+            receipt.unlink()
+        elif fault == "receipt-pin":
+            options["expected_receipt_sha256"] = "f"*64
+        elif fault == "release":
+            options["release_source_sha"] = "d"*40
+        elif fault == "package":
+            options["package_identity"] = "nginx:amd64=1.2-4"
+        elif fault == "payload":
+            options["native_payload_sha256"] = "d"*64
+        elif fault == "binary":
+            options["authenticated_sha256"] = "e"*64
+        elif fault == "foreign-field":
+            record = json.loads(receipt.read_bytes())
+            record["unexpected"] = False
+            receipt.write_bytes(json.dumps(record, sort_keys=True, separators=(",", ":")).encode("ascii"))
+            options["expected_receipt_sha256"] = hashlib.sha256(receipt.read_bytes()).hexdigest()
+        elif fault == "pending":
+            (owned / candidate._PENDING).write_bytes(b"foreign")
+        elif fault == "foreign-inode":
+            other = owned / "other"
+            other.write_bytes(leaf.read_bytes())
+            other.chmod(0o755)
+            os.replace(other, leaf)
+        elif fault == "metadata":
+            info = leaf.stat()
+            os.utime(leaf, ns=(info.st_atime_ns, info.st_mtime_ns + 1000000000))
+
+        def snapshot():
+            return {p.name: (p.read_bytes(), p.stat().st_ino, p.stat().st_mtime_ns,
+                             p.stat().st_ctime_ns) for p in owned.iterdir()}
+
+        before = snapshot()
+        if fault == "none":
+            verified = candidate.verify_nginx_candidate_receipt(parent, **options)
+            assert verified["status"] == "NGINX_EXECUTABLE_RECEIPT_VERIFIED"
+            assert verified["receipt_sha256"] == report["receipt_sha256"]
+            assert verified["executable_identity"][:2] == (report["device"], report["inode"])
+            assert verified["receipt_matches_owned_inode"]
+            assert not verified["authorizes_nginx_activation"]
+            assert not verified["runtime_selinux_policy_verified"]
+        else:
+            with pytest.raises(NativeExecutableCandidateError):
+                candidate.verify_nginx_candidate_receipt(parent, **options)
+        assert snapshot() == before
+        assert source.read_bytes() == b"synthetic authenticated native executable"
+    finally:
+        os.close(vendor)
+        os.close(parent)

@@ -343,26 +343,13 @@ def _read_executable_receipt(directory: int) -> bytes | None:
         os.close(fd)
 
 
-def stage_nginx_candidate_with_receipt(
-    directory: int, vendor_fd: int, *, distribution: str, package_identity: str,
-    native_payload_sha256: str, authenticated_sha256: str,
-    release_source_sha: str, release_archive_sha256: str,
-    dedicated_policy_sha256: str | None = None,
-) -> dict:
-    """Bind candidate inode to independently authenticated package/release.
-
-    Internal root-only operation under the caller's retained owned
-    placement transaction. Neither inputs nor receipt independently grant
-    trust; caller verifies the package and release on each invocation.
-    A crash before complete receipt publication leaves a refused unowned
-    or incomplete state, never an automatically adopted executable.
-    """
-    from repocache.server_protected_state_store_v1 import (
-        ProtectedStateStoreError, _canonical, _json, _write_exclusive,
-    )
+def _expected_candidate_receipt(*, distribution: str, package_identity: str,
+                                native_payload_sha256: str, authenticated_sha256: str,
+                                release_source_sha: str, release_archive_sha256: str,
+                                dedicated_policy_sha256: str | None) -> dict:
+    """Closed identity fields shared by placement and read-only observation."""
     if (os.getresuid() != (0, 0, 0) or os.getresgid() != (0, 0, 0)
-            or type(directory) is not int or type(vendor_fd) is not int
-            or directory == vendor_fd or type(package_identity) is not str
+            or type(package_identity) is not str
             or type(distribution) is not str or distribution not in ("debian", "almalinux")
             or (distribution == "debian" and
                 (not package_identity.startswith("nginx:amd64=")
@@ -386,10 +373,106 @@ def stage_nginx_candidate_with_receipt(
         "release_archive_sha256": release_archive_sha256,
         "authorizes_nginx_activation": False,
     }
-    dedicated = dedicated_policy_sha256 is not None
-    if dedicated:
+    if dedicated_policy_sha256 is not None:
         expected.update({"dedicated_policy_sha256": dedicated_policy_sha256,
                          "executable_context": _EXEC_CONTEXT.decode("ascii")})
+    return expected
+
+
+def verify_nginx_candidate_receipt(
+    directory: int, *, expected_receipt_sha256: str,
+    distribution: str, package_identity: str, native_payload_sha256: str,
+    authenticated_sha256: str, release_source_sha: str,
+    release_archive_sha256: str, dedicated_policy_sha256: str | None = None,
+) -> dict:
+    """Read-only verification of an independently pinned placement receipt.
+
+    The caller must authenticate the source/package identity and the
+    expected receipt digest independently, retain the owned directory and
+    placement lock, and separately verify policy, storage and service
+    state. Neither this primitive nor the receipt authorizes activation.
+    No network, package action, stage repair or equal-byte adoption.
+    """
+    from repocache.server_protected_state_store_v1 import (
+        ProtectedStateStoreError, _canonical, _json,
+    )
+    if (type(directory) is not int or type(expected_receipt_sha256) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", expected_receipt_sha256) is None):
+        _deny("RECEIPT_INPUT_REFUSED")
+    expected = _expected_candidate_receipt(
+        distribution=distribution, package_identity=package_identity,
+        native_payload_sha256=native_payload_sha256,
+        authenticated_sha256=authenticated_sha256,
+        release_source_sha=release_source_sha,
+        release_archive_sha256=release_archive_sha256,
+        dedicated_policy_sha256=dedicated_policy_sha256)
+    dedicated = dedicated_policy_sha256 is not None
+    try:
+        directory_identity = _directory(directory)
+        raw = _read_executable_receipt(directory)
+        if (raw is None or hashlib.sha256(raw).hexdigest() != expected_receipt_sha256
+                or _named(directory, _PENDING) is not None):
+            _deny("RECEIPT_REFUSED")
+        record = _json(raw, limit=_RECEIPT_MAX)
+        metadata = ("device", "inode", "size", "mtime_ns", "ctime_ns")
+        if (type(record) is not dict or set(record) != set(expected) | set(metadata)
+                or _canonical(record, limit=_RECEIPT_MAX) != raw
+                or any(type(record[key]) is not type(value) or record[key] != value
+                       for key, value in expected.items())
+                or any(type(record[key]) is not int for key in metadata)
+                or record["device"] != directory_identity[0]
+                or record["inode"] <= 0):
+            _deny("RECEIPT_REFUSED")
+        before = _verify_leaf(directory, authenticated_sha256, dedicated_selinux=dedicated)
+        if (before[:2] != (record["device"], record["inode"])
+                or before[6:] != (record["size"], record["mtime_ns"], record["ctime_ns"])):
+            _deny("RECEIPT_CHANGED")
+        if (_directory(directory) != directory_identity
+                or _read_executable_receipt(directory) != raw
+                or _verify_leaf(directory, authenticated_sha256, dedicated_selinux=dedicated) != before
+                or _named(directory, _PENDING) is not None):
+            _deny("RECEIPT_CHANGED")
+        return {"status": "NGINX_EXECUTABLE_RECEIPT_VERIFIED",
+                "receipt_sha256": expected_receipt_sha256,
+                "executable_identity": before,
+                "receipt_matches_owned_inode": True,
+                "dedicated_executable_label_observed": dedicated,
+                "runtime_selinux_policy_verified": False,
+                "authorizes_nginx_activation": False}
+    except NativeExecutableCandidateError:
+        raise
+    except (ProtectedStateStoreError, OSError, ValueError, TypeError, RecursionError):
+        _deny("RECEIPT_REFUSED")
+
+
+def stage_nginx_candidate_with_receipt(
+    directory: int, vendor_fd: int, *, distribution: str, package_identity: str,
+    native_payload_sha256: str, authenticated_sha256: str,
+    release_source_sha: str, release_archive_sha256: str,
+    dedicated_policy_sha256: str | None = None,
+) -> dict:
+    """Bind candidate inode to independently authenticated package/release.
+
+    Internal root-only operation under the caller's retained owned
+    placement transaction. Neither inputs nor receipt independently grant
+    trust; caller verifies the package and release on each invocation.
+    A crash before complete receipt publication leaves a refused unowned
+    or incomplete state, never an automatically adopted executable.
+    """
+    from repocache.server_protected_state_store_v1 import (
+        ProtectedStateStoreError, _canonical, _json, _write_exclusive,
+    )
+    if (type(directory) is not int or type(vendor_fd) is not int
+            or directory == vendor_fd):
+        _deny("RECEIPT_INPUT_REFUSED")
+    expected = _expected_candidate_receipt(
+        distribution=distribution, package_identity=package_identity,
+        native_payload_sha256=native_payload_sha256,
+        authenticated_sha256=authenticated_sha256,
+        release_source_sha=release_source_sha,
+        release_archive_sha256=release_archive_sha256,
+        dedicated_policy_sha256=dedicated_policy_sha256)
+    dedicated = dedicated_policy_sha256 is not None
     try:
         identity = _directory(directory)
         raw = _read_executable_receipt(directory)

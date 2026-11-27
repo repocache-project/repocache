@@ -2140,23 +2140,20 @@ assert candidate.__loader__.archive == "/usr/libexec/repocache/server-control-wo
 report,pins=json.load(sys.stdin)
 directory=os.open("/usr/libexec/repocache",os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
 try:
-    raw=candidate._read_executable_receipt(directory)
-    assert hashlib.sha256(raw).hexdigest() == report["receipt_sha256"]
-    record=json.loads(raw)
-    assert record["release_source_sha"] == pins["commit"]
-    assert record["release_archive_sha256"] == pins["archive_sha256"]
     dedicated=report["dedicated_policy_sha256"] is not None
-    if dedicated:
-        policy=candidate.signed_owned_nginx_policy_candidate()
-        assert record["dedicated_policy_sha256"] == policy["policy_sha256"] == report["dedicated_policy_sha256"]
-        assert record["executable_context"] == policy["executable_context"]
-    else:
-        assert "dedicated_policy_sha256" not in record and "executable_context" not in record
-    observed=candidate._verify_leaf(directory,record["executable_sha256"],dedicated_selinux=dedicated)
-    assert observed[:2] == (record["device"],record["inode"])
-    assert observed[6:] == (record["size"],record["mtime_ns"],record["ctime_ns"])
-    assert candidate._named(directory,candidate._PENDING) is None
-    assert record["authorizes_nginx_activation"] is False
+    policy=candidate.signed_owned_nginx_policy_candidate()["policy_sha256"] if dedicated else None
+    assert policy==report["dedicated_policy_sha256"]
+    observed=candidate.verify_nginx_candidate_receipt(
+        directory,expected_receipt_sha256=report["receipt_sha256"],
+        distribution="almalinux" if dedicated else "debian",
+        package_identity=report["package_identity"],
+        native_payload_sha256=report["native_payload_sha256"],
+        authenticated_sha256=report["sha256"],
+        release_source_sha=pins["commit"],release_archive_sha256=pins["archive_sha256"],
+        dedicated_policy_sha256=policy)
+    assert observed["executable_identity"][:2]==(report["device"],report["inode"])
+    assert observed["receipt_matches_owned_inode"]
+    assert not observed["authorizes_nginx_activation"]
 finally:
     os.close(directory)
 """

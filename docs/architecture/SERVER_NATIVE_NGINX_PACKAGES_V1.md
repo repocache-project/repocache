@@ -1361,3 +1361,11 @@ adopt a receipt, roll over another boot, change the generation, or publish
 the catalog. The native pending-WAL reboot fixture injects SIGKILL at
 this boundary, proves that verify-only refuses the empty policy, resumes
 the exact receipt, and then exercises the subsequent real reboot.
+
+The reboot readback reuses a closed, read-only executable receipt verifier
+with independently pinned receipt, package, binary and signed release
+identity. Placement and readback share the exact receipt identity fields.
+Readback does not create, repair, relabel or adopt an executable, and
+rejects absent/foreign/pending evidence and inode or metadata drift.
+The native reboot fixture supplies its separately authenticated placement
+proof; an installed boot caller still needs independent trusted pins.
