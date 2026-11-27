@@ -771,7 +771,7 @@ def _probe_dnf4_catalog_stale_reader(base, key, certificate, foreign, primary,
                         assert pair.recover_sandbox(root, ident)["status"] == "restored"
                         assert not primary.hits and not upstream.hits
                         assert not os.path.lexists(claim)
-                        with _stale_dnf4_reader(root, "withdraw-" + withdrawal,
+                        with _stale_dnf4_reader(root, "fresh",
                                                 certificate, [upstream.origin]) as fresh:
                             _complete_stale_dnf4_reader(fresh, expected_bytes, rpmdb)
                         assert not primary.hits and any(_RPM_NAME in hit for hit in upstream.hits)
