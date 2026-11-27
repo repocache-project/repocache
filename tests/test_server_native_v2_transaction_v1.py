@@ -3674,7 +3674,8 @@ def test_dedicated_health_child_timeout_and_preflight_do_not_signal_foreign_pid(
 
 
 @pytest.mark.parametrize("fault", ["none", "active-route", "nonloopback", "pending",
-                                    "policy", "enabled", "start", "health",
+                                    "policy", "policy-drift", "storage-drift",
+                                    "enabled", "start", "health",
                                     "foreign-master", "generation-drift"])
 def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
         filesystem, monkeypatch, fault):
@@ -3705,6 +3706,8 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
     calls = []
     running = False
     foreign = False
+    policy_reads = 0
+    storage_reads = 0
     ns, exe = (17, 29), (31, 41)
 
     # Retain the real layout before replacing its public test seam, so
@@ -3749,12 +3752,23 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
         return SimpleNamespace(returncode=0)
 
     def policy(root, statefd, rules, **kwargs):
+        nonlocal policy_reads
+        policy_reads += 1
         assert not kwargs["allow_prepare"] and not kwargs["allow_boot_rollover"]
         assert kwargs["namespace_identity"] == ns
         kwargs["recheck_owned"]()
         if fault == "policy":
             raise native.NativeV2TransactionError("POLICY_REFUSED")
-        return {"receipt_sha256": "a"*64}
+        digest = "b" if fault == "policy-drift" and policy_reads >= 2 else "a"
+        return {"receipt_sha256": digest*64}
+
+    def inspect_storage(*args, **kwargs):
+        nonlocal storage_reads
+        storage_reads += 1
+        assert not kwargs["allow_create"]
+        if fault == "storage-drift" and storage_reads >= 2:
+            return {"repository_cache_roots_verified": [], "changed": True}
+        return {"repository_cache_roots_verified": []}
 
     def health(root, context, catalog_bytes, **kwargs):
         nonlocal foreign
@@ -3782,8 +3796,7 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
     monkeypatch.setattr(unit, "_inspect_signed_owned_namespace_runtime", runtime)
     monkeypatch.setattr(unit, "_safe_native_systemctl", lambda: None)
     monkeypatch.setattr(native.subprocess, "run", command)
-    monkeypatch.setattr(storage, "prepare_dedicated_candidate_storage",
-                        lambda *a, **kw: {"repository_cache_roots_verified": []})
+    monkeypatch.setattr(storage, "prepare_dedicated_candidate_storage", inspect_storage)
     monkeypatch.setattr(native, "verify_service_storage_mounts", lambda pid: None)
     monkeypatch.setattr(native.pwd, "getpwnam", lambda name: SimpleNamespace(pw_uid=33))
     # The fixture already has an owned lock; the mocked layout is the
@@ -3803,11 +3816,16 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
         with pytest.raises(native.NativeV2TransactionError):
             invoke()
         assert calls == {"active-route": [], "nonloopback": [], "pending": [],
-                         "policy": [], "enabled": [],
+                         "policy": [], "policy-drift": [], "storage-drift": [],
+                         "enabled": [],
                          "start": ["start", "stop"], "health": ["start", "health", "stop"],
                          "foreign-master": ["start", "health"],
                          "generation-drift": ["start", "health"]}[fault]
         assert running == (fault in ("foreign-master", "generation-drift"))
+    if fault == "policy-drift":
+        assert policy_reads == 2
+    if fault == "storage-drift":
+        assert storage_reads == 2
     expected = ({**resources, native._CATALOG: b"foreign catalog"}
                 if fault == "generation-drift" else resources)
     assert _fixture_resource_bytes(paths) == expected

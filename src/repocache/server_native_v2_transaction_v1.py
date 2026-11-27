@@ -2973,8 +2973,11 @@ def _start_owned_committed_dedicated_locked(
                 _deny("OWNED_DEDICATED_START_OWNER_REFUSED")
             before_policy = policy(False)
             _require_audited_native_package_for_activation(state, distribution="almalinux")
-            if owner(False) != stopped or _verify_tls_pair(
-                    root_fd, document, verify_identity=True) != leaf:
+            if (owner(False) != stopped
+                    or _verify_tls_pair(root_fd, document, verify_identity=True) != leaf
+                    or prepare_dedicated_candidate_storage(
+                        "almalinux", document, allow_create=False) != storage
+                    or policy(False) != before_policy):
                 _deny("OWNED_DEDICATED_START_OWNER_CHANGED")
             fixed_systemctl("is-enabled")
             started = None

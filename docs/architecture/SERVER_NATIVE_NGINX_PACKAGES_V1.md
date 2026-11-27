@@ -1387,7 +1387,8 @@ sequence inside the installed signed worker while retaining the protected
 state layout. It refuses a pending WAL, bootstrap, enabled unit, non-loopback
 listener or active upstream routes. Existing boot policy, signed unit,
 authenticated ownership, dedicated storage and TLS are checked before start;
-PID1 runs the exact native ExecStartPre and the worker verifies actual
+after the package audit, the stopped owner, TLS, storage and prepared
+egress policy are rechecked before issuing the fixed start. PID1 runs the exact native ExecStartPre and the worker verifies actual
 master, listener, TLS, catalog and storage afterwards. On failure only an
 exact still-owned active master may be stopped; ambiguous ownership or
 generation drift is recovery-required. No new CLI, socket operation,
