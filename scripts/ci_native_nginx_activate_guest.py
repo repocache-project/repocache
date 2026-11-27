@@ -1432,6 +1432,12 @@ try:
         elif action in ("create","verify"):
             result=storage.prepare_dedicated_candidate_storage(
                 "almalinux",doc,allow_create=action=="create")
+        elif action=="runtime-prepare":
+            unit.inspect_effective_owned_nginx_unit(active=False)
+            prepared=tx._owned_alma_runtime_temps(
+                root,dedicated=True,allow_create=True,inactive=True)
+            assert tx._owned_alma_runtime_temps(root,dedicated=True,inactive=True)==prepared
+            result={"scratch_count":len(prepared[1])}
         elif action=="namespace-create":
             def owned():
                 unit.inspect_effective_owned_nginx_unit(active=False)
@@ -1644,9 +1650,6 @@ finally:
     assert hashlib.sha256(unit_path.read_bytes()).hexdigest() == rendered["source_unit_sha256"] == release["files"][OWN]
     assert rendered["http"].count("server 8.8.8.8:8008;") == len(names)
     http = rendered["http"].replace("server 8.8.8.8:8008;", "server 127.0.0.1:8008;")
-    # All temporary paths remain within the newly created owned cache root.
-    scratch = "".join(f"{directive}_temp_path /var/cache/nginx/repocache-managed/.ci-{directive};\n"
-                      for directive in ("client_body", "proxy", "fastcgi", "scgi", "uwsgi"))
     locations = rendered["locations"].replace(
         "    proxy_cache_valid 200 60s;",
         "    proxy_cache_valid 200 60s;\n    add_header X-RepoCache-Smoke $upstream_cache_status always;")
@@ -1655,7 +1658,7 @@ finally:
     health = ('location = /__repocache/healthz {\n'
               + f'    add_header X-Repocache-Generation "{doc["expected_state_generation"]}" always;\n'
               + '    return 204;\n}\n')
-    fixture = (scratch + http + "\nserver {\n" + rendered["tls"] + health + locations
+    fixture = (http + "\nserver {\n" + rendered["tls"] + health + locations
                + "location / { return 404; }\n}\n").encode("ascii")
     assert rendered["rules"].count("ip daddr 8.8.8.8 tcp dport 8008") == 1
     rules = rendered["rules"].replace("ip daddr 8.8.8.8 tcp dport 8008",
@@ -1776,6 +1779,7 @@ finally:
             replace_include(fixture)
             runtime.mkdir(mode=0o755)
             require("/usr/bin/chcon", "-t", "repocache_nginx_pid_t", str(runtime))
+            assert signed("runtime-prepare") == {"scratch_count": 5}
             namespace_attempted = True
             namespace_report = signed("namespace-create")
             namespace = True
@@ -2454,6 +2458,13 @@ try:
             elif action=="verify":
                 net_identity=namespace_identity()
                 result=policy(False)
+            elif action=="prepare-committed-runtime":
+                assert not pending
+                owner(False)
+                prepared=tx._owned_alma_runtime_temps(
+                    root,dedicated=True,allow_create=True,inactive=True)
+                assert tx._owned_alma_runtime_temps(root,dedicated=True,inactive=True)==prepared
+                result={"scratch_count":len(prepared[1]),"authorizes_nginx_activation":False}
             elif action=="start-committed":
                 assert not pending
                 result=tx._start_owned_committed_dedicated_locked(
@@ -2500,6 +2511,7 @@ try:
                         assert not witness["authorizes_nginx_activation"]
                         assert not witness["authorizes_catalog_publication"]
                         storage.verify_service_storage_mounts(witness["main_pid"])
+                        assert len(tx._owned_alma_runtime_temps(root,dedicated=True)[1])==5
                         assert tx._verify_tls_pair(root,document,verify_identity=True)==leaf
                         assert policy(False,active=True)==observed_policy
                         unchanged()
@@ -2674,6 +2686,8 @@ finally:
                 assert os.getxattr(fd, "security.selinux").rstrip(b"\0") == b"system_u:object_r:repocache_nginx_ro_t:s0"
             runtime.mkdir(mode=0o755)
             require("/usr/bin/chcon", "-t", "repocache_nginx_pid_t", str(runtime))
+            assert signed("prepare-committed-runtime")=={
+                "scratch_count":5,"authorizes_nginx_activation":False}
             require_prior_resources()
             assert signed("verify") == result
             try:

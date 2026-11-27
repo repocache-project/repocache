@@ -1158,18 +1158,17 @@ def test_generated_complete_managed_nginx_server_passes_real_distro_parser(
     fixture_main = main.replace(b"/run/repocache-nginx/nginx.pid", own_pid).replace(
         native._OWNED_INCLUDE_PATH.encode("ascii"), str(candidate).encode("ascii"),
     )
-    # Redirect only the fixed Debian scratch paths for this disposable parser.
+    # Redirect only the fixed scratch paths for this disposable parser.
     # The production path is exercised separately inside the confined VM.
     scratch_pairs = []
-    if distro == "debian":
-        scratch = tmp_path / "owned-runtime"
-        scratch.mkdir(mode=0o755)
-        for directive, leaf in native._OWNED_DEBIAN_TEMP_NAMES:
-            fixed = f"/run/repocache-nginx/{leaf}".encode("ascii")
-            fixture = str(scratch / leaf).encode("ascii")
-            assert directive.encode("ascii") + b" " + fixed + b";" in fixture_main
-            fixture_main = fixture_main.replace(fixed + b";", fixture + b";")
-            scratch_pairs.append((fixture, fixed))
+    scratch = tmp_path / "owned-runtime"
+    scratch.mkdir(mode=0o755)
+    for directive, leaf in native._OWNED_RUNTIME_TEMP_NAMES:
+        fixed = f"/run/repocache-nginx/{leaf}".encode("ascii")
+        fixture = str(scratch / leaf).encode("ascii")
+        assert directive.encode("ascii") + b" " + fixed + b";" in fixture_main
+        fixture_main = fixture_main.replace(fixed + b";", fixture + b";")
+        scratch_pairs.append((fixture, fixed))
     owned_config.write_bytes(fixture_main)
     completed = subprocess.run(
         [nginx, "-T", "-c", str(owned_config), "-p", str(tmp_path)],
@@ -2813,11 +2812,11 @@ def test_bootstrap_wal_binds_selected_distro_and_managed_wal_refuses_switch():
         native._owned_wal_record(alma, next_generation, live=True)
 
 
-def test_debian_managed_context_explicit_private_temp_paths():
-    main = native._owned_managed_config("debian")
-    for directive, name in native._OWNED_DEBIAN_TEMP_NAMES:
+@pytest.mark.parametrize("distribution", ["debian", "almalinux"])
+def test_managed_context_explicit_private_temp_paths(distribution):
+    main = native._owned_managed_config(distribution)
+    for directive, name in native._OWNED_RUNTIME_TEMP_NAMES:
         assert main.count(f"{directive} /run/repocache-nginx/{name};".encode("ascii")) == 1
-        assert directive.encode("ascii") not in native._owned_managed_config("almalinux")
         assert directive.encode("ascii") not in native._OWNED_BOOTSTRAP_CONFIG
     assert b"/var/lib/nginx" not in main
 
@@ -2832,11 +2831,11 @@ def test_debian_runtime_scratch_is_fixed_and_safe(tmp_path, monkeypatch, fault):
     runtime = tmp_path / "run/repocache-nginx"
     runtime.mkdir(parents=True, mode=0o755)
     runtime.chmod(0o755)
-    for _, name in native._OWNED_DEBIAN_TEMP_NAMES:
+    for _, name in native._OWNED_RUNTIME_TEMP_NAMES:
         path = runtime / name
         path.mkdir(mode=0o700)
         os.chown(path, 33, 0)
-    first = runtime / native._OWNED_DEBIAN_TEMP_NAMES[0][1]
+    first = runtime / native._OWNED_RUNTIME_TEMP_NAMES[0][1]
     if fault == "missing":
         first.rmdir()
     elif fault == "symlink":
@@ -3797,6 +3796,8 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
     monkeypatch.setattr(unit, "_safe_native_systemctl", lambda: None)
     monkeypatch.setattr(native.subprocess, "run", command)
     monkeypatch.setattr(storage, "prepare_dedicated_candidate_storage", inspect_storage)
+    monkeypatch.setattr(native, "_owned_alma_runtime_temps",
+                        lambda *_a, **_kw: ((1,), {"scratch": (2,)}))
     monkeypatch.setattr(native, "verify_service_storage_mounts", lambda pid: None)
     monkeypatch.setattr(native.pwd, "getpwnam", lambda name: SimpleNamespace(pw_uid=33))
     # The fixture already has an owned lock; the mocked layout is the

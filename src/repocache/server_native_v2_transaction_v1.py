@@ -171,25 +171,25 @@ _OWNED_MANAGED_CONFIGS = {
         ("almalinux", b"user nginx nginx;\n"),
     )
 }
-# Debian's package builds in /var/lib/nginx temp paths. The bootstrap uses
-# the build-time default worker; switching to www-data in a managed context
-# must never chown/chmod vendor storage through a read-only mount. Use the
-# existing signed runtime domain, whose parent is root-owned. These are
-# transient scratch paths, not repository cache or persistent log storage.
-_OWNED_DEBIAN_TEMP_NAMES = (
+# Native packages have build-time vendor temp paths. Neither managed
+# context may create or chown vendor data. Use the existing signed runtime
+# domain, whose parent is root-owned. These are transient scratch paths,
+# not repository cache or persistent log storage. The bootstrap is unchanged.
+_OWNED_RUNTIME_TEMP_NAMES = (
     ("client_body_temp_path", "client-body"),
     ("proxy_temp_path", "proxy"),
     ("fastcgi_temp_path", "fastcgi"),
     ("scgi_temp_path", "scgi"),
     ("uwsgi_temp_path", "uwsgi"),
 )
-_OWNED_MANAGED_CONFIGS["debian"] = _OWNED_MANAGED_CONFIGS["debian"].replace(
-    b"http {\n    access_log off;\n",
-    b"http {\n    access_log off;\n" + b"".join(
-        f"    {directive} /run/repocache-nginx/{name};\n".encode("ascii")
-        for directive, name in _OWNED_DEBIAN_TEMP_NAMES
-    ),
-)
+for _distribution, _main in tuple(_OWNED_MANAGED_CONFIGS.items()):
+    _OWNED_MANAGED_CONFIGS[_distribution] = _main.replace(
+        b"http {\n    access_log off;\n",
+        b"http {\n    access_log off;\n" + b"".join(
+            f"    {directive} /run/repocache-nginx/{name};\n".encode("ascii")
+            for directive, name in _OWNED_RUNTIME_TEMP_NAMES
+        ),
+    )
 # Default only for pure Debian filesystem/parser fixtures, never native selection.
 _OWNED_MANAGED_CONFIG = _OWNED_MANAGED_CONFIGS["debian"]
 
@@ -1360,7 +1360,7 @@ def _owned_debian_runtime_temps(root_fd: int, *, require_all: bool,
                                         follow_symlinks=False)) != identity(info)):
                 _deny("OWNED_CONTEXT_RUNTIME_TEMP_UNVERIFIED")
             runtime_mount = _mount(runtime)
-            names = {name for _, name in _OWNED_DEBIAN_TEMP_NAMES}
+            names = {name for _, name in _OWNED_RUNTIME_TEMP_NAMES}
             if inactive:
                 with os.scandir(runtime) as entries:
                     if any(entry.name not in names for entry in entries):
@@ -1399,6 +1399,137 @@ def _owned_debian_runtime_temps(root_fd: int, *, require_all: bool,
         raise
     except (InstalledStorageError, OSError, ValueError, KeyError, TypeError):
         _deny("OWNED_CONTEXT_RUNTIME_TEMP_UNVERIFIED")
+
+
+def _owned_alma_runtime_temps(root_fd: int, *, dedicated: bool,
+                              allow_create: bool = False, require_all: bool = True,
+                              inactive: bool = False) -> tuple:
+    """Verify the five fixed Alma runtime leaves, or prepare fresh ones.
+
+    Only the authenticated lifecycle/syntax caller under the original state
+    lock may create them. The runtime parent stays root-owned and the
+    dedicated PID label never becomes a cache/scratch label. No existing
+    inode is relabelled, chmodded, chowned or removed. A partial/foreign
+    leaf is refused; no persistent or vendor storage is changed.
+    """
+    code = "OWNED_CONTEXT_RUNTIME_TEMP_UNVERIFIED"
+    if (any(type(value) is not bool for value in
+            (dedicated, allow_create, require_all, inactive))
+            or (allow_create and not require_all)):
+        _deny(code)
+
+    def identity(info):
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)
+
+    def label(fd, types):
+        if set(os.listxattr(fd)) != {"security.selinux"}:
+            _deny(code)
+        value = os.getxattr(fd, "security.selinux").rstrip(b"\x00")
+        if value not in {user + b":object_r:" + kind + b":s0"
+                         for user in (b"system_u", b"unconfined_u") for kind in types}:
+            _deny(code)
+        return value
+
+    try:
+        worker = pwd.getpwnam("nginx")
+        if not 0 < worker.pw_uid < 2**32 - 1:
+            _deny(code)
+        parent_types = ((b"repocache_nginx_pid_t",) if dedicated else
+                        (b"var_run_t", b"httpd_var_run_t"))
+        child_type = b"repocache_nginx_rw_t" if dedicated else b"httpd_var_run_t"
+        fresh_label = b"system_u:object_r:" + child_type + b":s0\x00"
+        names = tuple(sorted(name for _, name in _OWNED_RUNTIME_TEMP_NAMES))
+        with ExitStack() as stack:
+            run = os.open("run", _DIRECTORY_FLAGS, dir_fd=root_fd)
+            stack.callback(os.close, run)
+            runtime = os.open("repocache-nginx", _DIRECTORY_FLAGS, dir_fd=run)
+            stack.callback(os.close, runtime)
+            parent = os.fstat(run)
+            info = os.fstat(runtime)
+            if (parent.st_uid != 0 or parent.st_gid != 0 or parent.st_mode & 0o022
+                    or info.st_uid != 0 or info.st_gid != 0
+                    or stat.S_IMODE(info.st_mode) != 0o755
+                    or os.fstatvfs(runtime).f_flag & os.ST_RDONLY):
+                _deny(code)
+            runtime_label = label(runtime, parent_types)
+            runtime_mount = _mount(runtime)
+
+            def guard():
+                if (identity(os.fstat(run)) != identity(parent)
+                        or identity(os.stat("run", dir_fd=root_fd,
+                                            follow_symlinks=False)) != identity(parent)
+                        or identity(os.fstat(runtime)) != identity(info)
+                        or identity(os.stat("repocache-nginx", dir_fd=run,
+                                            follow_symlinks=False)) != identity(info)
+                        or label(runtime, parent_types) != runtime_label
+                        or _mount(runtime) != runtime_mount
+                        or os.fstatvfs(runtime).f_flag & os.ST_RDONLY):
+                    _deny(code)
+                if inactive and set(os.listdir(runtime)) - set(names):
+                    _deny(code)
+
+            def sample(name, fd):
+                child = os.fstat(fd)
+                if (not stat.S_ISDIR(child.st_mode)
+                        or (child.st_uid, child.st_gid, stat.S_IMODE(child.st_mode))
+                        != (worker.pw_uid, 0, 0o700)
+                        or _mount(fd) != runtime_mount
+                        or os.fstatvfs(fd).f_flag & os.ST_RDONLY
+                        or identity(os.stat(name, dir_fd=runtime,
+                                            follow_symlinks=False)) != identity(child)):
+                    _deny(code)
+                if inactive and os.listdir(fd):
+                    _deny(code)
+                return identity(child) + (label(fd, (child_type,)),)
+
+            guard()
+            held = {}
+            observed = {}
+            for name in names:
+                try:
+                    fd = os.open(name, _DIRECTORY_FLAGS, dir_fd=runtime)
+                except FileNotFoundError:
+                    if require_all and not allow_create:
+                        _deny(code)
+                    continue
+                stack.callback(os.close, fd)
+                held[name] = fd
+                observed[name] = sample(name, fd)
+            # Validate all existing leaves before any creation. No worker can
+            # replace a direct child of the root-owned runtime parent.
+            guard()
+            if allow_create:
+                for name in names:
+                    if name in held:
+                        continue
+                    guard()
+                    os.mkdir(name, 0o700, dir_fd=runtime)
+                    fd = os.open(name, _DIRECTORY_FLAGS, dir_fd=runtime)
+                    stack.callback(os.close, fd)
+                    fresh = os.fstat(fd)
+                    if ((fresh.st_uid, fresh.st_gid, stat.S_IMODE(fresh.st_mode))
+                            != (0, 0, 0o700) or os.listdir(fd)
+                            or _mount(fd) != runtime_mount
+                            or identity(os.stat(name, dir_fd=runtime,
+                                                follow_symlinks=False)) != identity(fresh)
+                            or set(os.listxattr(fd)) != {"security.selinux"}):
+                        _deny(code)
+                    os.setxattr(fd, "security.selinux", fresh_label)
+                    os.fchown(fd, worker.pw_uid, 0)
+                    os.fsync(fd)
+                    os.fsync(runtime)
+                    held[name] = fd
+                    observed[name] = sample(name, fd)
+            guard()
+            if (require_all and set(held) != set(names)
+                    or any(sample(name, fd) != observed[name] for name, fd in held.items())):
+                _deny(code)
+            guard()
+            return identity(info) + (runtime_label,), observed
+    except NativeV2TransactionError:
+        raise
+    except (InstalledStorageError, OSError, ValueError, KeyError, TypeError):
+        _deny(code)
 
 
 def _probe_owned_context_locked(
@@ -1446,7 +1577,17 @@ def _probe_owned_context_locked(
                 runtime_before, temp_before = _owned_debian_runtime_temps(
                     root_fd, require_all=False,
                 )
+            alma_runtime = (include is not None
+                            and managed_main == _OWNED_MANAGED_CONFIGS["almalinux"])
+            if alma_runtime:
+                # Stock httpd_t owns its native runtime type. Prepare only
+                # fresh fixed leaves before the exact legacy syntax command.
+                alma_before = _owned_alma_runtime_temps(
+                    root_fd, dedicated=False, allow_create=True)
             dump = _capture_owned_nginx_dump_private(managed=include is not None)
+            if alma_runtime and _owned_alma_runtime_temps(
+                    root_fd, dedicated=False) != alma_before:
+                _deny("OWNED_CONTEXT_RUNTIME_TEMP_UNVERIFIED")
             if debian_runtime:
                 runtime_after, temp_after = _owned_debian_runtime_temps(
                     root_fd, require_all=True,
@@ -2940,6 +3081,8 @@ def _start_owned_committed_dedicated_locked(
             recheck_authenticated_owner()
             storage = prepare_dedicated_candidate_storage(
                 "almalinux", document, allow_create=False)
+            scratch = _owned_alma_runtime_temps(
+                root_fd, dedicated=True, inactive=True)
             leaf = _verify_tls_pair(root_fd, document, verify_identity=True)
             context = (document, snapshot["state_generation"], leaf)
 
@@ -2977,6 +3120,8 @@ def _start_owned_committed_dedicated_locked(
                     or _verify_tls_pair(root_fd, document, verify_identity=True) != leaf
                     or prepare_dedicated_candidate_storage(
                         "almalinux", document, allow_create=False) != storage
+                    or _owned_alma_runtime_temps(
+                        root_fd, dedicated=True, inactive=True) != scratch
                     or policy(False) != before_policy):
                 _deny("OWNED_DEDICATED_START_OWNER_CHANGED")
             fixed_systemctl("is-enabled")
@@ -3005,6 +3150,7 @@ def _start_owned_committed_dedicated_locked(
                         or _verify_tls_pair(root_fd, document, verify_identity=True) != leaf
                         or prepare_dedicated_candidate_storage(
                             "almalinux", document, allow_create=False) != storage
+                        or _owned_alma_runtime_temps(root_fd, dedicated=True) != scratch
                         or policy(True) != before_policy):
                     _deny("OWNED_DEDICATED_START_POSTCHECK_FAILED")
                 verify_service_storage_mounts(started["main_pid_observed"])

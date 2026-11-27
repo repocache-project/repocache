@@ -1393,3 +1393,22 @@ master, listener, TLS, catalog and storage afterwards. On failure only an
 exact still-owned active master may be stopped; ambiguous ownership or
 generation drift is recovery-required. No new CLI, socket operation,
 automatic boot enablement or production activation is introduced.
+
+
+### Fixed transient scratch for the managed AlmaLinux context
+
+The native activation run at `adc3c6f6f6d345e23a732df348f883d42113d85c`
+refused the committed dedicated start because the packaged build selected
+`/var/lib/nginx/tmp/client_body`. The managed main now binds all five HTTP
+temporary paths to the existing root-owned `/run/repocache-nginx` domain
+on both distributions; the signed bootstrap is unchanged. On AlmaLinux the
+fixed scratch preparation verifies retained descriptors, mount, owner,
+mode and native SELinux type and labels only fresh empty inodes. The
+legacy syntax path uses the stock runtime type; the dedicated profile
+uses its already-authenticated writable type, not its PID type. Existing
+foreign/partial leaves are refused, not relabelled, and no vendor files,
+SELinux rules, systemd permissions or persistent cache paths are changed.
+The isolated committed start requires all five prepared leaves and
+rechecks identity across the actual start and TLS/catalog witness. Native
+legacy reboot, dedicated start and systemd runtime cleanup remain NOT
+VERIFIED at the new revision until executed guest evidence is inspected.
