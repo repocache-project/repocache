@@ -1721,6 +1721,7 @@ finally:
     boot_prepared = False
     unit_placed = False
     started = False
+    runtime_snapshot = None
     origin = None
     def require(*argv):
         return isolated.command(*argv, timeout=90)
@@ -1791,6 +1792,7 @@ finally:
             runtime.mkdir(mode=0o755)
             require("/usr/bin/chcon", "-t", "repocache_nginx_pid_t", str(runtime))
             assert signed("runtime-prepare") == {"scratch_count": 5}
+            runtime_snapshot = fixture_snapshot_dedicated_runtime()
             namespace_attempted = True
             namespace_report = signed("namespace-create")
             namespace = True
@@ -1972,6 +1974,7 @@ sys.stdout.buffer.write(https_response(sys.argv[1]))
             # Never restore legacy labels/bytes under a running candidate.
             if started:
                 require("/usr/bin/systemctl", "stop", OWN)
+                require_status(OWN, False, True)
             if origin is not None:
                 origin.terminate()
                 origin.wait(timeout=15)
@@ -1983,6 +1986,12 @@ sys.stdout.buffer.write(https_response(sys.argv[1]))
                 raise AssertionError("Incomplete owned profile placement retained")
             if boot_preparation_attempted and not boot_prepared:
                 raise AssertionError("Incomplete boot-bound egress intent retained")
+            if runtime_snapshot is not None:
+                require_status(OWN, False, True)
+                fixture_preserve_stopped_runtime(
+                    runtime_snapshot, ".ci-data-dedicated-runtime")
+            elif legacy_stopped:
+                assert not os.path.lexists(runtime), "Incomplete runtime retained"
             if boot_prepared:
                 assert signed("egress-boot-verify", boot_args) == boot_report
                 assert hashlib.sha256(boot_receipt.read_bytes()).hexdigest() == boot_report["receipt_sha256"]
@@ -2027,11 +2036,9 @@ sys.stdout.buffer.write(https_response(sys.argv[1]))
             for path, backup, identity in reversed(moved):
                 assert (backup.lstat().st_dev, backup.lstat().st_ino) == identity
                 rename_absent(backup, path)
-            if legacy_stopped and runtime.exists():
-                # No foreign object is removed; an unclean runtime fails.
-                assert not list(runtime.iterdir())
-                runtime.rmdir()
             if legacy_stopped:
+                assert not os.path.lexists(runtime)
+
                 status = run("/usr/bin/systemctl", "is-failed", OWN)
                 if status.returncode == 0:
                     require("/usr/bin/systemctl", "reset-failed", OWN)
@@ -2209,6 +2216,87 @@ def fixture_move_same_parent_noreplace(source: Path, target: Path) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def fixture_archive_stopped_runtime(root_fd, expected, archive_name):
+    """Preserve only the stopped disposable fixture's known scratch inodes.
+
+    PID1 may leave some labelled scratch directories after stop. Never
+    recursively delete them, relax SELinux, or reuse them as legacy paths.
+    All remaining leaves must be the original empty, correctly labelled
+    leaves. The caller has independently proved the service is stopped.
+    """
+    from repocache.server_native_installed_storage_v1 import _rename_directory_noreplace
+    from repocache.server_native_v2_transaction_v1 import _owned_alma_runtime_temps
+
+    if archive_name not in (".ci-data-dedicated-runtime", ".ci-boot-dedicated-runtime"):
+        raise AssertionError("Unexpected runtime archive")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    parent = os.open("run", flags, dir_fd=root_fd)
+    name = "repocache-nginx"
+    try:
+        def absent(leaf):
+            try:
+                os.stat(leaf, dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError:
+                return True
+            return False
+
+        def identity(info):
+            return info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid
+
+        assert absent(archive_name)
+        if absent(name):
+            return False
+        fd = os.open(name, flags, dir_fd=parent)
+        try:
+            def verify():
+                observed = _owned_alma_runtime_temps(
+                    root_fd, dedicated=True, require_all=False, inactive=True)
+                assert observed[0] == expected[0]
+                assert all(expected[1].get(key) == value
+                           for key, value in observed[1].items())
+                assert identity(os.fstat(fd)) == expected[0][:5]
+                assert identity(os.stat(name, dir_fd=parent,
+                                        follow_symlinks=False)) == expected[0][:5]
+                assert identity(os.stat("run", dir_fd=root_fd,
+                                        follow_symlinks=False)) == identity(os.fstat(parent))
+                return observed
+
+            observed = verify()
+            assert verify() == observed
+            # Preserve evidence rather than remove even empty owned leaves.
+            _rename_directory_noreplace(parent, name, parent, archive_name)
+            os.fsync(parent)
+            assert absent(name)
+            assert identity(os.stat(archive_name, dir_fd=parent,
+                                    follow_symlinks=False)) == expected[0][:5]
+            assert set(os.listdir(fd)) == set(observed[1])
+            return True
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent)
+
+
+def fixture_snapshot_dedicated_runtime():
+    from repocache.server_native_v2_transaction_v1 import _owned_alma_runtime_temps
+
+    root = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        return _owned_alma_runtime_temps(root, dedicated=True, inactive=True)
+    finally:
+        os.close(root)
+
+
+def fixture_preserve_stopped_runtime(expected, archive_name):
+    root = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        archived = fixture_archive_stopped_runtime(root, expected, archive_name)
+    finally:
+        os.close(root)
+    print("PASS: exact stopped fixture scratch "
+          + ("archived without replacement" if archived else "removed by PID1"), flush=True)
 
 
 def verify_committed_boot_namespace_reboot_fixture(native, assets, pins, *, after, pending=False):
@@ -2701,6 +2789,7 @@ finally:
             require("/usr/bin/chcon", "-t", "repocache_nginx_pid_t", str(runtime))
             assert signed("prepare-committed-runtime")=={
                 "scratch_count":5,"authorizes_nginx_activation":False}
+            runtime_snapshot = fixture_snapshot_dedicated_runtime()
             require_prior_resources()
             assert signed("verify") == result
             try:
@@ -2722,6 +2811,8 @@ finally:
             require("/usr/bin/systemctl", "stop", OWN)
             require_status(OWN, False, False)
             assert signed("verify") == result
+            fixture_preserve_stopped_runtime(
+                runtime_snapshot, ".ci-boot-dedicated-runtime")
             # Success-only restoration of the isolated fixture. Failed
             # startup/readback preserves its state for diagnosis instead of
             # silently reverting and reporting a successful campaign.
@@ -2734,9 +2825,7 @@ finally:
             for source, backup, ident in zip(fixed, backups, identities):
                 assert file_identity(backup) == ident
                 fixture_move_same_parent_noreplace(backup, source)
-            if runtime.exists():
-                assert not list(runtime.iterdir())
-                runtime.rmdir()
+            assert not os.path.lexists(runtime)
         require_prior_resources()
         print("PASS: actual signed dedicated unit starts exact committed generation after namespace reboot rollover; pinned TLS and exact catalog served, then stops without changing prior bytes", flush=True)
 

@@ -1011,3 +1011,71 @@ def test_fixture_storage_move_refuses_other_parent(tmp_path):
         fixture_move_same_parent_noreplace(source, other / "backup")
     assert source.read_bytes() == b"owned"
     assert not list(other.iterdir())
+
+
+@pytest.mark.parametrize("fault", ["all", "partial", "absent", "foreign", "nonempty",
+                                   "replacement", "symlink", "archive-exists", "parent-mode"])
+def test_fixture_preserves_only_exact_stopped_runtime(tmp_path, monkeypatch, fault):
+    import os
+    import stat
+    from scripts import ci_native_nginx_activate_guest as guest
+    from repocache import server_native_v2_transaction_v1 as tx
+
+    runtime = tmp_path / "run/repocache-nginx"
+    runtime.mkdir(parents=True)
+    names = ("client-body", "proxy", "fastcgi", "scgi", "uwsgi")
+    for name in names:
+        (runtime / name).mkdir(mode=0o700)
+    archive = runtime.parent / ".ci-data-dedicated-runtime"
+    def ident(path):
+        st = path.lstat()
+        return (st.st_dev, st.st_ino, st.st_mode, st.st_uid, st.st_gid)
+    def snapshot(root, *, dedicated, require_all=False, inactive):
+        assert dedicated and inactive and not require_all
+        leaves = {}
+        for path in runtime.iterdir():
+            assert path.name in names and stat.S_ISDIR(path.lstat().st_mode)
+            assert not list(path.iterdir())
+            leaves[path.name] = ident(path) + (b"rw",)
+        return ident(runtime) + (b"pid",), leaves
+    expected = snapshot(0, dedicated=True, inactive=True)
+    monkeypatch.setattr(tx, "_owned_alma_runtime_temps", snapshot)
+    if fault in ("partial", "absent"):
+        for name in (names if fault == "absent" else names[:2]):
+            (runtime / name).rmdir()
+        if fault == "absent":
+            runtime.rmdir()
+    elif fault == "foreign":
+        (runtime / "foreign").mkdir()
+    elif fault == "nonempty":
+        (runtime / names[0] / "retain").write_bytes(b"foreign")
+    elif fault == "replacement":
+        (runtime / names[0]).rename(runtime.parent / "old")
+        (runtime / names[0]).mkdir(mode=0o700)
+    elif fault == "symlink":
+        (runtime / names[0]).rmdir()
+        (runtime / names[0]).symlink_to(tmp_path, target_is_directory=True)
+    elif fault == "archive-exists":
+        archive.mkdir()
+    elif fault == "parent-mode":
+        runtime.chmod(0o777)
+    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        if fault in ("all", "partial", "absent"):
+            assert guest.fixture_archive_stopped_runtime(
+                fd, expected, archive.name) == (fault != "absent")
+            assert not runtime.exists()
+            if fault != "absent":
+                assert ident(archive) == expected[0][:5]
+                assert {p.name for p in archive.iterdir()} == (
+                    set(names) if fault == "all" else set(names[2:]))
+                assert all(ident(p) == expected[1][p.name][:5] for p in archive.iterdir())
+        else:
+            with pytest.raises((AssertionError, OSError)):
+                guest.fixture_archive_stopped_runtime(fd, expected, archive.name)
+            assert runtime.exists()
+            assert archive.exists() == (fault == "archive-exists")
+            if fault == "nonempty":
+                assert (runtime / names[0] / "retain").read_bytes() == b"foreign"
+    finally:
+        os.close(fd)
