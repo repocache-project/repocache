@@ -114,14 +114,31 @@ waitssh() {
     sleep 5
   done
 }
+verify_pinned_integration() {
+  local pin="$1" tested="$2" observed
+  local integration=refs/remotes/origin/integration/v0.6.0
+  # Full-history checkout already observes this ref. If the exact pinned
+  # prerequisite is in both histories, a second network fetch adds no
+  # source evidence. For historical/partial checkouts retain the explicit
+  # fetch and refuse if the accepted prerequisite cannot be established.
+  if observed="$(git rev-parse --verify "$integration^{commit}" 2>/dev/null)" &&
+     git merge-base --is-ancestor "$pin" "$observed" &&
+     git merge-base --is-ancestor "$pin" "$tested"; then
+    printf 'checkout_integration=%s\nverification=checkout-ancestry\n' "$observed"
+  else
+    git fetch --no-tags origin +refs/heads/integration/v0.6.0:refs/remotes/origin/integration/v0.6.0 || return
+    observed="$(git rev-parse --verify "$integration^{commit}")" || return
+    git merge-base --is-ancestor "$pin" "$observed" || return
+    printf 'checkout_integration=%s\nverification=fetched-ancestry\n' "$observed"
+  fi
+}
 prepare_pinned_synthetic_source() {
   stage=pinned-pr249-synthetic-candidate
   # #249 was squash-merged at this exact protected integration commit.
   # Never trust a moving/deleted source PR branch or confuse source SHA
   # with its accepted integration ancestry. Only a disposable local merge.
   PR249_INTEGRATION_SHA=69b13b8882560b29515ec2405463b70e40c8aa44
-  git fetch --no-tags origin +refs/heads/integration/v0.6.0:refs/remotes/origin/integration/v0.6.0
-  git merge-base --is-ancestor "$PR249_INTEGRATION_SHA" refs/remotes/origin/integration/v0.6.0
+  verify_pinned_integration "$PR249_INTEGRATION_SHA" "$sha" > "$out/pinned-integration-ancestry.txt"
   git worktree add --detach "$tmp/combined-source" "$sha" >/dev/null
   git -C "$tmp/combined-source" switch -c pr237-synthetic-vm-merge >/dev/null
   git -C "$tmp/combined-source" config user.email "pr237-fixture@repocache.invalid"

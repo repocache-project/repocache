@@ -159,3 +159,90 @@ def test_booted_nginx_invalid_candidate_requires_exact_recovery_marker(tmp_path:
     (tmp_path / "sha.txt").write_text("f" * 40, encoding="utf-8")
     stale = collect(tmp_path, "almalinux10", "smoke", HEAD)
     assert "28.04" not in {row["issue_criterion"] for row in stale["criteria"]}
+
+
+@pytest.mark.parametrize("case", ["checkout", "missing-ref", "foreign-ref", "missing-from-head"])
+def test_pinned_vm_source_uses_checkout_only_with_both_exact_ancestries(tmp_path, case):
+    """A redundant network fetch must not block an already proven source."""
+    import shutil
+    import subprocess
+
+    if not shutil.which("git") or not shutil.which("bash"):
+        pytest.skip("native Git/bash fixture unavailable")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(repo), *args], check=True, capture_output=True,
+            text=True).stdout.strip()
+    git("init", "-q")
+    git("config", "user.name", "VM provenance fixture")
+    git("config", "user.email", "vm@repocache.invalid")
+    git("commit", "-q", "--allow-empty", "-m", "base")
+    base = git("rev-parse", "HEAD")
+    git("commit", "-q", "--allow-empty", "-m", "accepted prerequisite")
+    pin = git("rev-parse", "HEAD")
+    git("commit", "-q", "--allow-empty", "-m", "candidate")
+    tested = git("rev-parse", "HEAD")
+    git("remote", "add", "origin", str(tmp_path / "unreachable"))
+    if case != "missing-ref":
+        git("update-ref", "refs/remotes/origin/integration/v0.6.0",
+            base if case == "foreign-ref" else tested)
+    if case == "missing-from-head":
+        tested = base
+    script = (Path(__file__).resolve().parents[1] / "scripts/ci_pr237_booted_vm.sh").read_text()
+    start = script.index("verify_pinned_integration() {")
+    end = script.index("prepare_pinned_synthetic_source() {", start)
+    command = script[start:end] + '\nverify_pinned_integration "$1" "$2"\n'
+    result = subprocess.run(
+        ["bash", "-Eeuo", "pipefail", "-c", command, "fixture", pin, tested],
+        cwd=repo, capture_output=True, text=True, timeout=15)
+    if case == "checkout":
+        assert result.returncode == 0
+        assert result.stdout == f"checkout_integration={tested}\nverification=checkout-ancestry\n"
+        assert not result.stderr
+    else:
+        assert result.returncode != 0
+        assert not result.stdout
+
+
+def test_pinned_vm_source_fallback_fetch_retains_ancestry_refusal(tmp_path):
+    """Missing local evidence still requires an actual verified fetch."""
+    import shutil
+    import subprocess
+
+    if not shutil.which("git") or not shutil.which("bash"):
+        pytest.skip("native Git/bash fixture unavailable")
+    repo = tmp_path / "repo"
+    remote = tmp_path / "remote.git"
+    repo.mkdir()
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(repo), *args], check=True, capture_output=True,
+            text=True).stdout.strip()
+    git("init", "-q")
+    git("config", "user.name", "VM provenance fixture")
+    git("config", "user.email", "vm@repocache.invalid")
+    git("commit", "-q", "--allow-empty", "-m", "base")
+    base = git("rev-parse", "HEAD")
+    git("commit", "-q", "--allow-empty", "-m", "accepted prerequisite")
+    pin = git("rev-parse", "HEAD")
+    subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
+    git("remote", "add", "origin", str(remote))
+    branch = "refs/heads/integration/v0.6.0"
+    git("push", "-q", "origin", f"{base}:{branch}")
+    script = (Path(__file__).resolve().parents[1] / "scripts/ci_pr237_booted_vm.sh").read_text()
+    start = script.index("verify_pinned_integration() {")
+    end = script.index("prepare_pinned_synthetic_source() {", start)
+    command = script[start:end] + '\nverify_pinned_integration "$1" "$2"\n'
+    def invoke():
+        return subprocess.run(
+            ["bash", "-Eeuo", "pipefail", "-c", command, "fixture", pin, pin],
+            cwd=repo, capture_output=True, text=True, timeout=15)
+    result = invoke()
+    assert result.returncode != 0 and not result.stdout
+    git("push", "-q", "origin", f"{pin}:{branch}")
+    git("update-ref", "-d", "refs/remotes/origin/integration/v0.6.0")
+    result = invoke()
+    assert result.returncode == 0
+    assert result.stdout == f"checkout_integration={pin}\nverification=fetched-ancestry\n"
