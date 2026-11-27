@@ -1107,5 +1107,11 @@ activation, label changes, namespace creation or a live generation commit.
 The caller must still prove the signed release, inactive service, executable
 receipt, SELinux/namespace ownership and WAL generation before use. No
 installed dispatcher calls this primitive yet; detached tests exercise exact
-resume and foreign refusal. Native service placement and recovery must be
-validated separately.
+resume and foreign refusal. The guarded native AlmaLinux service fixture
+now kills a signed-worker child at the receipt/publication boundary under
+the caller's state lock, proves verify-only refusal and exact inode resume,
+then exercises actual PID1 startup and cache using the resulting profile.
+It verifies the same receipt before fixture-only cleanup; an incomplete
+placement is preserved and must not trigger a legacy restart. This remains
+a temporary isolated candidate transition, not reboot-time activation or
+the generation-bound WAL lifecycle.

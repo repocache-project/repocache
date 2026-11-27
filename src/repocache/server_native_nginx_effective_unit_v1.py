@@ -621,7 +621,9 @@ def _stage_namespace_dropin_under_lock(root_fd: int, state_fd: int, raw: bytes, 
     )
     from repocache.server_protected_state_store_v1 import _canonical, _read_file, _write_exclusive
 
-    if (type(allow_create) is not bool or owner_uid != os.geteuid()
+    if (type(allow_create) is not bool or type(root_fd) is not int
+            or type(state_fd) is not int or type(owner_uid) is not int
+            or type(owner_gid) is not int or owner_uid != os.geteuid()
             or owner_gid != os.getegid()):
         _deny("NAMESPACE_PROFILE_INPUT_REFUSED")
     candidate = _render_owned_nginx_namespace_dropin_candidate(raw, https_port=https_port)

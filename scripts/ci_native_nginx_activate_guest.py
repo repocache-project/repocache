@@ -1268,7 +1268,7 @@ def verify_owned_service_namespace_data_fixture(native, assets, pins):
         payloads["/" + ident + "/" + suffix] = ("REPOCACHE dedicated " + ident + "\n") * 64
     names = sorted(repo["id"] for repo in doc["repositories"])
     code = r"""
-import json,os,sys,zipimport
+import hashlib,json,os,signal,sys,zipimport
 sys.path.insert(0,"/usr/libexec/repocache/server-control-worker")
 from repocache import server_native_installed_storage_v1 as storage
 from repocache import server_native_nginx_effective_unit_v1 as unit
@@ -1298,6 +1298,47 @@ try:
         elif action in ("unit-inactive","unit-active"):
             result=unit.inspect_signed_owned_namespace_unit(
                 https_port=443,active=action=="unit-active")
+        elif action in ("unit-place","unit-verify-placement"):
+            raw=unit._signed_owned_unit_bytes()
+            def prepare(allow):
+                return unit._stage_namespace_dropin_under_lock(
+                    root,state,raw,https_port=443,owner_uid=0,owner_gid=0,
+                    allow_create=allow)
+            if action=="unit-place":
+                unit.inspect_effective_owned_nginx_unit(active=False)
+                # Test-only child dies exactly after the durable receipt,
+                # before publication. Retain the caller's state lock.
+                pid=os.fork()
+                if pid==0:
+                    def crash(*args):
+                        os.kill(os.getpid(),signal.SIGKILL)
+                    storage._rename_directory_noreplace=crash
+                    prepare(True)
+                    os._exit(77)
+                _,status=os.waitpid(pid,0)
+                assert os.WIFSIGNALED(status) and os.WTERMSIG(status)==signal.SIGKILL
+                from repocache.server_protected_state_store_v1 import _read_file
+                receipt=_read_file(state,unit._NAMESPACE_PROFILE_RECEIPT,0,
+                                   unit._NAMESPACE_PROFILE_RECEIPT_MAX)
+                assert receipt
+                before=unit._read_namespace_profile_at(
+                    root,unit._render_owned_nginx_namespace_dropin_candidate(
+                        raw,https_port=443)["dropin_bytes"],
+                    owner_uid=0,owner_gid=0,staged=True)
+                try:
+                    prepare(False)
+                except unit.EffectiveNginxUnitError as exc:
+                    assert "NAMESPACE_PROFILE_STAGE_PENDING" in str(exc)
+                else:
+                    raise AssertionError("Verify-only completed pending profile")
+                unit.inspect_effective_owned_nginx_unit(active=False)
+                result=prepare(True)
+                assert result["receipt_sha256"]==hashlib.sha256(receipt).hexdigest()
+                assert result["directory_identity"]==before[0]
+                assert result["private_dropin_identity"]==before[1]
+                assert prepare(False)==result==prepare(True)
+            else:
+                result=prepare(False)
         else:
             assert action=="render"
             pins={r["id"]:{"cache.example.invalid":["8.8.8.8"]} for r in doc["repositories"]}
@@ -1366,6 +1407,9 @@ finally:
     dropin = dropdir / "90-repocache-dedicated.conf"
     assert not os.path.lexists(dropdir)
     assert not os.path.lexists(Path("/run/systemd/system", OWN + ".d"))
+    profile_receipt = STATE / ".native-nginx-profile-v1.json"
+    profile_stage = dropdir.parent / ".repocache-dedicated-unit.stage"
+    assert not os.path.lexists(profile_receipt) and not os.path.lexists(profile_stage)
     assert run("/usr/bin/systemctl", "show", "-p", "DropInPaths", "--value", OWN).stdout.strip() == ""
     ns = Path("/run/netns/repocache-nginx")
     runtime = Path("/run/repocache-nginx")
@@ -1380,6 +1424,7 @@ finally:
     legacy_stopped = False
     include_changed = False
     namespace = False
+    placement_attempted = False
     unit_placed = False
     started = False
     origin = None
@@ -1461,16 +1506,15 @@ finally:
                              "/usr/sbin/nft", "-c", "-f", "-", input_text=rules)
             isolated.command("/usr/sbin/ip", "netns", "exec", "repocache-nginx",
                              "/usr/sbin/nft", "-f", "-", input_text=rules)
-            dropdir.mkdir(mode=0o755)
+            placement_attempted = True
+            placement = signed("unit-place")
             unit_placed = True
-            dropdir.chmod(0o755)
-            with dropin.open("xb") as stream:
-                os.fchmod(stream.fileno(), 0o644)
-                stream.write(rendered["dropin"].encode("ascii"))
-                stream.flush()
-                os.fsync(stream.fileno())
-            sync_dir(dropdir)
-            sync_dir(dropdir.parent)
+            assert placement["receipt_matches_owned_dropin"]
+            assert not placement["authorizes_systemctl"] and not placement["authorizes_nginx_activation"]
+            assert dropin.read_text() == rendered["dropin"]
+            assert not os.path.lexists(profile_stage)
+            assert hashlib.sha256(profile_receipt.read_bytes()).hexdigest() == placement["receipt_sha256"]
+            print("PASS: signed drop-in receipt survived SIGKILL before no-replace publication; exact inode resumed", flush=True)
             require("/usr/bin/systemctl", "daemon-reload")
             assert run("/usr/bin/systemctl", "show", "-p", "DropInPaths", "--value", OWN).stdout.strip() == str(dropin)
             inactive_profile = signed("unit-inactive")
@@ -1599,6 +1643,7 @@ sys.stdout.buffer.write(https_response(sys.argv[1]))
                     assert all(b":repocache_nginx_rw_t:" in os.getxattr(p, "security.selinux") for p in entries)
                 assert signed("verify") == report == signed("create")
                 assert signed("unit-active") == profile
+                assert signed("unit-verify-placement") == placement
                 print("PASS: authenticated exact persistent drop-in and fixed PID1/master identity, inactive/active/repeat observation", flush=True)
                 assert isolated.command("/usr/sbin/nft", "--stateless", "--numeric-priority",
                                         "list", "ruleset").stdout == host_rules
@@ -1611,11 +1656,22 @@ sys.stdout.buffer.write(https_response(sys.argv[1]))
             if origin is not None:
                 origin.terminate()
                 origin.wait(timeout=15)
+            if placement_attempted and not unit_placed:
+                # Unknown or partial test placement must never be removed
+                # or followed by a legacy restart. Preserve VM evidence.
+                raise AssertionError("Incomplete owned profile placement retained")
             if unit_placed:
+                assert signed("unit-verify-placement") == placement
                 assert dropin.read_text() == rendered["dropin"]
+                assert hashlib.sha256(profile_receipt.read_bytes()).hexdigest() == placement["receipt_sha256"]
+                # Only the exact fixture-owned profile and private receipt
+                # are removed, with the test service stopped. No installed
+                # cleanup or arbitrary removal operation is introduced.
                 dropin.unlink()
                 dropdir.rmdir()
                 sync_dir(dropdir.parent)
+                profile_receipt.unlink()
+                sync_dir(STATE)
                 require("/usr/bin/systemctl", "daemon-reload")
             if namespace:
                 assert (ns.stat().st_dev, ns.stat().st_ino) == ns_identity
