@@ -2654,8 +2654,8 @@ finally:
             prepared_storage = signed("prepare-committed-storage")["storage"]
             for path, fd, ident, _ in labels:
                 assert file_identity(path) == ident
-                os.setxattr(fd, "security.selinux", b"system_u:object_r:repocache_nginx_ro_t:s0\\0")
-                assert os.getxattr(fd, "security.selinux").rstrip(b"\\0") == b"system_u:object_r:repocache_nginx_ro_t:s0"
+                os.setxattr(fd, "security.selinux", b"system_u:object_r:repocache_nginx_ro_t:s0\0")
+                assert os.getxattr(fd, "security.selinux").rstrip(b"\0") == b"system_u:object_r:repocache_nginx_ro_t:s0"
             runtime.mkdir(mode=0o755)
             require("/usr/bin/chcon", "-t", "repocache_nginx_pid_t", str(runtime))
             require_prior_resources()
