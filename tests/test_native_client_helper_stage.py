@@ -102,3 +102,53 @@ def test_client_helper_stager_in_closed_v06_inventory_only():
     for version in ("0.4.0", "0.5.0"):
         assert path not in build_release.release_files_for_version(version)
         assert path not in upgrade.release_files_for_version(version)
+
+
+
+def test_private_writer_archive_is_import_only_and_disjoint_from_installed_helper(tmp_path):
+    source = _candidate_source(tmp_path)
+    helper = stage.build(source)
+    private = stage._build_private_writer(source)
+    assert private == stage._build_private_writer(source) and private != helper
+    assert stage.build(source) == helper
+    with zipfile.ZipFile(io.BytesIO(private)) as archive:
+        assert archive.namelist() == ["__main__.py",
+                                     *(m + ".py" for m in stage._PRIVATE_WRITER_MODULES)]
+        assert archive.read("__main__.py") == b"raise SystemExit(3)\n"
+        assert set(stage._PRIVATE_WRITER_MODULES) - set(stage.MODULES) == {
+            "transaction_stage", "transaction_atomic_lab", "recoverable_fallback_pair_lab"}
+        for name in stage._PRIVATE_WRITER_MODULES:
+            assert archive.read(name + ".py") == (source / "client" / (name + ".py")).read_bytes()
+    path = tmp_path / "private-writer.zip"
+    path.write_bytes(private)
+    path.chmod(0o600)
+    for args in ([], ["--apply"], ["--json", "status"], ["recover", "0"*64]):
+        result = subprocess.run([sys.executable, "-IS", "-B", str(path), *args],
+                                cwd=tmp_path, capture_output=True, timeout=10)
+        assert result.returncode == 3 and not result.stdout and not result.stderr
+
+
+def test_private_writer_profile_refuses_untrusted_guest_before_asset_reads(monkeypatch, tmp_path):
+    from scripts import ci_v06_vm_signed_client_guest as guest
+    def deny(platform):
+        assert platform == "debian13"
+        raise RuntimeError("untrusted guest")
+    def unexpected(*args, **kwargs):
+        pytest.fail("private writer profile reached authentication")
+    monkeypatch.setattr(guest, "guarded_native_guest", deny)
+    monkeypatch.setattr(stage, "_authenticated_payload", unexpected)
+    with pytest.raises(RuntimeError, match="untrusted guest"):
+        stage._authenticated_private_writer_fixture(
+            tmp_path, platform="debian13", commit="a"*40, archive_sha256="b"*64)
+
+
+def test_private_writer_profile_never_uses_normal_publisher_key(candidate, monkeypatch):
+    archive, digest, commit, _ = candidate
+    # The fixture's normal test publisher is deliberately not the guarded
+    # native campaign key. Verify using the unchanged signature verifier.
+    monkeypatch.setattr(stage, "_build_private_writer",
+                        lambda *_: pytest.fail("unexpected private writer build"))
+    with pytest.raises(stage.ClientHelperStageError, match="TEST_KEY_REQUIRED"):
+        stage._authenticated_payload(
+            archive.parent, commit=commit, archive_sha256=digest,
+            system={"ID": "debian", "VERSION_ID": "13"}, private_writer=True)

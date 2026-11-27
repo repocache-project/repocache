@@ -646,7 +646,7 @@ def _alma_label_roundtrip(root: Path, *, dnf4=False) -> None:
     print("PASS: AlmaLinux Enforcing schema-3 source label/user-xattr SIGKILL recovery; private fixture")
 
 
-def _signed_helper_placement(platform: str) -> None:
+def _signed_helper_placement(platform: str, private_archive: Path) -> dict:
     """Actual fixed root-owned helper placement with synthetic Ed25519 trust."""
     checkout = Path("/home/pr237ci/source")
     sys.path[:0] = [str(checkout / "src"), str(checkout), str(checkout / "tests")]
@@ -708,6 +708,12 @@ def _signed_helper_placement(platform: str) -> None:
                 raise AssertionError("Invalid signature placed a client helper")
             assert not os.path.lexists(target.parent)
             assert not os.path.lexists(registry.parent)
+            try:
+                stage._authenticated_private_writer_fixture(archive.parent, **options)
+            except signatures.SignatureError:
+                pass
+            else:
+                raise AssertionError("Invalid signature admitted private writer bytes")
             detached.write_bytes(signed)
             placed = stage.install_authenticated_fixture(archive.parent, **options)
             assert placed["placement"] == "placed" and not placed["source_writer_installed"]
@@ -741,16 +747,38 @@ def _signed_helper_placement(platform: str) -> None:
                 pass
             else:
                 raise AssertionError("Unprivileged execution reached the root-only helper")
+            # A separate import-only archive from the same verified signed
+            # source is retained solely in this root-private temporary tree.
+            payload, receipt = stage._authenticated_private_writer_fixture(
+                archive.parent, **options)
+            assert receipt["private_fixture_only"] and not receipt["source_writer_installed"]
+            assert receipt["source_sha"] == placed["source_sha"]
+            assert receipt["archive_sha256"] == placed["archive_sha256"]
+            assert receipt["manifest_sha256"] == placed["manifest_sha256"]
+            assert receipt["publisher_key_id"] == placed["publisher_key_id"] == "client-vm-fixture"
+            assert not receipt["authorizes_host_installation"] and not receipt["authorizes_source_mutation"]
+            assert receipt["helper_sha256"] == hashlib.sha256(payload).hexdigest()
+            assert receipt["helper_sha256"] != placed["helper_sha256"]
+            parent = os.open(private_archive.parent, stage.DIRECTORY)
+            try:
+                info = os.fstat(parent)
+                assert info.st_uid == info.st_gid == 0 and info.st_mode & 0o777 == 0o700
+                stage._private_write(parent, private_archive.name, payload, 0o600)
+                assert stage._asset_bytes(parent, private_archive.name, len(payload),
+                                          installed_mode=0o600) == payload
+                os.fsync(parent)
+            finally:
+                os.close(parent)
+            assert _snapshot(target) == before and _snapshot(lock) == lock_before
         finally:
             signatures.TRUST_DIR = original_trust
     print("PASS: synthetic Ed25519 authenticated fixed root-only client helper placement and idempotence")
+    print("PASS: separately authenticated import-only private writer archive; installed helper unchanged")
+    return receipt
 
 
-def main(platform: str) -> None:
+def _run_private_fixtures(platform: str) -> None:
     guarded_native_guest(platform)
-    before_sources = installed_sources(platform)
-    before_packages = installed_packages(platform)
-    _signed_helper_placement(platform)
     with tempfile.TemporaryDirectory(prefix="repocache-booted-approval-", dir="/tmp") as work:
         root = Path(work)
         if platform == "debian13":
@@ -772,6 +800,76 @@ def main(platform: str) -> None:
                 root = Path(work)
                 with _alma_fixture_file_context(root):
                     _alma_label_roundtrip(root, dnf4=True)
+
+def main(platform: str) -> None:
+    if not __debug__:
+        raise RuntimeError("Native private writer campaign requires assertions")
+    guarded_native_guest(platform)
+    before_sources = installed_sources(platform)
+    before_packages = installed_packages(platform)
+    with tempfile.TemporaryDirectory(prefix="repocache-client-writer-proof-", dir="/root") as work:
+        private_archive = Path(work) / "private-writer.zip"
+        receipt = _signed_helper_placement(platform, private_archive)
+        before = _snapshot(private_archive)
+        assert before[3:5] == (0, 0) and before[5] & 0o777 == 0o600
+        # Direct execution is refused even by root. Only a guarded harness
+        # explicitly imports the isolated modules after authentication.
+        refused = subprocess.run(["/usr/bin/python3", "-IS", "-B", str(private_archive),
+                                  "--apply"], capture_output=True, timeout=15)
+        assert refused.returncode == 3 and not refused.stdout and not refused.stderr
+        code = r"""
+import hashlib,importlib,json,os,runpy,stat,sys,zipfile,zipimport
+from pathlib import Path
+archive=Path(sys.argv[1])
+platform,digest,device,inode=sys.argv[2],sys.argv[3],int(sys.argv[4]),int(sys.argv[5])
+assert __debug__ and os.getresuid()==os.getresgid()==(0,0,0)
+assert archive.parent.parent==Path("/root")
+assert archive.parent.name.startswith("repocache-client-writer-proof-")
+assert archive.name=="private-writer.zip" and archive.resolve(strict=True)==archive
+parent=archive.parent.lstat()
+assert parent.st_uid==parent.st_gid==0 and stat.S_IMODE(parent.st_mode)==0o700
+info=archive.lstat()
+assert stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode)==0o600
+assert info.st_uid==info.st_gid==0 and info.st_nlink==1
+assert (info.st_dev,info.st_ino)==(device,inode)
+assert hashlib.sha256(archive.read_bytes()).hexdigest()==digest
+modules=("root_source_boundary","repocache_client","native_fallback_plan",
+         "source_preflight","source_entry_boundaries","source_structure_subset",
+         "native_package_lock_observation","source_metadata_lab","recovery_journal_v1",
+         "transaction_stage","transaction_atomic_lab","recoverable_fallback_pair_lab")
+with zipfile.ZipFile(archive) as z:
+    assert z.namelist()==["__main__.py",*(m+".py" for m in modules)]
+    assert z.read("__main__.py")==b"raise SystemExit(3)\n"
+sys.path.insert(0,"/home/pr237ci/source/scripts")
+from ci_v06_vm_signed_client_guest import guarded_native_guest
+guarded_native_guest(platform)
+sys.path.insert(0,str(archive))
+for name in modules:
+    mod=importlib.import_module(name)
+    assert isinstance(mod.__loader__,zipimport.zipimporter)
+    assert mod.__loader__.archive==str(archive)
+# Never execute on the actual host root, even from this signed fixture.
+import recoverable_fallback_pair_lab as pair
+for operation in (pair.apply_sandbox,pair.restore_sandbox,pair.recover_sandbox):
+    try:
+        operation(Path("/"),"0"*64)
+    except pair.PairRefused:
+        pass
+    else:
+        raise AssertionError("Private writer accepted production root")
+harness=runpy.run_path("/home/pr237ci/source/scripts/ci_v06_vm_client_privileged_guest.py")
+assert harness["pair"] is pair
+assert harness["boundary"] is sys.modules["root_source_boundary"]
+harness["_run_private_fixtures"](platform)
+for name in modules:
+    assert sys.modules[name].__loader__.archive==str(archive)
+assert hashlib.sha256(archive.read_bytes()).hexdigest()==digest
+print("PASS: native private apply/recover used only authenticated writer modules")
+"""
+        subprocess.run(["/usr/bin/python3", "-IS", "-B", "-c", code,
+                        str(private_archive), platform, receipt["helper_sha256"],
+                        str(before[1]), str(before[2])], cwd="/", check=True, timeout=600)
+        assert _snapshot(private_archive) == before
     assert installed_sources(platform) == before_sources
     assert installed_packages(platform) == before_packages
     guarded_native_guest(platform)
