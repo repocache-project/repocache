@@ -1335,3 +1335,14 @@ fixture now uses it during the active boot-receipt check. This does not
 prove the effective SELinux policy, worker credentials, storage, listener
 or TLS, which remain independently checked; no start or stop authority
 follows from the observation.
+
+For the loopback-only dedicated candidate, a separate native health witness
+uses the retained namespace descriptor and exact active master observation
+to prove a unique listener inode on the expected port. Only the existing
+fixed local health/catalog protocol may execute in a bounded single-threaded
+child after entering that descriptor's network namespace. The parent never
+changes its namespace; the same master, listener, namespace and caller's
+receipt/policy guard are verified again after the child is reaped. The legacy
+host-network listener check remains unchanged in scope. The witness grants
+no activation, mutation or publication authority and is not wired to the
+confined socket dispatcher.

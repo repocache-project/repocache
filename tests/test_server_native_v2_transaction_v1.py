@@ -3489,3 +3489,86 @@ def test_verify_prepared_wal_boot_egress_never_prepares_or_publishes(
         assert paths[native._CATALOG].read_bytes() == b"foreign"
     else:
         assert _fixture_resource_bytes(paths) == withdrawn
+
+
+@pytest.mark.parametrize("fault", ["none", "namespace", "owner", "listener", "child"])
+def test_dedicated_health_binds_listener_before_and_after_fixed_child(monkeypatch, fault):
+    from contextlib import contextmanager
+    from repocache import server_native_egress_candidate_v1 as egress
+    from repocache import server_native_nginx_effective_unit_v1 as unit
+    calls = []
+    context = (None, None, None)
+    expected = {"main_pid_observed": 123, "private_unit_identity": (31, 41)}
+    namespace = (17, 29)
+
+    @contextmanager
+    def scope():
+        yield 11, namespace if fault != "namespace" else (17, 30), lambda: None
+
+    def owned():
+        if fault == "owner" and "child" in calls:
+            raise native.NativeV2TransactionError("OWNER_CHANGED")
+
+    def observe(**kw):
+        assert kw == {"https_port": 8008, "namespace_identity": namespace,
+                      "executable_identity": (51, 61)}
+        return expected
+
+    def listener(identity, got_context, reobserve, *, namespace_identity):
+        assert identity == (123, (31, 41)) and got_context == context
+        assert namespace_identity == namespace and reobserve() == identity
+        calls.append("listener")
+        return 78 if fault == "listener" and "child" in calls else 77
+
+    def child(net, identity, got_context, catalog, *, publish):
+        assert (net, identity, got_context, catalog, publish) == (11, namespace, context, None, False)
+        calls.append("child")
+        if fault == "child":
+            raise native.NativeV2TransactionError("CHILD_FAILED")
+
+    monkeypatch.setattr(native, "_verify_current_root_fd", lambda fd: None)
+    monkeypatch.setattr(egress, "_fixed_namespace_scope", scope)
+    monkeypatch.setattr(unit, "_inspect_signed_owned_namespace_runtime", observe)
+    monkeypatch.setattr(native, "_owned_master_listener", listener)
+    monkeypatch.setattr(native, "_run_dedicated_health_child", child)
+    def invoke():
+        return native._owned_dedicated_live_health_bound(
+            10, context, None, publish=False, namespace_identity=namespace,
+            executable_identity=(51, 61), recheck_owned=owned)
+    if fault == "none":
+        result = invoke()
+        assert result["status"] == "OWNED_DEDICATED_HEALTH_OBSERVED"
+        assert result["listener_inode"] == 77
+        assert not result["authorizes_nginx_activation"]
+        assert not result["authorizes_catalog_publication"]
+        assert calls == ["listener", "child", "listener"]
+    else:
+        with pytest.raises(native.NativeV2TransactionError):
+            invoke()
+        assert calls == {"namespace": [], "owner": ["listener", "child"],
+                         "listener": ["listener", "child", "listener"],
+                         "child": ["listener", "child"]}[fault]
+
+
+@pytest.mark.parametrize("exit_status", [0, 256])
+def test_dedicated_health_parent_reaps_only_fixed_child(monkeypatch, exit_status):
+    import signal
+    import threading
+    from types import SimpleNamespace
+    calls = []
+    monkeypatch.setattr(threading, "active_count", lambda: 1)
+    monkeypatch.setattr(signal, "getsignal", lambda signum: signal.SIG_DFL)
+    monkeypatch.setattr(native, "os", SimpleNamespace(
+        listdir=lambda path: ["1"], setns=lambda *args: None, CLONE_NEWNET=1,
+        fork=lambda: 123, WNOHANG=1, WIFEXITED=lambda status: True,
+        WEXITSTATUS=lambda status: status >> 8,
+        waitpid=lambda pid, mode: calls.append((pid, mode)) or (pid, exit_status)))
+    def invoke():
+        native._run_dedicated_health_child(11, (17, 29), (None, None, None), None,
+                                          publish=False)
+    if exit_status:
+        with pytest.raises(native.NativeV2TransactionError, match="HEALTH_UNVERIFIED"):
+            invoke()
+    else:
+        invoke()
+    assert calls == [(123, 1)]

@@ -2585,6 +2585,16 @@ def _owned_live_verify_listener(root_fd: int, identity: tuple, context: tuple, *
     def observe():
         return (_owned_live_observe(root_fd) if expected_unit is None
                 else _owned_live_observe(root_fd, expected_unit=expected_unit))
+    return _owned_master_listener(identity, context, observe)
+
+
+def _owned_master_listener(identity: tuple, context: tuple, observe, *,
+                           namespace_identity: tuple[int, int] | None = None) -> int:
+    """Shared fixed listener readback; no new mutation or caller authority.
+
+    Legacy callers still require the current network namespace. Dedicated
+    callers must independently retain the verified fixed nsfs descriptor.
+    """
     if observe() != identity:
         _deny("OWNED_LIVE_UNIT_CHANGED")
     pid = identity[0]
@@ -2614,7 +2624,10 @@ def _owned_live_verify_listener(root_fd: int, identity: tuple, context: tuple, *
             def sample():
                 local_ns = os.stat("/proc/self/ns/net")
                 master_ns = os.stat("ns/net", dir_fd=master)
-                if (local_ns.st_dev, local_ns.st_ino) != (master_ns.st_dev, master_ns.st_ino):
+                local_identity = (local_ns.st_dev, local_ns.st_ino)
+                required = local_identity if namespace_identity is None else namespace_identity
+                if (required != (master_ns.st_dev, master_ns.st_ino)
+                        or (namespace_identity is not None and required == local_identity)):
                     _deny("OWNED_LIVE_LISTENER_NAMESPACE_CHANGED")
                 current = os.stat(str(pid), dir_fd=proc, follow_symlinks=False)
                 if (current.st_dev, current.st_ino) != master_id:
@@ -2635,7 +2648,7 @@ def _owned_live_verify_listener(root_fd: int, identity: tuple, context: tuple, *
                 ) + _owned_listener_rows(
                     _owned_read_proc_table(net, "tcp6"), ipv6=True, port=port,
                 )
-                return _owned_require_listener(rows, sockets, address), (local_ns.st_dev, local_ns.st_ino)
+                return _owned_require_listener(rows, sockets, address), required
 
             first = sample()
             if observe() != identity or sample() != first:
@@ -2658,6 +2671,151 @@ def _owned_live_health_bound(root_fd: int, identity: tuple, context: tuple,
     _owned_live_health(context, catalog, publish=publish)
     if listener() != before:
         _deny("OWNED_LIVE_LISTENER_CHANGED")
+
+
+def _run_dedicated_health_child(net: int, namespace_identity: tuple[int, int],
+                                context: tuple, catalog: bytes | None, *, publish: bool) -> None:
+    """Run only the fixed local health read in a bounded disposable child.
+
+    Never switch the caller's network namespace or expose an arbitrary
+    command. This is a single-threaded trusted native lifecycle primitive,
+    not available to the confined socket dispatcher.
+    """
+    import signal
+    import threading
+
+    if (threading.active_count() != 1 or len(os.listdir("/proc/self/task")) != 1
+            or signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL
+            or not hasattr(os, "setns") or not hasattr(os, "CLONE_NEWNET")):
+        _deny("OWNED_DEDICATED_HEALTH_CHILD_REFUSED")
+    pid = os.fork()
+    if pid == 0:
+        try:
+            os.setns(net, os.CLONE_NEWNET)
+            seen = os.stat("/proc/self/ns/net")
+            if (seen.st_dev, seen.st_ino) != namespace_identity:
+                os._exit(1)
+            _owned_live_health(context, catalog, publish=publish)
+        except BaseException:
+            os._exit(1)
+        os._exit(0)
+
+    reaped = False
+    try:
+        deadline = time.monotonic() + 45
+        while True:
+            found, status = os.waitpid(pid, os.WNOHANG)
+            if found == pid:
+                reaped = True
+                if not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
+                    _deny("OWNED_DEDICATED_HEALTH_UNVERIFIED")
+                return
+            if found != 0:
+                _deny("OWNED_DEDICATED_HEALTH_CHILD_REFUSED")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _deny("OWNED_DEDICATED_HEALTH_TIMEOUT")
+            time.sleep(min(0.05, remaining))
+    finally:
+        if not reaped:
+            # Never signal a PID already reaped or an unrelated process.
+            # The single-thread/default-SIGCHLD precondition means the
+            # unreaped child PID cannot be recycled between these calls.
+            try:
+                found, _ = os.waitpid(pid, os.WNOHANG)
+                if found == 0:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    os.waitpid(pid, 0)
+            except ChildProcessError:
+                pass
+
+
+def _owned_dedicated_live_health_bound(
+    root_fd: int, context: tuple, catalog: bytes | None, *, publish: bool,
+    namespace_identity: tuple[int, int], executable_identity: tuple[int, int],
+    recheck_owned,
+) -> dict:
+    """Observe the fixed signed dedicated listener and pinned local health.
+
+    The trusted lifecycle caller must retain the original state lock,
+    authenticate the context/certificate, executable and boot/profile
+    receipts and recheck the fixed kernel policy and storage. No active
+    ingress, namespace preparation, process or publication operation is
+    authorized by this observation. Only the loopback candidate is enabled.
+    """
+    from repocache.server_native_egress_candidate_v1 import (
+        _fixed_namespace_scope, NativeEgressCandidateError,
+    )
+    from repocache.server_native_nginx_effective_unit_v1 import (
+        _inspect_signed_owned_namespace_runtime,
+    )
+    if (not callable(recheck_owned) or type(publish) is not bool
+            or type(context) is not tuple or len(context) != 3
+            or (publish and type(catalog) is not bytes)
+            or (not publish and catalog is not None)
+            or any(type(pair) is not tuple or len(pair) != 2
+                   or any(type(value) is not int or value <= 0 for value in pair)
+                   for pair in (namespace_identity, executable_identity))):
+        _deny("OWNED_DEDICATED_HEALTH_INPUT_INVALID")
+    _verify_current_root_fd(root_fd)
+    document, generation, leaf = context
+    try:
+        if document is None:
+            if generation is not None or leaf is not None or publish:
+                _deny("OWNED_DEDICATED_HEALTH_INPUT_INVALID")
+            port = 8008
+        else:
+            validated = validate_install_document(document, for_apply=True)
+            listen = validated["deployment"]["listen"]
+            if (listen["bind_address"] != "127.0.0.1"
+                    or type(generation) is not int
+                    or validated["expected_state_generation"] != generation
+                    or not _valid_sha(leaf)):
+                _deny("OWNED_DEDICATED_HEALTH_INPUT_INVALID")
+            port = listen["https_port"]
+        with _fixed_namespace_scope() as (net, current, recheck):
+            if current != namespace_identity:
+                _deny("OWNED_DEDICATED_HEALTH_NAMESPACE_CHANGED")
+
+            def observe():
+                recheck()
+                recheck_owned()
+                report = _inspect_signed_owned_namespace_runtime(
+                    https_port=port, namespace_identity=current,
+                    executable_identity=executable_identity)
+                recheck_owned()
+                recheck()
+                return report
+
+            first = observe()
+            identity = (first["main_pid_observed"], first["private_unit_identity"])
+
+            def same_master():
+                if observe() != first:
+                    _deny("OWNED_DEDICATED_HEALTH_MASTER_CHANGED")
+                return identity
+
+            def listener():
+                return _owned_master_listener(
+                    identity, context, same_master, namespace_identity=current)
+
+            before = listener()
+            _run_dedicated_health_child(net, current, context, catalog, publish=publish)
+            if listener() != before or observe() != first:
+                _deny("OWNED_LIVE_LISTENER_CHANGED")
+            return {"status": "OWNED_DEDICATED_HEALTH_OBSERVED",
+                    "listener_inode": before, "main_pid": identity[0],
+                    "generation": generation, "catalog_observed": publish,
+                    "authorizes_nginx_activation": False,
+                    "authorizes_catalog_publication": False}
+    except NativeV2TransactionError:
+        raise
+    except (NativeEgressCandidateError, EffectiveNginxUnitError, OSError,
+            ValueError, TypeError, KeyError, OverflowError):
+        _deny("OWNED_DEDICATED_HEALTH_UNVERIFIED")
 
 
 def _owned_live_wait_generation(root_fd: int, identity: tuple, context: tuple) -> None:
