@@ -151,6 +151,7 @@ assert "recoverable_fallback_pair_lab" not in sys.modules
         # Negative readback from the same authenticated archive, not a
         # second writer. Only the exact marked fixture journal is touched.
         journal_path = root / "var/lib/repocache-client/approved-entries" / ("pair-" + ident + ".json")
+        journal = json.loads(journal_path.read_text("ascii"))
         pending = journal_path.with_name(".pair-" + ident + ".pending")
         before = _snapshot(journal_path)
         with pending.open("xb") as stream:
