@@ -824,6 +824,104 @@ finally:
     print("PASS: actual dedicated WAL recovery after kernel reboot restores prior TLS generation and catalog", flush=True)
 
 
+def verify_stopped_wal_preparation_fixture(distribution, native, assets, pins):
+    """Actual stopped service, signed-worker prior-byte recovery, fixture start.
+
+    Preserve the earlier reboot/active broker test. Repeat its interrupted
+    proposal, retain the WAL and withhold catalog publication while stopped,
+    then explicitly start the prior fixture generation and let the existing
+    confined recovery protocol finish. No installed inactive dispatch added.
+    """
+    from scripts.ci_pr237_native_socket_guest import command, https_response
+
+    require_status(OWN, True, True)
+    require_status(VENDOR, False, False)
+    require_control_worker_idle()
+    assert run("/usr/bin/systemctl", "is-active",
+               "repocache-control.socket").stdout.strip() == "inactive"
+    assert native.stage.verify_installed_worker(assets, **pins)[
+        "publisher_key_id"] == "pr237-synthetic"
+    prior = live_wal_resource_hashes()
+    run_live_wal(distribution, "interrupt")
+    wal = STATE / ".state-v2-owned-nginx.pending"
+    original = wal.read_bytes()
+    inode = wal.stat().st_ino
+    catalog = Path("/var/lib/repocache/public/catalog.json")
+    assert not catalog.exists()
+    assert b"x-repocache-generation: 2" in https_response("/__repocache/healthz").lower()
+    command("/usr/bin/systemctl", "stop", OWN)
+    require_status(OWN, False, True)
+    require_status(VENDOR, False, False)
+    code = r"""
+import hashlib,json,os,sys,zipimport
+sys.path.insert(0,"/usr/libexec/repocache/server-control-worker")
+from repocache import server_native_v2_transaction_v1 as tx
+from repocache import server_native_nginx_effective_unit_v1 as unit
+from repocache.server_native_installed_storage_v1 import prepare_installed_storage
+from repocache.server_root_control_host_preflight_v1 import require_native_host_preconditions
+for module in (tx,unit):
+    assert isinstance(module.__loader__,zipimport.zipimporter)
+    assert module.__loader__.archive=="/usr/libexec/repocache/server-control-worker"
+require_native_host_preconditions()
+distribution,expected_hash=sys.argv[1:]
+root=os.open("/",tx._DIRECTORY_FLAGS)
+try:
+    with tx._locked(root,0) as state:
+        tx._require_audited_native_package_for_activation(state,distribution=distribution)
+        storage=prepare_installed_storage(distribution,allow_create=False)
+        identity=unit.inspect_effective_owned_nginx_unit(active=False)
+        raw=unit._signed_owned_unit_bytes()
+        exact_unit=unit._read_exact_owned_unit_at(root,raw,owner_uid=0,owner_gid=0)
+        assert identity["main_pid_observed"]==0
+        def stopped():
+            assert unit.inspect_effective_owned_nginx_unit(active=False)==identity
+            assert unit._read_exact_owned_unit_at(root,raw,owner_uid=0,owner_gid=0)==exact_unit
+            assert prepare_installed_storage(distribution,allow_create=False)==storage
+        with tx._owned_layout_locked(root,state,recovering=True) as layout:
+            original=tx._read_file(state,tx._OWNED_WAL,0,tx._MAX_WAL)
+            assert hashlib.sha256(original).hexdigest()==expected_hash
+            result=tx._prepare_owned_inactive_wal_rollback_locked(
+                *layout,distribution=distribution,expected_wal=original,
+                recheck_stopped_owner=stopped)
+            assert result["prior_generation"]==1
+            assert result["catalog_withdrawn"] and result["recovery_required"]
+            assert not result["runtime_verified"]
+            assert not result["authorizes_nginx_activation"]
+            assert not result["authorizes_catalog_publication"]
+            assert tx._prepare_owned_inactive_wal_rollback_locked(
+                *layout,distribution=distribution,expected_wal=original,
+                recheck_stopped_owner=stopped)==result
+            assert tx._read_file(state,tx._OWNED_WAL,0,tx._MAX_WAL)==original
+            print(json.dumps(result,sort_keys=True))
+finally:
+    os.close(root)
+"""
+    subprocess.run(["/usr/bin/python3", "-IS", "-B", "-c", code, distribution,
+                    hashlib.sha256(original).hexdigest()],
+                   stdin=subprocess.DEVNULL, check=True, timeout=180)
+    require_status(OWN, False, True)
+    assert wal.read_bytes() == original and wal.stat().st_ino == inode
+    assert not catalog.exists()
+    assert all(hashlib.sha256(Path(name).read_bytes()).hexdigest() == digest
+               for name, digest in prior.items() if name != str(catalog))
+    print("PASS: stopped signed-test service retains WAL and withdrawn catalog after exact prior-byte preparation and repeat", flush=True)
+    # Explicit disposable-fixture start only, not an installed recovery
+    # command or proof of automatic boot ordering. The existing unit must
+    # expose the old generation before the confined broker can finalize.
+    command("/usr/bin/systemctl", "start", OWN)
+    require_status(OWN, True, True)
+    assert b"x-repocache-generation: 1" in https_response("/__repocache/healthz").lower()
+    assert not catalog.exists() and wal.read_bytes() == original
+    verify_dedicated_socket(pending=True)
+    assert live_wal_resource_hashes() == prior and not wal.exists()
+    assert https_response("/.well-known/repocache/catalog.json").endswith(catalog.read_bytes())
+    require_status(VENDOR, False, False)
+    assert native.stage.verify_installed_worker(assets, **pins)[
+        "publisher_key_id"] == "pr237-synthetic"
+    print("PASS: explicit fixture start observes prior generation before confined recovery publishes catalog and clears WAL", flush=True)
+    print("NOT VERIFIED: installed inactive recovery dispatch or dedicated automatic boot service ordering", flush=True)
+
+
 def verify_storage_report(report: dict, distribution: str) -> None:
     assert report["storage"] == {
         "cache_root_verified": True,
@@ -2438,6 +2536,7 @@ def verify_guest(distribution: str, phase: str) -> None:
         require_status(VENDOR, False, False)
         assert native._own_service_observation(active=True)["main_pid_observed"] > 1
         recover_live_wal_after_reboot(distribution)
+        verify_stopped_wal_preparation_fixture(distribution, native, assets, pins)
         verify_storage_after_recovery(distribution, native)
         verify_managed_installer_repeat(distribution, native, assets, pins)
         verify_inactive_managed_repair(distribution, native, assets, pins)

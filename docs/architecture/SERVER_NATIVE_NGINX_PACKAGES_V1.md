@@ -1264,3 +1264,13 @@ ownership, service start, health or rollback completion. No installed
 dispatch or catalog publication is enabled. A subsequent authenticated
 runtime recovery must verify the prior service before final publication
 and WAL removal.
+
+The disposable signed-test VM now repeats its interrupted generation
+after the existing active reboot recovery, stops only the owned service,
+and exercises the new prior-byte preparation through the installed
+authenticated worker on both distributions. It checks the same WAL inode,
+exact prior non-catalog hashes and continued catalog absence before an
+explicit fixture-only start. The existing confined recovery then verifies
+the prior generation and completes catalog publication and WAL removal.
+This adds native evidence for the preparation/composition, not an
+installed inactive recovery entry point or automatic boot provisioner.
