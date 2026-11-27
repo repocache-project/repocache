@@ -3673,7 +3673,7 @@ def test_dedicated_health_child_timeout_and_preflight_do_not_signal_foreign_pid(
 
 
 @pytest.mark.parametrize("fault", ["none", "active-route", "nonloopback", "pending",
-                                    "policy", "policy-drift", "storage-drift",
+                                    "policy", "policy-drift", "storage-drift", "scratch-drift",
                                     "enabled", "start", "health",
                                     "foreign-master", "generation-drift"])
 def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
@@ -3707,6 +3707,7 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
     foreign = False
     policy_reads = 0
     storage_reads = 0
+    scratch_reads = 0
     ns, exe = (17, 29), (31, 41)
 
     # Retain the real layout before replacing its public test seam, so
@@ -3796,8 +3797,13 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
     monkeypatch.setattr(unit, "_safe_native_systemctl", lambda: None)
     monkeypatch.setattr(native.subprocess, "run", command)
     monkeypatch.setattr(storage, "prepare_dedicated_candidate_storage", inspect_storage)
-    monkeypatch.setattr(native, "_owned_alma_runtime_temps",
-                        lambda *_a, **_kw: ((1,), {"scratch": (2,)}))
+    def inspect_scratch(*args, **kwargs):
+        nonlocal scratch_reads
+        scratch_reads += 1
+        assert kwargs["dedicated"] and not kwargs.get("allow_create", False)
+        inode = 3 if fault == "scratch-drift" and scratch_reads >= 2 else 2
+        return ((1,), {"scratch": (inode,)})
+    monkeypatch.setattr(native, "_owned_alma_runtime_temps", inspect_scratch)
     monkeypatch.setattr(native, "verify_service_storage_mounts", lambda pid: None)
     monkeypatch.setattr(native.pwd, "getpwnam", lambda name: SimpleNamespace(pw_uid=33))
     # The fixture already has an owned lock; the mocked layout is the
@@ -3817,7 +3823,7 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
         with pytest.raises(native.NativeV2TransactionError):
             invoke()
         assert calls == {"active-route": [], "nonloopback": [], "pending": [],
-                         "policy": [], "policy-drift": [], "storage-drift": [],
+                         "policy": [], "policy-drift": [], "storage-drift": [], "scratch-drift": [],
                          "enabled": [],
                          "start": ["start", "stop"], "health": ["start", "health", "stop"],
                          "foreign-master": ["start", "health"],
@@ -3827,8 +3833,114 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
         assert policy_reads == 2
     if fault == "storage-drift":
         assert storage_reads == 2
+    if fault == "scratch-drift":
+        assert scratch_reads == 2
     expected = ({**resources, native._CATALOG: b"foreign catalog"}
                 if fault == "generation-drift" else resources)
     assert _fixture_resource_bytes(paths) == expected
     if fault == "pending":
         assert pending.read_bytes() == b"existing pending evidence"
+
+
+
+@pytest.mark.parametrize("dedicated", [False, True])
+@pytest.mark.parametrize("fault", ["fresh", "repeat", "missing", "parent-mode",
+                                   "parent-label", "child-label", "symlink", "mode",
+                                   "owner", "group", "xattr", "nonempty", "extra",
+                                   "preflight-all"])
+def test_alma_runtime_scratch_fresh_only_and_exact_identity(tmp_path, monkeypatch,
+                                                          dedicated, fault):
+    """Real dirfds/modes/ownership, synthetic SELinux xattr seam only."""
+    from types import SimpleNamespace
+
+    runtime = tmp_path / "run/repocache-nginx"
+    runtime.mkdir(parents=True, mode=0o755)
+    runtime.chmod(0o755)
+    names = sorted(name for _, name in native._OWNED_RUNTIME_TEMP_NAMES)
+    parent_type = b"repocache_nginx_pid_t" if dedicated else b"var_run_t"
+    child_type = b"repocache_nginx_rw_t" if dedicated else b"httpd_var_run_t"
+    def context(kind):
+        return b"system_u:object_r:" + kind + b":s0\x00"
+    labels = {runtime.stat().st_ino: context(parent_type)}
+    writes = []
+    if fault != "fresh":
+        for name in names:
+            leaf = runtime / name
+            leaf.mkdir(mode=0o700)
+            os.chown(leaf, 33, 0)
+            labels[leaf.stat().st_ino] = context(child_type)
+    first, last = runtime / names[0], runtime / names[-1]
+    if fault == "missing":
+        first.rmdir()
+    elif fault == "parent-mode":
+        runtime.chmod(0o775)
+    elif fault == "parent-label":
+        labels[runtime.stat().st_ino] = context(b"var_t")
+    elif fault in ("child-label", "preflight-all"):
+        labels[last.stat().st_ino] = context(b"httpd_cache_t")
+        if fault == "preflight-all":
+            first.rmdir()
+    elif fault == "symlink":
+        first.rmdir()
+        first.symlink_to(tmp_path, target_is_directory=True)
+    elif fault == "mode":
+        first.chmod(0o750)
+    elif fault == "owner":
+        os.chown(first, 65534, 0)
+    elif fault == "group":
+        os.chown(first, 33, 33)
+    elif fault == "nonempty":
+        (first / "retain").write_bytes(b"foreign")
+    elif fault == "extra":
+        (runtime / "foreign").mkdir()
+
+    def inode(fd):
+        return os.fstat(fd).st_ino
+    def listxattr(fd):
+        return (["security.selinux", "user.foreign"] if
+                fault == "xattr" and inode(fd) == first.stat().st_ino else
+                ["security.selinux"])
+    def getxattr(fd, name):
+        assert name == "security.selinux"
+        return labels.get(inode(fd), context(parent_type))
+    def setxattr(fd, name, value):
+        assert name == "security.selinux" and value == context(child_type)
+        assert os.fstat(fd).st_uid == 0
+        labels[inode(fd)] = value
+        writes.append(inode(fd))
+
+    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(native.pwd, "getpwnam", lambda name: SimpleNamespace(pw_uid=33))
+            patch.setattr(native.os, "listxattr", listxattr)
+            patch.setattr(native.os, "getxattr", getxattr)
+            patch.setattr(native.os, "setxattr", setxattr)
+            def observe(create=False, require_all=True):
+                return native._owned_alma_runtime_temps(
+                    fd, dedicated=dedicated, allow_create=create,
+                    require_all=require_all, inactive=True)
+            if fault in ("fresh", "repeat"):
+                result = observe(create=True)
+                assert set(result[1]) == set(names)
+                assert len(writes) == (5 if fault == "fresh" else 0)
+                assert observe() == observe(create=True) == result
+                assert len(writes) == (5 if fault == "fresh" else 0)
+                for name in names:
+                    assert (runtime / name).stat().st_uid == 33
+                    assert result[1][name][-1] == context(child_type).rstrip(b"\x00")
+            elif fault == "missing":
+                assert len(observe(require_all=False)[1]) == 4
+                with pytest.raises(native.NativeV2TransactionError,
+                                   match="OWNED_CONTEXT_RUNTIME_TEMP_UNVERIFIED"):
+                    observe()
+                assert not first.exists() and not writes
+            else:
+                with pytest.raises(native.NativeV2TransactionError,
+                                   match="OWNED_CONTEXT_RUNTIME_TEMP_UNVERIFIED"):
+                    observe(create=True)
+                assert not writes
+                if fault == "preflight-all":
+                    assert not first.exists()
+    finally:
+        os.close(fd)
