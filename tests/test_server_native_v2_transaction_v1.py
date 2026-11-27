@@ -3671,3 +3671,127 @@ def test_dedicated_health_child_timeout_and_preflight_do_not_signal_foreign_pid(
         assert calls == ["fork", ("wait", 1), ("wait", 1)]
     else:
         assert not calls
+
+
+@pytest.mark.parametrize("fault", ["none", "active-route", "policy", "enabled",
+                                    "start", "health", "foreign-master"])
+def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
+        filesystem, monkeypatch, fault):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from repocache import server_native_nginx_effective_unit_v1 as unit
+    from repocache import server_native_installed_storage_v1 as storage
+    from repocache import server_root_control_host_preflight_v1 as host
+
+    rootfd, state, _, _, _ = filesystem
+    cfg = document(1, generation=1)
+    cfg["deployment"]["paths"]["generated_include"] = native._OWNED_INCLUDE_PATH
+    cfg["deployment"]["listen"]["bind_address"] = "127.0.0.1"
+    cfg["repositories"][0]["desired_state"] = "active" if fault == "active-route" else "disabled"
+    raw = _canon(snapshot(generation=1, doc=cfg))
+    main, include, catalog = native._render_owned_managed_candidate(
+        cfg, 1, "almalinux",
+        {"repo-0": {"mirror0.example.invalid": ["8.8.8.8"]}} if fault == "active-route" else {})
+    resources = {V2_STATE: raw, native._OWNED_MAIN: main, native._INCLUDE: include,
+                 native._CATALOG: catalog, native._OWNED_MANIFEST:
+                     native._owned_manifest_for(raw, main, include, catalog)}
+    paths = _owned_fixture_paths(filesystem, resources)
+    calls = []
+    running = False
+    foreign = False
+    ns, exe = (17, 29), (31, 41)
+
+    @contextmanager
+    def layout(root, statefd, *, recovering):
+        assert root == rootfd and not recovering
+        with native._owned_fixture_layout(rootfd, recovering=False) as result:
+            # The fixture layout opens its own retained directory FDs; the
+            # production caller instead supplies the already locked state.
+            yield result
+
+    def observe(*, https_port, active):
+        if active != running:
+            raise unit.EffectiveNginxUnitError("WRONG_STATE")
+        return {"main_pid_observed": 123 if active else 0,
+                "private_unit_identity": (51, 61),
+                "private_dropin_identity": (71, 81)}
+
+    def runtime(*, https_port, namespace_identity, executable_identity):
+        assert namespace_identity == ns and executable_identity == exe
+        assert running
+        result = observe(https_port=https_port, active=True)
+        if foreign:
+            result["private_unit_identity"] = (51, 62)
+        return result
+
+    def command(argv, **kwargs):
+        nonlocal running
+        assert argv[0] == native._SYSTEMCTL and argv[2] == native._OWNED_WAL_DOMAIN
+        assert not kwargs["shell"]
+        if argv[1] == "is-enabled":
+            return SimpleNamespace(returncode=0 if fault == "enabled" else 1,
+                                   stdout=b"enabled\n" if fault == "enabled" else b"disabled\n")
+        calls.append(argv[1])
+        if argv[1] == "start":
+            running = True
+            return SimpleNamespace(returncode=1 if fault == "start" else 0)
+        assert argv[1] == "stop" and running
+        running = False
+        return SimpleNamespace(returncode=0)
+
+    def policy(root, statefd, rules, **kwargs):
+        assert not kwargs["allow_prepare"] and not kwargs["allow_boot_rollover"]
+        assert kwargs["namespace_identity"] == ns
+        kwargs["recheck_owned"]()
+        if fault == "policy":
+            raise native.NativeV2TransactionError("POLICY_REFUSED")
+        return {"receipt_sha256": "a"*64}
+
+    def health(root, context, catalog_bytes, **kwargs):
+        nonlocal foreign
+        assert running and catalog_bytes == catalog and kwargs["publish"]
+        kwargs["recheck_owned"]()
+        calls.append("health")
+        if fault in ("health", "foreign-master"):
+            foreign = fault == "foreign-master"
+            raise native.NativeV2TransactionError("TLS_REFUSED")
+        return {"main_pid": 123, "catalog_observed": True, "generation": 1,
+                "listener_inode": 1234, "authorizes_nginx_activation": False,
+                "authorizes_catalog_publication": False}
+
+    monkeypatch.setattr(host, "require_native_host_preconditions", lambda: {})
+    monkeypatch.setattr(native, "_verify_current_root_fd", lambda root: None)
+    monkeypatch.setattr(native, "_require_audited_native_package_for_activation", lambda *a, **kw: None)
+    monkeypatch.setattr(native, "_owned_layout_locked", layout)
+    monkeypatch.setattr(native, "_verify_tls_pair", lambda *a, **kw: "c"*64)
+    monkeypatch.setattr(native, "_prepare_boot_egress_locked", policy)
+    monkeypatch.setattr(native, "_owned_dedicated_live_health_bound", health)
+    monkeypatch.setattr(unit, "inspect_signed_owned_namespace_unit", observe)
+    monkeypatch.setattr(unit, "_inspect_signed_owned_namespace_runtime", runtime)
+    monkeypatch.setattr(unit, "_safe_native_systemctl", lambda: None)
+    monkeypatch.setattr(native.subprocess, "run", command)
+    monkeypatch.setattr(storage, "prepare_dedicated_candidate_storage",
+                        lambda *a, **kw: {"repository_cache_roots_verified": []})
+    monkeypatch.setattr(native, "verify_service_storage_mounts", lambda pid: None)
+    monkeypatch.setattr(native.pwd, "getpwnam", lambda name: SimpleNamespace(pw_uid=33))
+    # The fixture already has an owned lock; the mocked layout is the
+    # existing descriptor-only fixture and no real systemctl runs.
+    def invoke():
+        return native._start_owned_committed_dedicated_locked(
+            rootfd, 0, namespace_identity=ns, executable_identity=exe,
+            profile_receipt_sha256="a"*64, executable_receipt_sha256="b"*64,
+            recheck_authenticated_owner=lambda: None)
+    if fault == "none":
+        result = invoke()
+        assert result["status"] == "OWNED_DEDICATED_COMMITTED_START_OBSERVED"
+        assert result["service_storage_mounts_verified"]
+        assert not result["enablement_changed"]
+        assert calls == ["start", "health"] and running
+    else:
+        with pytest.raises(native.NativeV2TransactionError):
+            invoke()
+        assert calls == {"active-route": [], "policy": [], "enabled": [],
+                         "start": ["start", "stop"], "health": ["start", "health", "stop"],
+                         "foreign-master": ["start", "health"]}[fault]
+        assert running == (fault == "foreign-master")
+    assert _fixture_resource_bytes(paths) == resources

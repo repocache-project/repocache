@@ -2866,6 +2866,181 @@ def _owned_dedicated_live_health_bound(
         _deny("OWNED_DEDICATED_HEALTH_UNVERIFIED")
 
 
+def _start_owned_committed_dedicated_locked(
+    root_fd: int, state_fd: int, *, namespace_identity: tuple[int, int],
+    executable_identity: tuple[int, int], profile_receipt_sha256: str,
+    executable_receipt_sha256: str, recheck_authenticated_owner,
+) -> dict:
+    """Explicit isolated-candidate start of an already prepared profile.
+
+    The trusted signed lifecycle caller holds the original state lock,
+    independently authenticates the installed worker, exact executable
+    and profile receipts and dedicated labels/policy, and prepares the
+    stopped service's storage and boot namespace. This is NOT socket
+    dispatch, an installer CLI, namespace provisioning or automatic boot.
+    Only a disabled, inactive AlmaLinux service and a committed managed
+    loopback generation with no active routes or pending WAL are accepted.
+    Neither enablement nor configuration, receipts, policy or catalog may
+    change. On failure stop only the exact, still-owned active master.
+    """
+    from repocache.server_native_nginx_effective_unit_v1 import (
+        inspect_signed_owned_namespace_unit, _inspect_signed_owned_namespace_runtime,
+        _safe_native_systemctl,
+    )
+    from repocache.server_root_control_host_preflight_v1 import require_native_host_preconditions
+
+    if (not callable(recheck_authenticated_owner)
+            or not _valid_sha(profile_receipt_sha256)
+            or not _valid_sha(executable_receipt_sha256)
+            or any(type(pair) is not tuple or len(pair) != 2
+                   or any(type(value) is not int or value <= 0 for value in pair)
+                   for pair in (namespace_identity, executable_identity))):
+        _deny("OWNED_DEDICATED_START_INPUT_INVALID")
+    require_native_host_preconditions()
+    _verify_current_root_fd(root_fd)
+    _require_audited_native_package_for_activation(state_fd, distribution="almalinux")
+
+    def fixed_systemctl(action):
+        if action not in ("is-enabled", "start", "stop"):
+            _deny("OWNED_DEDICATED_START_COMMAND_REFUSED")
+        _safe_native_systemctl()
+        result = subprocess.run(
+            (_SYSTEMCTL, action, _OWNED_WAL_DOMAIN), shell=False,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, cwd="/", env=_ENV,
+            timeout=40 if action != "is-enabled" else 5,
+            close_fds=True, start_new_session=True, check=False)
+        if action == "is-enabled":
+            if result.returncode != 1 or result.stdout != b"disabled\n":
+                _deny("OWNED_DEDICATED_START_ENABLEMENT_REFUSED")
+        elif type(result.returncode) is not int or result.returncode != 0:
+            _deny("OWNED_DEDICATED_START_COMMAND_FAILED")
+
+    try:
+        with _owned_layout_locked(root_fd, state_fd, recovering=False) as layout:
+            state, nginx, public, check_layout = layout
+            resources = _read_owned_resources(state, nginx, public)
+            snapshot = _validate_owned_resources(resources, distribution="almalinux")
+            if snapshot is None:
+                _deny("OWNED_DEDICATED_START_MANAGED_REQUIRED")
+            _owned_socket_require_inactive_routes(snapshot)
+            document = parse_install_bytes(base64.b64decode(
+                snapshot["configuration_base64"], validate=True), for_apply=True)
+            listen = document["deployment"]["listen"]
+            if listen["bind_address"] != "127.0.0.1":
+                _deny("OWNED_DEDICATED_START_LOOPBACK_REQUIRED")
+            port = listen["https_port"]
+            worker = pwd.getpwnam("nginx")
+            plan = _owned_boot_egress_plan(resources, distribution="almalinux",
+                                           worker_uid=worker.pw_uid)
+            if plan["destinations"]:
+                _deny("OWNED_BOOT_EGRESS_ACTIVE_ROUTES_REFUSED")
+            from repocache.server_native_installed_storage_v1 import prepare_dedicated_candidate_storage
+            recheck_authenticated_owner()
+            storage = prepare_dedicated_candidate_storage(
+                "almalinux", document, allow_create=False)
+            leaf = _verify_tls_pair(root_fd, document, verify_identity=True)
+            context = (document, snapshot["state_generation"], leaf)
+
+            def exact():
+                check_layout()
+                _no_conflicting_owned_wal_pending(state)
+                _owned_check_stages_absent(state, nginx, public)
+                if _read_owned_resources(state, nginx, public) != resources:
+                    _deny("OWNED_DEDICATED_START_GENERATION_CHANGED")
+                recheck_authenticated_owner()
+                fixed_systemctl("is-enabled")
+
+            def owner(active):
+                exact()
+                observed = inspect_signed_owned_namespace_unit(https_port=port, active=active)
+                exact()
+                return observed
+
+            def policy(active):
+                return _prepare_boot_egress_locked(
+                    root_fd, state, plan["nft_candidate"],
+                    namespace_identity=namespace_identity, generation=plan["generation"],
+                    generation_manifest_sha256=plan["generation_manifest_sha256"],
+                    profile_receipt_sha256=profile_receipt_sha256,
+                    executable_receipt_sha256=executable_receipt_sha256,
+                    recheck_owned=lambda: owner(active), allow_prepare=False,
+                    allow_boot_rollover=False)
+
+            stopped = owner(False)
+            if stopped["main_pid_observed"] != 0:
+                _deny("OWNED_DEDICATED_START_OWNER_REFUSED")
+            before_policy = policy(False)
+            _require_audited_native_package_for_activation(state, distribution="almalinux")
+            if owner(False) != stopped or _verify_tls_pair(
+                    root_fd, document, verify_identity=True) != leaf:
+                _deny("OWNED_DEDICATED_START_OWNER_CHANGED")
+            started = None
+            try:
+                # PID1 executes the exact signed ExecStartPre syntax check
+                # in the prepared namespace before the actual master starts.
+                fixed_systemctl("start")
+                started = _inspect_signed_owned_namespace_runtime(
+                    https_port=port, namespace_identity=namespace_identity,
+                    executable_identity=executable_identity)
+                if (started["private_unit_identity"] != stopped["private_unit_identity"]
+                        or started["private_dropin_identity"] != stopped["private_dropin_identity"]
+                        or policy(True) != before_policy):
+                    _deny("OWNED_DEDICATED_START_OWNER_CHANGED")
+                witness = _owned_dedicated_live_health_bound(
+                    root_fd, context, resources[_CATALOG], publish=True,
+                    namespace_identity=namespace_identity,
+                    executable_identity=executable_identity, recheck_owned=exact)
+                if (witness["main_pid"] != started["main_pid_observed"]
+                        or not witness["catalog_observed"]
+                        or witness["generation"] != snapshot["state_generation"]
+                        or _inspect_signed_owned_namespace_runtime(
+                            https_port=port, namespace_identity=namespace_identity,
+                            executable_identity=executable_identity) != started
+                        or _verify_tls_pair(root_fd, document, verify_identity=True) != leaf
+                        or prepare_dedicated_candidate_storage(
+                            "almalinux", document, allow_create=False) != storage
+                        or policy(True) != before_policy):
+                    _deny("OWNED_DEDICATED_START_POSTCHECK_FAILED")
+                verify_service_storage_mounts(started["main_pid_observed"])
+                _require_audited_native_package_for_activation(state, distribution="almalinux")
+                exact()
+                return {**witness, "status": "OWNED_DEDICATED_COMMITTED_START_OBSERVED",
+                        "storage": storage, "service_storage_mounts_verified": True,
+                        "enablement_changed": False}
+            except Exception:
+                try:
+                    exact()
+                    try:
+                        inactive = owner(False)
+                    except EffectiveNginxUnitError:
+                        active = _inspect_signed_owned_namespace_runtime(
+                            https_port=port, namespace_identity=namespace_identity,
+                            executable_identity=executable_identity)
+                        if (active["private_unit_identity"] != stopped["private_unit_identity"]
+                                or active["private_dropin_identity"] != stopped["private_dropin_identity"]
+                                or (started is not None and active != started)
+                                or policy(True) != before_policy):
+                            _deny("OWNED_DEDICATED_START_RECOVERY_REQUIRED")
+                        exact()
+                        if _inspect_signed_owned_namespace_runtime(
+                                https_port=port, namespace_identity=namespace_identity,
+                                executable_identity=executable_identity) != active:
+                            _deny("OWNED_DEDICATED_START_RECOVERY_REQUIRED")
+                        fixed_systemctl("stop")
+                        inactive = owner(False)
+                    if inactive != stopped or policy(False) != before_policy:
+                        _deny("OWNED_DEDICATED_START_RECOVERY_REQUIRED")
+                except Exception:
+                    _deny("OWNED_DEDICATED_START_RECOVERY_REQUIRED")
+                _deny("OWNED_DEDICATED_START_FAILED_STOPPED")
+    except NativeV2TransactionError:
+        raise
+    except (EffectiveNginxUnitError, InstalledStorageError, OSError, TypeError,
+            ValueError, KeyError, OverflowError, subprocess.SubprocessError):
+        _deny("OWNED_DEDICATED_START_UNVERIFIED")
+
+
 def _owned_live_wait_generation(root_fd: int, identity: tuple, context: tuple) -> None:
     """A graceful reload is asynchronous; bounded retries cannot change authority."""
     deadline = time.monotonic() + 12

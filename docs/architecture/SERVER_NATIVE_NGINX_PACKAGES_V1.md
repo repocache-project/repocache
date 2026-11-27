@@ -1381,3 +1381,14 @@ restores the original fixture-owned storage and labels only on success;
 any ambiguous failure retains evidence. This is still explicit
 test-harness sequencing, not automatic installed boot dispatch or
 persistent storage migration.
+
+The isolated candidate now executes the fixed committed-generation start
+sequence inside the installed signed worker while retaining the protected
+state layout. It refuses a pending WAL, bootstrap, enabled unit, non-loopback
+listener or active upstream routes. Existing boot policy, signed unit,
+authenticated ownership, dedicated storage and TLS are checked before start;
+PID1 runs the exact native ExecStartPre and the worker verifies actual
+master, listener, TLS, catalog and storage afterwards. On failure only an
+exact still-owned active master may be stopped; ambiguous ownership or
+generation drift is recovery-required. No new CLI, socket operation,
+automatic boot enablement or production activation is introduced.

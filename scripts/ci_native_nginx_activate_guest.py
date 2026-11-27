@@ -2320,12 +2320,14 @@ try:
             result=profile(True)
         else:
             observed_profile=profile(False)
-            def owner(active):
-                unit.inspect_signed_owned_namespace_unit(https_port=443,active=active)
+            def receipts():
                 assert profile(False)==observed_profile
                 assert executable._read_executable_receipt(directory)==receipt
                 assert executable._verify_leaf(directory,proof["sha256"],dedicated_selinux=True)==identity
                 assert executable._named(directory,executable._PENDING) is None
+            def owner(active):
+                unit.inspect_signed_owned_namespace_unit(https_port=443,active=active)
+                receipts()
             def stopped():
                 owner(False)
             def namespace_identity():
@@ -2436,6 +2438,14 @@ try:
             elif action=="verify":
                 net_identity=namespace_identity()
                 result=policy(False)
+            elif action=="start-committed":
+                assert not pending
+                result=tx._start_owned_committed_dedicated_locked(
+                    root,state,namespace_identity=namespace_identity(),
+                    executable_identity=identity[:2],
+                    profile_receipt_sha256=observed_profile["receipt_sha256"],
+                    executable_receipt_sha256=hashlib.sha256(receipt).hexdigest(),
+                    recheck_authenticated_owner=receipts)
             elif action in ("prepare-committed-storage","verify-committed-active"):
                 # Exercise the actual committed generation, not a rewritten
                 # synthetic include. No pending-WAL publication authority.
@@ -2660,13 +2670,17 @@ finally:
             require("/usr/bin/chcon", "-t", "repocache_nginx_pid_t", str(runtime))
             require_prior_resources()
             assert signed("verify") == result
-            started = run("/usr/bin/systemctl", "start", OWN)
-            if started.returncode:
-                print("COMMITTED_DEDICATED_START_REFUSED:", started.stderr[-1000:], flush=True)
+            try:
+                started = signed("start-committed")
+            except Exception:
                 print(run("/usr/bin/journalctl", "-u", OWN, "-n", "20", "--no-pager").stdout[-4000:], flush=True)
-                raise AssertionError("Exact committed dedicated start failed")
+                raise
+            assert started["status"] == "OWNED_DEDICATED_COMMITTED_START_OBSERVED"
+            assert started["service_storage_mounts_verified"] and not started["enablement_changed"]
             require_status(OWN, True, False)
             witnessed = signed("verify-committed-active")
+            assert witnessed["main_pid"] == started["main_pid"]
+            assert witnessed["listener_inode"] == started["listener_inode"]
             assert witnessed["storage"] == prepared_storage
             assert witnessed["catalog_observed"] and witnessed["generation"] == current["state_generation"]
             assert witnessed["listener_inode"] > 0
