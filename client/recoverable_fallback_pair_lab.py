@@ -336,12 +336,21 @@ def _dnf4_private_claim(root: Path):
     expected = str(os.getpid()).encode("ascii")
     dirfd = rpmfd = fd = kernel = None
     published = False
+    directory_drift = False
     def identity(info):
         return (info.st_dev, info.st_ino, info.st_mode, info.st_uid,
                 info.st_gid, info.st_nlink, info.st_size)
     def check_directories():
-        _dnf4_check_lock_directory(root, lock_dir, pinned=dirfd)
-        _dnf4_check_lock_directory(root, rpm_dir, pinned=rpmfd)
+        nonlocal directory_drift
+        _require_dnf4(not directory_drift)
+        try:
+            _dnf4_check_lock_directory(root, lock_dir, pinned=dirfd)
+            _dnf4_check_lock_directory(root, rpm_dir, pinned=rpmfd)
+        except (OSError, locks.LockInspectionRefused):
+            # Never resume a scope or remove its claim after an observed
+            # ownership-boundary failure, even if a caller repairs the mode.
+            directory_drift = True
+            raise
     def recheck():
         _require_dnf4(os.getpid() == int(expected))
         check_directories()
@@ -367,6 +376,7 @@ def _dnf4_private_claim(root: Path):
         os.fsync(fd)
         claim = identity(os.fstat(fd))
         _require_dnf4(claim[3:6] == (0, 0, 1))
+        check_directories()
         boundary._rename_noreplace(dirfd, staged, leaf)
         published = True
         os.fsync(dirfd)
@@ -393,6 +403,7 @@ def _dnf4_private_claim(root: Path):
                 named = os.stat(leaf, dir_fd=dirfd, follow_symlinks=False)
                 if identity(named) != claim or os.pread(fd, 32, 0) != expected:
                     raise RuntimeError("Foreign DNF4 PID record; retained for review")
+                check_directories()
                 os.unlink(leaf, dir_fd=dirfd)
                 os.fsync(dirfd)
         finally:

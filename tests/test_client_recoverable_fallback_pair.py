@@ -234,7 +234,6 @@ def test_pending_journal_name_uses_validated_id():
         lab._pending_journal_name("../unsafe")
 
 
-
 @pytest.mark.parametrize("fault", ["none", "root-mode", "parent-mode",
                                     "leaf-mode", "symlink", "replacement", "owner"])
 def test_dnf4_rewalk_checks_private_directory_and_retained_identity(tmp_path, monkeypatch, fault):

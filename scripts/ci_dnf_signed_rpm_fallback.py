@@ -339,6 +339,29 @@ def _probe_private_dnf4_claim(root, argv, lock, env):
         assert (retained.st_dev, retained.st_ino) == (claim.st_dev, claim.st_ino)
         assert lock.read_bytes() == str(os.getpid()).encode("ascii")
         lock.unlink()  # exact disposable claim, after restoring trusted mode
+    # An observed failure cannot be hidden by repairing permissions inside
+    # the same scope; only a fresh, explicitly cleaned fixture may proceed.
+    mode = stat.S_IMODE(lock.parent.stat().st_mode)
+    try:
+        with _private_dnf4_claim(root) as recheck:
+            claim = lock.stat()
+            lock.parent.chmod(mode | 0o020)
+            try:
+                recheck()
+            except held_locks.LockInspectionRefused:
+                pass
+            else:
+                raise AssertionError("Unsafe private DNF4 lock directory accepted")
+            finally:
+                lock.parent.chmod(mode)
+    except held_locks.LockInspectionRefused:
+        pass
+    else:
+        raise AssertionError("Drifted DNF4 scope resumed after mode repair")
+    retained = lock.stat()
+    assert (retained.st_dev, retained.st_ino) == (claim.st_dev, claim.st_ino)
+    assert lock.read_bytes() == str(os.getpid()).encode("ascii")
+    lock.unlink()
     with _private_dnf4_claim(root) as recheck:
         recheck()
     assert not os.path.lexists(lock)
