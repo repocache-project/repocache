@@ -905,21 +905,55 @@ finally:
     assert all(hashlib.sha256(Path(name).read_bytes()).hexdigest() == digest
                for name, digest in prior.items() if name != str(catalog))
     print("PASS: stopped signed-test service retains WAL and withdrawn catalog after exact prior-byte preparation and repeat", flush=True)
-    # Explicit disposable-fixture start only, not an installed recovery
-    # command or proof of automatic boot ordering. The existing unit must
-    # expose the old generation before the confined broker can finalize.
-    command("/usr/bin/systemctl", "start", OWN)
+    # The existing explicit signed activation path must recover the exact
+    # pending prior bytes, not blindly start with a missing catalog.
+    report = native.activate_authenticated_native_nginx(assets, **pins)
+    assert report["status"] == "AUTHENTICATED_REPOCACHE_NGINX_ACTIVE"
+    assert report["state_generation"] == 1
     require_status(OWN, True, True)
     assert b"x-repocache-generation: 1" in https_response("/__repocache/healthz").lower()
-    assert not catalog.exists() and wal.read_bytes() == original
-    verify_dedicated_socket(pending=True)
     assert live_wal_resource_hashes() == prior and not wal.exists()
     assert https_response("/.well-known/repocache/catalog.json").endswith(catalog.read_bytes())
     require_status(VENDOR, False, False)
     assert native.stage.verify_installed_worker(assets, **pins)[
         "publisher_key_id"] == "pr237-synthetic"
-    print("PASS: explicit fixture start observes prior generation before confined recovery publishes catalog and clears WAL", flush=True)
-    print("NOT VERIFIED: installed inactive recovery dispatch or dedicated automatic boot service ordering", flush=True)
+    print("PASS: explicit signed activation recovers prepared inactive WAL, verifies prior generation and publishes exact catalog", flush=True)
+
+    # Repeat directly from partially committed bytes, injecting a failure
+    # before the real start. The installed entry point must retain the
+    # original WAL and withdrawn prior resources, then recover on retry.
+    run_live_wal(distribution, "interrupt")
+    original = wal.read_bytes()
+    inode = wal.stat().st_ino
+    command("/usr/bin/systemctl", "stop", OWN)
+    require_status(OWN, False, True)
+    actual = native._nginx_activation_command
+    def fail_start(action):
+        assert action == "start"
+        raise native.stage.WorkerStageError("DISPOSABLE_START_REFUSAL")
+    native._nginx_activation_command = fail_start
+    try:
+        try:
+            native.activate_authenticated_native_nginx(assets, **pins)
+        except native.stage.WorkerStageError as exc:
+            assert str(exc) == "WORKER_PLACEMENT_NATIVE_ACTIVATION_RECOVERY_REQUIRED"
+        else:
+            raise AssertionError("Injected start refusal reported recovery")
+    finally:
+        native._nginx_activation_command = actual
+    require_status(OWN, False, True)
+    assert wal.read_bytes() == original and wal.stat().st_ino == inode
+    assert not catalog.exists()
+    assert all(hashlib.sha256(Path(name).read_bytes()).hexdigest() == digest
+               for name, digest in prior.items() if name != str(catalog))
+    report = native.activate_authenticated_native_nginx(assets, **pins)
+    assert report["state_generation"] == 1
+    require_status(OWN, True, True)
+    require_status(VENDOR, False, False)
+    assert live_wal_resource_hashes() == prior and not wal.exists()
+    assert https_response("/.well-known/repocache/catalog.json").endswith(catalog.read_bytes())
+    print("PASS: signed inactive recovery from partial WAL preserves exact evidence after start refusal and completes on retry", flush=True)
+    print("NOT VERIFIED: dedicated automatic boot service ordering or active routes", flush=True)
 
 
 def verify_storage_report(report: dict, distribution: str) -> None:

@@ -48,7 +48,10 @@ from repocache.server_native_v2_transaction_v1 import (
     _owned_layout_locked, _read_owned_resources, _validate_owned_resources,
     _owned_live_observe, _owned_live_validate, _owned_live_health_bound,
     _owned_socket_require_inactive_routes, _no_conflicting_owned_wal_pending,
-    _owned_debian_runtime_temps,
+    _owned_debian_runtime_temps, _OWNED_WAL, _MAX_WAL, _CATALOG,
+    _decode_owned_wal, _owned_live_guard,
+    _prepare_owned_inactive_wal_rollback_locked,
+    _finish_owned_inactive_wal_rollback_locked,
     NativeV2TransactionError,
 )
 from repocache.server_native_nginx_effective_unit_v1 import (
@@ -59,7 +62,9 @@ from repocache.server_native_nginx_effective_unit_v1 import (
 )
 from repocache.server_root_control_full_context_v1 import _capture_default_nginx_dump_private
 from repocache.server_proposed_state_v2_store import _read_v2
-from repocache.server_protected_state_store_v1 import _canonical, _locked, _unlink_known
+from repocache.server_protected_state_store_v1 import (
+    _canonical, _locked, _unlink_known, _read_file,
+)
 from repocache.server_root_control_fixed_candidate_v1 import (
     _MAX_ENVELOPE, _MAX_STATE, _NAME as _PROPOSAL, _canonical_json, _proposal,
 )
@@ -1237,12 +1242,144 @@ def _repair_inactive_managed_nginx_under_lock(
         _reject("NATIVE_ACTIVATION_MANAGED_STATE_REFUSED")
 
 
+def _recover_enabled_inactive_owned_wal_under_lock(
+    root_fd: int, state_fd: int, distribution: str, unit_bytes: bytes,
+    expected_wal: bytes, recheck_signed_worker,
+) -> dict:
+    """Explicit signed installer recovery of an already enabled stopped unit.
+
+    Preserve the original WAL through prior-byte preparation and exact
+    runtime verification; keep the catalog withdrawn until the old service
+    is proven. No enablement, foreign unit, active route or dedicated
+    namespace transition is authorized here. The existing signed caller
+    retains the original state lock and exact release payload.
+    """
+    if not callable(recheck_signed_worker):
+        _reject("NATIVE_ACTIVATION_MANAGED_STATE_REFUSED")
+    try:
+        with _owned_layout_locked(root_fd, state_fd, recovering=True) as layout:
+            _, nginx_fd, public_fd, check = layout
+            old, _ = _decode_owned_wal(expected_wal, distribution=distribution)
+            snapshot = _validate_owned_resources(old, distribution=distribution)
+            _owned_socket_require_inactive_routes(snapshot)
+            withdrawn = {**old, _CATALOG: None}
+            unit_identity = _read_exact_owned_unit_at(
+                root_fd, unit_bytes, owner_uid=0, owner_gid=0)
+            storage = prepare_installed_storage(distribution, allow_create=False)
+
+            def fixed_owner():
+                recheck_signed_worker()
+                _nginx_inactive_vendor_service(distribution)
+                if (_read_exact_owned_unit_at(root_fd, unit_bytes, owner_uid=0,
+                                             owner_gid=0) != unit_identity
+                        or _own_systemctl("is-enabled") != (0, b"enabled\n")
+                        or prepare_installed_storage(distribution, allow_create=False) != storage):
+                    _reject("NATIVE_ACTIVATION_MANAGED_STATE_CHANGED")
+
+            def stopped():
+                fixed_owner()
+                if (_own_systemctl("is-active") != (3, b"inactive\n")
+                        or _own_service_observation(active=False)["main_pid_observed"] != 0):
+                    _reject("NATIVE_ACTIVATION_MANAGED_STATE_REFUSED")
+
+            def retained(owner):
+                _owned_live_guard(state_fd, nginx_fd, public_fd, check,
+                                  expected_wal, withdrawn)
+                owner()
+                _owned_live_guard(state_fd, nginx_fd, public_fd, check,
+                                  expected_wal, withdrawn)
+
+            stopped()
+            _prepare_owned_inactive_wal_rollback_locked(
+                *layout, distribution=distribution, expected_wal=expected_wal,
+                recheck_stopped_owner=stopped)
+            retained(stopped)
+            _prepare_own_runtime_directory(
+                managed_debian=distribution == "debian" and snapshot is not None)
+            try:
+                _owned_live_validate(root_fd, state_fd, old)
+            finally:
+                retained(stopped)
+                _cleanup_own_nginx_syntax_pid()
+            _require_audited_native_package_for_activation(state_fd, distribution=distribution)
+            retained(stopped)
+            identity = None
+            try:
+                _nginx_activation_command("start")
+                identity = _owned_live_observe(root_fd, expected_unit=unit_bytes)
+                if identity[1] != unit_identity:
+                    _reject("NATIVE_ACTIVATION_MANAGED_STATE_CHANGED")
+
+                def active():
+                    fixed_owner()
+                    if (_own_systemctl("is-active") != (0, b"active\n")
+                            or _owned_live_observe(root_fd, expected_unit=unit_bytes) != identity):
+                        _reject("NATIVE_ACTIVATION_MANAGED_STATE_CHANGED")
+                    verify_service_storage_mounts(identity[0])
+
+                retained(active)
+                _require_audited_native_package_for_activation(state_fd, distribution=distribution)
+                retained(active)
+                result = _finish_owned_inactive_wal_rollback_locked(
+                    root_fd, *layout, distribution=distribution,
+                    expected_wal=expected_wal, expected_unit=unit_bytes,
+                    recheck_active_owner=active)
+                generation = None if snapshot is None else snapshot["state_generation"]
+                if result != {"status": "OWNED_INACTIVE_WAL_ROLLBACK_OBSERVED",
+                              "prior_generation": generation, "recovery_required": False}:
+                    _reject("NATIVE_ACTIVATION_RECOVERY_REQUIRED")
+                report = {"status": "AUTHENTICATED_REPOCACHE_NGINX_ACTIVE",
+                          "nginx_active_verified": True, "nginx_enabled_verified": True,
+                          "storage": storage, "service_storage_mounts_verified": True}
+                if generation is not None:
+                    report["state_generation"] = generation
+                return report
+            except Exception:
+                # Compensate only while the exact pending WAL and withdrawn
+                # prior bytes still authorize a stop. Never stop after an
+                # uncertain unlink, changed unit, unknown master or catalog.
+                try:
+                    retained(fixed_owner)
+                    current = _own_systemctl("is-active")
+                    if current == (0, b"active\n"):
+                        observed = _owned_live_observe(root_fd, expected_unit=unit_bytes)
+                        if (observed[1] != unit_identity
+                                or (identity is not None and observed != identity)):
+                            _reject("NATIVE_ACTIVATION_RECOVERY_REQUIRED")
+                        retained(fixed_owner)
+                        if _owned_live_observe(root_fd, expected_unit=unit_bytes) != observed:
+                            _reject("NATIVE_ACTIVATION_RECOVERY_REQUIRED")
+                        _nginx_activation_command("stop")
+                    elif current != (3, b"inactive\n"):
+                        _reject("NATIVE_ACTIVATION_RECOVERY_REQUIRED")
+                    retained(stopped)
+                except Exception:
+                    _reject("NATIVE_ACTIVATION_RECOVERY_REQUIRED")
+                # Prior bytes are prepared, but runtime recovery is pending.
+                _reject("NATIVE_ACTIVATION_RECOVERY_REQUIRED")
+    except stage.WorkerStageError:
+        raise
+    except (NativeV2TransactionError, EffectiveNginxUnitError, OSError, ValueError, TypeError):
+        _reject("NATIVE_ACTIVATION_RECOVERY_REQUIRED")
+
+
 def _activate_audited_native_nginx_under_lock(
     state_fd: int, distribution: str, config: bytes, *,
     root_fd: int | None = None, unit_bytes: bytes | None = None,
+    recheck_signed_worker=None,
 ) -> dict:
     """Start only signed REPOCACHE unit; never start or override vendor NGINX."""
     _require_audited_native_package_for_activation(state_fd, distribution=distribution)
+    if recheck_signed_worker is not None:
+        if (not callable(recheck_signed_worker) or root_fd is None
+                or type(unit_bytes) is not bytes or not unit_bytes):
+            _reject("NATIVE_SIGNED_WORKER_AUDIT_UNVERIFIED")
+        recheck_signed_worker()
+        pending = _read_file(state_fd, _OWNED_WAL, 0, _MAX_WAL)
+        if pending is not None:
+            return _recover_enabled_inactive_owned_wal_under_lock(
+                root_fd, state_fd, distribution, unit_bytes, pending,
+                recheck_signed_worker)
     managed = _read_v2(state_fd, 0)[0] is not None
     if managed and (root_fd is None or unit_bytes is None):
         _reject("NATIVE_ACTIVATION_MANAGED_STATE_REFUSED")
@@ -1351,10 +1488,13 @@ def activate_authenticated_native_nginx(
     try:
         with _locked(root, 0) as state:
             # Recheck installed source identity after acquiring shared lock.
-            stage._audit_worker_files(Path("/"), payloads)
+            def recheck_signed_worker():
+                stage._audit_worker_files(Path("/"), payloads)
+            recheck_signed_worker()
             result = _activate_audited_native_nginx_under_lock(
                 state, distribution, payloads[stage.CONFIG], root_fd=root,
                 unit_bytes=payloads[_OWN_UNIT],
+                recheck_signed_worker=recheck_signed_worker,
             )
             if "state_generation" in result:
                 stage._audit_worker_files(Path("/"), payloads)

@@ -1282,5 +1282,18 @@ before writing the previous catalog. It verifies the published catalog
 and exact runtime again before clearing the journal. A failed check may
 withdraw only the exact owned catalog while the same WAL and other
 resources remain intact; a foreign change or uncertain unlink never
-produces a successful recovery report. This is not yet wired to the
-installed activation command.
+produces a successful recovery report.
+
+The existing explicit signed native activation command now invokes this
+sequence only for an already enabled, inactive, exactly owned unit and
+a published v3 WAL. It re-audits the installed signed payload, retains
+the original lock, checks the native package/vendor/storage/unit and
+validates the prior syntax before start. It neither enables a disabled
+unit nor changes broker privileges or the public command contract.
+If start or runtime verification fails, only an exact owned active
+process with the same pending WAL and withdrawn prior resources can
+be stopped. An uncertain journal unlink or changed process is not
+compensated by stopping or declaring success. Both booted guests
+exercise the existing signed entry point, including failure before
+start and exact retry; this does not establish automatic dedicated
+namespace boot ordering or active authoritative routes.

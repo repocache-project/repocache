@@ -822,3 +822,117 @@ def test_isolated_fixed_candidate_keeps_authenticated_installed_executable():
     assert parsed.sections() == ["Unit", "Service"]
     with pytest.raises(AssertionError):
         guest.derive_signed_unit(raw, root, fixed_candidate=True)
+
+
+@pytest.mark.parametrize("signed,pending", [(False, True), (True, True), (True, False)])
+def test_signed_activation_routes_published_wal_only_with_authenticated_caller(
+        monkeypatch, signed, pending):
+    state = _setup(monkeypatch)
+    calls = []
+    monkeypatch.setattr(host, "_read_file",
+                        lambda *args: b"wal" if pending else None)
+    monkeypatch.setattr(host, "_recover_enabled_inactive_owned_wal_under_lock",
+                        lambda *args: calls.append(args) or {"status": "RECOVERY"})
+    proof = lambda: None
+    result = host._activate_audited_native_nginx_under_lock(
+        11, "debian", host._BOOTSTRAP_CONFIG, root_fd=10, unit_bytes=b"signed",
+        recheck_signed_worker=proof if signed else None)
+    if signed and pending:
+        assert calls == [(10, 11, "debian", b"signed", b"wal", proof)]
+        assert result == {"status": "RECOVERY"}
+        assert not state["commands"]
+    else:
+        assert not calls
+        assert state["commands"] == ["daemon-reload", "start", "enable"]
+
+
+@pytest.mark.parametrize("fault", ["none", "start", "health", "wal-unlink",
+                                    "foreign-master", "disabled", "active"])
+def test_signed_pending_inactive_recovery_preserves_enablement_and_exact_authority(
+        monkeypatch, fault):
+    from contextlib import contextmanager
+    state = _setup(monkeypatch)
+    state["enabled"] = fault != "disabled"
+    state["active"] = fault == "active"
+    calls = []
+    wal = [b"wal"]
+    old = {host._CATALOG: b"prior", "other": b"bytes"}
+    current = {**old, host._CATALOG: None}
+
+    @contextmanager
+    def layout(root, fd, *, recovering):
+        assert (root, fd, recovering) == (10, 11, True)
+        yield 11, 12, 13, lambda: None
+
+    monkeypatch.setattr(host, "_owned_layout_locked", layout)
+    monkeypatch.setattr(host, "_decode_owned_wal", lambda *a, **kw: (old, {}))
+    monkeypatch.setattr(host, "_validate_owned_resources",
+                        lambda *a, **kw: {"state_generation": 1})
+    monkeypatch.setattr(host, "_owned_socket_require_inactive_routes", lambda _: None)
+    monkeypatch.setattr(host, "_read_exact_owned_unit_at", lambda *a, **kw: (1, 2))
+
+    def guard(*args):
+        assert args[-1] == current
+        if wal[0] != args[-2]:
+            raise host.NativeV2TransactionError("WAL_CHANGED")
+
+    monkeypatch.setattr(host, "_owned_live_guard", guard)
+    monkeypatch.setattr(host, "_owned_live_validate", lambda *a: ({}, 1, "a"*64))
+    monkeypatch.setattr(host, "_cleanup_own_nginx_syntax_pid", lambda: None)
+
+    def prepare(*args, **kw):
+        kw["recheck_stopped_owner"]()
+        assert not state["active"] and state["enabled"]
+        calls.append("prepare")
+
+    def observe(root, *, expected_unit):
+        assert state["active"] and (root, expected_unit) == (10, b"signed")
+        if fault == "foreign-master":
+            raise host.NativeV2TransactionError("MASTER_UNVERIFIED")
+        return 1234, (1, 2)
+
+    def finish(*args, **kw):
+        kw["recheck_active_owner"]()
+        calls.append("finish")
+        if fault == "health":
+            raise host.NativeV2TransactionError("HEALTH")
+        wal[0] = None
+        if fault == "wal-unlink":
+            raise OSError("uncertain unlink")
+        return {"status": "OWNED_INACTIVE_WAL_ROLLBACK_OBSERVED",
+                "prior_generation": 1, "recovery_required": False}
+
+    monkeypatch.setattr(host, "_prepare_owned_inactive_wal_rollback_locked", prepare)
+    monkeypatch.setattr(host, "_owned_live_observe", observe)
+    monkeypatch.setattr(host, "_finish_owned_inactive_wal_rollback_locked", finish)
+    actual = host._nginx_activation_command
+
+    def activate(action):
+        if fault == "start" and action == "start":
+            state["commands"].append(action)
+            raise stage.WorkerStageError("START_FAILED")
+        actual(action)
+
+    monkeypatch.setattr(host, "_nginx_activation_command", activate)
+    def invoke():
+        return host._recover_enabled_inactive_owned_wal_under_lock(
+            10, 11, "debian", b"signed", b"wal", lambda: None)
+
+    if fault == "none":
+        assert invoke()["state_generation"] == 1
+        assert calls == ["prepare", "finish"]
+        assert state["commands"] == ["start"] and state["active"]
+    else:
+        with pytest.raises(stage.WorkerStageError):
+            invoke()
+        if fault in ("disabled", "active"):
+            assert not calls and not state["commands"]
+        elif fault == "start":
+            assert calls == ["prepare"] and state["commands"] == ["start"]
+            assert not state["active"]
+        elif fault == "health":
+            assert calls == ["prepare", "finish"] and state["commands"] == ["start", "stop"]
+            assert not state["active"]
+        else:
+            assert state["commands"] == ["start"] and state["active"]
+    assert state["enabled"] == (fault != "disabled")
