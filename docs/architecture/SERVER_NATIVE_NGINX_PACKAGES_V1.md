@@ -1036,3 +1036,38 @@ netlink administrator remains outside the lease model; the service and
 namespace ownership lifecycle and complete WAL recovery ordering are
 separate mandatory gates. Root-container synthetic label tests are now
 explicitly executed in the existing root-control protocol workflow.
+
+
+### Fresh dedicated storage and actual service candidate
+
+The dedicated storage profile separates a root-owned traversal-only cache
+parent (0711) from worker-owned per-repository private directories (0700).
+The confined master can initialize the existing fixed cache paths without
+DAC_OVERRIDE or DAC_READ_SEARCH. The log root and metrics file remain
+root-owned. On enforcing AlmaLinux, only fresh owned leaves receive the
+fixed dedicated rw context; native vendor parents retain their original
+labels and are traversed using search-only permissions. The original
+profile remains unchanged and a dedicated preparation refuses a legacy
+root or marker rather than reinterpreting it.
+
+The authenticated unit renderer also derives a closed runtime drop-in
+for the existing service name: reset all four Exec directives before
+selecting the authenticated executable, explicitly use stderr for startup,
+and preserve the original sandbox while adding the fixed network namespace
+and minimal capabilities. Neither renderer grants installation authority.
+
+The guarded Alma VM campaign now tests the actual owned systemd service,
+fixed configuration, TLS material and fresh marked cache/log roots under
+the dedicated domain, rather than expecting the legacy httpd_t service
+to acquire unsupported upstream access. It preserves the verified empty
+legacy fixture roots and markers by same-parent no-replace renames,
+temporarily assigns the dedicated ro/PID contexts only to its own fixture
+resources, derives the drop-in and exact egress from the signed worker,
+and starts the service in a loopback-only namespace. A private TLS origin
+exercises real MISS/HIT, metrics and repeat storage verification. The
+test must stop the candidate, preserve its evidence, restore the exact
+previous resource bytes, labels, storage and legacy service, and confirm
+host rules/vendor/signature identity unchanged. This is not a production
+migration or a durable label/unit/namespace WAL. The known legacy
+httpd_t upstream failure remains unsupported, and final durable installed
+activation, active publication and reboot acceptance remain open.

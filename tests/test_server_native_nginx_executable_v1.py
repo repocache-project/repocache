@@ -182,7 +182,27 @@ def test_signed_policy_candidate_is_exact_reviewed_fixture_permissions():
     def rules(data):
         return [line for line in data.splitlines() if line and not line.startswith(b"#")]
 
-    assert rules(raw) == rules(fixture.replace(b"repocache_ci_nginx", b"repocache_nginx"))
+    # The shipped candidate is not the disposable policy copied wholesale.
+    # Only this explicit reviewed delta is permitted for the fixed native
+    # paths and low-port listener, with no additional vendor-domain grants.
+    expected = fixture.replace(b"repocache_ci_nginx", b"repocache_nginx")
+    expected = expected.replace(b"    type init_t;\n", b"""    type init_t;
+    type httpd_config_t;
+    type httpd_cache_t;
+    type httpd_log_t;
+    type var_t;
+    type var_log_t;
+    type var_run_t;
+    type cert_t;
+""")
+    expected = expected.replace(
+        b"allow repocache_nginx_t self:capability { chown kill setgid setuid };",
+        b"""allow repocache_nginx_t self:capability { chown kill setgid setuid net_bind_service };
+allow repocache_nginx_t { httpd_config_t httpd_cache_t httpd_log_t var_t var_log_t var_run_t }:dir search_dir_perms;
+allow repocache_nginx_t cert_t:dir search_dir_perms;
+allow repocache_nginx_t cert_t:file read_file_perms;
+allow repocache_nginx_t cert_t:lnk_file { getattr read };""")
+    assert rules(raw) == rules(expected)
     report = candidate._policy_candidate(raw)
     assert report["policy_bytes"] == raw
     assert report["policy_sha256"] == hashlib.sha256(raw).hexdigest()

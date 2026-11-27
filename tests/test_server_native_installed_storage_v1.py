@@ -328,3 +328,79 @@ def test_actual_service_view_rejects_foreign_inode_and_writable_parent(root, mon
     finally:
         os.close(fd)
         os.close(directory)
+
+
+
+def _dedicated_data(root, *, create=True):
+    fd = os.open(root, m._DIR)
+    try:
+        opts = dict(owner=os.getuid(), owner_gid=os.getgid(), uid=os.getuid(),
+                    gid=os.getgid(), labels=m._Labels("debian", dedicated=True),
+                    allow_create=create, dedicated=True)
+        m._prepare_under_root(fd, **opts)
+        return m._prepare_repository_storage_under_root(
+            fd, document=_data_document(), **opts)
+    finally:
+        os.close(fd)
+
+
+def test_fresh_dedicated_storage_profile_preserves_private_repository_leaves(root):
+    report = _dedicated_data(root)
+    cache = root / m.CACHE_ROOT.lstrip("/")
+    log = root / m.LOG_ROOT.lstrip("/") / "metrics.jsonl"
+    assert stat.S_IMODE(cache.stat().st_mode) == 0o711
+    assert stat.S_IMODE(log.stat().st_mode) == 0o600
+    for name in report["repository_cache_roots_verified"]:
+        leaf = cache / name
+        assert stat.S_IMODE(leaf.stat().st_mode) == 0o700
+        (leaf / "payload").write_bytes(b"preserve")
+    log.write_bytes(b"history")
+    paths = [cache, log, *(cache / n / "payload" for n in report["repository_cache_roots_verified"])]
+    before = [(p.stat().st_ino, p.stat().st_mtime_ns, p.stat().st_mode) for p in paths]
+    assert _dedicated_data(root, create=False) == _dedicated_data(root) == report
+    assert before == [(p.stat().st_ino, p.stat().st_mtime_ns, p.stat().st_mode) for p in paths]
+    assert log.read_bytes() == b"history"
+    with pytest.raises(m.InstalledStorageError, match="ROOT_METADATA_UNSAFE"):
+        prepare(root)
+
+
+def test_dedicated_profile_never_reinterprets_legacy_ownership(root):
+    prepare(root)
+    _prepare_data(root)
+    cache = root / m.CACHE_ROOT.lstrip("/")
+    log = root / m.LOG_ROOT.lstrip("/") / "metrics.jsonl"
+    log.write_bytes(b"legacy")
+    before = [(p.stat().st_ino, p.stat().st_mode, p.stat().st_mtime_ns) for p in (cache, log)]
+    with pytest.raises(m.InstalledStorageError, match="ROOT_METADATA_UNSAFE"):
+        _dedicated_data(root)
+    assert before == [(p.stat().st_ino, p.stat().st_mode, p.stat().st_mtime_ns) for p in (cache, log)]
+    assert log.read_bytes() == b"legacy"
+
+
+def test_dedicated_labels_only_assign_fresh_pinned_leaf(monkeypatch):
+    context = b"system_u:object_r:repocache_nginx_rw_t:s0"
+    seen = [b"system_u:object_r:httpd_cache_t:s0\0"]
+    calls = []
+    monkeypatch.setattr(m._Labels, "_command", staticmethod(
+        lambda *args: b"Enforcing" if len(args) == 1 else
+        pytest.fail("dedicated leaf must not inherit vendor context")))
+    monkeypatch.setattr(m.os, "listxattr", lambda fd: ["security.selinux"])
+    monkeypatch.setattr(m.os, "getxattr", lambda *args: seen[0])
+    def set_label(fd, name, value):
+        calls.append((fd, name, value))
+        seen[0] = value
+    monkeypatch.setattr(m.os, "setxattr", set_label)
+    labels = m._Labels("almalinux", dedicated=True)
+    with pytest.raises(m.InstalledStorageError, match="SELINUX_LABEL_UNVERIFIED"):
+        labels.check(11, m.CACHE_ROOT, b"repocache_nginx_rw_t")
+    assert not calls
+    labels.check(11, m.CACHE_ROOT, b"repocache_nginx_rw_t", fresh=True)
+    labels.check(11, m.CACHE_ROOT, b"repocache_nginx_rw_t")
+    assert calls == [(11, "security.selinux", context + b"\0")]
+
+
+def test_dedicated_profile_keeps_worker_private_leaf_ownership():
+    assert m._storage_profile(owner=0, owner_gid=0, uid=987, gid=988, dedicated=True) == (
+        ("cache", m._CACHE, 0, 0, 0o711, b"httpd_cache_t", b"repocache_nginx_rw_t"),
+        ("log", m._LOG, 0, 0, 0o750, b"httpd_log_t", b"repocache_nginx_rw_t"),
+    )

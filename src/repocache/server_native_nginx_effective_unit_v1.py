@@ -452,6 +452,39 @@ def render_owned_nginx_namespace_unit_candidate(*, https_port: int) -> dict:
         _signed_owned_unit_bytes(), https_port=https_port)
 
 
+def _render_owned_nginx_namespace_dropin_candidate(raw: bytes, *, https_port: int) -> dict:
+    """Exact runtime transition proposal for the already owned service.
+
+    Reset systemd's list-valued Exec directives, rather than append a second
+    executable. The inherited signed service contract is otherwise preserved.
+    The caller must prove the old unit bytes and absence of foreign drop-ins,
+    namespace ownership, labelled storage and durable recovery before use.
+    """
+    import hashlib
+
+    candidate = _render_owned_nginx_namespace_unit_candidate(raw, https_port=https_port)
+    service = candidate["unit_bytes"].decode("ascii").split("[Service]\n", 1)[1]
+    service = service.split("[Install]\n", 1)[0]
+    values = dict(row.split("=", 1) for row in service.splitlines())
+    lines = ["[Service]"]
+    for key in _OWN_EXEC_KEYS:
+        # Avoid opening the vendor package's default log before loading our
+        # fixed absolute config. Preserve all remaining signed arguments.
+        command = values[key].replace(_CANDIDATE_EXECUTABLE + " ",
+                                      _CANDIDATE_EXECUTABLE + " -e stderr ", 1)
+        lines.extend((key + "=", key + "=" + command))
+    for key in ("CapabilityBoundingSet", "NetworkNamespacePath", "RestrictAddressFamilies"):
+        lines.append(key + "=" + values[key])
+    dropin = ("\n".join(lines) + "\n").encode("ascii")
+    return {**candidate, "dropin_bytes": dropin,
+            "dropin_sha256": hashlib.sha256(dropin).hexdigest()}
+
+
+def render_owned_nginx_namespace_dropin_candidate(*, https_port: int) -> dict:
+    return _render_owned_nginx_namespace_dropin_candidate(
+        _signed_owned_unit_bytes(), https_port=https_port)
+
+
 def _read_exact_owned_unit_at(root_fd: int, expected: bytes, *,
                               owner_uid: int, owner_gid: int) -> tuple[int, ...]:
     """Descriptor-bound exact unit read. Test fixtures never confer authority."""

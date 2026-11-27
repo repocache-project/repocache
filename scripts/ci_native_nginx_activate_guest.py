@@ -1216,6 +1216,435 @@ finally:
     print("PASS: restored exact committed generation; repeat signed storage preparation retains cache/history", flush=True)
 
 
+
+def verify_owned_service_namespace_data_fixture(native, assets, pins):
+    """Guarded Alma VM: actual owned unit, paths and signed dedicated candidate.
+
+    Preserve the original disabled-route generation and vendor service. The
+    temporary runtime drop-in and fresh labelled storage are not a durable
+    installed migration. A failed compensation must fail this campaign.
+    """
+    import base64
+    import contextlib
+    import pwd
+    import stat
+    import tempfile
+    from scripts import ci_selinux_nginx_egress_guest as isolated
+    from scripts.ci_pr237_native_socket_guest import https_response
+    from repocache.server_native_installed_storage_v1 import verify_service_storage_mounts
+
+    isolated.guard()
+    require_status(OWN, True, True)
+    require_status(VENDOR, False, False)
+    require_control_worker_idle()
+    assert run("/usr/bin/systemctl", "is-active", "repocache-control.socket").stdout.strip() == "inactive"
+    release = native.stage.verify_installed_worker(assets, **pins)
+    assert release["publisher_key_id"] == "pr237-synthetic"
+    verify_fixed_executable_after_reboot(pins)
+    before = live_wal_resource_hashes()
+    vendor_before = isolated.VENDOR.lstat()
+    booleans = isolated.command("/usr/sbin/getsebool", "-a").stdout
+    host_rules = isolated.command("/usr/sbin/nft", "--stateless", "--numeric-priority",
+                                  "list", "ruleset").stdout
+    worker = pwd.getpwnam("nginx")
+    prior = json.loads((STATE / "state-v2.json").read_bytes())
+    doc = json.loads(base64.b64decode(prior["configuration_base64"], validate=True))
+    assert all(row["desired_state"] == "disabled" for row in doc["repositories"])
+    dep = doc["deployment"]
+    assert dep["listen"]["bind_address"] == "127.0.0.1" and dep["listen"]["https_port"] == 443
+    assert dep["paths"]["cache_root"] == "/var/cache/nginx/repocache-managed"
+    assert dep["paths"]["log_root"] == "/var/log/nginx/repocache-managed"
+    assert dep["tls"] == {"mode": "operator-provided",
+                          "certificate_file": "/etc/repocache/tls/example-chain.pem",
+                          "private_key_file": "/etc/repocache/tls/example-key.pem"}
+    dep["logging"]["metrics_opt_in"] = True
+    payloads = {}
+    for repo in doc["repositories"]:
+        ident = repo["id"]
+        repo["desired_state"] = "active"
+        repo["upstream"] = {"base_url": "https://cache.example.invalid:8008/" + ident + "/",
+                            "allowed_hosts": ["cache.example.invalid"]}
+        suffix = "fixture.deb" if repo["kind"] == "apt" else "fixture.rpm"
+        payloads["/" + ident + "/" + suffix] = ("REPOCACHE dedicated " + ident + "\n") * 64
+    names = sorted(repo["id"] for repo in doc["repositories"])
+    code = r"""
+import json,os,sys,zipimport
+sys.path.insert(0,"/usr/libexec/repocache/server-control-worker")
+from repocache import server_native_installed_storage_v1 as storage
+from repocache import server_native_nginx_effective_unit_v1 as unit
+from repocache import server_native_egress_candidate_v1 as egress
+from repocache import server_native_v2_transaction_v1 as tx
+from repocache.server_nginx_metrics_bundle_join_v1 import render_repository_nginx_metrics_join
+from repocache.server_nginx_tls_listener_candidate_v1 import render_native_tls_listener_candidate
+from repocache.server_protected_state_store_v1 import _locked
+from repocache.server_protected_state_inspect_v1 import _DIRECTORY_FLAGS
+from repocache.server_root_control_host_preflight_v1 import require_native_host_preconditions
+for module in (storage,unit,egress,tx):
+    assert isinstance(module.__loader__,zipimport.zipimporter)
+    assert module.__loader__.archive=="/usr/libexec/repocache/server-control-worker"
+require_native_host_preconditions()
+doc,uid,action=json.load(sys.stdin)
+root=os.open("/",_DIRECTORY_FLAGS)
+try:
+    with _locked(root,0) as state:
+        tx._require_audited_native_package_for_activation(state,distribution="almalinux")
+        if action=="legacy":
+            result=storage.prepare_installed_repository_storage("almalinux",doc,allow_create=False)
+        elif action in ("create","verify"):
+            result=storage.prepare_dedicated_candidate_storage(
+                "almalinux",doc,allow_create=action=="create")
+        else:
+            assert action=="render"
+            pins={r["id"]:{"cache.example.invalid":["8.8.8.8"]} for r in doc["repositories"]}
+            bundle=render_repository_nginx_metrics_join(
+                doc,expected_state_generation=doc["expected_state_generation"],
+                candidate_pins_by_repository=pins,ca_bundle_path="/etc/pki/tls/certs/ca-bundle.crt")
+            # The exact upstream/cache fragment is the authenticated renderer's
+            # output; metrics add their own separate HTTP directives.
+            from repocache.server_nginx_repository_bundle_v1 import render_repository_nginx_bundle_candidate
+            upstream=render_repository_nginx_bundle_candidate(
+                doc,expected_state_generation=doc["expected_state_generation"],
+                candidate_pins_by_repository=pins,ca_bundle_path="/etc/pki/tls/certs/ca-bundle.crt")
+            rules=egress.render_namespace_egress_candidate(
+                doc,generation=doc["expected_state_generation"],
+                http_fragment=upstream["http_upstream_fragment"].encode("ascii"),worker_uid=uid)
+            dropin=unit.render_owned_nginx_namespace_dropin_candidate(https_port=443)
+            assert not dropin["authorizes_systemctl"] and not rules["authorizes_firewall_change"]
+            result={"http":bundle["http_fragment"],"locations":bundle["server_fragment"],
+                    "tls":render_native_tls_listener_candidate(doc)["server_context_fragment"],
+                    "rules":rules["nft_candidate"],"dropin":dropin["dropin_bytes"].decode("ascii"),
+                    "source_unit_sha256":dropin["source_unit_sha256"]}
+        print(json.dumps(result))
+finally:
+    os.close(root)
+"""
+    def signed(action, document=doc):
+        return json.loads(isolated.command(
+            "/usr/bin/python3", "-IS", "-B", "-c", code,
+            input_text=json.dumps([document, worker.pw_uid, action]), timeout=90).stdout)
+
+    rendered = signed("render")
+    unit_path = Path("/etc/systemd/system", OWN)
+    assert hashlib.sha256(unit_path.read_bytes()).hexdigest() == rendered["source_unit_sha256"] == release["files"][OWN]
+    assert rendered["http"].count("server 8.8.8.8:8008;") == len(names)
+    http = rendered["http"].replace("server 8.8.8.8:8008;", "server 127.0.0.1:8008;")
+    # All temporary paths remain within the newly created owned cache root.
+    scratch = "".join(f"{directive}_temp_path /var/cache/nginx/repocache-managed/.ci-{directive};\n"
+                      for directive in ("client_body", "proxy", "fastcgi", "scgi", "uwsgi"))
+    locations = rendered["locations"].replace(
+        "    proxy_cache_valid 200 60s;",
+        "    proxy_cache_valid 200 60s;\n    add_header X-RepoCache-Smoke $upstream_cache_status always;")
+    fixture = (scratch + http + "\nserver {\n" + rendered["tls"] + locations
+               + "location / { return 404; }\n}\n").encode("ascii")
+    assert rendered["rules"].count("ip daddr 8.8.8.8 tcp dport 8008") == 1
+    rules = rendered["rules"].replace("ip daddr 8.8.8.8 tcp dport 8008",
+                                     "ip daddr 127.0.0.1 tcp dport 8008")
+    cache = Path(dep["paths"]["cache_root"])
+    log = Path(dep["paths"]["log_root"])
+    metrics = log / "metrics.jsonl"
+    include = OWN_CONFIG.parent / "repocache-managed.conf"
+    saved_include = include.read_bytes()
+    assert hashlib.sha256(saved_include).hexdigest() == before[str(include)]
+    # Legacy roots are fully verified, empty, owned and never relabelled.
+    # Preserve their exact inodes/markers in their existing native parents.
+    legacy_doc = json.loads(base64.b64decode(prior["configuration_base64"], validate=True))
+    signed("legacy", legacy_doc)
+    assert not any(cache.iterdir()) and not any(log.iterdir())
+    fixed = (cache, cache.parent / ".repocache-managed.owner-v1",
+             log, log.parent / ".repocache-managed.owner-v1")
+    backups = tuple(path.with_name(".ci-legacy-" + path.name) for path in fixed)
+    assert not any(os.path.lexists(path) for path in backups)
+    for parent in (cache.parent, log.parent):
+        assert not any(p.name.startswith((".repocache-repository-", ".repocache-metrics-"))
+                       for p in parent.iterdir())
+    dropdir = Path("/run/systemd/system", OWN + ".d")
+    dropin = dropdir / "90-repocache-ci-dedicated.conf"
+    assert not os.path.lexists(dropdir)
+    assert not os.path.lexists(Path("/etc/systemd/system", OWN + ".d"))
+    assert run("/usr/bin/systemctl", "show", "-p", "DropInPaths", "--value", OWN).stdout.strip() == ""
+    ns = Path("/run/netns/repocache-nginx")
+    runtime = Path("/run/repocache-nginx")
+    assert not os.path.lexists(ns)
+    target = Path("/usr/libexec/repocache/nginx")
+    saved_target = target.stat()
+    label_paths = (OWN_CONFIG.parent, OWN_CONFIG, include, Path("/etc/repocache/tls"),
+                   Path(dep["tls"]["certificate_file"]), Path(dep["tls"]["private_key_file"]))
+    labels = []
+    moved = []
+    created_storage = False
+    legacy_stopped = False
+    include_changed = False
+    namespace = False
+    unit_placed = False
+    started = False
+    origin = None
+    def require(*argv):
+        return isolated.command(*argv, timeout=90)
+    def sync_dir(path):
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    def rename_absent(source, dest):
+        assert not os.path.lexists(dest)
+        # Same filesystem, exact leaves, no overwrite.
+        from repocache.server_native_installed_storage_v1 import _rename_directory_noreplace
+        parent = os.open(source.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            assert source.parent == dest.parent
+            _rename_directory_noreplace(parent, source.name, parent, dest.name)
+            os.fsync(parent)
+        finally:
+            os.close(parent)
+    with contextlib.ExitStack() as stack:
+        for path in label_paths:
+            assert path.resolve(strict=True) == path
+            info = path.lstat()
+            assert info.st_uid == info.st_gid == 0 and not info.st_mode & 0o022
+            assert stat.S_ISDIR(info.st_mode) or (stat.S_ISREG(info.st_mode) and info.st_nlink == 1)
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            stack.callback(os.close, fd)
+            assert (os.fstat(fd).st_dev, os.fstat(fd).st_ino) == (info.st_dev, info.st_ino)
+            assert set(os.listxattr(fd)) == {"security.selinux"}
+            labels.append((path, fd, (info.st_dev, info.st_ino), os.getxattr(fd, "security.selinux")))
+        include_fd = os.open(include, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
+        stack.callback(os.close, include_fd)
+        assert os.pread(include_fd, len(saved_include)+1, 0) == saved_include
+        def replace_include(raw):
+            assert include.stat().st_ino == os.fstat(include_fd).st_ino
+            os.ftruncate(include_fd, 0)
+            assert os.pwrite(include_fd, raw, 0) == len(raw)
+            os.fsync(include_fd)
+        try:
+            require("/usr/bin/systemctl", "stop", OWN)
+            legacy_stopped = True
+            require_status(OWN, False, True)
+            assert not os.path.lexists(runtime)
+            for path, backup in zip(fixed, backups):
+                info = path.lstat()
+                rename_absent(path, backup)
+                moved.append((path, backup, (info.st_dev, info.st_ino)))
+            # A failed preparation retains evidence; no partial object is
+            # deleted or mistaken for a legacy root.
+            created_storage = True
+            report = signed("create")
+            assert report == {"repository_cache_roots_verified": names, "metrics_file_verified": True,
+                              "selinux_enforcing_labels_verified": True, "actual_service_write_verified": False}
+            assert signed("verify") == report
+            assert cache.stat().st_uid == cache.stat().st_gid == 0
+            assert stat.S_IMODE(cache.stat().st_mode) == 0o711
+            for ident in names:
+                leaf = cache / ident
+                assert (leaf.stat().st_uid, leaf.stat().st_gid,
+                        stat.S_IMODE(leaf.stat().st_mode)) == (worker.pw_uid, worker.pw_gid, 0o700)
+            for path, fd, identity, _ in labels:
+                assert (path.lstat().st_dev, path.lstat().st_ino) == identity
+                os.setxattr(fd, "security.selinux", b"system_u:object_r:repocache_nginx_ro_t:s0\0")
+                assert os.getxattr(fd, "security.selinux").rstrip(b"\0") == b"system_u:object_r:repocache_nginx_ro_t:s0"
+            include_changed = True
+            replace_include(fixture)
+            runtime.mkdir(mode=0o755)
+            require("/usr/bin/chcon", "-t", "repocache_nginx_pid_t", str(runtime))
+            require("/usr/sbin/ip", "netns", "add", "repocache-nginx")
+            namespace = True
+            ns_identity = (ns.stat().st_dev, ns.stat().st_ino)
+            require("/usr/sbin/ip", "-n", "repocache-nginx", "link", "set", "lo", "up")
+            assert {x["ifname"] for x in json.loads(require(
+                "/usr/sbin/ip", "-n", "repocache-nginx", "-j", "link", "show").stdout)} == {"lo"}
+            isolated.command("/usr/sbin/ip", "netns", "exec", "repocache-nginx",
+                             "/usr/sbin/nft", "-c", "-f", "-", input_text=rules)
+            isolated.command("/usr/sbin/ip", "netns", "exec", "repocache-nginx",
+                             "/usr/sbin/nft", "-f", "-", input_text=rules)
+            dropdir.mkdir(mode=0o755)
+            unit_placed = True
+            with dropin.open("xb") as stream:
+                os.fchmod(stream.fileno(), 0o644)
+                stream.write(rendered["dropin"].encode("ascii"))
+                stream.flush()
+                os.fsync(stream.fileno())
+            sync_dir(dropdir)
+            sync_dir(dropdir.parent)
+            require("/usr/bin/systemctl", "daemon-reload")
+            assert run("/usr/bin/systemctl", "show", "-p", "DropInPaths", "--value", OWN).stdout.strip() == str(dropin)
+            origin_code = r"""
+import json,ssl,sys
+from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+from pathlib import Path
+root=Path(sys.argv[1])
+payloads=json.loads((root/"payloads").read_text())
+class Origin(BaseHTTPRequestHandler):
+    def log_message(self,*args): pass
+    def do_GET(self):
+        if self.path not in payloads:
+            self.send_error(404); return
+        data=payloads[self.path].encode("ascii")
+        with (root/"hits").open("a") as stream: stream.write(self.path+"\n")
+        self.send_response(200)
+        self.send_header("Content-Length",str(len(data)))
+        self.send_header("Cache-Control","public, max-age=60")
+        self.end_headers()
+        self.wfile.write(data)
+server=ThreadingHTTPServer(("127.0.0.1",8008),Origin)
+context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+context.load_cert_chain("/etc/repocache/tls/example-chain.pem","/etc/repocache/tls/example-key.pem")
+server.socket=context.wrap_socket(server.socket,server_side=True)
+(root/"ready").write_text("ready")
+server.serve_forever()
+"""
+            with tempfile.TemporaryDirectory(prefix="repocache-owned-namespace-", dir="/root") as place:
+                work = Path(place)
+                (work / "payloads").write_text(json.dumps(payloads))
+                origin = subprocess.Popen(["/usr/sbin/ip", "netns", "exec", "repocache-nginx",
+                                           "/usr/bin/python3", "-IS", "-B", "-c", origin_code, str(work)],
+                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                for _ in range(100):
+                    assert origin.poll() is None
+                    if (work / "ready").exists():
+                        break
+                    time.sleep(0.1)
+                else:
+                    raise AssertionError("Private origin not ready")
+                started = True
+                result = run("/usr/bin/systemctl", "start", OWN)
+                if result.returncode:
+                    print("DEDICATED_FIXED_SERVICE_START_REFUSED:", result.stderr[-1000:], flush=True)
+                    print(run("/usr/bin/journalctl", "-u", OWN, "-n", "20", "--no-pager").stdout[-2000:], flush=True)
+                    raise AssertionError("Actual owned service dedicated transition refused")
+                require_status(OWN, True, True)
+                pid = int(require("/usr/bin/systemctl", "show", "-p", "MainPID", "--value", OWN).stdout)
+                proc = Path("/proc") / str(pid)
+                assert (proc / "exe").stat().st_ino == saved_target.st_ino
+                assert (proc / "ns/net").stat().st_ino == ns_identity[1]
+                assert ":repocache_nginx_t:" in (proc / "attr/current").read_text()
+                fields = dict(line.split(":", 1) for line in (proc / "status").read_text().splitlines() if ":" in line)
+                bound = isolated.MASTER_CAPS | (1 << 10)
+                assert int(fields["CapEff"].strip(), 16) == int(fields["CapBnd"].strip(), 16) == bound
+                assert fields["NoNewPrivs"].strip() == "1"
+                assert int(fields["CapAmb"].strip(), 16) == 0
+                verify_service_storage_mounts(pid)
+                children = (proc / "task" / str(pid) / "children").read_text().split()
+                observed_workers = 0
+                for child in children:
+                    entry = Path("/proc") / child
+                    if not (entry / "cmdline").read_bytes().startswith(b"nginx: worker process"):
+                        continue
+                    fields = dict(line.split(":", 1) for line in
+                                  (entry / "status").read_text().splitlines() if ":" in line)
+                    assert set(fields["Uid"].split()) == {str(worker.pw_uid)}
+                    assert set(fields["Gid"].split()) == {str(worker.pw_gid)}
+                    assert int(fields["CapEff"].strip(), 16) == int(fields["CapPrm"].strip(), 16) == 0
+                    assert fields["NoNewPrivs"].strip() == "1"
+                    assert ":repocache_nginx_t:" in (entry / "attr/current").read_text()
+                    assert (entry / "exe").stat().st_ino == saved_target.st_ino
+                    assert (entry / "ns/net").stat().st_ino == ns_identity[1]
+                    observed_workers += 1
+                assert observed_workers
+                readback = r"""
+import json,sys,zipimport
+sys.path.insert(0,"/usr/libexec/repocache/server-control-worker")
+from repocache import server_native_egress_candidate_v1 as egress
+assert isinstance(egress.__loader__,zipimport.zipimporter)
+assert egress.__loader__.archive=="/usr/libexec/repocache/server-control-worker"
+print(json.dumps(egress.inspect_fixed_namespace_egress(json.load(sys.stdin))))
+"""
+                observed = json.loads(isolated.command(
+                    "/usr/bin/python3", "-IS", "-B", "-c", readback,
+                    input_text=json.dumps(rules)).stdout)
+                assert observed["ruleset_shape_matches"]
+                assert (observed["namespace_device"], observed["namespace_inode"]) == ns_identity
+                # Actual native client request inside the service-only namespace.
+                # The isolated peer campaign already proves veth ingress.
+                request_code = r"""
+import sys
+sys.path.insert(0,"/home/pr237ci/combined")
+from scripts.ci_pr237_native_socket_guest import https_response
+sys.stdout.buffer.write(https_response(sys.argv[1]))
+"""
+                for path, expected in payloads.items():
+                    for status in (b"miss", b"hit"):
+                        response = subprocess.run(
+                            ["/usr/sbin/ip", "netns", "exec", "repocache-nginx", "/usr/bin/python3",
+                             "-IS", "-B", "-c", request_code, "/__repocache/repos" + path],
+                            capture_output=True, check=True, timeout=15).stdout
+                        header, body = response.split(b"\r\n\r\n", 1)
+                        assert header.startswith(b"HTTP/1.1 200 "), header.split(b"\r\n")[0]
+                        assert b"x-repocache-smoke: " + status in header.lower()
+                        assert body == expected.encode("ascii")
+                assert sorted((work / "hits").read_text().splitlines()) == sorted(payloads)
+                rows = [json.loads(line) for line in metrics.read_text().splitlines()]
+                assert len(rows) == 2 * len(names)
+                assert {row["upstream_cache_status"] for row in rows} == {"MISS", "HIT"}
+                assert {row["repocache_repository"] for row in rows} == {
+                    "/__repocache/repos/" + name + "/" for name in names}
+                for name in names:
+                    entries = [p for p in (cache / name).rglob("*") if p.is_file()]
+                    assert entries and all(p.stat().st_uid == worker.pw_uid for p in entries)
+                    assert all(b":repocache_nginx_rw_t:" in os.getxattr(p, "security.selinux") for p in entries)
+                assert signed("verify") == report == signed("create")
+                assert isolated.command("/usr/sbin/nft", "--stateless", "--numeric-priority",
+                                        "list", "ruleset").stdout == host_rules
+                print("PASS: actual owned systemd unit using signed dedicated executable, private netns, "
+                      "fixed labelled cache and metrics; exact TLS MISS/HIT, preserved vendor resources", flush=True)
+        finally:
+            # Never restore legacy labels/bytes under a running candidate.
+            if started:
+                require("/usr/bin/systemctl", "stop", OWN)
+            if origin is not None:
+                origin.terminate()
+                origin.wait(timeout=15)
+            if unit_placed:
+                assert dropin.read_text() == rendered["dropin"]
+                dropin.unlink()
+                dropdir.rmdir()
+                sync_dir(dropdir.parent)
+                require("/usr/bin/systemctl", "daemon-reload")
+            if namespace:
+                assert (ns.stat().st_dev, ns.stat().st_ino) == ns_identity
+                require("/usr/sbin/ip", "netns", "delete", "repocache-nginx")
+            if include_changed:
+                replace_include(saved_include)
+            for path, fd, identity, label in reversed(labels):
+                assert (path.lstat().st_dev, path.lstat().st_ino) == identity
+                if os.getxattr(fd, "security.selinux") != label:
+                    os.setxattr(fd, "security.selinux", label)
+                assert os.getxattr(fd, "security.selinux") == label
+            if created_storage:
+                # Preserve all dedicated data and ownership evidence rather
+                # than deleting it or adopting it into the legacy profile.
+                generated = set(fixed)
+                for name in names:
+                    marker = cache.parent / (".repocache-repository-" + name + ".owner-v1")
+                    generated.update((marker, marker.with_name(marker.name + ".stage")))
+                generated.add(log.parent / ".repocache-metrics-log.owner-v1")
+                for path in sorted(generated):
+                    if os.path.lexists(path):
+                        rename_absent(path, path.with_name(".ci-dedicated-" + path.name))
+            for path, backup, identity in reversed(moved):
+                assert (backup.lstat().st_dev, backup.lstat().st_ino) == identity
+                rename_absent(backup, path)
+            if legacy_stopped and runtime.exists():
+                # No foreign object is removed; an unclean runtime fails.
+                assert not list(runtime.iterdir())
+                runtime.rmdir()
+            if legacy_stopped:
+                status = run("/usr/bin/systemctl", "is-failed", OWN)
+                if status.returncode == 0:
+                    require("/usr/bin/systemctl", "reset-failed", OWN)
+                require("/usr/bin/systemctl", "start", OWN)
+    require_status(OWN, True, True)
+    require_status(VENDOR, False, False)
+    assert live_wal_resource_hashes() == before
+    assert b"x-repocache-generation: 1" in https_response("/__repocache/healthz").lower()
+    assert isolated.command("/usr/sbin/getsebool", "-a").stdout == booleans
+    assert isolated.command("/usr/sbin/nft", "--stateless", "--numeric-priority", "list", "ruleset").stdout == host_rules
+    assert isolated.VENDOR.stat().st_ino == vendor_before.st_ino
+    assert native.stage.verify_installed_worker(assets, **pins) == release
+    print("PASS: exact previous installed service, owned generation and storage roots restored", flush=True)
+    print("NOT VERIFIED: durable installed dedicated transition, boot activation of that profile, "
+          "WAL-driven active publication and authoritative upstream routes; legacy httpd_t upstream remains unsupported", flush=True)
+
+
 def signed_namespace_unit_candidate():
     """Render from the actual installed authenticated worker, without writing."""
     code = r"""
@@ -1525,7 +1954,10 @@ def verify_guest(distribution: str, phase: str) -> None:
         verify_storage_after_recovery(distribution, native)
         verify_managed_installer_repeat(distribution, native, assets, pins)
         verify_inactive_managed_repair(distribution, native, assets, pins)
-        verify_owned_service_data_fixture(distribution, native, assets, pins)
+        if distribution == "almalinux":
+            verify_owned_service_namespace_data_fixture(native, assets, pins)
+        else:
+            verify_owned_service_data_fixture(distribution, native, assets, pins)
         require_status(OWN, True, True)
         require_status(VENDOR, False, False)
         assert hashlib.sha256(VENDOR_CONFIG.read_bytes()).hexdigest() == original["vendor_config_sha256"]

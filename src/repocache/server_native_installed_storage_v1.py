@@ -65,9 +65,12 @@ def _named(parent, name):
 
 
 class _Labels:
-    def __init__(self, distribution):
+    def __init__(self, distribution, *, dedicated=False):
         if distribution not in ("debian", "almalinux"):
             _deny("TARGET_UNVERIFIED")
+        if type(dedicated) is not bool:
+            _deny("ARGUMENT_INVALID")
+        self.dedicated = dedicated
         self.enforcing = distribution == "almalinux"
         if self.enforcing and self._command("/usr/sbin/getenforce") != b"Enforcing":
             _deny("SELINUX_NOT_ENFORCING")
@@ -92,7 +95,12 @@ class _Labels:
             _deny("SELINUX_LABEL_UNVERIFIED")
         if path is None:
             return  # Root-owned ancestry: reject additional xattrs, never relabel.
-        expected = self._command("/usr/sbin/matchpathcon", "-n", path)
+        if self.dedicated and expected_type == b"repocache_nginx_rw_t":
+            # Fixed dedicated leaf context; do not alter vendor file-context
+            # mappings. Fresh inode assignment only; existing drift refused.
+            expected = b"system_u:object_r:repocache_nginx_rw_t:s0"
+        else:
+            expected = self._command("/usr/sbin/matchpathcon", "-n", path)
         parts = expected.split(b":", 3)
         if (len(parts) != 4 or parts[2] != expected_type or len(expected) > 1024
                 or any(c < 33 or c > 126 for c in expected)):
@@ -209,7 +217,26 @@ def _create(parent, kind, uid, gid, mode, owner, owner_gid, labels, path, label_
     _verify(parent, kind, uid, gid, mode, owner, owner_gid, labels, path, label_type)
 
 
-def _prepare_under_root(root, *, owner, owner_gid, uid, gid, labels, allow_create):
+def _storage_profile(*, owner, owner_gid, uid, gid, dedicated):
+    """Closed leaf/parent metadata for a fresh confined NGINX candidate.
+
+    The root master has no DAC bypass. A root-owned traversal-only cache
+    parent permits native path initialization; each repository remains
+    worker-owned 0700. No migration or adoption of legacy storage.
+    """
+    if type(dedicated) is not bool:
+        _deny("ARGUMENT_INVALID")
+    return (
+        ("cache", _CACHE, owner if dedicated else uid,
+         owner_gid if dedicated else gid, 0o711 if dedicated else 0o700,
+         b"httpd_cache_t", b"repocache_nginx_rw_t" if dedicated else b"httpd_cache_t"),
+        ("log", _LOG, owner, owner_gid, 0o750,
+         b"httpd_log_t", b"repocache_nginx_rw_t" if dedicated else b"httpd_log_t"),
+    )
+
+
+def _prepare_under_root(root, *, owner, owner_gid, uid, gid, labels, allow_create,
+                        dedicated=False):
     """Private descriptor seam; the production entry always opens real root."""
     if type(allow_create) is not bool:
         _deny("ARGUMENT_INVALID")
@@ -217,13 +244,12 @@ def _prepare_under_root(root, *, owner, owner_gid, uid, gid, labels, allow_creat
         identity = _root_owned(root, owner, labels)
         with ExitStack() as stack:
             targets = []
-            for kind, segments, leaf_uid, leaf_gid, mode, label_type in (
-                ("cache", _CACHE, uid, gid, 0o700, b"httpd_cache_t"),
-                ("log", _LOG, owner, owner_gid, 0o750, b"httpd_log_t"),
-            ):
+            for kind, segments, leaf_uid, leaf_gid, mode, parent_type, label_type in (
+                    _storage_profile(owner=owner, owner_gid=owner_gid, uid=uid,
+                                     gid=gid, dedicated=dedicated)):
                 parent, chain = _walk(root, segments, owner, labels, stack)
                 path = "/" + "/".join((*segments, _LEAF))
-                labels.check(parent, "/" + "/".join(segments), label_type)
+                labels.check(parent, "/" + "/".join(segments), parent_type)
                 args = (parent, kind, leaf_uid, leaf_gid, mode, owner, owner_gid,
                         labels, path, label_type)
                 leaf, marker = _named(parent, _LEAF), _named(parent, _MARKER)
@@ -460,7 +486,7 @@ def _verify_service_data_view(service_root, *, host_directory, segments,
 
 def _prepare_repository_storage_under_root(root, *, owner, owner_gid, uid,
                                             gid, labels, document, allow_create,
-                                            service_root=None):
+                                            service_root=None, dedicated=False):
     """Prepare a closed active set under the existing authenticated state lock.
 
     This private descriptor seam does not grant activation, deletion or
@@ -472,15 +498,17 @@ def _prepare_repository_storage_under_root(root, *, owner, owner_gid, uid,
     active, metrics = _repository_storage_intent(document)
     try:
         _prepare_under_root(root, owner=owner, owner_gid=owner_gid, uid=uid,
-                            gid=gid, labels=labels, allow_create=False)
+                            gid=gid, labels=labels, allow_create=False,
+                            dedicated=dedicated)
         root_identity = _root_owned(root, owner, labels)
         with ExitStack() as stack:
             roots = []
-            for kind, segments, leaf_uid, leaf_gid, mode, label_type, path in (
-                ("cache", _CACHE, uid, gid, 0o700, b"httpd_cache_t", CACHE_ROOT),
-                ("log", _LOG, owner, owner_gid, 0o750, b"httpd_log_t", LOG_ROOT),
-            ):
+            for kind, segments, leaf_uid, leaf_gid, mode, parent_type, label_type in (
+                    _storage_profile(owner=owner, owner_gid=owner_gid, uid=uid,
+                                     gid=gid, dedicated=dedicated)):
+                path = "/" + "/".join((*segments, _LEAF))
                 parent, chain = _walk(root, segments, owner, labels, stack)
+                labels.check(parent, "/" + "/".join(segments), parent_type)
                 args = (parent, kind, leaf_uid, leaf_gid, mode, owner, owner_gid,
                         labels, path, label_type)
                 _verify(*args)
@@ -499,15 +527,17 @@ def _prepare_repository_storage_under_root(root, *, owner, owner_gid, uid,
             plans = []
             cache_parent, cache = roots[0][1][0], roots[0][2]
             log_parent, log = roots[1][1][0], roots[1][2]
+            cache_type = b"repocache_nginx_rw_t" if dedicated else b"httpd_cache_t"
+            log_type = b"repocache_nginx_rw_t" if dedicated else b"httpd_log_t"
             for name in active:
                 marker = ".repocache-repository-" + name + ".owner-v1"
                 plans.append((cache_parent, cache, "repository-cache", name, marker,
                               marker + ".stage", uid, gid, owner, owner_gid, labels,
-                              CACHE_ROOT + "/" + name, b"httpd_cache_t"))
+                              CACHE_ROOT + "/" + name, cache_type))
             if metrics:
                 plans.append((log_parent, log, "metrics-log", _METRICS, _METRICS_MARKER,
                               None, owner, owner_gid, owner, owner_gid, labels,
-                              LOG_ROOT + "/" + _METRICS, b"httpd_log_t"))
+                              LOG_ROOT + "/" + _METRICS, log_type))
             # Preflight the entire requested set before provisioning any leaf.
             initial = [_data_identity(*args, allow_missing=allow_create) for args in plans]
             check_roots()
@@ -568,6 +598,41 @@ def prepare_installed_repository_storage(distribution, document, *, allow_create
             )
         finally:
             os.close(fd)
+    except InstalledStorageError:
+        raise
+    except (OSError, KeyError, ValueError, TypeError, subprocess.SubprocessError):
+        _deny("DATA_UNVERIFIED")
+
+
+def prepare_dedicated_candidate_storage(distribution, document, *, allow_create):
+    """Internal fresh dedicated-profile preparation under the caller's lock.
+
+    No legacy marker is reinterpreted or overwritten. The fixed profile
+    remains unavailable to host dispatch until the signed service/namespace
+    transition is complete. This operation never enables or reloads NGINX.
+    """
+    if (os.getresuid() != (0, 0, 0) or os.getresgid() != (0, 0, 0)
+            or distribution not in ("debian", "almalinux")
+            or type(allow_create) is not bool):
+        _deny("HOST_UNVERIFIED")
+    _repository_storage_intent(document)
+    try:
+        worker = pwd.getpwnam("www-data" if distribution == "debian" else "nginx")
+        if not (0 < worker.pw_uid < 2**32 - 1 and 0 < worker.pw_gid < 2**32 - 1):
+            _deny("WORKER_IDENTITY_UNVERIFIED")
+        labels = _Labels(distribution, dedicated=True)
+        root = os.open("/", _DIR)
+        try:
+            _prepare_under_root(root, owner=0, owner_gid=0, uid=worker.pw_uid,
+                                gid=worker.pw_gid, labels=labels,
+                                allow_create=allow_create, dedicated=True)
+            return _prepare_repository_storage_under_root(
+                root, owner=0, owner_gid=0, uid=worker.pw_uid, gid=worker.pw_gid,
+                labels=labels, document=document, allow_create=allow_create,
+                dedicated=True,
+            )
+        finally:
+            os.close(root)
     except InstalledStorageError:
         raise
     except (OSError, KeyError, ValueError, TypeError, subprocess.SubprocessError):

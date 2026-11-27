@@ -454,3 +454,36 @@ def test_namespace_candidate_refuses_unreviewed_source_contract(old, new):
 def test_namespace_candidate_requires_installed_signed_source():
     with pytest.raises(EffectiveNginxUnitError, match="SIGNED_OWN_UNIT_SOURCE_REQUIRED"):
         unit.render_owned_nginx_namespace_unit_candidate(https_port=8008)
+
+
+
+@pytest.mark.parametrize("port", [443, 8008])
+def test_namespace_dropin_resets_exact_executables_without_widening_base(port):
+    import hashlib
+    raw = _signed_unit_fixture()
+    report = unit._render_owned_nginx_namespace_dropin_candidate(raw, https_port=port)
+    dropin = report["dropin_bytes"].decode("ascii").splitlines()
+    assert dropin[0] == "[Service]"
+    source = unit._closed_signed_owned_unit_contract(raw)
+    expected = ["[Service]"]
+    for key in unit._OWN_EXEC_KEYS:
+        expected.extend([key + "=", key + "=" + source[key].replace(
+            "/usr/sbin/nginx", "/usr/libexec/repocache/nginx -e stderr", 1)])
+    expected.extend([
+        "CapabilityBoundingSet=CAP_CHOWN CAP_KILL CAP_SETGID CAP_SETUID" +
+        (" CAP_NET_BIND_SERVICE" if port < 1024 else ""),
+        "NetworkNamespacePath=/run/netns/repocache-nginx",
+        "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
+    ])
+    assert dropin == expected
+    assert hashlib.sha256(report["dropin_bytes"]).hexdigest() == report["dropin_sha256"]
+    assert not report["authorizes_systemctl"] and not report["authorizes_nginx_activation"]
+
+
+def test_namespace_dropin_refuses_foreign_unit_before_rendering():
+    with pytest.raises(EffectiveNginxUnitError, match="NAMESPACE_UNIT_SOURCE_INVALID"):
+        unit._render_owned_nginx_namespace_dropin_candidate(
+            _signed_unit_fixture().replace(b"PrivateTmp=yes", b"PrivateTmp=no"),
+            https_port=443)
+    with pytest.raises(EffectiveNginxUnitError, match="SIGNED_OWN_UNIT_SOURCE_REQUIRED"):
+        unit.render_owned_nginx_namespace_dropin_candidate(https_port=443)
