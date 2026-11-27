@@ -1236,7 +1236,8 @@ campaign. No production service or boot activation authority is added.
 
 The fresh committed-boot orchestration retains the exact five-resource
 scope before and across fixed loopback namespace creation and policy
-preparation. It refuses active destinations, pending WAL/stages,
+preparation. It refuses non-loopback listeners, active destinations,
+pending WAL/stages,
 unverified owner or changed boot intent before policy preparation.
 The read-only intent preflight checks prior canonical bindings and
 requires explicit stale-boot rollover before any new namespace is

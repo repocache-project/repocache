@@ -775,6 +775,9 @@ def _fresh_boot_egress_intent_locked(
                                  executable_receipt_sha256))):
         raise NativeEgressCandidateError("NATIVE_EGRESS_FRESH_BOOT_INPUT_REFUSED")
     canonical = _canonical_ruleset(proposed)
+    health, destinations = _closed_ruleset(canonical)
+    if destinations or not ipaddress.ip_address(health[0]).is_loopback:
+        raise NativeEgressCandidateError("NATIVE_EGRESS_FRESH_BOOT_NONLOOPBACK_REFUSED")
     boot = _current_boot_id()
     owner, group = os.geteuid(), os.getegid()
     saved = _read_boot_egress_receipt(state_fd, owner, group)

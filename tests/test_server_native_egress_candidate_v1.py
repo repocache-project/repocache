@@ -914,3 +914,22 @@ def test_fresh_boot_intent_preflight_is_read_only(tmp_path, monkeypatch, fault):
         assert {path.name: path.read_bytes() for path in tmp_path.iterdir()} == before
     finally:
         os.close(fd)
+
+
+@pytest.mark.parametrize("bind,destinations", [
+    ("192.0.2.10", ()), ("127.0.0.1", (("8.8.8.8", 443),)),
+])
+def test_fresh_boot_intent_refuses_nonloopback_or_upstream_before_state_read(
+        monkeypatch, bind, destinations):
+    from repocache import server_native_egress_candidate_v1 as egress
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("Invalid fresh boot plan reached state or host read")
+    monkeypatch.setattr(egress, "_current_boot_id", unexpected)
+    monkeypatch.setattr(egress, "_read_boot_egress_receipt", unexpected)
+    rules = egress._render_closed_output_rules(bind, 443, destinations, 33)
+    with pytest.raises(NativeEgressCandidateError, match="FRESH_BOOT_NONLOOPBACK_REFUSED"):
+        egress._fresh_boot_egress_intent_locked(
+            -1, rules, generation=1, generation_manifest_sha256="a"*64,
+            profile_receipt_sha256="b"*64, executable_receipt_sha256="c"*64,
+            allow_boot_rollover=False)
