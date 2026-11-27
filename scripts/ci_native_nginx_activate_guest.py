@@ -1453,16 +1453,20 @@ try:
                 root,state,raw,https_port=443,owner_uid=0,owner_gid=0,allow_create=False)
             directory=os.open("/usr/libexec/repocache",_DIRECTORY_FLAGS)
             try:
-                receipt=executable._read_executable_receipt(directory)
-                assert receipt
-                record=json.loads(receipt)
                 expected=json.loads(open("/root/pr237-synthetic-fixture/native-executable-candidate-proof.json").read())
-                assert hashlib.sha256(receipt).hexdigest()==expected["receipt_sha256"]
-                assert record["dedicated_policy_sha256"]==executable.signed_owned_nginx_policy_candidate()["policy_sha256"]
-                inode=executable._verify_leaf(directory,record["executable_sha256"],dedicated_selinux=True)
-                assert inode[:2]==(record["device"],record["inode"])
-                assert inode[6:]==(record["size"],record["mtime_ns"],record["ctime_ns"])
-                assert executable._named(directory,executable._PENDING) is None
+                policy=executable.signed_owned_nginx_policy_candidate()["policy_sha256"]
+                assert policy==expected["dedicated_policy_sha256"]
+                verified=executable.verify_nginx_candidate_receipt(
+                    directory,expected_receipt_sha256=expected["receipt_sha256"],
+                    distribution="almalinux",package_identity=expected["package_identity"],
+                    native_payload_sha256=expected["native_payload_sha256"],
+                    authenticated_sha256=expected["sha256"],
+                    release_source_sha=expected["release_source_sha"],
+                    release_archive_sha256=expected["release_archive_sha256"],
+                    dedicated_policy_sha256=policy)
+                inode=verified["executable_identity"]
+                receipt=executable._read_executable_receipt(directory)
+                assert hashlib.sha256(receipt).hexdigest()==verified["receipt_sha256"]
                 active=action=="egress-boot-active"
                 # This is the explicitly synthetic fixture generation and
                 # loopback policy, not a claim about committed active routes.
@@ -1482,7 +1486,8 @@ try:
                     assert unit._stage_namespace_dropin_under_lock(
                         root,state,raw,https_port=443,owner_uid=0,owner_gid=0,allow_create=False)==profile
                     assert executable._read_executable_receipt(directory)==receipt
-                    assert executable._verify_leaf(directory,record["executable_sha256"],dedicated_selinux=True)==inode
+                    assert executable._verify_leaf(directory,expected["sha256"],dedicated_selinux=True)==inode
+                    assert executable._named(directory,executable._PENDING) is None
                 def prepare(allow):
                     return egress._prepare_boot_egress_locked(
                         root,state,doc["rules"],namespace_identity=identity,
@@ -2138,8 +2143,15 @@ from repocache import server_native_nginx_executable_v1 as candidate
 assert isinstance(candidate.__loader__, zipimport.zipimporter)
 assert candidate.__loader__.archive == "/usr/libexec/repocache/server-control-worker"
 report,pins=json.load(sys.stdin)
-directory=os.open("/usr/libexec/repocache",os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
-try:
+from contextlib import ExitStack
+from repocache.server_protected_state_store_v1 import _locked
+from repocache.server_protected_state_inspect_v1 import _DIRECTORY_FLAGS,_walk,_recheck
+with ExitStack() as stack:
+    root=os.open("/",_DIRECTORY_FLAGS)
+    stack.callback(os.close,root)
+    state=stack.enter_context(_locked(root,0))
+    directory,chain=_walk(root,("usr","libexec","repocache"),stack,0)
+    _recheck(chain,0)
     dedicated=report["dedicated_policy_sha256"] is not None
     policy=candidate.signed_owned_nginx_policy_candidate()["policy_sha256"] if dedicated else None
     assert policy==report["dedicated_policy_sha256"]
@@ -2154,8 +2166,7 @@ try:
     assert observed["executable_identity"][:2]==(report["device"],report["inode"])
     assert observed["receipt_matches_owned_inode"]
     assert not observed["authorizes_nginx_activation"]
-finally:
-    os.close(directory)
+    _recheck(chain,0)
 """
     subprocess.run(["/usr/bin/python3", "-IS", "-B", "-c", code],
                    input=json.dumps([expected,pins]),text=True,check=True,timeout=30)
@@ -2263,17 +2274,18 @@ try:
     with _locked(root,0) as state:
         tx._require_audited_native_package_for_activation(state,distribution="almalinux")
         raw=unit._signed_owned_unit_bytes()
+        policy_digest=executable.signed_owned_nginx_policy_candidate()["policy_sha256"]
+        assert policy_digest==proof["dedicated_policy_sha256"]
+        verified=executable.verify_nginx_candidate_receipt(
+            directory,expected_receipt_sha256=proof["receipt_sha256"],
+            distribution="almalinux",package_identity=proof["package_identity"],
+            native_payload_sha256=proof["native_payload_sha256"],
+            authenticated_sha256=proof["sha256"],
+            release_source_sha=pins["commit"],release_archive_sha256=pins["archive_sha256"],
+            dedicated_policy_sha256=policy_digest)
+        identity=verified["executable_identity"]
         receipt=executable._read_executable_receipt(directory)
-        assert receipt
-        record=json.loads(receipt)
-        assert hashlib.sha256(receipt).hexdigest()==proof["receipt_sha256"]
-        assert record["release_source_sha"]==pins["commit"]
-        assert record["release_archive_sha256"]==pins["archive_sha256"]
-        assert record["dedicated_policy_sha256"]==executable.signed_owned_nginx_policy_candidate()["policy_sha256"]
-        identity=executable._verify_leaf(directory,record["executable_sha256"],dedicated_selinux=True)
-        assert identity[:2]==(record["device"],record["inode"])
-        assert identity[6:]==(record["size"],record["mtime_ns"],record["ctime_ns"])
-        assert executable._named(directory,executable._PENDING) is None
+        assert hashlib.sha256(receipt).hexdigest()==verified["receipt_sha256"]
 
         def profile(allow):
             return unit._stage_namespace_dropin_under_lock(
@@ -2309,7 +2321,8 @@ try:
                 unit.inspect_signed_owned_namespace_unit(https_port=443,active=False)
                 assert profile(False)==observed_profile
                 assert executable._read_executable_receipt(directory)==receipt
-                assert executable._verify_leaf(directory,record["executable_sha256"],dedicated_selinux=True)==identity
+                assert executable._verify_leaf(directory,proof["sha256"],dedicated_selinux=True)==identity
+                assert executable._named(directory,executable._PENDING) is None
             def namespace_identity():
                 info=os.stat("/run/netns/repocache-nginx",follow_symlinks=False)
                 return (info.st_dev,info.st_ino)
