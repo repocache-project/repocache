@@ -3854,7 +3854,7 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
 @pytest.mark.parametrize("fault", ["fresh", "repeat", "missing", "parent-mode",
                                    "parent-label", "child-label", "symlink", "mode",
                                    "owner", "group", "xattr", "nonempty", "extra",
-                                   "preflight-all"])
+                                   "preflight-all", "permissive"])
 def test_alma_runtime_scratch_fresh_only_and_exact_identity(tmp_path, monkeypatch,
                                                           dedicated, fault):
     """Real dirfds/modes/ownership, synthetic SELinux xattr seam only."""
@@ -3919,6 +3919,12 @@ def test_alma_runtime_scratch_fresh_only_and_exact_identity(tmp_path, monkeypatc
     fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
     try:
         with monkeypatch.context() as patch:
+            def policy(distribution, *, dedicated):
+                assert distribution == "almalinux"
+                if fault == "permissive":
+                    raise native.InstalledStorageError("SELINUX_NOT_ENFORCING")
+                return SimpleNamespace(finish=lambda: None)
+            patch.setattr(native, "_Labels", policy)
             patch.setattr(native.pwd, "getpwnam", lambda name: SimpleNamespace(pw_uid=33))
             patch.setattr(native.os, "listxattr", listxattr)
             patch.setattr(native.os, "getxattr", getxattr)

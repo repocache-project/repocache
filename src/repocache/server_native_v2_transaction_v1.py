@@ -53,7 +53,7 @@ from repocache.server_native_nginx_effective_unit_v1 import (
     _inspect_owned_nginx_unit_bytes,
 )
 from repocache.server_native_installed_storage_v1 import (
-    InstalledStorageError, verify_control_storage, verify_service_storage_mounts, _mount,
+    InstalledStorageError, verify_control_storage, verify_service_storage_mounts, _mount, _Labels,
 )
 from repocache.server_native_nginx_package_journal_v1 import (
     _read_completed_native_install_under_lock, NativePackageJournalError,
@@ -1431,6 +1431,7 @@ def _owned_alma_runtime_temps(root_fd: int, *, dedicated: bool,
         return value
 
     try:
+        labels = _Labels("almalinux", dedicated=dedicated)
         worker = pwd.getpwnam("nginx")
         if not 0 < worker.pw_uid < 2**32 - 1:
             _deny(code)
@@ -1525,6 +1526,7 @@ def _owned_alma_runtime_temps(root_fd: int, *, dedicated: bool,
                     or any(sample(name, fd) != observed[name] for name, fd in held.items())):
                 _deny(code)
             guard()
+            labels.finish()
             return identity(info) + (runtime_label,), observed
     except NativeV2TransactionError:
         raise
