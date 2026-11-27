@@ -487,3 +487,55 @@ def test_namespace_dropin_refuses_foreign_unit_before_rendering():
             https_port=443)
     with pytest.raises(EffectiveNginxUnitError, match="SIGNED_OWN_UNIT_SOURCE_REQUIRED"):
         unit.render_owned_nginx_namespace_dropin_candidate(https_port=443)
+
+
+def test_exact_persistent_namespace_dropin_and_foreign_refusal(tmp_path):
+    import os
+    raw = unit._render_owned_nginx_namespace_dropin_candidate(
+        _signed_unit_fixture(), https_port=443)["dropin_bytes"]
+    parent = tmp_path / "etc/systemd/system" / unit._NAMESPACE_DROPIN_DIR
+    parent.mkdir(parents=True)
+    parent.chmod(0o755)
+    leaf = parent / unit._NAMESPACE_DROPIN_LEAF
+    leaf.write_bytes(raw)
+    leaf.chmod(0o644)
+    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        def read():
+            return unit._read_exact_namespace_dropin_at(
+                fd, raw, owner_uid=os.getuid(), owner_gid=os.getgid())
+        identity = read()
+        assert identity[:2] == (leaf.stat().st_dev, leaf.stat().st_ino)
+        assert read() == identity
+        foreign = parent / "91-foreign.conf"
+        foreign.write_bytes(b"[Service]\n")
+        with pytest.raises(EffectiveNginxUnitError, match="NAMESPACE_DROPIN_DIRECTORY_REFUSED"):
+            read()
+        assert foreign.read_bytes() == b"[Service]\n"
+        foreign.unlink()
+        leaf.chmod(0o666)
+        with pytest.raises(EffectiveNginxUnitError, match="NAMESPACE_DROPIN_METADATA_REFUSED"):
+            read()
+        leaf.chmod(0o644)
+        leaf.write_bytes(b"x" * len(raw))
+        with pytest.raises(EffectiveNginxUnitError, match="NAMESPACE_DROPIN_CONTENT_CHANGED"):
+            read()
+        leaf.write_bytes(raw)
+        os.link(leaf, tmp_path / "hardlink")
+        with pytest.raises(EffectiveNginxUnitError, match="NAMESPACE_DROPIN_METADATA_REFUSED"):
+            read()
+        (tmp_path / "hardlink").unlink()
+        leaf.unlink()
+        foreign = tmp_path / "foreign"
+        foreign.write_bytes(raw)
+        leaf.symlink_to(foreign)
+        with pytest.raises(EffectiveNginxUnitError, match="NAMESPACE_DROPIN_UNVERIFIED"):
+            read()
+        assert foreign.read_bytes() == raw
+    finally:
+        os.close(fd)
+
+
+def test_namespace_profile_requires_installed_signed_source():
+    with pytest.raises(EffectiveNginxUnitError, match="SIGNED_OWN_UNIT_SOURCE_REQUIRED"):
+        unit.inspect_signed_owned_namespace_unit(https_port=443, active=False)

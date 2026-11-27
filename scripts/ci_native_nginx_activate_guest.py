@@ -1295,6 +1295,9 @@ try:
         elif action in ("create","verify"):
             result=storage.prepare_dedicated_candidate_storage(
                 "almalinux",doc,allow_create=action=="create")
+        elif action in ("unit-inactive","unit-active"):
+            result=unit.inspect_signed_owned_namespace_unit(
+                https_port=443,active=action=="unit-active")
         else:
             assert action=="render"
             pins={r["id"]:{"cache.example.invalid":["8.8.8.8"]} for r in doc["repositories"]}
@@ -1359,10 +1362,10 @@ finally:
     for parent in (cache.parent, log.parent):
         assert not any(p.name.startswith((".repocache-repository-", ".repocache-metrics-"))
                        for p in parent.iterdir())
-    dropdir = Path("/run/systemd/system", OWN + ".d")
-    dropin = dropdir / "90-repocache-ci-dedicated.conf"
+    dropdir = Path("/etc/systemd/system", OWN + ".d")
+    dropin = dropdir / "90-repocache-dedicated.conf"
     assert not os.path.lexists(dropdir)
-    assert not os.path.lexists(Path("/etc/systemd/system", OWN + ".d"))
+    assert not os.path.lexists(Path("/run/systemd/system", OWN + ".d"))
     assert run("/usr/bin/systemctl", "show", "-p", "DropInPaths", "--value", OWN).stdout.strip() == ""
     ns = Path("/run/netns/repocache-nginx")
     runtime = Path("/run/repocache-nginx")
@@ -1460,6 +1463,7 @@ finally:
                              "/usr/sbin/nft", "-f", "-", input_text=rules)
             dropdir.mkdir(mode=0o755)
             unit_placed = True
+            dropdir.chmod(0o755)
             with dropin.open("xb") as stream:
                 os.fchmod(stream.fileno(), 0o644)
                 stream.write(rendered["dropin"].encode("ascii"))
@@ -1469,6 +1473,11 @@ finally:
             sync_dir(dropdir.parent)
             require("/usr/bin/systemctl", "daemon-reload")
             assert run("/usr/bin/systemctl", "show", "-p", "DropInPaths", "--value", OWN).stdout.strip() == str(dropin)
+            inactive_profile = signed("unit-inactive")
+            assert inactive_profile["main_pid_observed"] == 0
+            assert inactive_profile["signed_worker_unit_bytes_match"]
+            assert inactive_profile["dropin_sha256"] == hashlib.sha256(dropin.read_bytes()).hexdigest()
+            assert not inactive_profile["authorizes_systemctl"]
             origin_code = r"""
 import json,ssl,sys
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
@@ -1515,6 +1524,11 @@ server.serve_forever()
                     raise AssertionError("Actual owned service dedicated transition refused")
                 require_status(OWN, True, True)
                 pid = int(require("/usr/bin/systemctl", "show", "-p", "MainPID", "--value", OWN).stdout)
+                profile = signed("unit-active")
+                assert profile["main_pid_observed"] == pid
+                assert profile["private_unit_identity"] == inactive_profile["private_unit_identity"]
+                assert profile["private_dropin_identity"] == inactive_profile["private_dropin_identity"]
+                assert not profile["authorizes_nginx_activation"]
                 proc = Path("/proc") / str(pid)
                 assert (proc / "exe").stat().st_ino == saved_target.st_ino
                 assert (proc / "ns/net").stat().st_ino == ns_identity[1]
@@ -1584,6 +1598,8 @@ sys.stdout.buffer.write(https_response(sys.argv[1]))
                     assert entries and all(p.stat().st_uid == worker.pw_uid for p in entries)
                     assert all(b":repocache_nginx_rw_t:" in os.getxattr(p, "security.selinux") for p in entries)
                 assert signed("verify") == report == signed("create")
+                assert signed("unit-active") == profile
+                print("PASS: authenticated exact persistent drop-in and fixed PID1/master identity, inactive/active/repeat observation", flush=True)
                 assert isolated.command("/usr/sbin/nft", "--stateless", "--numeric-priority",
                                         "list", "ruleset").stdout == host_rules
                 print("PASS: actual owned systemd unit using signed dedicated executable, private netns, "

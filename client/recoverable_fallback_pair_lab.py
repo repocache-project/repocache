@@ -589,13 +589,38 @@ def _apply_sandbox(root: Path, ident: str, *, crash: str | None,
                 recheck()
                 _put_journal(statefd, ident, j)
                 _crash(crash, "armed")
-                if current_catalog:
-                    # Durable journal already exists, so failure here is
-                    # recoverable offline without using a withdrawn route.
-                    boundary._current_route(approval, root)
+                def revalidate_route():
+                    if not current_catalog:
+                        return
+                    # This is an observation, not a server-side lease. An
+                    # armed modern record can be compensated offline under
+                    # the same state and native lock scope.
+                    try:
+                        boundary._current_route(approval, root)
+                    except boundary.BoundaryRefused as exc:
+                        if not _modern_recovery_record(j):
+                            raise
+                        try:
+                            recheck()
+                            if boundary._manifest(statefd, ident) != approval:
+                                raise PairRefused("Approval changed before compensation")
+                            restored = _restore_locked(
+                                root, statefd, ident, j, recheck=recheck,
+                                crash="catalog-refusal")
+                            observed, report = _inspect_record_locked(root, statefd, ident)
+                            if (restored["status"] != "restored" or observed != j
+                                    or report["phase"] != "restored"):
+                                raise PairRefused("Compensation not restored")
+                            recheck()
+                        except (PairRefused, boundary.BoundaryRefused, OSError,
+                                ValueError, pre.PreflightError, locks.LockInspectionRefused) as rollback_error:
+                            raise PairRefused("Catalog refused; local recovery required") from rollback_error
+                        raise PairRefused("Catalog refused; exact local transaction restored") from exc
                     if boundary._manifest(statefd, ident) != approval:
                         raise PairRefused("Approval changed before publication")
                     recheck()
+
+                revalidate_route()
                 if companion is not None:
                     with atom._source_directory(root, companion) as (fd, leaf):
                         temp = ".repocache-atomic-" + ident
@@ -606,6 +631,8 @@ def _apply_sandbox(root: Path, ident: str, *, crash: str | None,
                         boundary._rename_noreplace(fd, temp, leaf)
                         os.fsync(fd)
                     _crash(crash, "companion")
+                    if _modern_recovery_record(j):
+                        revalidate_route()
                 with atom._source_directory(root, proposal.source) as (fd, leaf):
                     if _read_named(fd, leaf, attrs) != source:
                         raise PairRefused("Source changed before transaction commit")
@@ -623,6 +650,13 @@ def _apply_sandbox(root: Path, ident: str, *, crash: str | None,
                     if not _matches(installed, proposal.proposed, list(new_id)):
                         raise PairRefused("Installed source readback mismatch")
                     _metadata(installed[1], j)
+                if current_catalog and _modern_recovery_record(j):
+                    revalidate_route()
+                    observed, report = _inspect_record_locked(root, statefd, ident)
+                    if (observed != j or report["source_state"] != "proposed"
+                            or report["companion_state"] != (
+                                "cache-bearing" if companion is not None else "not-applicable")):
+                        raise PairRefused("Published transaction changed during catalog validation")
                 j["phase"] = "installed"
                 recheck()
                 _put_journal(statefd, ident, j)

@@ -131,7 +131,7 @@ def _parse_fixed_unit_status(value: Any) -> dict[str, str]:
 
 
 
-def _observe_nginx_master_kernel(pid: int) -> None:
+def _observe_nginx_master_kernel(pid: int, *, dedicated: bool = False) -> None:
     """Narrow /proc inode/executable check, never a process authorization.
 
     Only a fixed OS-reported MainPID is accepted. This does not authenticate
@@ -141,7 +141,9 @@ def _observe_nginx_master_kernel(pid: int) -> None:
     if type(pid) is not int or not 2 <= pid <= 2**31 - 1:
         _deny("INVALID_MAIN_PID")
     proc = f"/proc/{pid}"
-    binary = "/usr/sbin/nginx"
+    if type(dedicated) is not bool:
+        _deny("NGINX_MASTER_IDENTITY_REFUSED")
+    binary = _CANDIDATE_EXECUTABLE if dedicated else "/usr/sbin/nginx"
     try:
         installed = os.lstat(binary)
         process = os.stat(proc)
@@ -264,7 +266,11 @@ def inspect_effective_owned_nginx_unit(*, active: bool) -> dict[str, Any]:
     native package provenance, ownership intent and any required state lock.
     No service operation is authorized by this observation.
     """
-    if type(active) is not bool:
+    return _inspect_effective_owned_nginx_unit(active=active, dedicated=False)
+
+
+def _inspect_effective_owned_nginx_unit(*, active: bool, dedicated: bool) -> dict[str, Any]:
+    if type(active) is not bool or type(dedicated) is not bool:
         _deny("OWN_UNIT_UNVERIFIED")
     try:
         _observe_systemd_pid1()
@@ -295,7 +301,8 @@ def inspect_effective_owned_nginx_unit(*, active: bool) -> dict[str, Any]:
             expected = {
                 "Id": _OWN_UNIT, "Names": _OWN_UNIT,
                 "FragmentPath": "/etc/systemd/system/" + _OWN_UNIT,
-                "DropInPaths": "", "LoadState": "loaded",
+                "DropInPaths": _NAMESPACE_DROPIN_PATH if dedicated else "",
+                "LoadState": "loaded",
                 "ActiveState": "active" if active else "inactive",
                 "SubState": "running" if active else "dead",
                 "CanReload": "yes", "NeedDaemonReload": "no",
@@ -307,7 +314,10 @@ def inspect_effective_owned_nginx_unit(*, active: bool) -> dict[str, Any]:
                 if (not 1 <= len(pid) <= 10 or not pid.isascii() or not pid.isdecimal()
                         or not 2 <= int(pid) <= 2**31 - 1):
                     _deny("OWN_UNIT_UNVERIFIED")
-                _observe_nginx_master_kernel(int(pid))
+                if dedicated:
+                    _observe_nginx_master_kernel(int(pid), dedicated=True)
+                else:
+                    _observe_nginx_master_kernel(int(pid))
             elif pid != "0":
                 _deny("OWN_UNIT_UNVERIFIED")
             observed.append(fields)
@@ -362,6 +372,9 @@ def _signed_owned_unit_bytes() -> bytes:
 # have been accepted together. Installed paths are not caller parameters.
 _NAMESPACE_PATH = "/run/netns/repocache-nginx"
 _CANDIDATE_EXECUTABLE = "/usr/libexec/repocache/nginx"
+_NAMESPACE_DROPIN_DIR = _OWN_UNIT + ".d"
+_NAMESPACE_DROPIN_LEAF = "90-repocache-dedicated.conf"
+_NAMESPACE_DROPIN_PATH = "/etc/systemd/system/" + _NAMESPACE_DROPIN_DIR + "/" + _NAMESPACE_DROPIN_LEAF
 _MASTER_CAPABILITIES = "CAP_CHOWN CAP_KILL CAP_SETGID CAP_SETUID"
 _OWN_EXEC_KEYS = ("ExecStartPre", "ExecStart", "ExecReload", "ExecStop")
 
@@ -524,6 +537,103 @@ def _read_exact_owned_unit_at(root_fd: int, expected: bytes, *,
         raise
     except (OSError, ValueError, TypeError):
         _deny("SIGNED_OWN_UNIT_UNVERIFIED")
+
+
+def _read_exact_namespace_dropin_at(root_fd: int, expected: bytes, *,
+                                    owner_uid: int, owner_gid: int) -> tuple[int, ...]:
+    """Read the single fixed persistent drop-in with retained descriptors.
+
+    The expected bytes must come from the signed unit renderer in an installed
+    worker. Detached roots are for tests only. No files are created or relabelled.
+    """
+    from repocache.server_protected_state_inspect_v1 import (
+        _FILE_FLAGS, _identity, _recheck, _walk,
+    )
+
+    if type(expected) is not bytes or not 1 <= len(expected) <= _UNIT_MAX_BYTES:
+        _deny("NAMESPACE_DROPIN_SOURCE_INVALID")
+    try:
+        with ExitStack() as stack:
+            parent, chain = _walk(
+                root_fd, ("etc", "systemd", "system", _NAMESPACE_DROPIN_DIR),
+                stack, owner_uid)
+            info = os.fstat(parent)
+            if (info.st_gid != owner_gid or stat.S_IMODE(info.st_mode) != 0o755
+                    or set(os.listxattr(parent)) - {"security.selinux"}
+                    or os.listdir(parent) != [_NAMESPACE_DROPIN_LEAF]):
+                _deny("NAMESPACE_DROPIN_DIRECTORY_REFUSED")
+            fd = os.open(_NAMESPACE_DROPIN_LEAF, _FILE_FLAGS, dir_fd=parent)
+            stack.callback(os.close, fd)
+            leaf = os.fstat(fd)
+            if (not stat.S_ISREG(leaf.st_mode) or leaf.st_nlink != 1
+                    or leaf.st_uid != owner_uid or leaf.st_gid != owner_gid
+                    or stat.S_IMODE(leaf.st_mode) != 0o644
+                    or leaf.st_dev != info.st_dev or leaf.st_size != len(expected)
+                    or set(os.listxattr(fd)) - {"security.selinux"}):
+                _deny("NAMESPACE_DROPIN_METADATA_REFUSED")
+            raw = bytearray()
+            while len(raw) <= len(expected):
+                block = os.read(fd, len(expected) + 1 - len(raw))
+                if not block:
+                    break
+                raw.extend(block)
+            identity = _identity(leaf)
+            if (bytes(raw) != expected or _identity(os.fstat(fd)) != identity
+                    or _identity(os.stat(_NAMESPACE_DROPIN_LEAF, dir_fd=parent,
+                                         follow_symlinks=False)) != identity
+                    or os.listdir(parent) != [_NAMESPACE_DROPIN_LEAF]
+                    or _identity(os.fstat(parent)) != _identity(info)):
+                _deny("NAMESPACE_DROPIN_CONTENT_CHANGED")
+            _recheck(chain, owner_uid)
+            return identity
+    except EffectiveNginxUnitError:
+        raise
+    except (OSError, ValueError, TypeError):
+        _deny("NAMESPACE_DROPIN_UNVERIFIED")
+
+
+def inspect_signed_owned_namespace_unit(*, https_port: int, active: bool) -> dict[str, Any]:
+    """Observe signed base, exact persistent drop-in and PID1 twice.
+
+    The state/receipt owner must bind the port to the verified generation,
+    verify the installed executable receipt, kernel namespace, labels and
+    egress independently, and hold the appropriate lock. This function does
+    not establish a durable transition or authorize any service operation.
+    The legacy signed-unit observer continues to refuse all drop-ins.
+    """
+    from repocache.server_protected_state_inspect_v1 import _DIRECTORY_FLAGS
+
+    raw = _signed_owned_unit_bytes()
+    candidate = _render_owned_nginx_namespace_dropin_candidate(raw, https_port=https_port)
+    if type(active) is not bool or os.getresuid() != (0, 0, 0) or os.getresgid() != (0, 0, 0):
+        _deny("NAMESPACE_UNIT_OBSERVATION_REFUSED")
+    try:
+        with ExitStack() as stack:
+            root_fd = os.open("/", _DIRECTORY_FLAGS)
+            stack.callback(os.close, root_fd)
+
+            def read():
+                return (
+                    _read_exact_owned_unit_at(root_fd, raw, owner_uid=0, owner_gid=0),
+                    _read_exact_namespace_dropin_at(
+                        root_fd, candidate["dropin_bytes"], owner_uid=0, owner_gid=0),
+                )
+
+            before = read()
+            observed = _inspect_effective_owned_nginx_unit(active=active, dedicated=True)
+            if read() != before:
+                _deny("NAMESPACE_UNIT_CHANGED")
+            return {**observed, "signed_worker_unit_bytes_match": True,
+                    "private_unit_identity": before[0],
+                    "private_dropin_identity": before[1],
+                    "dropin_sha256": candidate["dropin_sha256"],
+                    "runtime_namespace_verified": False,
+                    "runtime_selinux_verified": False,
+                    "authorizes_nginx_activation": False}
+    except EffectiveNginxUnitError:
+        raise
+    except (OSError, ValueError, TypeError):
+        _deny("NAMESPACE_UNIT_UNVERIFIED")
 
 
 def inspect_signed_owned_nginx_unit() -> dict[str, Any]:

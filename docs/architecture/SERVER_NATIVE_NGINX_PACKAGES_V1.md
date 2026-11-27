@@ -1071,3 +1071,23 @@ host rules/vendor/signature identity unchanged. This is not a production
 migration or a durable label/unit/namespace WAL. The known legacy
 httpd_t upstream failure remains unsupported, and final durable installed
 activation, active publication and reboot acceptance remain open.
+
+
+### Exact persistent service-profile observation
+
+The installed authenticated worker can now separately observe the proposed
+dedicated profile's exact signed base unit and single fixed persistent drop-in
+under /etc/systemd/system/repocache-nginx.service.d/90-repocache-dedicated.conf.
+Read the closed rendered bytes through retained descriptors, reject additional
+leaves, unsafe metadata, symlinks and hardlinks, recheck both files around
+two fixed PID1 observations and verify the active master uses the dedicated
+executable inode. The legacy observer continues to reject every drop-in.
+The observation has no service or file-write authority; callers must prove
+the executable receipt, namespace/egress, SELinux contexts, ownership lock
+and WAL generation separately. The port must come from that trusted generation.
+
+The guarded Alma VM uses the fixed persistent location only for its existing
+temporary transition and verifies inactive, active and repeat observation
+from the authenticated worker before restoring the legacy fixture. This is
+not a durable transition, boot-time namespace lifecycle, or active-route
+dispatch; the broker remains unchanged and no policy or vendor grant expands.

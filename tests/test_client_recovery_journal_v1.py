@@ -383,3 +383,118 @@ def test_pair_rechecks_mount_topology_after_native_lock_acquisition(tmp_path, mo
     with pytest.raises(PairRefused, match="Mounted fixture resource refused"):
         _apply_modern_pair(root, "apt")
     assert _private_file_snapshot(root) == before
+
+
+def _catalog_fixture(root, manager):
+    source, mirror = _modern_pair(root, manager)
+    config = root / "etc/repocache-client"
+    config.mkdir(mode=0o755)
+    path = config / "config.json"
+    path.write_text(json.dumps({"server": "https://cache.example.org"}))
+    path.chmod(0o644)
+    apply = (pair.apply_retaining_apt_companion_sandbox if manager == "apt"
+             else pair.apply_catalog_bound_sandbox)
+    return source, mirror, apply
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="requires private root-owned fixture")
+@pytest.mark.parametrize("manager,withdraw_at", [
+    ("apt", 1), ("apt", 2), ("apt", 3), ("apt", 4),
+    ("dnf", 1), ("dnf", 2), ("dnf", 3),
+])
+def test_catalog_withdrawal_compensates_only_armed_modern_transaction(
+        tmp_path, monkeypatch, manager, withdraw_at):
+    root = tmp_path / "fixture"
+    source, mirror, apply = _catalog_fixture(root, manager)
+    original = source.read_bytes()
+    before = source.stat()
+    calls = []
+
+    def current(record, selected_root):
+        assert selected_root == root
+        calls.append((source.read_bytes(), mirror.exists()))
+        if len(calls) == withdraw_at:
+            raise pair.boundary.BoundaryRefused("Withdrawn route")
+        return "https://cache.example.org"
+
+    monkeypatch.setattr(pair.boundary, "_current_route", current)
+    with pytest.raises(PairRefused, match=(
+            "Paired transaction refused" if withdraw_at == 1
+            else "exact local transaction restored")):
+        apply(root, IDENT)
+    assert len(calls) == withdraw_at
+    assert source.read_bytes() == original
+    assert (source.stat().st_uid, source.stat().st_gid, source.stat().st_mode) == (
+        before.st_uid, before.st_gid, before.st_mode)
+    after_publish = withdraw_at == (4 if manager == "apt" else 3)
+    assert (calls[-1][0] != original) == after_publish
+    if not after_publish:
+        assert source.stat().st_ino == before.st_ino
+    assert calls[-1][1] == (manager == "apt" and withdraw_at >= 3)
+    report = inspect_local_recovery_record(IDENT, _test_root=root)
+    if withdraw_at == 1:
+        assert report["status"] == "no-journal-read-only"
+    else:
+        assert report["phase"] == "restored"
+        expected_source = ("restored", "original-or-restored") if after_publish else ("original",)
+        assert report["source_state"] in expected_source
+        assert report["companion_state"] == (
+            "upstream-only" if manager == "apt" and withdraw_at >= 3
+            else "absent" if manager == "apt" else "not-applicable")
+        assert not report["route_revocation_verified"] and not report["write_eligible"]
+        assert pair.recover_sandbox(root, IDENT)["status"] == "restored"
+    if manager == "apt" and withdraw_at >= 3:
+        assert mirror.read_bytes() == b"https://deb.example.org/debian/\tpriority:1\n"
+    else:
+        assert not mirror.exists()
+    assert not list(root.rglob(".repocache-atomic-*"))
+    assert len(calls) == withdraw_at  # no network-dependent recovery
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="requires private root-owned fixture")
+def test_catalog_refusal_cannot_compensate_foreign_source(tmp_path, monkeypatch):
+    root = tmp_path / "fixture"
+    source, mirror, apply = _catalog_fixture(root, "apt")
+    calls = []
+    snapshots = []
+
+    def current(record, selected_root):
+        calls.append(None)
+        if len(calls) == 3:
+            saved = source.with_name(".owned-original")
+            source.rename(saved)
+            source.write_bytes(saved.read_bytes())
+            source.chmod(0o644)
+            snapshots.append(_private_file_snapshot(root))
+            raise pair.boundary.BoundaryRefused("Withdrawn route")
+        return "https://cache.example.org"
+
+    monkeypatch.setattr(pair.boundary, "_current_route", current)
+    with pytest.raises(PairRefused, match="local recovery required"):
+        apply(root, IDENT)
+    assert len(calls) == 3 and _private_file_snapshot(root) == snapshots[0]
+    assert mirror.exists()
+    with pytest.raises(PairRefused):
+        pair.recover_sandbox(root, IDENT)
+    assert _private_file_snapshot(root) == snapshots[0]
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="requires private root-owned fixture")
+@pytest.mark.parametrize("manager", ["apt", "dnf"])
+def test_withdrawn_committed_retry_preserves_exact_installed_evidence(
+        tmp_path, monkeypatch, manager):
+    root = tmp_path / "fixture"
+    source, mirror, apply = _catalog_fixture(root, manager)
+    monkeypatch.setattr(pair.boundary, "_current_route",
+                        lambda *args: "https://cache.example.org")
+    assert apply(root, IDENT)["status"] == "installed-sandbox"
+    before = _private_file_snapshot(root)
+
+    def withdrawn(*args):
+        raise pair.boundary.BoundaryRefused("Withdrawn route")
+
+    monkeypatch.setattr(pair.boundary, "_current_route", withdrawn)
+    with pytest.raises(PairRefused):
+        apply(root, IDENT)
+    assert _private_file_snapshot(root) == before
+    assert inspect_local_recovery_record(IDENT, _test_root=root)["phase"] == "installed"
