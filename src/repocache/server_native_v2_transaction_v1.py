@@ -43,6 +43,7 @@ from repocache.server_locked_manifest_reconcile_v1 import (
 from repocache.server_native_egress_candidate_v1 import (
     derive_pinned_egress_candidate, render_namespace_egress_candidate,
     render_bootstrap_egress_candidate, _replace_fixed_namespace_egress,
+    _prepare_boot_egress_locked,
 )
 from repocache.server_native_nginx_effective_unit_v1 import (
     EffectiveNginxUnitError, inspect_effective_native_nginx_unit,
@@ -1671,6 +1672,93 @@ def _owned_generation_egress(resources, *, distribution: str, worker_uid: int):
             resources[_OWNED_MAIN], resources[_INCLUDE], resources[_CATALOG]):
         _deny("OWNED_EGRESS_GENERATION_DRIFT")
     return plan
+
+
+@contextmanager
+def _owned_committed_boot_egress_generation_locked(
+    root_fd: int, state_fd: int, *, distribution: str, worker_uid: int,
+):
+    """Retain exact committed resources for boot-specific policy preparation.
+
+    No pending WAL, foreign domain or staged file can be treated as a
+    committed generation. No DNS, kernel mutation, activation or catalog
+    publication occurs here. The caller retains the state lock and proves
+    signed release, native package, executable/profile, worker identity and
+    service/namespace ownership. Recovery of a pending WAL is separate.
+    """
+    if type(distribution) is not str or distribution not in _CA:
+        _deny("OWNED_EGRESS_DISTRIBUTION_INVALID")
+    with _owned_layout_locked(root_fd, state_fd, recovering=False) as layout:
+        state, nginx, public, check_layout = layout
+        current = _read_owned_resources(state, nginx, public)
+        plan = _owned_generation_egress(
+            current, distribution=distribution, worker_uid=worker_uid)
+        manifest = current[_OWNED_MANIFEST]
+        if manifest is None:
+            # Generation zero has no managed manifest. Domain-separate the
+            # exact bootstrap resource inventory; never treat it as v2.
+            manifest = _canonical({
+                "schema_version": 1,
+                "service_domain": _OWNED_WAL_DOMAIN,
+                "bootstrap_generation": 0,
+                "resources_sha256": {name: _hash(current[name]) for name in _OWNED_ORDER},
+            }, limit=_OWNED_LIMIT[_OWNED_MANIFEST])
+        evidence = {**plan, "generation_manifest_sha256": _hash(manifest),
+                    "committed_resources_verified": True,
+                    "authorizes_catalog_publication": False}
+        active = True
+
+        def recheck():
+            if not active:
+                _deny("OWNED_BOOT_EGRESS_SCOPE_EXPIRED")
+            check_layout()
+            _no_conflicting_owned_wal_pending(state)
+            _owned_check_stages_absent(state, nginx, public)
+            if _read_owned_resources(state, nginx, public) != current:
+                _deny("OWNED_BOOT_EGRESS_GENERATION_CHANGED")
+
+        try:
+            recheck()
+            yield evidence, recheck
+            recheck()
+        finally:
+            active = False
+
+
+def _prepare_owned_committed_boot_egress_locked(
+    root_fd: int, state_fd: int, *, distribution: str, worker_uid: int,
+    namespace_identity: tuple[int, int], profile_receipt_sha256: str,
+    executable_receipt_sha256: str, recheck_namespace_owner, allow_prepare: bool,
+) -> dict:
+    """Connect committed generation evidence to the boot receipt candidate.
+
+    Only an already authenticated, owning lifecycle caller can use this
+    internal function. No installed dispatch, namespace creation, pending
+    WAL recovery or service start authority is introduced.
+    """
+    if not callable(recheck_namespace_owner) or type(allow_prepare) is not bool:
+        _deny("OWNED_BOOT_EGRESS_INPUT_INVALID")
+    with _owned_committed_boot_egress_generation_locked(
+            root_fd, state_fd, distribution=distribution, worker_uid=worker_uid,
+    ) as (plan, recheck):
+        def owned():
+            recheck()
+            recheck_namespace_owner()
+            recheck()
+
+        owned()
+        result = _prepare_boot_egress_locked(
+            root_fd, state_fd, plan["nft_candidate"],
+            namespace_identity=namespace_identity, generation=plan["generation"],
+            generation_manifest_sha256=plan["generation_manifest_sha256"],
+            profile_receipt_sha256=profile_receipt_sha256,
+            executable_receipt_sha256=executable_receipt_sha256,
+            recheck_owned=owned, allow_prepare=allow_prepare)
+        owned()
+        return {**result, "generation_manifest_sha256": plan["generation_manifest_sha256"],
+                "committed_resources_verified": True,
+                "authorizes_nginx_activation": False,
+                "authorizes_catalog_publication": False}
 
 
 def _owned_live_egress_recovery_candidates(

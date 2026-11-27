@@ -1152,3 +1152,18 @@ to the actual service MainPID namespace before fixture-only cleanup.
 This proves neither authoritative committed/WAL generation activation nor
 reboot-time recreation; those require the separate installed lifecycle
 and explicit ingress/routing authorization. The broker remains unchanged.
+
+
+The committed-generation adapter retains the exact five resources and
+reconstructs the canonical policy from the authenticated manifest under
+the existing state lock. It refuses every pending WAL, foreign domain
+or orphan stage before any boot receipt preparation, and rechecks the
+same bytes throughout the caller's ownership witness. The generation-zero
+bootstrap has a domain-separated digest of its exact resource inventory.
+The adapter passes only this independently derived generation/rules and
+manifest digest to the boot-intent primitive; no DNS or duplicate
+allowlist is used. The native fixture also verifies actual committed
+disabled-generation evidence before its synthetic route experiment.
+A pending WAL must still be recovered without starting an unverified
+service; the boot-time unit and stale boot reconciliation are not yet
+implemented. No live dispatch or active catalog authority is introduced.

@@ -3001,3 +3001,76 @@ def test_owned_egress_replacement_requires_exact_durable_wal_and_withdrawn_catal
             native._owned_live_replace_egress_locked(
                 101, 102, 103, lambda: checks.append("layout"), **kwargs)
         assert len(calls) == (0 if fault in ("catalog", "partial") else 1)
+
+
+@pytest.mark.parametrize("kind", ["bootstrap", "disabled", "active"])
+@pytest.mark.parametrize("fault", ["none", "pending", "orphan", "resource-drift", "owner-drift"])
+def test_committed_boot_egress_retains_generation_and_excludes_pending(
+        filesystem, monkeypatch, kind, fault):
+    rootfd, state, _, _, _ = filesystem
+    old = (_owned_bootstrap_resources() if kind == "bootstrap" else
+           _owned_generation(active=kind == "active"))
+    paths = _owned_fixture_paths(filesystem, old)
+    if fault == "pending":
+        # Presence, including an invalid pending intent, is sufficient to
+        # forbid boot-time policy initialization before recovery.
+        (state / native._OWNED_WAL).write_bytes(b"pending")
+        (state / native._OWNED_WAL).chmod(0o600)
+    elif fault == "orphan":
+        orphan = paths[native._OWNED_MAIN].parent / native._OWNED_STAGES[native._OWNED_MAIN]
+        orphan.write_bytes(b"orphan")
+        orphan.chmod(0o644)
+    calls = []
+    def owned():
+        if fault == "owner-drift" and calls:
+            raise native.NativeV2TransactionError("OWNER_CHANGED")
+    def prepare(got_root, got_state, rules, **kw):
+        assert got_root == rootfd
+        assert got_state == statefd
+        assert kw["namespace_identity"] == (17, 29)
+        assert kw["generation"] == (0 if kind == "bootstrap" else 1)
+        assert ("8.8.8.8" in rules) == (kind == "active")
+        assert kw["profile_receipt_sha256"] == "a" * 64
+        assert kw["executable_receipt_sha256"] == "b" * 64
+        if kind != "bootstrap":
+            assert kw["generation_manifest_sha256"] == hashlib.sha256(
+                old[native._OWNED_MANIFEST]).hexdigest()
+        calls.append(kw["generation_manifest_sha256"])
+        if fault == "resource-drift":
+            paths[native._OWNED_MAIN].write_bytes(b"foreign")
+        kw["recheck_owned"]()
+        return {"status": "NATIVE_EGRESS_BOOT_RECEIPT_VERIFIED"}
+    monkeypatch.setattr(native, "_prepare_boot_egress_locked", prepare)
+    with native._locked(rootfd, 0) as statefd:
+        def invoke():
+            return native._prepare_owned_committed_boot_egress_locked(
+                rootfd, statefd, distribution="debian", worker_uid=33,
+                namespace_identity=(17, 29), profile_receipt_sha256="a"*64,
+                executable_receipt_sha256="b"*64,
+                recheck_namespace_owner=owned, allow_prepare=True)
+        if fault == "none":
+            result = invoke()
+            assert result["generation_manifest_sha256"] == calls[0]
+            assert result["committed_resources_verified"]
+            assert not result["authorizes_nginx_activation"]
+            assert not result["authorizes_catalog_publication"]
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                invoke()
+            assert len(calls) == (0 if fault in ("pending", "orphan") else 1)
+    if fault != "resource-drift":
+        assert _fixture_resource_bytes(paths) == old
+
+
+def test_committed_boot_egress_generation_recheck_expires(filesystem):
+    rootfd, _, _, _, _ = filesystem
+    old = _owned_bootstrap_resources()
+    _owned_fixture_paths(filesystem, old)
+    with native._locked(rootfd, 0) as statefd:
+        with native._owned_committed_boot_egress_generation_locked(
+                rootfd, statefd, distribution="debian", worker_uid=33,
+        ) as (plan, recheck):
+            assert plan["generation"] == 0
+            recheck()
+        with pytest.raises(native.NativeV2TransactionError, match="SCOPE_EXPIRED"):
+            recheck()

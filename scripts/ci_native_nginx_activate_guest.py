@@ -1292,6 +1292,11 @@ try:
         tx._require_audited_native_package_for_activation(state,distribution="almalinux")
         if action=="legacy":
             result=storage.prepare_installed_repository_storage("almalinux",doc,allow_create=False)
+        elif action=="committed-boot-evidence":
+            with tx._owned_committed_boot_egress_generation_locked(
+                    root,state,distribution="almalinux",worker_uid=uid) as (plan,recheck):
+                recheck()
+                result=plan
         elif action in ("create","verify"):
             result=storage.prepare_dedicated_candidate_storage(
                 "almalinux",doc,allow_create=action=="create")
@@ -1443,6 +1448,17 @@ finally:
             "/usr/bin/python3", "-IS", "-B", "-c", code,
             input_text=json.dumps([document, worker.pw_uid, action]), timeout=90).stdout)
 
+    # Independently derive the real committed disabled generation before
+    # changing any fixture resources. No caller-selected document or DNS.
+    committed_egress = signed("committed-boot-evidence")
+    assert committed_egress["generation"] == prior["state_generation"]
+    assert committed_egress["generation_manifest_sha256"] == hashlib.sha256(
+        (STATE / ".state-v2-owned-nginx.manifest").read_bytes()).hexdigest()
+    assert committed_egress["committed_resources_verified"]
+    assert not committed_egress["destinations"]
+    assert not committed_egress["authorizes_nginx_activation"]
+    assert not committed_egress["authorizes_catalog_publication"]
+    print("PASS: signed worker derives exact committed boot egress manifest and disabled-route rules without DNS or mutation", flush=True)
     rendered = signed("render")
     unit_path = Path("/etc/systemd/system", OWN)
     assert hashlib.sha256(unit_path.read_bytes()).hexdigest() == rendered["source_unit_sha256"] == release["files"][OWN]
