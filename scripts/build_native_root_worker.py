@@ -36,6 +36,8 @@ MODULES = (
     "server_native_nginx_service_unit_v1",
     "server_native_root_control_entrypoint_v1",
     "server_native_v2_transaction_v1",
+    "server_nginx_metrics_bundle_join_v1",
+    "server_nginx_metrics_candidate_v1",
     "server_nginx_pin_render_v1",
     "server_nginx_repository_bundle_v1",
     "server_nginx_tls_listener_candidate_v1",

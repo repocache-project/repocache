@@ -120,6 +120,23 @@ def test_fixed_worker_archive_is_reproducible_from_closed_release_sources(tmp_pa
         ).read_bytes()
     target = tmp_path / "server-control-worker"
     target.write_bytes(payload)
+    # Exercise the exact archive in an isolated interpreter, not the checkout.
+    imports = """
+import sys, zipimport
+sys.path.insert(0, sys.argv[1])
+from repocache import server_nginx_metrics_bundle_join_v1 as joined
+from repocache import server_nginx_metrics_candidate_v1 as metrics
+for module in (joined, metrics):
+    assert isinstance(module.__loader__, zipimport.zipimporter)
+    assert module.__loader__.archive == sys.argv[1]
+assert joined.render_nginx_metrics_candidate is metrics.render_nginx_metrics_candidate
+"""
+    result = subprocess.run(
+        [sys.executable, "-IS", "-B", "-c", imports, str(target)],
+        cwd=tmp_path, check=False, capture_output=True, timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == result.stderr == b""
     unrelated = tmp_path / "repocache"
     unrelated.mkdir()
     (unrelated / "__init__.py").write_text("raise RuntimeError('wrong import')\n")

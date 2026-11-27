@@ -1274,12 +1274,14 @@ from repocache import server_native_installed_storage_v1 as storage
 from repocache import server_native_nginx_effective_unit_v1 as unit
 from repocache import server_native_egress_candidate_v1 as egress
 from repocache import server_native_v2_transaction_v1 as tx
+from repocache import server_nginx_metrics_bundle_join_v1 as joined
+from repocache import server_nginx_metrics_candidate_v1 as metrics
 from repocache.server_nginx_metrics_bundle_join_v1 import render_repository_nginx_metrics_join
 from repocache.server_nginx_tls_listener_candidate_v1 import render_native_tls_listener_candidate
 from repocache.server_protected_state_store_v1 import _locked
 from repocache.server_protected_state_inspect_v1 import _DIRECTORY_FLAGS
 from repocache.server_root_control_host_preflight_v1 import require_native_host_preconditions
-for module in (storage,unit,egress,tx):
+for module in (storage,unit,egress,tx,joined,metrics):
     assert isinstance(module.__loader__,zipimport.zipimporter)
     assert module.__loader__.archive=="/usr/libexec/repocache/server-control-worker"
 require_native_host_preconditions()
