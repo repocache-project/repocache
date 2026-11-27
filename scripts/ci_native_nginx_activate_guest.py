@@ -1466,11 +1466,11 @@ try:
                 active=action=="egress-boot-active"
                 # This is the explicitly synthetic fixture generation and
                 # loopback policy, not a claim about committed active routes.
-                def owned():
+                def owned(*,verify_runtime=True):
                     info=os.stat("/run/netns/repocache-nginx",follow_symlinks=False)
                     assert (info.st_dev,info.st_ino)==identity
                     observed=unit.inspect_signed_owned_namespace_unit(https_port=443,active=active)
-                    if active:
+                    if active and verify_runtime:
                         runtime=unit._inspect_signed_owned_namespace_runtime(
                             https_port=443,namespace_identity=identity,
                             executable_identity=inode[:2])
@@ -1523,6 +1523,33 @@ try:
                         raise AssertionError("Existing namespace table was adopted")
                 else:
                     result=prepare(False)
+                    if active:
+                        health_document=doc["health_document"]
+                        assert hashlib.sha256(json.dumps(
+                            health_document,sort_keys=True,separators=(",",":")).encode("ascii")).hexdigest()==doc["fixture_generation_sha256"]
+                        leaf=tx._verify_tls_pair(root,health_document,verify_identity=True)
+                        context=(health_document,doc["generation"],leaf)
+                        def health(leaf_context):
+                            return tx._owned_dedicated_live_health_bound(
+                                root,leaf_context,None,publish=False,
+                                namespace_identity=identity,executable_identity=inode[:2],
+                                recheck_owned=lambda: owned(verify_runtime=False))
+                        witness=health(context)
+                        assert witness["status"]=="OWNED_DEDICATED_HEALTH_OBSERVED"
+                        assert witness["generation"]==doc["generation"]
+                        assert witness["main_pid"]==unit.inspect_signed_owned_namespace_unit(
+                            https_port=443,active=True)["main_pid_observed"]
+                        assert witness["listener_inode"]>0 and not witness["catalog_observed"]
+                        assert not witness["authorizes_nginx_activation"]
+                        assert not witness["authorizes_catalog_publication"]
+                        wrong_leaf=("b" if leaf[0]=="a" else "a")+leaf[1:]
+                        try:
+                            health((health_document,doc["generation"],wrong_leaf))
+                        except tx.NativeV2TransactionError as exc:
+                            assert "DEDICATED_HEALTH_UNVERIFIED" in str(exc)
+                        else:
+                            raise AssertionError("Untrusted TLS leaf accepted")
+                        assert prepare(False)==result
             finally:
                 os.close(directory)
         elif action in ("unit-place","unit-verify-placement"):
@@ -1618,7 +1645,12 @@ finally:
     locations = rendered["locations"].replace(
         "    proxy_cache_valid 200 60s;",
         "    proxy_cache_valid 200 60s;\n    add_header X-RepoCache-Smoke $upstream_cache_status always;")
-    fixture = (scratch + http + "\nserver {\n" + rendered["tls"] + locations
+    # Use the same fixed health path/generation marker as the real managed
+    # renderer, but do not advertise the synthetic repository as committed.
+    health = ('location = /__repocache/healthz {\n'
+              + f'    add_header X-Repocache-Generation "{doc["expected_state_generation"]}" always;\n'
+              + '    return 204;\n}\n')
+    fixture = (scratch + http + "\nserver {\n" + rendered["tls"] + health + locations
                + "location / { return 404; }\n}\n").encode("ascii")
     assert rendered["rules"].count("ip daddr 8.8.8.8 tcp dport 8008") == 1
     rules = rendered["rules"].replace("ip daddr 8.8.8.8 tcp dport 8008",
@@ -1771,6 +1803,7 @@ finally:
             # generation. Bind its full synthetic document without claiming
             # that this digest is the authoritative installed WAL manifest.
             boot_args = {"rules": rules, "identity": list(ns_identity),
+                         "health_document": doc,
                          "generation": doc["expected_state_generation"],
                          "fixture_generation_sha256": hashlib.sha256(json.dumps(
                              doc, sort_keys=True, separators=(",", ":")).encode("ascii")).hexdigest()}
@@ -1909,7 +1942,7 @@ sys.stdout.buffer.write(https_response(sys.argv[1]))
                 assert signed("unit-active") == profile
                 assert signed("unit-verify-placement") == placement
                 assert signed("egress-boot-active", boot_args) == boot_report
-                print("PASS: boot receipt and exact kernel policy bound to actual dedicated MainPID namespace", flush=True)
+                print("PASS: boot receipt, exact dedicated master domain/capabilities and fixed listener/TLS health bound to actual namespace; wrong leaf refused", flush=True)
                 print("PASS: authenticated exact persistent drop-in and fixed PID1/master identity, inactive/active/repeat observation", flush=True)
                 assert isolated.command("/usr/sbin/nft", "--stateless", "--numeric-priority",
                                         "list", "ruleset").stdout == host_rules

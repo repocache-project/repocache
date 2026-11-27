@@ -1346,3 +1346,10 @@ receipt/policy guard are verified again after the child is reaped. The legacy
 host-network listener check remains unchanged in scope. The witness grants
 no activation, mutation or publication authority and is not wired to the
 confined socket dispatcher.
+
+The enforcing signed-worker service fixture exercises the retained
+namespace health witness against the real dedicated master and its local
+TLS generation marker, and requires refusal of a mismatched certificate
+leaf. It rechecks the exact boot policy before and after the observation.
+The synthetic fixture does not publish its routes as an authoritative
+catalog, and this test does not establish durable installed activation.
