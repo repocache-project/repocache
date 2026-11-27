@@ -3673,8 +3673,9 @@ def test_dedicated_health_child_timeout_and_preflight_do_not_signal_foreign_pid(
         assert not calls
 
 
-@pytest.mark.parametrize("fault", ["none", "active-route", "policy", "enabled",
-                                    "start", "health", "foreign-master"])
+@pytest.mark.parametrize("fault", ["none", "active-route", "nonloopback", "pending",
+                                    "policy", "enabled", "start", "health",
+                                    "foreign-master", "generation-drift"])
 def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
         filesystem, monkeypatch, fault):
     from contextlib import contextmanager
@@ -3686,7 +3687,8 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
     rootfd, state, _, _, _ = filesystem
     cfg = document(1, generation=1)
     cfg["deployment"]["paths"]["generated_include"] = native._OWNED_INCLUDE_PATH
-    cfg["deployment"]["listen"]["bind_address"] = "127.0.0.1"
+    cfg["deployment"]["listen"]["bind_address"] = (
+        "0.0.0.0" if fault == "nonloopback" else "127.0.0.1")
     cfg["repositories"][0]["desired_state"] = "active" if fault == "active-route" else "disabled"
     raw = _canon(snapshot(generation=1, doc=cfg))
     main, include, catalog = native._render_owned_managed_candidate(
@@ -3696,18 +3698,25 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
                  native._CATALOG: catalog, native._OWNED_MANIFEST:
                      native._owned_manifest_for(raw, main, include, catalog)}
     paths = _owned_fixture_paths(filesystem, resources)
+    if fault == "pending":
+        pending = state / native._OWNED_WAL
+        pending.write_bytes(b"existing pending evidence")
+        pending.chmod(0o600)
     calls = []
     running = False
     foreign = False
     ns, exe = (17, 29), (31, 41)
 
+    # Retain the real layout before replacing its public test seam, so
+    # nested fixture calls cannot accidentally recurse into the mock.
+    real_layout = native._owned_layout_locked
+
     @contextmanager
     def layout(root, statefd, *, recovering):
         assert root == rootfd and not recovering
-        with native._owned_fixture_layout(rootfd, recovering=False) as result:
-            # The fixture layout opens its own retained directory FDs; the
-            # production caller instead supplies the already locked state.
-            yield result
+        with native._locked(rootfd, 0) as locked_state:
+            with real_layout(rootfd, locked_state, recovering=False) as result:
+                yield result
 
     def observe(*, https_port, active):
         if active != running:
@@ -3752,6 +3761,9 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
         assert running and catalog_bytes == catalog and kwargs["publish"]
         kwargs["recheck_owned"]()
         calls.append("health")
+        if fault == "generation-drift":
+            paths[native._CATALOG].write_bytes(b"foreign catalog")
+            raise native.NativeV2TransactionError("GENERATION_CHANGED")
         if fault in ("health", "foreign-master"):
             foreign = fault == "foreign-master"
             raise native.NativeV2TransactionError("TLS_REFUSED")
@@ -3790,8 +3802,14 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
     else:
         with pytest.raises(native.NativeV2TransactionError):
             invoke()
-        assert calls == {"active-route": [], "policy": [], "enabled": [],
+        assert calls == {"active-route": [], "nonloopback": [], "pending": [],
+                         "policy": [], "enabled": [],
                          "start": ["start", "stop"], "health": ["start", "health", "stop"],
-                         "foreign-master": ["start", "health"]}[fault]
-        assert running == (fault == "foreign-master")
-    assert _fixture_resource_bytes(paths) == resources
+                         "foreign-master": ["start", "health"],
+                         "generation-drift": ["start", "health"]}[fault]
+        assert running == (fault in ("foreign-master", "generation-drift"))
+    expected = ({**resources, native._CATALOG: b"foreign catalog"}
+                if fault == "generation-drift" else resources)
+    assert _fixture_resource_bytes(paths) == expected
+    if fault == "pending":
+        assert pending.read_bytes() == b"existing pending evidence"
