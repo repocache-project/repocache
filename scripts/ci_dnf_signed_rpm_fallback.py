@@ -662,8 +662,8 @@ def _probe_dnf4_catalog_stale_reader(base, key, certificate, foreign, primary,
     def publish(mappings):
         catalog.write_text(json.dumps({"schema": 1, "repositories": mappings}), encoding="ascii")
     active = [{"upstream": upstream.origin, "cache": route}]
-    publish(active)
-    try:
+    def exercise(withdrawal):
+        publish(active)
         with tempfile.TemporaryDirectory(prefix="repocache-booted-dnf4-", dir="/var/tmp") as folder:
             root = Path(folder)
             with _alma_fixture_file_context(root):
@@ -723,6 +723,63 @@ def _probe_dnf4_catalog_stale_reader(base, key, certificate, foreign, primary,
                         assert _snapshot(source) == baseline
                         assert not list(state.glob("pair-*.json"))
                     publish(active)
+                    if withdrawal is not None:
+                        # The real HTTPS catalog changes while the private
+                        # DNF4 owner and native-created RPM lock are held.
+                        from recovery_journal_v1 import inspect_local_recovery_record
+                        original_crash = pair._crash
+                        seen = []
+                        claim = root / "var/lib/dnf/rpmdb_lock.pid"
+                        def withdraw_at(active, phase):
+                            if phase == withdrawal:
+                                assert claim.read_bytes() == str(os.getpid()).encode("ascii")
+                                seen.append(_snapshot(source))
+                                publish([])
+                        pair._crash = withdraw_at
+                        try:
+                            try:
+                                pair.apply_catalog_bound_sandbox(root, ident)
+                            except pair.PairRefused as exc:
+                                assert "exact local transaction restored" in str(exc), exc
+                            else:
+                                raise AssertionError("Mid-transaction DNF4 withdrawal committed")
+                        finally:
+                            pair._crash = original_crash
+                        assert len(seen) == 1
+                        assert (seen[0][0] != baseline[0]) == (withdrawal == "source")
+                        restored = _snapshot(source)
+                        assert restored[0] == baseline[0]
+                        assert restored[3:6] == baseline[3:6] and restored[-1] == baseline[-1]
+                        if withdrawal == "armed":
+                            assert restored[1:3] == baseline[1:3]
+                        assert not os.path.lexists(claim)
+                        assert not list(root.rglob(".repocache-atomic-*"))
+                        report = inspect_local_recovery_record(ident, _test_root=root)
+                        assert report["phase"] == "restored"
+                        assert report["source_state"] in (
+                            ("original",) if withdrawal == "armed"
+                            else ("restored", "original-or-restored"))
+                        assert report["companion_state"] == "not-applicable"
+                        assert report["journal_record_verified"]
+                        assert not any(report[k] for k in (
+                            "local_rollback_verified", "route_revocation_verified",
+                            "native_exclusion_verified", "write_eligible"))
+                        # Recovery remains offline and idempotent even with
+                        # a healthy former cache and a withdrawn catalog.
+                        primary.hits.clear()
+                        upstream.hits.clear()
+                        assert pair.recover_sandbox(root, ident)["status"] == "restored"
+                        assert not primary.hits and not upstream.hits
+                        assert not os.path.lexists(claim)
+                        with _stale_dnf4_reader(root, "withdraw-" + withdrawal,
+                                                certificate, [upstream.origin]) as fresh:
+                            _complete_stale_dnf4_reader(fresh, expected_bytes, rpmdb)
+                        assert not primary.hits and any(_RPM_NAME in hit for hit in upstream.hits)
+                        assert _snapshot(source) == restored
+                        print("PASS: real DNF4 HTTPS catalog withdrawal at " + withdrawal
+                              + " compensated under native private locks; signed upstream only",
+                              flush=True)
+                        return
                     pid = os.fork()
                     if pid == 0:
                         def kill_at(active, phase):
@@ -789,6 +846,9 @@ def _probe_dnf4_catalog_stale_reader(base, key, certificate, foreign, primary,
                     assert not primary.hits and any(_RPM_NAME in hit for hit in upstream.hits)
                     assert _snapshot(source) == restored
                     print("PASS: actual authenticated catalog-bound DNF4 labelled journal recovery; fresh native reader uses signed upstream only", flush=True)
+    try:
+        for withdrawal in ("armed", "source", None):
+            exercise(withdrawal)
     finally:
         boundary._native_tls_context = original_context
         primary.mode = "healthy"

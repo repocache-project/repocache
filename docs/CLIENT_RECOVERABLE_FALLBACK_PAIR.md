@@ -171,3 +171,11 @@ previously parsed configuration. Server withdrawal, complete native
 exclusion, and an installed source writer remain separate gates.
 The native Debian fixture withdraws the actual private HTTPS catalog
 after companion and source publication in separate guarded roots.
+
+The enforcing AlmaLinux DNF4 native fixture additionally withdraws the real
+HTTPS catalog after durable intent and after source publication in separate
+marked roots. It checks the live private PID claim, exact labelled source
+restoration, offline idempotent recovery, absence of staging leaves, and a
+fresh native reader retrieving the signed RPM only from upstream while the
+former cache remains healthy. This is not installed source-write or stale
+reader revocation acceptance.
