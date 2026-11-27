@@ -252,3 +252,23 @@ only. All three transfers require independent native RPM signature and
 payload digest verification. This is not a production revocation solution:
 a file rewrite cannot revoke already parsed inline DNF URLs. Preserve the
 installed apply guard and original operational acceptance requirements.
+
+
+## Retained kernel lock evidence
+
+Pathname and inode metadata stability do not prove POSIX lock continuity:
+closing an independently opened descriptor for the same file in the
+same process releases its POSIX record locks, even while the original
+descriptor and BSD flock remain intact. At every existing revalidation
+checkpoint the shared lock primitive and guarded private DNF4 scope now
+read bounded Linux `/proc/self/fdinfo/<fd>` evidence for the retained
+descriptor. Both unique whole-file advisory WRITE records (POSIX and
+FLOCK) must match the current PID and exact device/inode. Missing,
+partial, unexpected or unavailable evidence refuses the scope; it never
+re-acquires a lost lock or mutates a replacement. Closing the existing
+descriptors still performs normal cleanup. Actual cross-process
+contention and same-process close regressions, plus both guarded booted
+native fixtures, exercise loss without metadata drift and fresh-scope
+recovery. This is lock continuity evidence, not exclusion of earlier
+source reads, atomic host-wide exclusion or authorization for installed
+source writes. The installed CLI remains non-activating.

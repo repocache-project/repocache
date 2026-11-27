@@ -97,8 +97,27 @@ def _apt_source_read_order(root: Path) -> None:
             empty.write_text("")
         require_lock_refusal()
         recheck()
+    # Deliberately lose a process-owned POSIX lock on a private inode.
+    # The BSD lock and inode stay unchanged; revalidation must fail.
+    selected = lists / "lock"
+    before = selected.stat()
+    try:
+        with pair.locks.hold_existing_native_package_locks(
+                "apt", root=root, revalidation=True) as recheck:
+            os.close(os.open(selected, os.O_RDONLY | os.O_CLOEXEC))
+            assert selected.stat() == before
+            recheck()
+    except pair.locks.LockInspectionRefused as exc:
+        assert "kernel lock scope drift" in str(exc)
+    else:
+        raise AssertionError("Lost private APT POSIX lock was accepted")
+    with pair.locks.hold_existing_native_package_locks(
+            "apt", root=root, revalidation=True) as recheck:
+        recheck()
+        require_lock_refusal()
     assert update().returncode == 0
     assert status.read_bytes() == b"" and empty.read_bytes() == b""
+    print("PASS: native APT detects lost POSIX lock despite unchanged inode and re-acquires only in a fresh scope")
     print("PASS: native apt-get reads sources before the held lists lock, "
           "even with all four transaction locks held; release succeeds")
 
