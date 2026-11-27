@@ -621,7 +621,7 @@ def test_boot_egress_receipt_binds_intent_and_exact_resume(tmp_path, monkeypatch
         os.close(rootfd)
 
 
-@pytest.mark.parametrize("fault", ["none", "before-replace", "foreign-stage",
+@pytest.mark.parametrize("fault", ["none", "before-replace", "after-replace", "foreign-stage",
                                     "foreign-archive", "same-boot", "generation",
                                     "not-empty", "missing-current"])
 def test_boot_rollover_preserves_prior_receipt_and_resumes_exactly(tmp_path, monkeypatch, fault):
@@ -705,26 +705,137 @@ def test_boot_rollover_preserves_prior_receipt_and_resumes_exactly(tmp_path, mon
             if fault == "foreign-archive":
                 assert archive.read_bytes() == b"foreign" and not stage.exists()
             return
-        if fault == "before-replace":
+        if fault in ("before-replace", "after-replace"):
+            actual_replace = os.replace
             def interrupted(*args, **kwargs):
-                raise OSError("interrupted before atomic publication")
+                if fault == "after-replace":
+                    actual_replace(*args, **kwargs)
+                raise OSError("interrupted at atomic publication")
             with monkeypatch.context() as m:
                 m.setattr(os, "replace", interrupted)
                 with pytest.raises(NativeEgressCandidateError, match="BOOT_PREPARATION_REFUSED"):
                     prepare(rollover=True)
-            assert receipt.read_bytes() == archive.read_bytes() == saved
-            assert stage.is_file() and not writes
-            staged_inode = stage.stat().st_ino
+            assert archive.read_bytes() == saved and not writes
+            if fault == "before-replace":
+                assert receipt.read_bytes() == saved and stage.is_file()
+                staged_inode = stage.stat().st_ino
+            else:
+                assert json.loads(receipt.read_bytes())["boot_id"] == boot[0]
+                assert not stage.exists()
+                staged_inode = receipt.stat().st_ino
+                with pytest.raises(NativeEgressCandidateError, match="BOOT_POLICY_PENDING"):
+                    prepare(False)
         result = prepare(rollover=True)
         assert result["boot_id"] == boot[0]
         assert result["namespace_inode"] == identity[1]
         assert archive.read_bytes() == saved
         assert json.loads(receipt.read_bytes())["boot_id"] == boot[0]
         assert not stage.exists() and writes == [True, False]
-        if fault == "before-replace":
+        if fault in ("before-replace", "after-replace"):
             assert receipt.stat().st_ino == staged_inode
         assert prepare(False) == result == prepare()
         assert writes == [True, False]
     finally:
         os.close(statefd)
         os.close(rootfd)
+
+
+@pytest.mark.parametrize("fault", ["none", "foreign", "parent-drift", "boot-drift",
+                                    "ip-drift", "owner-drift", "extra-link",
+                                    "rules", "link-up-failed"])
+def test_create_namespace_is_absent_only_and_loopback_only(monkeypatch, fault):
+    import contextlib
+    from repocache import server_native_egress_candidate_v1 as egress
+    from repocache import server_root_control_host_preflight_v1 as host
+
+    calls = []
+    created = [False]
+    up = [False]
+    boot = "1f8f3d9c-17c2-4a45-a013-1d781b9796af"
+    parents = []
+    monkeypatch.setattr(host, "require_native_host_preconditions", lambda: None)
+    monkeypatch.setattr(egress, "_current_boot_id", lambda: (
+        "2f8f3d9c-17c2-4a45-a013-1d781b9796af"
+        if fault == "boot-drift" and created[0] else boot))
+    monkeypatch.setattr(egress, "_safe_namespace_ip_program", lambda: (
+        (2,) if fault == "ip-drift" and created[0] else (1,)))
+
+    def parent():
+        parents.append(1)
+        if fault == "foreign" or created[0]:
+            raise NativeEgressCandidateError("NAMESPACE_DIRECTORY_NOT_EMPTY")
+        return (1, 2 if fault == "parent-drift" and len(parents) == 2 else 1)
+
+    def owner():
+        if fault == "owner-drift" and created[0]:
+            raise NativeEgressCandidateError("OWNER_REFUSED")
+
+    @contextlib.contextmanager
+    def scope():
+        assert created[0]
+        yield 42, (17, 29), lambda: None
+
+    def native(fd=None):
+        calls.append(fd)
+        if fd is None:
+            created[0] = True
+        elif fault != "link-up-failed":
+            up[0] = True
+
+    def link(fd, *, up):
+        assert fd == 42
+        if fault == "extra-link" or up != is_up[0]:
+            raise NativeEgressCandidateError("LOOPBACK_REFUSED")
+
+    is_up = up
+    monkeypatch.setattr(egress, "_empty_namespace_parent", parent)
+    monkeypatch.setattr(egress, "_fixed_namespace_scope", scope)
+    monkeypatch.setattr(egress, "_run_namespace_creation", native)
+    monkeypatch.setattr(egress, "_require_loopback_only", link)
+    monkeypatch.setattr(egress, "_read_namespace_rules",
+                        lambda fd: "foreign" if fault == "rules" else "")
+    if fault == "none":
+        result = egress._create_fixed_loopback_namespace_locked(recheck_owned=owner)
+        assert result["status"] == "NATIVE_EGRESS_FRESH_LOOPBACK_NAMESPACE_OBSERVED"
+        assert result["boot_id"] == boot
+        assert (result["namespace_device"], result["namespace_inode"]) == (17, 29)
+        assert result["loopback_only_observed"] and result["empty_ruleset_observed"]
+        assert not result["authorizes_nginx_activation"]
+        assert not result["authorizes_catalog_publication"]
+        assert calls == [None, 42]
+        with pytest.raises(NativeEgressCandidateError, match="DIRECTORY_NOT_EMPTY"):
+            egress._create_fixed_loopback_namespace_locked(recheck_owned=owner)
+        assert calls == [None, 42]
+    else:
+        with pytest.raises(NativeEgressCandidateError):
+            egress._create_fixed_loopback_namespace_locked(recheck_owned=owner)
+        assert calls == ([] if fault in ("foreign", "parent-drift") else
+                         [None, 42] if fault == "link-up-failed" else [None])
+
+
+@pytest.mark.parametrize("fault", ["none", "extra", "wrong-type", "wrong-index",
+                                    "down", "other-flags", "bad-json"])
+def test_loopback_only_readback_requires_native_link_shape(monkeypatch, fault):
+    import json
+    from repocache import server_native_egress_candidate_v1 as egress
+    row = {"ifindex": 1, "ifname": "lo", "link_type": "loopback",
+           "flags": ["LOOPBACK", "UP", "LOWER_UP"]}
+    if fault == "wrong-type":
+        row["link_type"] = "ether"
+    elif fault == "wrong-index":
+        row["ifindex"] = 2
+    elif fault == "down":
+        row["flags"] = ["LOOPBACK"]
+    elif fault == "other-flags":
+        row["flags"].append("PROMISC")
+    raw = json.dumps([row, row] if fault == "extra" else [row])
+    def read(fd, command, *, maximum):
+        assert fd == 42 and command == ("/usr/sbin/ip", "-j", "link", "show")
+        assert maximum == 16384
+        return "[" if fault == "bad-json" else raw
+    monkeypatch.setattr(egress, "_bounded_namespace_output", read)
+    if fault == "none":
+        egress._require_loopback_only(42, up=True)
+    else:
+        with pytest.raises(NativeEgressCandidateError, match="LOOPBACK_REFUSED"):
+            egress._require_loopback_only(42, up=True)

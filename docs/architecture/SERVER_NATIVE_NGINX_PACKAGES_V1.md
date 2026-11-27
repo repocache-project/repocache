@@ -1186,3 +1186,23 @@ adopted, and a missing current record with history cannot silently reset.
 Read-only mode never rolls over. No automatic history pruning, namespace
 creation, installed boot service, ingress or actual reboot acceptance is
 claimed by this candidate; detached tests cover both publication sides.
+
+
+### Fixed loopback namespace creation
+
+The isolated lifecycle candidate now calls the native fixed iproute2
+creation operation itself, under the caller's retained state lock and
+service exclusion. It refuses a nonempty namespace directory (including
+any pre-existing same-name namespace) before creation; no other named
+namespace is affected by iproute2's directory mount setup. It verifies
+the exact new nsfs descriptor and initially down loopback as the only
+link, and enables only that loopback through the retained fd. Repeat
+link/rules readback and boot/program identity checks are mandatory.
+No host routes, interfaces, veth, forwarding, global firewall rules,
+cleanup or service start are provided. A partial creation without a
+verified identity is preserved and refused, not silently adopted.
+The guarded signed AlmaLinux fixture uses this primitive instead of
+direct guest ip commands; it verifies refusal on repetition and
+unchanged host rules before the profile and boot-intent steps.
+The production lifecycle, actual reboot-time recreation and explicit
+administrator ingress remain separate mandatory gates.

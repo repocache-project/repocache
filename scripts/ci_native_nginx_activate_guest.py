@@ -1300,6 +1300,16 @@ try:
         elif action in ("create","verify"):
             result=storage.prepare_dedicated_candidate_storage(
                 "almalinux",doc,allow_create=action=="create")
+        elif action=="namespace-create":
+            def owned():
+                unit.inspect_effective_owned_nginx_unit(active=False)
+            result=egress._create_fixed_loopback_namespace_locked(recheck_owned=owned)
+            try:
+                egress._create_fixed_loopback_namespace_locked(recheck_owned=owned)
+            except egress.NativeEgressCandidateError as exc:
+                assert "DIRECTORY_NOT_EMPTY" in str(exc)
+            else:
+                raise AssertionError("Existing fixed namespace was adopted")
         elif action in ("unit-inactive","unit-active"):
             result=unit.inspect_signed_owned_namespace_unit(
                 https_port=443,active=action=="unit-active")
@@ -1516,6 +1526,7 @@ finally:
     legacy_stopped = False
     include_changed = False
     namespace = False
+    namespace_attempted = False
     placement_attempted = False
     boot_preparation_attempted = False
     boot_prepared = False
@@ -1590,12 +1601,18 @@ finally:
             replace_include(fixture)
             runtime.mkdir(mode=0o755)
             require("/usr/bin/chcon", "-t", "repocache_nginx_pid_t", str(runtime))
-            require("/usr/sbin/ip", "netns", "add", "repocache-nginx")
+            namespace_attempted = True
+            namespace_report = signed("namespace-create")
             namespace = True
             ns_identity = (ns.stat().st_dev, ns.stat().st_ino)
-            require("/usr/sbin/ip", "-n", "repocache-nginx", "link", "set", "lo", "up")
-            assert {x["ifname"] for x in json.loads(require(
-                "/usr/sbin/ip", "-n", "repocache-nginx", "-j", "link", "show").stdout)} == {"lo"}
+            assert namespace_report["status"] == "NATIVE_EGRESS_FRESH_LOOPBACK_NAMESPACE_OBSERVED"
+            assert namespace_report["boot_id"] == Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+            assert (namespace_report["namespace_device"], namespace_report["namespace_inode"]) == ns_identity
+            assert namespace_report["loopback_only_observed"] and namespace_report["empty_ruleset_observed"]
+            assert not namespace_report["authorizes_nginx_activation"]
+            assert isolated.command("/usr/sbin/nft", "--stateless", "--numeric-priority",
+                                    "list", "ruleset").stdout == host_rules
+            print("PASS: signed fixed namespace creation, retained-fd loopback only, repeat refused; host rules unchanged", flush=True)
             placement_attempted = True
             placement = signed("unit-place")
             unit_placed = True
@@ -1767,6 +1784,8 @@ sys.stdout.buffer.write(https_response(sys.argv[1]))
             if origin is not None:
                 origin.terminate()
                 origin.wait(timeout=15)
+            if namespace_attempted and not namespace:
+                raise AssertionError("Incomplete namespace creation retained")
             if placement_attempted and not unit_placed:
                 # Unknown or partial test placement must never be removed
                 # or followed by a legacy restart. Preserve VM evidence.

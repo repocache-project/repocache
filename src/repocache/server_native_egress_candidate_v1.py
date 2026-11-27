@@ -259,6 +259,7 @@ _CLONE_NEWNET = 0x40000000
 _FIXED_NAMESPACE = "repocache-nginx"
 _NSENTER = "/usr/bin/nsenter"
 _NFT = "/usr/sbin/nft"
+_IP = "/usr/sbin/ip"
 
 
 def _namespace_identity(info):
@@ -310,12 +311,18 @@ def _safe_readback_programs():
 
 def _read_namespace_rules(fd):
     """Bounded read-only nft listing in a child, using the inherited nsfs fd."""
+    return _bounded_namespace_output(
+        fd, (_NFT, "--stateless", "--numeric-priority", "list", "ruleset"),
+        maximum=_MAX_FRAGMENT)
+
+
+def _bounded_namespace_output(fd, command, *, maximum):
+    # Private callers supply only the fixed nft listing or ip link listing.
     import os
     import selectors
     import subprocess
     import time
-    argv = (_NSENTER, "--net=/proc/self/fd/" + str(fd), "--", _NFT,
-            "--stateless", "--numeric-priority", "list", "ruleset")
+    argv = (_NSENTER, "--net=/proc/self/fd/" + str(fd), "--", *command)
     deadline = time.monotonic() + 10
     with subprocess.Popen(
         argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -332,11 +339,11 @@ def _read_namespace_rules(fd):
                     if remaining <= 0 or not selector.select(remaining):
                         raise NativeEgressCandidateError("NATIVE_EGRESS_LIST_TIMEOUT")
                     block = os.read(child.stdout.fileno(),
-                                    min(65536, _MAX_FRAGMENT + 1 - len(raw)))
+                                    min(65536, maximum + 1 - len(raw)))
                     if not block:
                         break
                     raw.extend(block)
-                    if len(raw) > _MAX_FRAGMENT:
+                    if len(raw) > maximum:
                         raise NativeEgressCandidateError("NATIVE_EGRESS_LIST_TOO_LARGE")
             remaining = deadline - time.monotonic()
             if remaining <= 0 or child.wait(timeout=remaining) != 0:
@@ -416,6 +423,163 @@ def _fixed_namespace_scope():
         raise
     except (OSError, ValueError, TypeError, OverflowError, subprocess.SubprocessError):
         raise NativeEgressCandidateError("NATIVE_EGRESS_NAMESPACE_READBACK_REFUSED") from None
+
+
+def _safe_namespace_ip_program():
+    import os
+    import stat
+    # Check the same trusted ancestors as the other native commands.
+    programs = _safe_readback_programs()
+    info = os.lstat(_IP)
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_gid != 0
+            or info.st_nlink != 1 or info.st_mode & 0o022 or not info.st_mode & 0o100):
+        raise NativeEgressCandidateError("NATIVE_EGRESS_IP_PROGRAM_REFUSED")
+    return (*programs, (info.st_dev, info.st_ino, info.st_mode, info.st_uid,
+                        info.st_gid, info.st_size, info.st_ctime_ns))
+
+
+def _empty_namespace_parent():
+    """Require an absent or empty safe iproute2 namespace directory."""
+    import os
+    from contextlib import ExitStack
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    with ExitStack() as stack:
+        root = os.open("/", flags)
+        stack.callback(os.close, root)
+        _namespace_parent_identity(root)
+        run = os.open("run", flags, dir_fd=root)
+        stack.callback(os.close, run)
+        run_identity = _namespace_parent_identity(run)
+        try:
+            named = os.stat("netns", dir_fd=run, follow_symlinks=False)
+        except FileNotFoundError:
+            parent = None
+        else:
+            directory = os.open("netns", flags, dir_fd=run)
+            stack.callback(os.close, directory)
+            parent = _namespace_parent_identity(directory)
+            if (named.st_dev, named.st_ino, named.st_mode, named.st_uid, named.st_gid) != parent:
+                raise NativeEgressCandidateError("NATIVE_EGRESS_NAMESPACE_PARENT_CHANGED")
+            # The native iproute2 operation can set up shared mount
+            # propagation on this directory. Do not affect other named
+            # namespaces; this first provisioning candidate is deliberately
+            # limited to an otherwise empty namespace directory.
+            if os.listdir(directory):
+                raise NativeEgressCandidateError("NATIVE_EGRESS_NAMESPACE_DIRECTORY_NOT_EMPTY")
+            again = os.stat("netns", dir_fd=run, follow_symlinks=False)
+            if ((again.st_dev, again.st_ino, again.st_mode, again.st_uid, again.st_gid) != parent
+                    or _namespace_parent_identity(directory) != parent):
+                raise NativeEgressCandidateError("NATIVE_EGRESS_NAMESPACE_PARENT_CHANGED")
+        named_run = os.stat("run", dir_fd=root, follow_symlinks=False)
+        if ((named_run.st_dev, named_run.st_ino, named_run.st_mode,
+             named_run.st_uid, named_run.st_gid) != run_identity
+                or _namespace_parent_identity(run) != run_identity):
+            raise NativeEgressCandidateError("NATIVE_EGRESS_NAMESPACE_PARENT_CHANGED")
+        return run_identity, parent
+
+
+def _require_loopback_only(fd, *, up: bool):
+    import json
+    raw = _bounded_namespace_output(fd, (_IP, "-j", "link", "show"), maximum=16384)
+    try:
+        links = json.loads(raw)
+        if type(links) is not list or len(links) != 1 or type(links[0]) is not dict:
+            raise ValueError("link count")
+        link = links[0]
+        flags = link["flags"]
+        if (type(link["ifindex"]) is not int or link["ifindex"] != 1
+                or link["ifname"] != "lo" or link["link_type"] != "loopback"
+                or type(flags) is not list or any(type(x) is not str for x in flags)
+                or len(flags) != len(set(flags)) or "LOOPBACK" not in flags
+                or ("UP" in flags) is not up
+                or "LOWER_UP" in flags and not up
+                or set(flags) - {"LOOPBACK", "UP", "LOWER_UP", "RUNNING"}):
+            raise ValueError("unexpected link")
+    except (ValueError, TypeError, KeyError, RecursionError):
+        raise NativeEgressCandidateError("NATIVE_EGRESS_LOOPBACK_REFUSED") from None
+
+
+def _run_namespace_creation(fd=None):
+    """Only fixed ip netns add, or retained-fd loopback link-up."""
+    import subprocess
+    if fd is None:
+        argv = (_IP, "netns", "add", _FIXED_NAMESPACE)
+        pass_fds = ()
+    else:
+        argv = (_NSENTER, "--net=/proc/self/fd/" + str(fd), "--", _IP,
+                "link", "set", "dev", "lo", "up")
+        pass_fds = (fd,)
+    result = subprocess.run(
+        argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, shell=False, cwd="/",
+        env={"PATH": "/usr/sbin:/usr/bin", "LC_ALL": "C"},
+        close_fds=True, pass_fds=pass_fds, timeout=10, check=False,
+    )
+    if result.returncode != 0:
+        raise NativeEgressCandidateError("NATIVE_EGRESS_NAMESPACE_CREATION_REFUSED")
+
+
+def _create_fixed_loopback_namespace_locked(*, recheck_owned) -> dict[str, Any]:
+    """Create the one absent namespace and enable only its loopback.
+
+    The trusted isolated lifecycle caller retains the server state lock,
+    proves signed release and service exclusion and independently holds
+    authorization for creation. This does not install any policy, route,
+    veth or host firewall rule, nor start a service. No same-boot adoption
+    or cleanup of an ambiguous partial namespace is permitted. An existing
+    namespace, including one with the right name/shape, is refused.
+    """
+    import subprocess
+    from repocache.server_root_control_host_preflight_v1 import require_native_host_preconditions
+
+    if not callable(recheck_owned):
+        raise NativeEgressCandidateError("NATIVE_EGRESS_NAMESPACE_CREATION_INPUT_REFUSED")
+    try:
+        require_native_host_preconditions()
+        programs = _safe_namespace_ip_program()
+        boot = _current_boot_id()
+
+        def guard():
+            recheck_owned()
+            if _current_boot_id() != boot or _safe_namespace_ip_program() != programs:
+                raise NativeEgressCandidateError("NATIVE_EGRESS_NAMESPACE_CREATION_SCOPE_CHANGED")
+
+        guard()
+        parent = _empty_namespace_parent()
+        guard()
+        if _empty_namespace_parent() != parent:
+            raise NativeEgressCandidateError("NATIVE_EGRESS_NAMESPACE_PARENT_CHANGED")
+        _run_namespace_creation()
+        guard()
+        with _fixed_namespace_scope() as (net, identity, recheck):
+            def verify_empty(*, up):
+                guard()
+                recheck()
+                _require_loopback_only(net, up=up)
+                if _read_namespace_rules(net).strip():
+                    raise NativeEgressCandidateError("NATIVE_EGRESS_NAMESPACE_NOT_EMPTY")
+                recheck()
+                guard()
+
+            verify_empty(up=False)
+            _run_namespace_creation(net)
+            verify_empty(up=True)
+            verify_empty(up=True)
+            return {
+                "status": "NATIVE_EGRESS_FRESH_LOOPBACK_NAMESPACE_OBSERVED",
+                "boot_id": boot,
+                "namespace_device": identity[0],
+                "namespace_inode": identity[1],
+                "loopback_only_observed": True,
+                "empty_ruleset_observed": True,
+                "namespace_exclusivity_verified": False,
+                "authorizes_nginx_activation": False,
+                "authorizes_catalog_publication": False,
+            }
+    except NativeEgressCandidateError:
+        raise
+    except (OSError, ValueError, TypeError, OverflowError, subprocess.SubprocessError):
+        raise NativeEgressCandidateError("NATIVE_EGRESS_NAMESPACE_CREATION_REFUSED") from None
 
 
 def inspect_fixed_namespace_egress(expected: str) -> dict[str, Any]:
