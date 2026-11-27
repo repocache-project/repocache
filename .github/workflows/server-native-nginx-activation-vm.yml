@@ -46,8 +46,7 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends qemu-system-x86 qemu-utils cloud-image-utils openssh-client
+          python3 -B scripts/ci_prepare_qemu_runner.py
       - name: Signed test-worker native activation, rollback and reboot
         shell: bash
         env:
