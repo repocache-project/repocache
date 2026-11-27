@@ -518,6 +518,187 @@ def _initialize_fixed_namespace_egress(proposed: str, *,
         }
 
 
+_BOOT_EGRESS_RECEIPT = ".native-nginx-boot-egress-v1.json"
+_BOOT_EGRESS_RECEIPT_MAX = 4096
+_BOOT_ID = re.compile(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}", re.ASCII)
+_SHA256 = re.compile(r"[0-9a-f]{64}", re.ASCII)
+
+
+def _current_boot_id() -> str:
+    """Read the kernel boot UUID, never a caller-selected identifier."""
+    import os
+    import stat
+    fd = os.open("/proc/sys/kernel/random/boot_id",
+                 os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0:
+            raise NativeEgressCandidateError("NATIVE_EGRESS_BOOT_ID_REFUSED")
+        raw = os.read(fd, 65)
+        if (not raw.endswith(b"\n") or len(raw) != 37
+                or _BOOT_ID.fullmatch(raw[:-1].decode("ascii")) is None
+                or os.read(fd, 1)):
+            raise NativeEgressCandidateError("NATIVE_EGRESS_BOOT_ID_REFUSED")
+        return raw[:-1].decode("ascii")
+    finally:
+        os.close(fd)
+
+
+def _read_boot_egress_receipt(state_fd: int, owner: int, group: int) -> bytes | None:
+    import os
+    from repocache.server_protected_state_inspect_v1 import _FILE_FLAGS, _identity
+    from repocache.server_protected_state_store_v1 import _read_file
+    limit = _BOOT_EGRESS_RECEIPT_MAX
+    raw = _read_file(state_fd, _BOOT_EGRESS_RECEIPT, owner, limit)
+    if raw is None:
+        return None
+    fd = os.open(_BOOT_EGRESS_RECEIPT, _FILE_FLAGS, dir_fd=state_fd)
+    try:
+        info = os.fstat(fd)
+        if (info.st_gid != group
+                or set(os.listxattr(fd)) - {"security.selinux"}
+                or _identity(info) != _identity(os.stat(
+                    _BOOT_EGRESS_RECEIPT, dir_fd=state_fd, follow_symlinks=False))
+                or os.read(fd, limit + 1) != raw
+                or _identity(os.fstat(fd)) != _identity(info)
+                or _identity(os.stat(_BOOT_EGRESS_RECEIPT, dir_fd=state_fd,
+                                     follow_symlinks=False)) != _identity(info)):
+            raise NativeEgressCandidateError("NATIVE_EGRESS_BOOT_RECEIPT_REFUSED")
+        return raw
+    finally:
+        os.close(fd)
+
+
+def _prepare_boot_egress_locked(
+    root_fd: int, state_fd: int, proposed: str, *,
+    namespace_identity: tuple[int, int], generation: int,
+    generation_manifest_sha256: str, profile_receipt_sha256: str,
+    executable_receipt_sha256: str, recheck_owned, allow_prepare: bool,
+) -> dict[str, Any]:
+    """Bind initial namespace rules to a durable, boot-specific intent.
+
+    The trusted caller holds the protected state lock, independently
+    authenticates the generation and executable/profile receipts, and
+    proves the fresh namespace's ownership, ingress/routing and service
+    exclusion before allowing preparation. The receipt alone proves none
+    of those prerequisites. Verify-only may observe an active service
+    if its caller independently binds that service to this namespace.
+    No installed dispatcher calls this internal candidate. A different
+    boot, generation or namespace is refused, not automatically adopted
+    or garbage-collected. No host routing or service action is performed.
+    """
+    import os
+    import stat
+    from contextlib import ExitStack
+    from repocache.server_protected_state_inspect_v1 import (
+        _STATE_SEGMENTS, _identity, _safe_directory, _walk,
+    )
+    from repocache.server_protected_state_store_v1 import (
+        _canonical, _recheck_after_mutation, _write_exclusive,
+    )
+    try:
+        canonical = _canonical_ruleset(proposed)
+        if (type(namespace_identity) is not tuple or len(namespace_identity) != 2
+                or any(type(x) is not int or x <= 0 for x in namespace_identity)
+                or type(generation) is not int or not 0 <= generation <= MAX_INT
+                or any(type(value) is not str or _SHA256.fullmatch(value) is None
+                       for value in (generation_manifest_sha256, profile_receipt_sha256,
+                                     executable_receipt_sha256))
+                or not callable(recheck_owned) or type(allow_prepare) is not bool):
+            raise NativeEgressCandidateError("NATIVE_EGRESS_BOOT_INPUT_REFUSED")
+        owner, group = os.geteuid(), os.getegid()
+        with ExitStack() as stack:
+            pinned_state, chain = _walk(root_fd, _STATE_SEGMENTS, stack, owner)
+            state_identity = _identity(_safe_directory(state_fd, owner))[:6]
+            if (_identity(os.fstat(pinned_state))[:6] != state_identity
+                    or stat.S_IMODE(state_identity[2]) != 0o700
+                    or state_identity[4] != group
+                    or set(os.listxattr(state_fd)) - {"security.selinux"}):
+                raise NativeEgressCandidateError("NATIVE_EGRESS_BOOT_STATE_REFUSED")
+            boot = _current_boot_id()
+            net, identity, recheck = stack.enter_context(_fixed_namespace_scope())
+            if identity != namespace_identity:
+                raise NativeEgressCandidateError("NATIVE_EGRESS_NAMESPACE_OWNERSHIP_REFUSED")
+            policy_sha = hashlib.sha256(canonical.encode("ascii")).hexdigest()
+            expected = _canonical({
+                "schema_version": 1,
+                "boot_id": boot,
+                "namespace_device": identity[0],
+                "namespace_inode": identity[1],
+                "generation": generation,
+                "generation_manifest_sha256": generation_manifest_sha256,
+                "profile_receipt_sha256": profile_receipt_sha256,
+                "executable_receipt_sha256": executable_receipt_sha256,
+                "ruleset_sha256": policy_sha,
+                "authorizes_nginx_activation": False,
+            }, limit=_BOOT_EGRESS_RECEIPT_MAX)
+
+            def guard():
+                recheck_owned()
+                _recheck_after_mutation(chain, owner)
+                if (_identity(_safe_directory(state_fd, owner))[:6] != state_identity
+                        or _current_boot_id() != boot):
+                    raise NativeEgressCandidateError("NATIVE_EGRESS_BOOT_SCOPE_CHANGED")
+                recheck()
+
+            def receipt():
+                return _read_boot_egress_receipt(state_fd, owner, group)
+
+            def check_receipt():
+                guard()
+                if receipt() != expected:
+                    raise NativeEgressCandidateError("NATIVE_EGRESS_BOOT_RECEIPT_CHANGED")
+                guard()
+
+            guard()
+            saved = receipt()
+            observed = _read_namespace_rules(net)
+            if type(observed) is not str:
+                raise NativeEgressCandidateError("NATIVE_EGRESS_BOOT_RULES_REFUSED")
+            if saved is None:
+                if not allow_prepare or observed.strip():
+                    # No adoption of an existing table, even identical.
+                    raise NativeEgressCandidateError("NATIVE_EGRESS_BOOT_INTENT_REQUIRED")
+                guard()
+                if receipt() is not None or _read_namespace_rules(net).strip():
+                    raise NativeEgressCandidateError("NATIVE_EGRESS_BOOT_INTENT_COLLISION")
+                _write_exclusive(state_fd, _BOOT_EGRESS_RECEIPT, expected, owner,
+                                 _BOOT_EGRESS_RECEIPT_MAX)
+            elif saved != expected:
+                # Old boot, different generation, foreign namespace or
+                # receipt drift are preserved for explicit reconciliation.
+                raise NativeEgressCandidateError("NATIVE_EGRESS_BOOT_RECEIPT_MISMATCH")
+            check_receipt()
+            observed = _read_namespace_rules(net)
+            if not observed.strip():
+                if not allow_prepare:
+                    raise NativeEgressCandidateError("NATIVE_EGRESS_BOOT_POLICY_PENDING")
+                _initialize_fixed_namespace_egress(
+                    canonical, namespace_identity=identity, recheck_owned=check_receipt)
+            for _ in range(2):
+                check_receipt()
+                verify_namespace_egress_readback(canonical, _read_namespace_rules(net))
+                check_receipt()
+            return {
+                "status": "NATIVE_EGRESS_BOOT_RECEIPT_VERIFIED",
+                "boot_id": boot,
+                "namespace_device": identity[0],
+                "namespace_inode": identity[1],
+                "generation": generation,
+                "ruleset_sha256": policy_sha,
+                "receipt_sha256": hashlib.sha256(expected).hexdigest(),
+                "ruleset_shape_matches": True,
+                "namespace_exclusivity_verified": False,
+                "runtime_egress_verified": False,
+                "authorizes_nginx_activation": False,
+                "authorizes_catalog_publication": False,
+            }
+    except NativeEgressCandidateError:
+        raise
+    except (OSError, ValueError, TypeError, OverflowError, RecursionError):
+        raise NativeEgressCandidateError("NATIVE_EGRESS_BOOT_PREPARATION_REFUSED") from None
+
+
 def _replace_fixed_namespace_egress(previous: str, proposed: str, *,
                                     namespace_identity: tuple[int, int],
                                     recheck_owned) -> dict[str, Any]:

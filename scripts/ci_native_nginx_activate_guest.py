@@ -1298,25 +1298,80 @@ try:
         elif action in ("unit-inactive","unit-active"):
             result=unit.inspect_signed_owned_namespace_unit(
                 https_port=443,active=action=="unit-active")
-        elif action=="egress-initialize":
-            # Test-only witness from the namespace just exclusively created
-            # by the guarded guest. No installed request supplies these values.
+        elif action in ("egress-boot-prepare","egress-boot-verify","egress-boot-active"):
+            from repocache import server_native_nginx_executable_v1 as executable
             identity=tuple(doc["identity"])
-            def owned():
-                unit.inspect_effective_owned_nginx_unit(active=False)
-                info=os.stat("/run/netns/repocache-nginx",follow_symlinks=False)
-                assert (info.st_dev,info.st_ino)==identity
-            options=dict(namespace_identity=identity,recheck_owned=owned)
-            result=egress._initialize_fixed_namespace_egress(doc["rules"],**options)
+            raw=unit._signed_owned_unit_bytes()
+            profile=unit._stage_namespace_dropin_under_lock(
+                root,state,raw,https_port=443,owner_uid=0,owner_gid=0,allow_create=False)
+            directory=os.open("/usr/libexec/repocache",_DIRECTORY_FLAGS)
             try:
-                egress._initialize_fixed_namespace_egress(doc["rules"],**options)
-            except egress.NativeEgressCandidateError as exc:
-                assert "NAMESPACE_NOT_EMPTY" in str(exc)
-            else:
-                raise AssertionError("Existing namespace table was adopted")
-            observed=egress.inspect_fixed_namespace_egress(doc["rules"])
-            assert observed["ruleset_shape_matches"]
-            assert (observed["namespace_device"],observed["namespace_inode"])==identity
+                receipt=executable._read_executable_receipt(directory)
+                assert receipt
+                record=json.loads(receipt)
+                expected=json.loads(open("/root/pr237-synthetic-fixture/native-executable-candidate-proof.json").read())
+                assert hashlib.sha256(receipt).hexdigest()==expected["receipt_sha256"]
+                assert record["dedicated_policy_sha256"]==executable.signed_owned_nginx_policy_candidate()["policy_sha256"]
+                inode=executable._verify_leaf(directory,record["executable_sha256"],dedicated_selinux=True)
+                assert inode[:2]==(record["device"],record["inode"])
+                assert inode[6:]==(record["size"],record["mtime_ns"],record["ctime_ns"])
+                assert executable._named(directory,executable._PENDING) is None
+                active=action=="egress-boot-active"
+                # This is the explicitly synthetic fixture generation and
+                # loopback policy, not a claim about committed active routes.
+                def owned():
+                    info=os.stat("/run/netns/repocache-nginx",follow_symlinks=False)
+                    assert (info.st_dev,info.st_ino)==identity
+                    observed=unit.inspect_signed_owned_namespace_unit(https_port=443,active=active)
+                    if active:
+                        current=os.stat("/proc/"+str(observed["main_pid_observed"])+"/ns/net")
+                        assert (current.st_dev,current.st_ino)==identity
+                    assert unit._stage_namespace_dropin_under_lock(
+                        root,state,raw,https_port=443,owner_uid=0,owner_gid=0,allow_create=False)==profile
+                    assert executable._read_executable_receipt(directory)==receipt
+                    assert executable._verify_leaf(directory,record["executable_sha256"],dedicated_selinux=True)==inode
+                def prepare(allow):
+                    return egress._prepare_boot_egress_locked(
+                        root,state,doc["rules"],namespace_identity=identity,
+                        generation=doc["generation"],generation_manifest_sha256=doc["fixture_generation_sha256"],
+                        profile_receipt_sha256=profile["receipt_sha256"],
+                        executable_receipt_sha256=hashlib.sha256(receipt).hexdigest(),
+                        recheck_owned=owned,allow_prepare=allow)
+                if action=="egress-boot-prepare":
+                    pid=os.fork()
+                    if pid==0:
+                        # The signed candidate must fsync its boot intent
+                        # before entering the first policy initialization.
+                        def crash(*args,**kw):
+                            os.kill(os.getpid(),signal.SIGKILL)
+                        egress._initialize_fixed_namespace_egress=crash
+                        prepare(True)
+                        os._exit(77)
+                    _,status=os.waitpid(pid,0)
+                    assert os.WIFSIGNALED(status) and os.WTERMSIG(status)==signal.SIGKILL
+                    saved=egress._read_boot_egress_receipt(state,0,0)
+                    assert saved
+                    try:
+                        prepare(False)
+                    except egress.NativeEgressCandidateError as exc:
+                        assert "BOOT_POLICY_PENDING" in str(exc)
+                    else:
+                        raise AssertionError("Verify-only initialized pending policy")
+                    result=prepare(True)
+                    assert result["receipt_sha256"]==hashlib.sha256(saved).hexdigest()
+                    assert prepare(False)==result==prepare(True)
+                    # Direct initialization still refuses an existing table.
+                    try:
+                        egress._initialize_fixed_namespace_egress(
+                            doc["rules"],namespace_identity=identity,recheck_owned=owned)
+                    except egress.NativeEgressCandidateError as exc:
+                        assert "NAMESPACE_NOT_EMPTY" in str(exc)
+                    else:
+                        raise AssertionError("Existing namespace table was adopted")
+                else:
+                    result=prepare(False)
+            finally:
+                os.close(directory)
         elif action in ("unit-place","unit-verify-placement"):
             raw=unit._signed_owned_unit_bytes()
             def prepare(allow):
@@ -1428,7 +1483,9 @@ finally:
     assert not os.path.lexists(Path("/run/systemd/system", OWN + ".d"))
     profile_receipt = STATE / ".native-nginx-profile-v1.json"
     profile_stage = dropdir.parent / ".repocache-dedicated-unit.stage"
+    boot_receipt = STATE / ".native-nginx-boot-egress-v1.json"
     assert not os.path.lexists(profile_receipt) and not os.path.lexists(profile_stage)
+    assert not os.path.lexists(boot_receipt)
     assert run("/usr/bin/systemctl", "show", "-p", "DropInPaths", "--value", OWN).stdout.strip() == ""
     ns = Path("/run/netns/repocache-nginx")
     runtime = Path("/run/repocache-nginx")
@@ -1444,6 +1501,8 @@ finally:
     include_changed = False
     namespace = False
     placement_attempted = False
+    boot_preparation_attempted = False
+    boot_prepared = False
     unit_placed = False
     started = False
     origin = None
@@ -1521,14 +1580,6 @@ finally:
             require("/usr/sbin/ip", "-n", "repocache-nginx", "link", "set", "lo", "up")
             assert {x["ifname"] for x in json.loads(require(
                 "/usr/sbin/ip", "-n", "repocache-nginx", "-j", "link", "show").stdout)} == {"lo"}
-            initialized = signed("egress-initialize", {"rules": rules, "identity": list(ns_identity)})
-            assert initialized["status"] == "NAMESPACE_EGRESS_INITIALIZATION_OBSERVED"
-            assert initialized["ruleset_shape_matches"]
-            assert not initialized["authorizes_nginx_activation"]
-            assert (initialized["namespace_device"], initialized["namespace_inode"]) == ns_identity
-            assert isolated.command("/usr/sbin/nft", "--stateless", "--numeric-priority",
-                                    "list", "ruleset").stdout == host_rules
-            print("PASS: signed retained-fd initialization of fresh empty owned namespace; existing table refused", flush=True)
             placement_attempted = True
             placement = signed("unit-place")
             unit_placed = True
@@ -1545,6 +1596,25 @@ finally:
             assert inactive_profile["signed_worker_unit_bytes_match"]
             assert inactive_profile["dropin_sha256"] == hashlib.sha256(dropin.read_bytes()).hexdigest()
             assert not inactive_profile["authorizes_systemctl"]
+            # The private fixture differs from the committed disabled
+            # generation. Bind its full synthetic document without claiming
+            # that this digest is the authoritative installed WAL manifest.
+            boot_args = {"rules": rules, "identity": list(ns_identity),
+                         "generation": doc["expected_state_generation"],
+                         "fixture_generation_sha256": hashlib.sha256(json.dumps(
+                             doc, sort_keys=True, separators=(",", ":")).encode("ascii")).hexdigest()}
+            boot_preparation_attempted = True
+            boot_report = signed("egress-boot-prepare", boot_args)
+            boot_prepared = True
+            assert boot_report["status"] == "NATIVE_EGRESS_BOOT_RECEIPT_VERIFIED"
+            assert boot_report["boot_id"] == Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+            assert boot_report["ruleset_shape_matches"]
+            assert not boot_report["authorizes_nginx_activation"]
+            assert (boot_report["namespace_device"], boot_report["namespace_inode"]) == ns_identity
+            assert hashlib.sha256(boot_receipt.read_bytes()).hexdigest() == boot_report["receipt_sha256"]
+            assert isolated.command("/usr/sbin/nft", "--stateless", "--numeric-priority",
+                                    "list", "ruleset").stdout == host_rules
+            print("PASS: signed boot-bound egress intent survived SIGKILL; exact private policy resumed, existing table refused", flush=True)
             origin_code = r"""
 import json,ssl,sys
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
@@ -1667,6 +1737,8 @@ sys.stdout.buffer.write(https_response(sys.argv[1]))
                 assert signed("verify") == report == signed("create")
                 assert signed("unit-active") == profile
                 assert signed("unit-verify-placement") == placement
+                assert signed("egress-boot-active", boot_args) == boot_report
+                print("PASS: boot receipt and exact kernel policy bound to actual dedicated MainPID namespace", flush=True)
                 print("PASS: authenticated exact persistent drop-in and fixed PID1/master identity, inactive/active/repeat observation", flush=True)
                 assert isolated.command("/usr/sbin/nft", "--stateless", "--numeric-priority",
                                         "list", "ruleset").stdout == host_rules
@@ -1683,6 +1755,15 @@ sys.stdout.buffer.write(https_response(sys.argv[1]))
                 # Unknown or partial test placement must never be removed
                 # or followed by a legacy restart. Preserve VM evidence.
                 raise AssertionError("Incomplete owned profile placement retained")
+            if boot_preparation_attempted and not boot_prepared:
+                raise AssertionError("Incomplete boot-bound egress intent retained")
+            if boot_prepared:
+                assert signed("egress-boot-verify", boot_args) == boot_report
+                assert hashlib.sha256(boot_receipt.read_bytes()).hexdigest() == boot_report["receipt_sha256"]
+                # Guarded disposable cleanup only after the exact service
+                # is stopped; no installed stale receipt GC is provided.
+                boot_receipt.unlink()
+                sync_dir(STATE)
             if unit_placed:
                 assert signed("unit-verify-placement") == placement
                 assert dropin.read_text() == rendered["dropin"]

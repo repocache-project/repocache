@@ -507,3 +507,115 @@ def test_fixed_namespace_initialization_requires_empty_owned_scope(monkeypatch, 
             [True, False] if fault == "post-drift" else
             [True] if fault in ("check", "drift", "owner") else [])
     assert not held[0]
+
+
+@pytest.mark.parametrize("fault", [
+    "none", "before-nft", "after-nft", "foreign", "identical", "boot",
+    "namespace", "generation", "profile", "executable", "manifest", "rules",
+])
+def test_boot_egress_receipt_binds_intent_and_exact_resume(tmp_path, monkeypatch, fault):
+    import contextlib
+    import os
+    from repocache import server_native_egress_candidate_v1 as egress
+
+    doc, raw = fixture()
+    expected = egress.render_namespace_egress_candidate(
+        doc, generation=1, http_fragment=raw, worker_uid=987)["nft_candidate"]
+    identity = [17, 29]
+    boot = ["1f8f3d9c-17c2-4a45-a013-1d781b9796af"]
+    observed = ["table ip foreign {}\n" if fault == "foreign" else
+                expected if fault == "identical" else ""]
+    writes = []
+    state = tmp_path / "var/lib/repocache/server"
+    state.mkdir(parents=True)
+    state.chmod(0o700)
+    receipt = state / egress._BOOT_EGRESS_RECEIPT
+    rootfd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    statefd = os.open(state, os.O_RDONLY | os.O_DIRECTORY)
+
+    @contextlib.contextmanager
+    def scope():
+        yield 42, tuple(identity), lambda: None
+
+    def read(fd):
+        assert fd == 42
+        return observed[0]
+
+    def batch(fd, raw, *, validate_only):
+        assert fd == 42 and raw == expected and receipt.is_file()
+        writes.append(validate_only)
+        if not validate_only:
+            if fault == "before-nft" and writes.count(False) == 1:
+                raise OSError("simulated interruption after receipt")
+            observed[0] = expected
+            if fault == "after-nft" and writes.count(False) == 1:
+                raise OSError("simulated interruption after mutation")
+
+    monkeypatch.setattr(egress, "_fixed_namespace_scope", scope)
+    monkeypatch.setattr(egress, "_current_boot_id", lambda: boot[0])
+    monkeypatch.setattr(egress, "_read_namespace_rules", read)
+    monkeypatch.setattr(egress, "_run_namespace_batch", batch)
+
+    def prepare(allow=True, **changes):
+        options = dict(namespace_identity=tuple(identity), generation=1,
+                       generation_manifest_sha256="a" * 64,
+                       profile_receipt_sha256="b" * 64,
+                       executable_receipt_sha256="c" * 64,
+                       recheck_owned=lambda: None, allow_prepare=allow)
+        options.update(changes)
+        return egress._prepare_boot_egress_locked(rootfd, statefd, expected, **options)
+
+    try:
+        if fault in ("foreign", "identical"):
+            with pytest.raises(NativeEgressCandidateError, match="BOOT_INTENT_REQUIRED"):
+                prepare()
+            assert not receipt.exists() and not writes
+            return
+        with pytest.raises(NativeEgressCandidateError, match="BOOT_INTENT_REQUIRED"):
+            prepare(False)
+        assert not receipt.exists()
+        if fault in ("before-nft", "after-nft"):
+            with pytest.raises(NativeEgressCandidateError, match="BOOT_PREPARATION_REFUSED"):
+                prepare()
+            assert receipt.is_file()
+            durable = receipt.read_bytes()
+            inode = receipt.stat().st_ino
+            if fault == "before-nft":
+                with pytest.raises(NativeEgressCandidateError, match="BOOT_POLICY_PENDING"):
+                    prepare(False)
+            else:
+                assert prepare(False)["ruleset_shape_matches"]
+        result = prepare()
+        assert result["status"] == "NATIVE_EGRESS_BOOT_RECEIPT_VERIFIED"
+        assert not result["authorizes_nginx_activation"]
+        assert not result["authorizes_catalog_publication"]
+        assert not result["runtime_egress_verified"]
+        assert observed[0] == expected
+        assert prepare(False) == result == prepare()
+        if fault in ("before-nft", "after-nft"):
+            assert receipt.read_bytes() == durable and receipt.stat().st_ino == inode
+        assert writes == ([True, False, True, False] if fault == "before-nft" else [True, False])
+        saved = receipt.read_bytes()
+        changes = {}
+        if fault == "boot":
+            boot[0] = "2f8f3d9c-17c2-4a45-a013-1d781b9796af"
+        elif fault == "namespace":
+            identity[1] += 1
+        elif fault == "generation":
+            changes["generation"] = 2
+        elif fault == "profile":
+            changes["profile_receipt_sha256"] = "d" * 64
+        elif fault == "executable":
+            changes["executable_receipt_sha256"] = "d" * 64
+        elif fault == "manifest":
+            changes["generation_manifest_sha256"] = "d" * 64
+        elif fault == "rules":
+            observed[0] += "table ip foreign {}\n"
+        if fault in ("boot", "namespace", "generation", "profile", "executable", "manifest", "rules"):
+            writes.clear()
+            with pytest.raises(NativeEgressCandidateError):
+                prepare(**changes)
+            assert receipt.read_bytes() == saved and not writes
+    finally:
+        os.close(statefd)
+        os.close(rootfd)

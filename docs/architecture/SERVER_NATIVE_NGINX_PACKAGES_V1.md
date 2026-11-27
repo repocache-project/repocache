@@ -1131,3 +1131,24 @@ worker on its newly created loopback-only namespace, checks refusal of
 repeat initialization and unchanged host rules before actual service start.
 Durable boot-scoped namespace ownership, generation-bound creation/recovery
 and administrator ingress remain separate gates.
+
+
+### Boot-specific namespace intent
+
+The locked preparation candidate persists a canonical root-private receipt
+before initial policy mutation, binding the current kernel boot UUID,
+fixed namespace identity, generation and full manifest digest, executable
+and drop-in receipt digests, and canonical closed nft policy digest.
+The caller must prove each of these independently, including fresh namespace
+ownership and service exclusion. A complete matching intent can resume
+from an empty namespace or verify the exact already-installed policy;
+verify-only never installs pending rules. Missing intent with existing
+rules, a different boot, inode, generation, receipt or policy all refuse
+without adoption or automatic cleanup. The guarded native fixture uses a
+distinct synthetic loopback generation, kills a signed-worker child
+after the receipt is durable, verifies refusal in read-only mode and
+resumes the same policy. It also binds the resulting receipt and rules
+to the actual service MainPID namespace before fixture-only cleanup.
+This proves neither authoritative committed/WAL generation activation nor
+reboot-time recreation; those require the separate installed lifecycle
+and explicit ingress/routing authorization. The broker remains unchanged.
