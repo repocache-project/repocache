@@ -1369,3 +1369,15 @@ Readback does not create, repair, relabel or adopt an executable, and
 rejects absent/foreign/pending evidence and inode or metadata drift.
 The native reboot fixture supplies its separately authenticated placement
 proof; an installed boot caller still needs independent trusted pins.
+
+The committed-generation reboot fixture additionally starts the actual
+signed dedicated service after closed namespace recreation. It uses the
+unmodified committed main/include/catalog and independently verified TLS,
+not a rewritten test route. The disposable fixture prepares fresh
+dedicated-labelled storage and exact owned read-only labels while stopped,
+then verifies the actual systemd master, listener, TLS generation and
+catalog from inside the recreated namespace. It stops the service and
+restores the original fixture-owned storage and labels only on success;
+any ambiguous failure retains evidence. This is still explicit
+test-harness sequencing, not automatic installed boot dispatch or
+persistent storage migration.

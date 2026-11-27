@@ -2190,7 +2190,9 @@ def verify_committed_boot_namespace_reboot_fixture(native, assets, pins, *, afte
     and fails the campaign rather than starting an unverified service.
     """
     import base64
+    import contextlib
     import pwd
+    import stat
     from scripts import ci_selinux_nginx_egress_guest as isolated
     from scripts.ci_pr237_native_socket_guest import https_response
 
@@ -2254,16 +2256,17 @@ def verify_committed_boot_namespace_reboot_fixture(native, assets, pins, *, afte
         return isolated.command(*argv, timeout=90)
 
     code = r"""
-import hashlib,json,os,sys,zipimport
+import base64,hashlib,json,os,sys,zipimport
 sys.path.insert(0,"/usr/libexec/repocache/server-control-worker")
 from repocache import server_native_egress_candidate_v1 as egress
 from repocache import server_native_nginx_effective_unit_v1 as unit
 from repocache import server_native_nginx_executable_v1 as executable
 from repocache import server_native_v2_transaction_v1 as tx
+from repocache import server_native_installed_storage_v1 as storage
 from repocache.server_protected_state_store_v1 import _locked
 from repocache.server_protected_state_inspect_v1 import _DIRECTORY_FLAGS
 from repocache.server_root_control_host_preflight_v1 import require_native_host_preconditions
-for module in (egress,unit,executable,tx):
+for module in (egress,unit,executable,tx,storage):
     assert isinstance(module.__loader__,zipimport.zipimporter)
     assert module.__loader__.archive=="/usr/libexec/repocache/server-control-worker"
 require_native_host_preconditions()
@@ -2317,21 +2320,23 @@ try:
             result=profile(True)
         else:
             observed_profile=profile(False)
-            def stopped():
-                unit.inspect_signed_owned_namespace_unit(https_port=443,active=False)
+            def owner(active):
+                unit.inspect_signed_owned_namespace_unit(https_port=443,active=active)
                 assert profile(False)==observed_profile
                 assert executable._read_executable_receipt(directory)==receipt
                 assert executable._verify_leaf(directory,proof["sha256"],dedicated_selinux=True)==identity
                 assert executable._named(directory,executable._PENDING) is None
+            def stopped():
+                owner(False)
             def namespace_identity():
                 info=os.stat("/run/netns/repocache-nginx",follow_symlinks=False)
                 return (info.st_dev,info.st_ino)
-            def policy(allow, rollover=False):
+            def policy(allow, rollover=False, active=False):
                 def owned():
-                    stopped()
+                    owner(active)
                     assert namespace_identity()==net_identity
                 if pending:
-                    assert not allow and not rollover
+                    assert not allow and not rollover and not active
                     return tx._verify_owned_prepared_wal_boot_egress_locked(
                         root,state,distribution="almalinux",worker_uid=uid,
                         expected_wal=pending_raw,namespace_identity=net_identity,
@@ -2431,6 +2436,51 @@ try:
             elif action=="verify":
                 net_identity=namespace_identity()
                 result=policy(False)
+            elif action in ("prepare-committed-storage","verify-committed-active"):
+                # Exercise the actual committed generation, not a rewritten
+                # synthetic include. No pending-WAL publication authority.
+                assert not pending
+                net_identity=namespace_identity()
+                active=action=="verify-committed-active"
+                observed_policy=policy(False,active=active)
+                with tx._owned_layout_locked(root,state,recovering=False) as layout:
+                    state_fd,nginx_fd,public_fd,check_layout=layout
+                    exact=tx._read_owned_resources(state_fd,nginx_fd,public_fd)
+                    snapshot=tx._validate_owned_resources(exact,distribution="almalinux")
+                    assert snapshot and exact[tx._CATALOG]
+                    tx._owned_socket_require_inactive_routes(snapshot)
+                    document=tx.parse_install_bytes(base64.b64decode(
+                        snapshot["configuration_base64"],validate=True),for_apply=True)
+                    prepared=storage.prepare_dedicated_candidate_storage(
+                        "almalinux",document,allow_create=not active)
+                    assert prepared["selinux_enforcing_labels_verified"]
+                    assert prepared["repository_cache_roots_verified"]==[]
+                    if active:
+                        leaf=tx._verify_tls_pair(root,document,verify_identity=True)
+                        context=(document,snapshot["state_generation"],leaf)
+                        def unchanged():
+                            owner(True)
+                            check_layout()
+                            assert tx._read_owned_resources(state_fd,nginx_fd,public_fd)==exact
+                            assert tx._read_file(state_fd,tx._OWNED_WAL,0,tx._MAX_WAL) is None
+                            assert storage.prepare_dedicated_candidate_storage(
+                                "almalinux",document,allow_create=False)==prepared
+                        witness=tx._owned_dedicated_live_health_bound(
+                            root,context,exact[tx._CATALOG],publish=True,
+                            namespace_identity=net_identity,executable_identity=identity[:2],
+                            recheck_owned=unchanged)
+                        assert witness["catalog_observed"]
+                        assert witness["generation"]==snapshot["state_generation"]
+                        assert not witness["authorizes_nginx_activation"]
+                        assert not witness["authorizes_catalog_publication"]
+                        storage.verify_service_storage_mounts(witness["main_pid"])
+                        assert tx._verify_tls_pair(root,document,verify_identity=True)==leaf
+                        assert policy(False,active=True)==observed_policy
+                        unchanged()
+                        result={**witness,"storage":prepared}
+                    else:
+                        assert policy(False)==observed_policy
+                        result={"storage":prepared,"authorizes_nginx_activation":False}
             else:
                 raise AssertionError("Unknown fixed fixture action")
         assert not result["authorizes_nginx_activation"]
@@ -2543,6 +2593,104 @@ finally:
     require_status(OWN, False, False)
     print("PASS: real reboot discarded old namespace; explicit signed recreation and receipt rollover preserved exact " +
           ("pending WAL and withdrawn prior generation" if pending else "committed generation"), flush=True)
+
+    if not pending:
+        # Prove the existing committed generation can actually start with
+        # the recreated namespace. Unlike the earlier private data-plane
+        # fixture, keep the real WAL/manifest-bound main/include/catalog
+        # bytes unchanged. Fresh test-only storage and labels are placed
+        # while stopped; no production migration is performed.
+        from repocache.server_native_installed_storage_v1 import _rename_directory_noreplace
+        cache = Path(document["deployment"]["paths"]["cache_root"])
+        log = Path(document["deployment"]["paths"]["log_root"])
+        runtime = Path("/run/repocache-nginx")
+        fixed = (cache, cache.parent / ".repocache-managed.owner-v1",
+                 log, log.parent / ".repocache-managed.owner-v1")
+        backups = tuple(p.with_name(".ci-boot-legacy-" + p.name) for p in fixed)
+        archived = tuple(p.with_name(".ci-boot-dedicated-" + p.name) for p in fixed)
+        assert not any(os.path.lexists(p) for p in (*backups, *archived, runtime))
+        assert not list(cache.iterdir()) and not list(log.iterdir())
+        for parent in (cache.parent, log.parent):
+            assert not any(p.name.startswith((".repocache-repository-", ".repocache-metrics-"))
+                           for p in parent.iterdir())
+
+        def move(source, target):
+            assert source.parent == target.parent and not os.path.lexists(target)
+            fd = os.open(source.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                _rename_directory_noreplace(fd, source.name, target.name)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+
+        def file_identity(path):
+            info = path.lstat()
+            return info.st_dev, info.st_ino
+
+        identities = tuple(file_identity(p) for p in fixed)
+        label_paths = (
+            OWN_CONFIG.parent, OWN_CONFIG, OWN_CONFIG.parent / "repocache-managed.conf",
+            Path("/etc/repocache/tls"),
+            Path(document["deployment"]["tls"]["certificate_file"]),
+            Path(document["deployment"]["tls"]["private_key_file"]),
+            catalog.parent, catalog,
+        )
+        with contextlib.ExitStack() as stack:
+            labels = []
+            for path in label_paths:
+                assert path.resolve(strict=True) == path
+                info = path.lstat()
+                assert info.st_uid == info.st_gid == 0 and not info.st_mode & 0o022
+                assert stat.S_ISDIR(info.st_mode) or (stat.S_ISREG(info.st_mode) and info.st_nlink == 1)
+                fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                stack.callback(os.close, fd)
+                ident = file_identity(path)
+                opened = os.fstat(fd)
+                assert (opened.st_dev, opened.st_ino) == ident
+                assert set(os.listxattr(fd)) == {"security.selinux"}
+                labels.append((path, fd, ident, os.getxattr(fd, "security.selinux")))
+            for source, backup in zip(fixed, backups):
+                move(source, backup)
+            prepared_storage = signed("prepare-committed-storage")["storage"]
+            for path, fd, ident, _ in labels:
+                assert file_identity(path) == ident
+                os.setxattr(fd, "security.selinux", b"system_u:object_r:repocache_nginx_ro_t:s0\\0")
+                assert os.getxattr(fd, "security.selinux").rstrip(b"\\0") == b"system_u:object_r:repocache_nginx_ro_t:s0"
+            runtime.mkdir(mode=0o755)
+            require("/usr/bin/chcon", "-t", "repocache_nginx_pid_t", str(runtime))
+            require_prior_resources()
+            assert signed("verify") == result
+            started = run("/usr/bin/systemctl", "start", OWN)
+            if started.returncode:
+                print("COMMITTED_DEDICATED_START_REFUSED:", started.stderr[-1000:], flush=True)
+                print(run("/usr/bin/journalctl", "-u", OWN, "-n", "20", "--no-pager").stdout[-4000:], flush=True)
+                raise AssertionError("Exact committed dedicated start failed")
+            require_status(OWN, True, False)
+            witnessed = signed("verify-committed-active")
+            assert witnessed["storage"] == prepared_storage
+            assert witnessed["catalog_observed"] and witnessed["generation"] == current["state_generation"]
+            assert witnessed["listener_inode"] > 0
+            require_prior_resources()
+            require("/usr/bin/systemctl", "stop", OWN)
+            require_status(OWN, False, False)
+            assert signed("verify") == result
+            # Success-only restoration of the isolated fixture. Failed
+            # startup/readback preserves its state for diagnosis instead of
+            # silently reverting and reporting a successful campaign.
+            for path, fd, ident, label in reversed(labels):
+                assert file_identity(path) == ident
+                os.setxattr(fd, "security.selinux", label)
+                assert os.getxattr(fd, "security.selinux") == label
+            for source, target in zip(fixed, archived):
+                move(source, target)
+            for source, backup, ident in zip(fixed, backups, identities):
+                assert file_identity(backup) == ident
+                move(backup, source)
+            if runtime.exists():
+                assert not list(runtime.iterdir())
+                runtime.rmdir()
+        require_prior_resources()
+        print("PASS: actual signed dedicated unit starts exact committed generation after namespace reboot rollover; pinned TLS and exact catalog served, then stops without changing prior bytes", flush=True)
 
     # The disposable fixture owns these exact leaves. Verify all of them
     # and the stopped service before fixture-only removal, then restore
