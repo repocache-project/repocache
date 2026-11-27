@@ -374,6 +374,9 @@ _NAMESPACE_PATH = "/run/netns/repocache-nginx"
 _CANDIDATE_EXECUTABLE = "/usr/libexec/repocache/nginx"
 _NAMESPACE_DROPIN_DIR = _OWN_UNIT + ".d"
 _NAMESPACE_DROPIN_LEAF = "90-repocache-dedicated.conf"
+_NAMESPACE_DROPIN_STAGE = ".repocache-dedicated-unit.stage"
+_NAMESPACE_PROFILE_RECEIPT = ".native-nginx-profile-v1.json"
+_NAMESPACE_PROFILE_RECEIPT_MAX = 4096
 _NAMESPACE_DROPIN_PATH = "/etc/systemd/system/" + _NAMESPACE_DROPIN_DIR + "/" + _NAMESPACE_DROPIN_LEAF
 _MASTER_CAPABILITIES = "CAP_CHOWN CAP_KILL CAP_SETGID CAP_SETUID"
 _OWN_EXEC_KEYS = ("ExecStartPre", "ExecStart", "ExecReload", "ExecStop")
@@ -541,6 +544,12 @@ def _read_exact_owned_unit_at(root_fd: int, expected: bytes, *,
 
 def _read_exact_namespace_dropin_at(root_fd: int, expected: bytes, *,
                                     owner_uid: int, owner_gid: int) -> tuple[int, ...]:
+    return _read_namespace_profile_at(root_fd, expected, owner_uid=owner_uid,
+                                      owner_gid=owner_gid, staged=False)[1]
+
+
+def _read_namespace_profile_at(root_fd: int, expected: bytes, *,
+                               owner_uid: int, owner_gid: int, staged: bool) -> tuple:
     """Read the single fixed persistent drop-in with retained descriptors.
 
     The expected bytes must come from the signed unit renderer in an installed
@@ -550,12 +559,14 @@ def _read_exact_namespace_dropin_at(root_fd: int, expected: bytes, *,
         _FILE_FLAGS, _identity, _recheck, _walk,
     )
 
-    if type(expected) is not bytes or not 1 <= len(expected) <= _UNIT_MAX_BYTES:
+    if (type(expected) is not bytes or not 1 <= len(expected) <= _UNIT_MAX_BYTES
+            or type(staged) is not bool):
         _deny("NAMESPACE_DROPIN_SOURCE_INVALID")
     try:
         with ExitStack() as stack:
             parent, chain = _walk(
-                root_fd, ("etc", "systemd", "system", _NAMESPACE_DROPIN_DIR),
+                root_fd, ("etc", "systemd", "system",
+                          _NAMESPACE_DROPIN_STAGE if staged else _NAMESPACE_DROPIN_DIR),
                 stack, owner_uid)
             info = os.fstat(parent)
             if (info.st_gid != owner_gid or stat.S_IMODE(info.st_mode) != 0o755
@@ -585,11 +596,173 @@ def _read_exact_namespace_dropin_at(root_fd: int, expected: bytes, *,
                     or _identity(os.fstat(parent)) != _identity(info)):
                 _deny("NAMESPACE_DROPIN_CONTENT_CHANGED")
             _recheck(chain, owner_uid)
-            return identity
+            return (info.st_dev, info.st_ino), identity
     except EffectiveNginxUnitError:
         raise
     except (OSError, ValueError, TypeError):
         _deny("NAMESPACE_DROPIN_UNVERIFIED")
+
+
+def _stage_namespace_dropin_under_lock(root_fd: int, state_fd: int, raw: bytes, *,
+                                        https_port: int, owner_uid: int,
+                                        owner_gid: int, allow_create: bool) -> dict:
+    """Prepare one fixed owned drop-in; never activate or reload systemd.
+
+    The trusted caller retains the state lock and independently proves the
+    signed source, inactive service before publication, executable receipt,
+    generation, labels and namespace prerequisites. Detached roots are only
+    tests. A partial stage without an exact durable receipt is preserved and
+    refused. A receipt-bound complete stage can resume without adoption.
+    """
+    import hashlib
+    from repocache.server_native_installed_storage_v1 import _rename_directory_noreplace
+    from repocache.server_protected_state_inspect_v1 import (
+        _DIRECTORY_FLAGS, _FILE_FLAGS, _identity, _recheck, _safe_directory, _walk,
+    )
+    from repocache.server_protected_state_store_v1 import _canonical, _read_file, _write_exclusive
+
+    if (type(allow_create) is not bool or owner_uid != os.geteuid()
+            or owner_gid != os.getegid()):
+        _deny("NAMESPACE_PROFILE_INPUT_REFUSED")
+    candidate = _render_owned_nginx_namespace_dropin_candidate(raw, https_port=https_port)
+    expected = candidate["dropin_bytes"]
+    limit = _NAMESPACE_PROFILE_RECEIPT_MAX
+    try:
+        with ExitStack() as stack:
+            parent, chain = _walk(root_fd, ("etc", "systemd", "system"), stack, owner_uid)
+            state, state_chain = _walk(root_fd, ("var", "lib", "repocache", "server"),
+                                       stack, owner_uid)
+            parent_id = _identity(os.fstat(parent))[:5]
+            state_id = _identity(os.fstat(state_fd))[:6]
+            if (_identity(os.fstat(state))[:6] != state_id
+                    or state_id[4] != owner_gid or stat.S_IMODE(state_id[2]) != 0o700
+                    or os.fstat(parent).st_gid != owner_gid
+                    or set(os.listxattr(parent)) - {"security.selinux"}
+                    or set(os.listxattr(state_fd)) - {"security.selinux"}):
+                _deny("NAMESPACE_PROFILE_PARENT_REFUSED")
+            unit_identity = _read_exact_owned_unit_at(
+                root_fd, raw, owner_uid=owner_uid, owner_gid=owner_gid)
+
+            def guard():
+                _recheck(chain[:-1], owner_uid)
+                _recheck(state_chain[:-1], owner_uid)
+                for held, entry, identity in ((parent, chain[-1], parent_id),
+                                               (state_fd, state_chain[-1], state_id)):
+                    ancestor, name, _, _ = entry
+                    if (_identity(_safe_directory(held, owner_uid))[:len(identity)] != identity
+                            or _identity(os.stat(name, dir_fd=ancestor,
+                                                 follow_symlinks=False))[:len(identity)] != identity):
+                        _deny("NAMESPACE_PROFILE_PARENT_CHANGED")
+                if _read_exact_owned_unit_at(
+                        root_fd, raw, owner_uid=owner_uid, owner_gid=owner_gid) != unit_identity:
+                    _deny("NAMESPACE_PROFILE_UNIT_CHANGED")
+
+            def present(name):
+                try:
+                    os.stat(name, dir_fd=parent, follow_symlinks=False)
+                    return True
+                except FileNotFoundError:
+                    return False
+
+            def receipt():
+                result = _read_file(state_fd, _NAMESPACE_PROFILE_RECEIPT, owner_uid, limit)
+                if result is not None:
+                    fd = os.open(_NAMESPACE_PROFILE_RECEIPT, _FILE_FLAGS, dir_fd=state_fd)
+                    try:
+                        info = os.fstat(fd)
+                        if (info.st_gid != owner_gid
+                                or set(os.listxattr(fd)) - {"security.selinux"}
+                                or _identity(info) != _identity(os.stat(
+                                    _NAMESPACE_PROFILE_RECEIPT, dir_fd=state_fd,
+                                    follow_symlinks=False))
+                                or os.read(fd, limit + 1) != result
+                                or _identity(os.fstat(fd)) != _identity(info)):
+                            _deny("NAMESPACE_PROFILE_RECEIPT_REFUSED")
+                    finally:
+                        os.close(fd)
+                return result
+
+            def observed(staged):
+                return _read_namespace_profile_at(
+                    root_fd, expected, owner_uid=owner_uid,
+                    owner_gid=owner_gid, staged=staged)
+
+            def record(identity):
+                directory, leaf = identity
+                return _canonical({
+                    "schema_version": 1,
+                    "source_unit_sha256": candidate["source_unit_sha256"],
+                    "dropin_sha256": candidate["dropin_sha256"],
+                    "https_port": https_port,
+                    "directory_identity": list(directory),
+                    "dropin_identity": list(leaf),
+                    "authorizes_nginx_activation": False,
+                }, limit=limit)
+
+            guard()
+            saved = receipt()
+            staged = present(_NAMESPACE_DROPIN_STAGE)
+            final = present(_NAMESPACE_DROPIN_DIR)
+            if staged and final:
+                _deny("NAMESPACE_PROFILE_COLLISION")
+            if saved is None:
+                if staged or final or not allow_create:
+                    _deny("NAMESPACE_PROFILE_UNOWNED_OR_MISSING")
+                # Stage outside systemd's drop-in lookup; no empty or partial
+                # active directory is ever published. Any incomplete stage is
+                # preserved for review, not automatically repaired by bytes.
+                os.mkdir(_NAMESPACE_DROPIN_STAGE, 0o700, dir_fd=parent)
+                stage = os.open(_NAMESPACE_DROPIN_STAGE, _DIRECTORY_FLAGS, dir_fd=parent)
+                stack.callback(os.close, stage)
+                os.fchmod(stage, 0o755)
+                fd = os.open(_NAMESPACE_DROPIN_LEAF,
+                             os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                             0o600, dir_fd=stage)
+                try:
+                    os.fchmod(fd, 0o644)
+                    if os.write(fd, expected) != len(expected):
+                        _deny("NAMESPACE_PROFILE_WRITE_INCOMPLETE")
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+                os.fsync(stage)
+                os.fsync(parent)
+                identity = observed(True)
+                if identity[0] != (os.fstat(stage).st_dev, os.fstat(stage).st_ino):
+                    _deny("NAMESPACE_PROFILE_STAGE_CHANGED")
+                guard()
+                saved = record(identity)
+                _write_exclusive(state_fd, _NAMESPACE_PROFILE_RECEIPT, saved, owner_uid, limit)
+                staged = True
+            if not (staged or final):
+                _deny("NAMESPACE_PROFILE_RECEIPT_WITHOUT_DIRECTORY")
+            identity = observed(staged)
+            if receipt() != saved or record(identity) != saved:
+                _deny("NAMESPACE_PROFILE_RECEIPT_MISMATCH")
+            guard()
+            if staged:
+                if not allow_create:
+                    _deny("NAMESPACE_PROFILE_STAGE_PENDING")
+                if present(_NAMESPACE_DROPIN_DIR) or observed(True) != identity:
+                    _deny("NAMESPACE_PROFILE_COLLISION")
+                # Durable receipt precedes the single same-parent no-replace
+                # publication. The file identity survives directory rename.
+                _rename_directory_noreplace(parent, _NAMESPACE_DROPIN_STAGE,
+                                            parent, _NAMESPACE_DROPIN_DIR)
+                os.fsync(parent)
+            if (present(_NAMESPACE_DROPIN_STAGE) or observed(False) != identity
+                    or receipt() != saved):
+                _deny("NAMESPACE_PROFILE_PUBLICATION_CHANGED")
+            guard()
+            return {"receipt_sha256": hashlib.sha256(saved).hexdigest(),
+                    "directory_identity": identity[0], "private_dropin_identity": identity[1],
+                    "dropin_sha256": candidate["dropin_sha256"],
+                    "receipt_matches_owned_dropin": True,
+                    "authorizes_systemctl": False, "authorizes_nginx_activation": False}
+    except EffectiveNginxUnitError:
+        raise
+    except (OSError, ValueError, TypeError, RecursionError):
+        _deny("NAMESPACE_PROFILE_PLACEMENT_REFUSED")
 
 
 def inspect_signed_owned_namespace_unit(*, https_port: int, active: bool) -> dict[str, Any]:

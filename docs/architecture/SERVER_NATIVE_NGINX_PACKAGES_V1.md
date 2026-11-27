@@ -1091,3 +1091,21 @@ temporary transition and verifies inactive, active and repeat observation
 from the authenticated worker before restoring the legacy fixture. This is
 not a durable transition, boot-time namespace lifecycle, or active-route
 dispatch; the broker remains unchanged and no policy or vendor grant expands.
+
+
+### Receipt-bound drop-in placement candidate
+
+Under a retained protected state lock, prepare the one fixed drop-in in a
+hidden same-parent staging directory outside PID1's drop-in lookup. The
+canonical private receipt records the authenticated base and rendered bytes
+digests, port and exact directory/file identities before atomic no-replace
+publication. A complete receipt-bound stage can resume after interruption;
+unowned identical bytes, partial stages without a receipt, collisions and
+identity drift are refused and preserved. Verify-only mode never completes
+a pending stage. The operation neither reloads PID1 nor authorizes service
+activation, label changes, namespace creation or a live generation commit.
+The caller must still prove the signed release, inactive service, executable
+receipt, SELinux/namespace ownership and WAL generation before use. No
+installed dispatcher calls this primitive yet; detached tests exercise exact
+resume and foreign refusal. Native service placement and recovery must be
+validated separately.

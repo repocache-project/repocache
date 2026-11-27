@@ -539,3 +539,95 @@ def test_exact_persistent_namespace_dropin_and_foreign_refusal(tmp_path):
 def test_namespace_profile_requires_installed_signed_source():
     with pytest.raises(EffectiveNginxUnitError, match="SIGNED_OWN_UNIT_SOURCE_REQUIRED"):
         unit.inspect_signed_owned_namespace_unit(https_port=443, active=False)
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_namespace_profile_durable_receipt_and_exact_resume(tmp_path, monkeypatch, interrupted):
+    import os
+    from repocache import server_native_installed_storage_v1 as storage
+
+    raw = _signed_unit_fixture()
+    system = tmp_path / "etc/systemd/system"
+    system.mkdir(parents=True)
+    (system / unit._OWN_UNIT).write_bytes(raw)
+    (system / unit._OWN_UNIT).chmod(0o644)
+    state = tmp_path / "var/lib/repocache/server"
+    state.mkdir(parents=True)
+    state.chmod(0o700)
+    rootfd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    statefd = os.open(state, os.O_RDONLY | os.O_DIRECTORY)
+    final = system / unit._NAMESPACE_DROPIN_DIR
+    pending = system / unit._NAMESPACE_DROPIN_STAGE
+    receipt = state / unit._NAMESPACE_PROFILE_RECEIPT
+    def stage(allow=True, port=443):
+        return unit._stage_namespace_dropin_under_lock(
+            rootfd, statefd, raw, https_port=port, owner_uid=os.getuid(),
+            owner_gid=os.getgid(), allow_create=allow)
+    try:
+        if interrupted:
+            rename = storage._rename_directory_noreplace
+            def stop(*args):
+                raise OSError("simulated interruption before directory publication")
+            monkeypatch.setattr(storage, "_rename_directory_noreplace", stop)
+            with pytest.raises(EffectiveNginxUnitError, match="NAMESPACE_PROFILE_PLACEMENT_REFUSED"):
+                stage()
+            assert receipt.is_file() and pending.is_dir() and not final.exists()
+            prior = receipt.read_bytes()
+            inode = (pending / unit._NAMESPACE_DROPIN_LEAF).stat().st_ino
+            with pytest.raises(EffectiveNginxUnitError, match="NAMESPACE_PROFILE_STAGE_PENDING"):
+                stage(False)
+            monkeypatch.setattr(storage, "_rename_directory_noreplace", rename)
+        result = stage()
+        assert result["receipt_matches_owned_dropin"]
+        assert not result["authorizes_systemctl"] and not result["authorizes_nginx_activation"]
+        assert not pending.exists() and final.is_dir()
+        assert stage(False) == result == stage()
+        if interrupted:
+            assert receipt.read_bytes() == prior
+            assert (final / unit._NAMESPACE_DROPIN_LEAF).stat().st_ino == inode
+        with pytest.raises(EffectiveNginxUnitError):
+            stage(port=8008)
+        leaf = final / unit._NAMESPACE_DROPIN_LEAF
+        data = leaf.read_bytes()
+        leaf.unlink()
+        leaf.write_bytes(data)
+        leaf.chmod(0o644)
+        with pytest.raises(EffectiveNginxUnitError, match="NAMESPACE_PROFILE_RECEIPT_MISMATCH"):
+            stage()
+        assert leaf.read_bytes() == data
+    finally:
+        os.close(statefd)
+        os.close(rootfd)
+
+
+@pytest.mark.parametrize("directory_name", ["_NAMESPACE_DROPIN_DIR", "_NAMESPACE_DROPIN_STAGE"])
+def test_namespace_profile_refuses_unowned_exact_directory(tmp_path, directory_name):
+    import os
+    raw = _signed_unit_fixture()
+    system = tmp_path / "etc/systemd/system"
+    system.mkdir(parents=True)
+    (system / unit._OWN_UNIT).write_bytes(raw)
+    (system / unit._OWN_UNIT).chmod(0o644)
+    state = tmp_path / "var/lib/repocache/server"
+    state.mkdir(parents=True)
+    state.chmod(0o700)
+    folder = system / getattr(unit, directory_name)
+    folder.mkdir(mode=0o755)
+    folder.chmod(0o755)
+    expected = unit._render_owned_nginx_namespace_dropin_candidate(raw, https_port=443)["dropin_bytes"]
+    leaf = folder / unit._NAMESPACE_DROPIN_LEAF
+    leaf.write_bytes(expected)
+    leaf.chmod(0o644)
+    rootfd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    statefd = os.open(state, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        inode = leaf.stat().st_ino
+        with pytest.raises(EffectiveNginxUnitError, match="NAMESPACE_PROFILE_UNOWNED_OR_MISSING"):
+            unit._stage_namespace_dropin_under_lock(
+                rootfd, statefd, raw, https_port=443, owner_uid=os.getuid(),
+                owner_gid=os.getgid(), allow_create=True)
+        assert leaf.read_bytes() == expected and leaf.stat().st_ino == inode
+        assert not (state / unit._NAMESPACE_PROFILE_RECEIPT).exists()
+    finally:
+        os.close(statefd)
+        os.close(rootfd)
