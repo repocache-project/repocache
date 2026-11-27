@@ -3431,3 +3431,61 @@ def test_prepared_wal_boot_egress_scope_expires(filesystem):
             recheck()
         with pytest.raises(native.NativeV2TransactionError, match="SCOPE_EXPIRED"):
             recheck()
+
+
+@pytest.mark.parametrize("fault", ["none", "wrong-namespace", "owner-drift", "catalog-drift"])
+def test_verify_prepared_wal_boot_egress_never_prepares_or_publishes(
+        filesystem, monkeypatch, fault):
+    rootfd, state, _, _, _ = filesystem
+    old = _owned_generation(active=False)
+    new = _owned_generation(2, previous=json.loads(old[V2_STATE]), active=False)
+    withdrawn = {**old, native._CATALOG: None}
+    paths = _owned_fixture_paths(filesystem, withdrawn)
+    wal = native._owned_wal_record(old, new, live=True)
+    record = state / native._OWNED_WAL
+    record.write_bytes(wal)
+    record.chmod(0o600)
+    calls = []
+
+    def stopped():
+        if calls and fault == "owner-drift":
+            raise native.NativeV2TransactionError("OWNER_CHANGED")
+
+    def verify(got_root, got_state, rules, **kw):
+        assert (got_root, got_state) == (rootfd, statefd)
+        assert kw["namespace_identity"] == (17, 29)
+        assert not kw["allow_prepare"] and not kw["allow_boot_rollover"]
+        assert kw["generation"] == 1
+        assert kw["generation_manifest_sha256"] == hashlib.sha256(
+            old[native._OWNED_MANIFEST]).hexdigest()
+        calls.append("verify")
+        if fault == "wrong-namespace":
+            raise native.NativeV2TransactionError("WRONG_NAMESPACE")
+        if fault == "catalog-drift":
+            paths[native._CATALOG].write_bytes(b"foreign")
+        kw["recheck_owned"]()
+        return {"status": "NATIVE_EGRESS_BOOT_RECEIPT_VERIFIED"}
+
+    monkeypatch.setattr(native, "_prepare_boot_egress_locked", verify)
+    with native._locked(rootfd, 0) as statefd:
+        def invoke():
+            return native._verify_owned_prepared_wal_boot_egress_locked(
+                rootfd, statefd, distribution="debian", worker_uid=33,
+                expected_wal=wal, namespace_identity=(17, 29),
+                profile_receipt_sha256="a"*64, executable_receipt_sha256="b"*64,
+                recheck_stopped_owner=stopped)
+        if fault == "none":
+            result = invoke()
+            assert result["prior_resources_verified"] and result["recovery_required"]
+            assert result["catalog_withdrawn"]
+            assert not result["authorizes_nginx_activation"]
+            assert not result["authorizes_catalog_publication"]
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                invoke()
+    assert calls == ["verify"]
+    assert record.read_bytes() == wal
+    if fault == "catalog-drift":
+        assert paths[native._CATALOG].read_bytes() == b"foreign"
+    else:
+        assert _fixture_resource_bytes(paths) == withdrawn

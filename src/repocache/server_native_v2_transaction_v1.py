@@ -1846,6 +1846,46 @@ def _owned_prepared_wal_boot_egress_generation_locked(
             active = False
 
 
+def _verify_owned_prepared_wal_boot_egress_locked(
+    root_fd: int, state_fd: int, *, distribution: str, worker_uid: int,
+    expected_wal: bytes, namespace_identity: tuple[int, int],
+    profile_receipt_sha256: str, executable_receipt_sha256: str,
+    recheck_stopped_owner,
+) -> dict:
+    """Read back the exact prepared prior policy; never create or replace it."""
+    if (not callable(recheck_stopped_owner)
+            or not _valid_sha(profile_receipt_sha256)
+            or not _valid_sha(executable_receipt_sha256)):
+        _deny("OWNED_BOOT_EGRESS_INPUT_INVALID")
+    with _owned_prepared_wal_boot_egress_generation_locked(
+            root_fd, state_fd, distribution=distribution, worker_uid=worker_uid,
+            expected_wal=expected_wal,
+    ) as (plan, recheck):
+        if plan["destinations"]:
+            _deny("OWNED_BOOT_EGRESS_ACTIVE_ROUTES_REFUSED")
+
+        def owned():
+            recheck()
+            recheck_stopped_owner()
+            recheck()
+
+        owned()
+        result = _prepare_boot_egress_locked(
+            root_fd, state_fd, plan["nft_candidate"],
+            namespace_identity=namespace_identity, generation=plan["generation"],
+            generation_manifest_sha256=plan["generation_manifest_sha256"],
+            profile_receipt_sha256=profile_receipt_sha256,
+            executable_receipt_sha256=executable_receipt_sha256,
+            recheck_owned=owned, allow_prepare=False, allow_boot_rollover=False)
+        owned()
+        return {**result, "generation_manifest_sha256": plan["generation_manifest_sha256"],
+                "prior_resources_verified": True, "recovery_required": True,
+                "catalog_withdrawn": True,
+                "wal_sha256": hashlib.sha256(expected_wal).hexdigest(),
+                "authorizes_nginx_activation": False,
+                "authorizes_catalog_publication": False}
+
+
 def _create_owned_prepared_wal_boot_egress_locked(
     root_fd: int, state_fd: int, *, distribution: str, worker_uid: int,
     expected_wal: bytes, profile_receipt_sha256: str,
