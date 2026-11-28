@@ -5478,6 +5478,152 @@ def _read_owned_initial_dedicated_prepared_locked(
     return reconstructed
 
 
+def _write_owned_initial_private_fixture_locked(
+        root_fd: int, state_fd: int, nginx_fd: int, public_fd: int,
+        check_layout, wal: bytes, expected: dict, name: str,
+        after: bytes) -> None:
+    """Publish a fresh private state/manifest, never replace an existing inode."""
+    _refuse_actual_root_fixture_write(root_fd)
+    code = "OWNED_INITIAL_PRIVATE_WRITE_REFUSED"
+    if name not in _OWNED_PRIVATE or type(after) is not bytes:
+        _deny(code)
+    old, hashes = _decode_owned_wal(wal, distribution="almalinux")
+    if (_json(wal, limit=_MAX_WAL)["version"] != 3
+            or _validate_owned_resources(old, distribution="almalinux") is not None
+            or not 1 <= len(after) <= _OWNED_LIMIT[name] or _hash(after) != hashes[name]
+            or expected[name] is not None or expected[_CATALOG] is not None
+            or expected[_OWNED_MANIFEST] is not None
+            or any(_hash(expected[resource]) != hashes[resource]
+                   for resource in (_OWNED_MAIN, _INCLUDE))
+            or (name == _OWNED_MANIFEST and _hash(expected[V2_STATE]) != hashes[V2_STATE])):
+        _deny(code)
+    labels = _Labels("almalinux", dedicated=True)
+    stage = _OWNED_STAGES[name]
+    mount = _mount(state_fd)
+    parent_identity = _identity(os.fstat(state_fd))[:6]
+
+    def guard(*, stage_allowed=False):
+        _owned_live_guard(state_fd, nginx_fd, public_fd, check_layout, wal, expected)
+        _owned_wal_resource_drift(old, hashes, expected, unpublished=False)
+        parent = _metadata_no_acl(state_fd, directory=True)
+        if (_identity(parent)[:6] != parent_identity
+                or stat.S_IMODE(parent.st_mode) != 0o700
+                or _mount(state_fd) != mount
+                or os.fstatvfs(state_fd).f_flag & os.ST_RDONLY):
+            _deny(code)
+        labels.check(state_fd)
+        labels.finish()
+        for resource in _OWNED_ORDER:
+            if resource != name or not stage_allowed:
+                directory = _owned_resource_parent(resource, state_fd, nginx_fd, public_fd)
+                _owned_require_absent(directory, _OWNED_STAGES[resource])
+        return _dedicated_readonly_config_labels(
+            nginx_fd, public_fd, catalog_present=False,
+            allowed_stage=_OWNED_STAGES[_OWNED_MAIN])
+
+    before = guard()
+    try:
+        fd = os.open(stage, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                     | os.O_CLOEXEC, 0o600, dir_fd=state_fd)
+        try:
+            def verify(size):
+                info = _metadata_no_acl(fd)
+                if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                        or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size != size
+                        or _mount(fd) != mount
+                        or _identity(os.stat(stage, dir_fd=state_fd,
+                                             follow_symlinks=False)) != _identity(info)):
+                    _deny(code)
+                labels.check(fd)
+                return _identity(info)
+
+            verify(0)
+            position = 0
+            while position < len(after):
+                count = os.write(fd, after[position:])
+                if count <= 0:
+                    _deny(code)
+                position += count
+            os.fsync(fd)
+            identity = verify(len(after))
+            if os.pread(fd, len(after) + 1, 0) != after or guard(stage_allowed=True) != before:
+                _deny(code)
+            if verify(len(after)) != identity:
+                _deny(code)
+            _owned_require_absent(state_fd, name)
+            _rename_directory_noreplace(state_fd, stage, state_fd, name)
+            os.fsync(state_fd)
+            current = _identity(os.fstat(fd))
+            if (current[:-1] != identity[:-1]
+                    or _identity(os.stat(name, dir_fd=state_fd, follow_symlinks=False)) != current
+                    or _mount(fd) != mount or os.pread(fd, len(after) + 1, 0) != after):
+                _deny(code)
+            labels.check(fd)
+            expected[name] = after
+            if guard() != before or _identity(os.fstat(fd)) != current:
+                _deny(code)
+        finally:
+            os.close(fd)
+    except NativeV2TransactionError:
+        raise
+    except (OSError, ValueError, TypeError, InstalledStorageError):
+        _deny(code)
+
+
+def _stage_owned_initial_dedicated_generation_fixture_locked(
+        root_fd: int, state_fd: int, nginx_fd: int, public_fd: int,
+        check_layout) -> tuple[bytes, dict]:
+    """Prepare complete generation-one bytes behind a withdrawn catalog.
+
+    The caller holds the detached root's original lock. Durable v3 WAL
+    precedes all target changes. No process or boot-policy effect, no
+    automatic compensation on uncertainty and no actual-root authority.
+    """
+    _refuse_actual_root_fixture_write(root_fd)
+    old, new, report = _prepare_owned_initial_dedicated_candidate_locked(
+        root_fd, state_fd, nginx_fd, public_fd, check_layout, "almalinux")
+    snapshot = _validate_owned_resources(new, distribution="almalinux")
+    _owned_socket_require_inactive_routes(snapshot)
+    document = parse_install_bytes(
+        base64.b64decode(snapshot["configuration_base64"], validate=True), for_apply=True)
+    labels = _Labels("almalinux", dedicated=True)
+    tls = _dedicated_readonly_tls_labels(root_fd, document)
+    config = _dedicated_readonly_config_labels(
+        nginx_fd, public_fd, catalog_present=False, bootstrap=True)
+
+    def boundary():
+        check_layout()
+        labels.finish()
+        if (_load_private_under_root(root_fd, owner_uid=0, owner_gid=0)
+                != (report, new[V2_STATE])
+                or _dedicated_readonly_tls_labels(root_fd, document) != tls):
+            _deny("CANDIDATE_CHANGED")
+
+    def pre_wal():
+        boundary()
+        if (_read_owned_resources(state_fd, nginx_fd, public_fd) != old
+                or _dedicated_readonly_config_labels(
+                    nginx_fd, public_fd, catalog_present=False, bootstrap=True) != config):
+            _deny("CANDIDATE_CHANGED")
+        _owned_check_stages_absent(state_fd, nginx_fd, public_fd)
+
+    pre_wal()
+    wal = _publish_owned_wal_locked(state_fd, nginx_fd, public_fd, old, new,
+                                    pre_wal, live=True)
+    expected = dict(old)
+    for name in (_INCLUDE, _OWNED_MAIN):
+        _write_owned_initial_dedicated_config_locked(
+            root_fd, state_fd, nginx_fd, public_fd, boundary, wal, expected, name, new[name])
+    for name in (V2_STATE, _OWNED_MANIFEST):
+        _write_owned_initial_private_fixture_locked(
+            root_fd, state_fd, nginx_fd, public_fd, boundary, wal, expected, name, new[name])
+    reconstructed = _read_owned_initial_dedicated_prepared_locked(
+        root_fd, state_fd, nginx_fd, public_fd, boundary, expected_wal=wal)
+    if reconstructed != new:
+        _deny("CANDIDATE_CHANGED")
+    return wal, reconstructed
+
+
 def _owned_live_finish(state_fd: int, nginx_fd: int, public_fd: int,
                        check_layout, wal: bytes, expected: dict) -> None:
     _owned_live_guard(state_fd, nginx_fd, public_fd, check_layout, wal, expected)

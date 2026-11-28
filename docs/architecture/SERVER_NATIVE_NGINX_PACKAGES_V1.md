@@ -2024,3 +2024,17 @@ Retain the closed configuration and TLS identities and recheck exact
 resources and absence of stages. This supplies the candidate identity for
 future authenticated boot-policy/start/finalization composition, not the
 writer, service start or public-catalog authorization itself.
+
+### Detached complete initial prepared bytes
+
+The configuration-only writer is now composed with exclusive private
+state and manifest staging. The original authenticated intake and TLS
+identities are checked before WAL publication and throughout each guarded
+write. The private publisher retains its exclusive 0600 descriptor,
+checks root ownership, mount, inode, metadata and exact bytes, and uses
+atomic no-replace publication. Publish state before manifest; keep the
+catalog absent. Reconstruct the complete prepared generation under the
+same lock before returning its exact WAL and bytes. The actual host root
+is refused, interrupted private stages are retained, and no service or
+boot-policy operation is performed. Full private-stage rollback and
+installed lifecycle composition remain required before host activation.

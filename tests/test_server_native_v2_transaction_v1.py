@@ -6262,3 +6262,78 @@ def test_reconstruct_initial_withdrawn_generation(filesystem, monkeypatch, fault
     assert _fixture_resource_bytes(paths) == before
     assert (state / native._OWNED_WAL).exists()
     assert not filesystem[-1]
+
+
+@pytest.mark.parametrize("fault", [
+    "none", "foreign-state", "manifest-first", "stage-conflict", "late-target",
+    "changed-intake", "actual-root",
+])
+def test_stage_initial_dedicated_generation_fixture(filesystem, monkeypatch, fault):
+    old = _owned_bootstrap_resources()
+    new = _owned_generation(active=False, distribution="almalinux")
+    paths = _owned_fixture_paths(filesystem, old)
+    root_fd, state = filesystem[:2]
+    report = {"expected_generation": 0, "expected_state_sha256": None}
+    label = native._DEDICATED_PUBLIC_CONTEXT + b"\0"
+    monkeypatch.setattr(os, "listxattr", lambda fd: ["security.selinux"])
+    monkeypatch.setattr(os, "getxattr", lambda fd, name: label)
+    monkeypatch.setattr(os, "setxattr", lambda *a: pytest.fail("unexpected relabel"))
+    monkeypatch.setattr(native._Labels, "_command", staticmethod(lambda *a: b"Enforcing"))
+    monkeypatch.setattr(native, "_dedicated_readonly_tls_labels", lambda *a: ("tls",))
+    monkeypatch.setattr(native, "_prepare_owned_initial_dedicated_candidate_locked",
+                        lambda *a: (old, new, report))
+    intake_calls = []
+    def intake(*args, **kwargs):
+        intake_calls.append(1)
+        return report, b"foreign" if fault == "changed-intake" and len(intake_calls) == 2 else new[V2_STATE]
+    monkeypatch.setattr(native, "_load_private_under_root", intake)
+    original_rename = native._rename_directory_noreplace
+    def rename(parent, stage, destination, name):
+        if fault == "late-target" and name == V2_STATE:
+            paths[V2_STATE].write_bytes(b"foreign")
+            paths[V2_STATE].chmod(0o600)
+        return original_rename(parent, stage, destination, name)
+    monkeypatch.setattr(native, "_rename_directory_noreplace", rename)
+    with native._owned_fixture_layout(root_fd, recovering=False) as layout:
+        if fault == "none":
+            wal, reconstructed = native._stage_owned_initial_dedicated_generation_fixture_locked(
+                root_fd, *layout)
+            assert reconstructed == new
+            assert _fixture_resource_bytes(paths) == {**new, native._CATALOG: None}
+            assert (state / native._OWNED_WAL).read_bytes() == wal
+            assert all(stat.S_IMODE(paths[name].stat().st_mode) == 0o600
+                       for name in native._OWNED_PRIVATE)
+        elif fault in ("foreign-state", "manifest-first", "stage-conflict"):
+            wal = native._publish_owned_wal_locked(*layout[:3], old, new, layout[3], live=True)
+            expected = dict(old)
+            for name in (native._INCLUDE, native._OWNED_MAIN):
+                native._write_owned_initial_dedicated_config_locked(
+                    root_fd, *layout, wal, expected, name, new[name])
+            if fault == "foreign-state":
+                paths[V2_STATE].write_bytes(b"foreign")
+                paths[V2_STATE].chmod(0o600)
+            if fault == "stage-conflict":
+                (state / native._OWNED_STAGES[V2_STATE]).touch(mode=0o600)
+            name = native._OWNED_MANIFEST if fault == "manifest-first" else V2_STATE
+            with pytest.raises(native.NativeV2TransactionError):
+                native._write_owned_initial_private_fixture_locked(
+                    root_fd, *layout, wal, expected, name, new[name])
+            assert not paths[native._OWNED_MANIFEST].exists()
+        else:
+            with pytest.raises((native.NativeV2TransactionError, ValueError)):
+                if fault == "actual-root":
+                    real = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+                    try:
+                        native._stage_owned_initial_dedicated_generation_fixture_locked(real, *layout)
+                    finally:
+                        os.close(real)
+                else:
+                    native._stage_owned_initial_dedicated_generation_fixture_locked(root_fd, *layout)
+            assert not paths[native._OWNED_MANIFEST].exists()
+            if fault == "late-target":
+                assert paths[V2_STATE].read_bytes() == b"foreign"
+                assert (state / native._OWNED_STAGES[V2_STATE]).read_bytes() == new[V2_STATE]
+            else:
+                assert _fixture_resource_bytes(paths) == old
+    assert not paths[native._CATALOG].exists()
+    assert not filesystem[-1]
