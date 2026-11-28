@@ -284,6 +284,7 @@ _AUDIT_FAILURE_CODES = frozenset({
     "NATIVE_V2_OWNED_DIRECTORY_FOREIGN_ENTRY",
     "NATIVE_V2_OWNED_DIRECTORY_MODE_UNSAFE",
     "NATIVE_V2_OWNED_DEDICATED_CATALOG_LABEL_UNVERIFIED",
+    "NATIVE_V2_OWNED_DEDICATED_FINISH_RESOURCE_CHANGED",
     "NATIVE_V2_OWNED_LIVE_APPLY_RECOVERY_REQUIRED",
     "NATIVE_V2_OWNED_LIVE_APPLY_ROLLED_BACK",
     "NATIVE_V2_OWNED_LIVE_BOOTSTRAP_DRIFT",
@@ -3480,7 +3481,14 @@ def _finish_owned_prepared_wal_dedicated_locked(
                                       worker_uid=pwd.getpwnam("nginx").pw_uid)
         if plan["destinations"]:
             _deny("OWNED_BOOT_EGRESS_ACTIVE_ROUTES_REFUSED")
-        expected = {**old, _CATALOG: None}
+        withdrawn = {**old, _CATALOG: None}
+        current = _read_owned_resources(state, nginx, public)
+        # A killed finalizer may have published the exact prior catalog
+        # while the WAL remains durable. Do not adopt any other bytes.
+        if current != withdrawn and current != old:
+            _deny("OWNED_DEDICATED_FINISH_RESOURCE_CHANGED")
+        expected = dict(current)
+        published_before_retry = current == old
 
         def exact():
             _owned_live_guard(state, nginx, public, check_layout, expected_wal, expected)
@@ -3548,6 +3556,14 @@ def _finish_owned_prepared_wal_dedicated_locked(
                 _deny("OWNED_DEDICATED_FINISH_HEALTH_CHANGED")
             return result
 
+        # After a process interruption, first revoke only the exact
+        # previously published catalog, with its label and all ownership,
+        # runtime, policy and WAL checks intact. A fresh 404 and subsequent
+        # exact 200 are still mandatory; prior publication is not proof.
+        if published_before_retry:
+            guarded()
+            _owned_live_write(state, nginx, public, guarded, expected_wal,
+                              expected, _CATALOG, None)
         before = health(False)
         guarded()
         try:

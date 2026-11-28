@@ -2620,7 +2620,7 @@ try:
                     profile_receipt_sha256=observed_profile["receipt_sha256"],
                     executable_receipt_sha256=hashlib.sha256(receipt).hexdigest(),
                     recheck_authenticated_owner=receipts)
-            elif action in ("finish-dedicated","finish-dedicated-fault"):
+            elif action in ("finish-dedicated","finish-dedicated-fault","finish-dedicated-kill"):
                 assert pending
                 def finish():
                     return tx._finish_owned_prepared_wal_dedicated_locked(
@@ -2652,6 +2652,27 @@ try:
                     assert observed==[False,True]
                     assert tx._read_file(state,tx._OWNED_WAL,0,tx._MAX_WAL)==pending_raw
                     result={"compensated":True,"authorizes_nginx_activation":False}
+                elif action=="finish-dedicated-kill":
+                    # A real process interruption after exact publication
+                    # and actual HTTPS readback, before WAL removal. The
+                    # parent still holds the lock until the child exits;
+                    # the next signed invocation reacquires it afresh.
+                    import signal
+                    actual=tx._owned_dedicated_live_health_bound
+                    child=os.fork()
+                    if child==0:
+                        def kill_after_health(*args,**kw):
+                            witness=actual(*args,**kw)
+                            if kw["publish"]:
+                                os.kill(os.getpid(),signal.SIGKILL)
+                            return witness
+                        tx._owned_dedicated_live_health_bound=kill_after_health
+                        finish()
+                        os._exit(77)
+                    _,status=os.waitpid(child,0)
+                    assert os.WIFSIGNALED(status) and os.WTERMSIG(status)==signal.SIGKILL
+                    assert tx._read_file(state,tx._OWNED_WAL,0,tx._MAX_WAL)==pending_raw
+                    result={"interrupted":True,"authorizes_nginx_activation":False}
                 else:
                     result=finish()
                     assert tx._read_file(state,tx._OWNED_WAL,0,tx._MAX_WAL) is None
@@ -2933,6 +2954,14 @@ finally:
                     require_prior_resources()
                     assert fresh_catalog().startswith(b"HTTP/1.1 404 ")
                     require_status(OWN, True, False)
+                    interrupted = signed("finish-dedicated-kill")
+                    assert interrupted["interrupted"]
+                    assert digest(wal) == wal_hash and wal.stat().st_ino == wal_inode
+                    assert live_wal_resource_hashes() == state_before
+                    response = fresh_catalog()
+                    assert response.startswith(b"HTTP/1.1 200 ") and response.endswith(catalog.read_bytes())
+                    require_status(OWN, True, False)
+                    print("PASS: actual dedicated finalizer killed after pinned catalog publication; exact WAL remains", flush=True)
                     finished = signed("finish-dedicated")
                     assert finished["status"] == "OWNED_DEDICATED_WAL_ROLLBACK_OBSERVED"
                     assert finished["wal_sha256"] == wal_hash
@@ -2960,7 +2989,7 @@ finally:
                     assert os.getxattr(fd, "security.selinux").rstrip(b"\0") == b"system_u:object_r:repocache_nginx_ro_t:s0"
                     assert legacy_catalog_label
                     labels.append((catalog, fd, ident, legacy_catalog_label))
-                    print("PASS: actual dedicated WAL publication fault compensates to HTTP 404; retry publishes exact prior TLS catalog, removes WAL and refuses replay", flush=True)
+                    print("PASS: actual dedicated WAL publication fault compensates to HTTP 404; SIGKILL retry republishes exact prior TLS catalog, removes WAL and refuses replay", flush=True)
             else:
                 witnessed = signed("verify-committed-active")
                 assert witnessed["main_pid"] == started["main_pid"]

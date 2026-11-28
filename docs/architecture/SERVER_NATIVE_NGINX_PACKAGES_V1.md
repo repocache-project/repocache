@@ -1480,3 +1480,15 @@ diagnostics use the fixed local redacted vocabulary without extending the
 socket protocol. The independent disposable interrupted-generation witness
 also observes bounded convergence on the same signed unit, retaining the
 actual interrupt and exact durable WAL/catalog assertions.
+
+The prepared-WAL finalizer also recognizes the exact prior catalog already
+published under an unchanged v3 WAL after interruption. It requires the
+existing exact SELinux label and all authenticated owner, master, storage,
+policy and resource checks before withdrawing that catalog. Fresh pinned
+404 and 200 observations remain mandatory before WAL removal. A foreign
+catalog, changed label, missing WAL or uncertain owner is not adopted.
+The booted enforcing fixture separately exercises ordinary post-publication
+exception compensation and a real SIGKILL after actual published HTTPS
+readback, followed by a fresh locked retry. This remains a private
+prepared-profile recovery primitive; no installed activation selection,
+automatic boot, active route or new public authority is introduced.
