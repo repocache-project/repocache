@@ -42,7 +42,7 @@ def _setup(monkeypatch):
                         lambda: state.__setitem__(
                             "config_checks", state["config_checks"] + 1))
     monkeypatch.setattr(host, "_prepare_own_runtime_directory",
-                        lambda: state.__setitem__(
+                        lambda **_kwargs: state.__setitem__(
                             "runtime_preps", state["runtime_preps"] + 1))
     def storage(distribution, *, allow_create):
         state["storage_preps"].append((distribution, allow_create))
@@ -406,3 +406,885 @@ def test_mount_refusal_compensates_owned_start(monkeypatch):
         host._activate_audited_native_nginx_under_lock(11, "debian", host._BOOTSTRAP_CONFIG)
     assert state["commands"] == ["daemon-reload", "start", "stop", "disable"]
     assert not state["active"] and not state["enabled"]
+
+
+def test_managed_installer_refuses_inactive_without_effects(monkeypatch):
+    state = _setup(monkeypatch)
+    monkeypatch.setattr(host, "_read_v2", lambda *_: ({"state_generation": 1}, b"owned"))
+    with pytest.raises(stage.WorkerStageError, match="NATIVE_ACTIVATION_MANAGED_STATE_REFUSED"):
+        host._activate_audited_native_nginx_under_lock(
+            11, "debian", host._BOOTSTRAP_CONFIG, root_fd=10, unit_bytes=b"signed")
+    assert state["commands"] == [] and state["config_checks"] == 0
+    assert state["storage_preps"] == []
+
+
+def test_managed_installer_reuses_verified_generation_without_bootstrap(monkeypatch):
+    from contextlib import contextmanager
+
+    state = _setup(monkeypatch)
+    state["enabled"] = state["active"] = True
+    monkeypatch.setattr(host, "_read_v2", lambda *_: ({"state_generation": 1}, b"owned"))
+    @contextmanager
+    def layout(root, fd, *, recovering):
+        assert (root, fd, recovering) == (10, 11, False)
+        yield (11, 12, 13, lambda: None)
+    monkeypatch.setattr(host, "_owned_layout_locked", layout)
+    resources = {"catalog.json": b"catalog"}
+    monkeypatch.setattr(host, "_read_owned_resources", lambda *_: resources)
+    monkeypatch.setattr(host, "_validate_owned_resources", lambda *_a, **_kw: {"state_generation": 1})
+    monkeypatch.setattr(host, "_owned_socket_require_inactive_routes", lambda _: None)
+    monkeypatch.setattr(host, "_no_conflicting_owned_wal_pending", lambda _: None)
+    def observe(root, *, expected_unit):
+        assert (root, expected_unit) == (10, b"signed")
+        return (1234, (1, 2))
+    monkeypatch.setattr(host, "_owned_live_observe", observe)
+    monkeypatch.setattr(host, "_owned_live_validate", lambda *_: (None, 1, None))
+    def health(*args, **kwargs):
+        assert kwargs == {"publish": True, "expected_unit": b"signed"}
+        assert args[-1] == b"catalog"
+    monkeypatch.setattr(host, "_owned_live_health_bound", health)
+    report = host._activate_audited_native_nginx_under_lock(
+        11, "debian", host._BOOTSTRAP_CONFIG, root_fd=10, unit_bytes=b"signed")
+    assert report["state_generation"] == 1
+    assert report["status"] == "AUTHENTICATED_REPOCACHE_NGINX_ALREADY_ACTIVE"
+    assert state["commands"] == [] and state["config_checks"] == 0
+    assert state["storage_preps"] == [("debian", False), ("debian", False)]
+    assert state["storage_mounts"] == [1234, 1234]
+
+def _inactive_managed(monkeypatch):
+    from contextlib import contextmanager
+
+    state = _setup(monkeypatch)
+    state["enabled"] = True
+    monkeypatch.setattr(host, "_read_v2", lambda *_: ({"state_generation": 1}, b"owned"))
+    @contextmanager
+    def layout(root, fd, *, recovering):
+        assert (root, fd, recovering) == (10, 11, False)
+        yield (11, 12, 13, lambda: None)
+    monkeypatch.setattr(host, "_owned_layout_locked", layout)
+    monkeypatch.setattr(host, "_read_owned_resources", lambda *_: {"catalog.json": b"catalog"})
+    monkeypatch.setattr(host, "_validate_owned_resources", lambda *_a, **_kw: {"state_generation": 1})
+    monkeypatch.setattr(host, "_owned_socket_require_inactive_routes", lambda _: None)
+    monkeypatch.setattr(host, "_no_conflicting_owned_wal_pending", lambda _: None)
+    monkeypatch.setattr(host, "_read_exact_owned_unit_at",
+                        lambda *a, **kw: (1, 2))
+    def observe(root, *, expected_unit):
+        assert state["active"] and (root, expected_unit) == (10, b"signed")
+        return (1234, (1, 2))
+    monkeypatch.setattr(host, "_owned_live_observe", observe)
+    monkeypatch.setattr(host, "_owned_live_validate", lambda *_: (None, 1, None))
+    monkeypatch.setattr(host, "_owned_live_health_bound", lambda *a, **kw: None)
+    monkeypatch.setattr(host, "_cleanup_own_nginx_syntax_pid", lambda: None)
+    return state
+
+
+def test_enabled_inactive_managed_restart_preserves_generation_and_enablement(monkeypatch):
+    state = _inactive_managed(monkeypatch)
+    result = host._activate_audited_native_nginx_under_lock(
+        11, "debian", host._BOOTSTRAP_CONFIG, root_fd=10, unit_bytes=b"signed")
+    assert result["status"] == "AUTHENTICATED_REPOCACHE_NGINX_ACTIVE"
+    assert result["state_generation"] == 1
+    assert state["commands"] == ["start"]
+    assert state["active"] and state["enabled"] and state["config_checks"] == 0
+    assert state["runtime_preps"] == 1
+    assert all(not create for _, create in state["storage_preps"])
+
+
+def test_enabled_inactive_managed_restart_compensates_post_start_failure(monkeypatch):
+    state = _inactive_managed(monkeypatch)
+    from repocache.server_native_installed_storage_v1 import InstalledStorageError
+    def refuse(_pid):
+        raise InstalledStorageError("INSTALLED_NGINX_STORAGE_SERVICE_PARENT_WRITABLE")
+    monkeypatch.setattr(host, "verify_service_storage_mounts", refuse)
+    with pytest.raises(stage.WorkerStageError, match="NATIVE_ACTIVATION_FAILED_ROLLED_BACK"):
+        host._activate_audited_native_nginx_under_lock(
+            11, "debian", host._BOOTSTRAP_CONFIG, root_fd=10, unit_bytes=b"signed")
+    assert state["commands"] == ["start", "stop"]
+    assert not state["active"] and state["enabled"] and state["config_checks"] == 0
+
+
+def test_enabled_inactive_managed_restart_never_stops_unverified_master(monkeypatch):
+    state = _inactive_managed(monkeypatch)
+    def refuse(*a, **kw):
+        raise host.NativeV2TransactionError("NATIVE_V2_OWNED_LIVE_UNIT_UNVERIFIED")
+    monkeypatch.setattr(host, "_owned_live_observe", refuse)
+    with pytest.raises(stage.WorkerStageError, match="NATIVE_ACTIVATION_RECOVERY_REQUIRED"):
+        host._activate_audited_native_nginx_under_lock(
+            11, "debian", host._BOOTSTRAP_CONFIG, root_fd=10, unit_bytes=b"signed")
+    assert state["commands"] == ["start"]
+    assert state["enabled"]
+
+
+def test_enabled_inactive_managed_pending_refused_before_start(monkeypatch):
+    state = _inactive_managed(monkeypatch)
+    def pending(_fd):
+        raise host.NativeV2TransactionError("NATIVE_V2_OWNED_WAL_DOMAIN_REQUIRED")
+    monkeypatch.setattr(host, "_no_conflicting_owned_wal_pending", pending)
+    with pytest.raises(stage.WorkerStageError, match="NATIVE_ACTIVATION_MANAGED_STATE_REFUSED"):
+        host._activate_audited_native_nginx_under_lock(
+            11, "debian", host._BOOTSTRAP_CONFIG, root_fd=10, unit_bytes=b"signed")
+    assert state["commands"] == [] and state["runtime_preps"] == 0
+
+def test_enabled_inactive_managed_restart_never_stops_replaced_master(monkeypatch):
+    state = _inactive_managed(monkeypatch)
+    from repocache.server_native_installed_storage_v1 import InstalledStorageError
+    observed = iter(((1234, (1, 2)), (1235, (1, 2))))
+    monkeypatch.setattr(host, "_owned_live_observe", lambda *a, **kw: next(observed))
+    def refuse(_pid):
+        raise InstalledStorageError("INSTALLED_NGINX_STORAGE_SERVICE_PARENT_WRITABLE")
+    monkeypatch.setattr(host, "verify_service_storage_mounts", refuse)
+    with pytest.raises(stage.WorkerStageError, match="NATIVE_ACTIVATION_RECOVERY_REQUIRED"):
+        host._activate_audited_native_nginx_under_lock(
+            11, "debian", host._BOOTSTRAP_CONFIG, root_fd=10, unit_bytes=b"signed")
+    assert state["commands"] == ["start"]
+    assert state["enabled"]
+
+
+def test_fixture_selinux_connect_denied_matches_only_current_enforcing_worker():
+    from scripts.ci_native_nginx_activate_guest import fixture_selinux_connect_denied
+
+    record = ('type=AVC msg=audit(1.0:1): avc:  denied  { name_connect } '
+              'for pid=123 comm="nginx" dest=8008 '
+              'scontext=system_u:system_r:httpd_t:s0 '
+              'tcontext=system_u:object_r:http_port_t:s0 tclass=tcp_socket '
+              'permissive=0')
+    assert fixture_selinux_connect_denied(record, {123})
+    assert fixture_selinux_connect_denied(
+        "audit: " + record.replace("type=AVC", "type=1400"), {123})
+    assert not fixture_selinux_connect_denied(record.replace("type=AVC", "type=1300"), {123})
+    assert not fixture_selinux_connect_denied(record, {124})
+    assert not fixture_selinux_connect_denied(record, set())
+    for old, new in (
+        ("type=AVC", "type=SYSCALL"),
+        ("name_connect", "name_bind"),
+        ('comm="nginx"', 'comm="python"'),
+        ("dest=8008", "dest=8009"),
+        (":httpd_t:", ":unconfined_t:"),
+        ("tclass=tcp_socket", "tclass=udp_socket"),
+        ("permissive=0", "permissive=1"),
+    ):
+        assert not fixture_selinux_connect_denied(record.replace(old, new), {123})
+    assert not fixture_selinux_connect_denied("x" * (1024 * 1024 + 1) + record, {123})
+    assert not fixture_selinux_connect_denied(record.replace(" dest=8008", "\n dest=8008"), {123})
+
+
+def test_fixture_policy_port_context_matches_kernel_first_tcp_interval():
+    from types import SimpleNamespace
+    from scripts.ci_native_nginx_activate_guest import fixture_port_context
+
+    def rule(protocol, low, high, context):
+        return SimpleNamespace(protocol=protocol,
+                               ports=SimpleNamespace(low=low, high=high),
+                               context=context)
+    label = "system_u:object_r:http_port_t:s0"
+    foreign = "system_u:object_r:unreserved_port_t:s0"
+    rules = [rule("tcp", 443, 443, label), rule("tcp", 8008, 8009, label),
+             rule("udp", 8008, 8008, foreign)]
+    assert fixture_port_context(rules, 443) == label
+    assert fixture_port_context(rules, 8008) == label
+    assert fixture_port_context(rules, 8009) is None
+    assert fixture_port_context([rule("tcp", 8009, 8010, label)], 8008) is None
+    # The actual kernel lookup follows policy order even when intervals overlap.
+    assert fixture_port_context(rules + [rule("tcp", 1024, 65535, foreign)], 8008) == label
+    assert fixture_port_context([rule("tcp", 1024, 65535, foreign)] + rules, 8008) == foreign
+    assert fixture_port_context([rule("tcp", 1, 511, foreign)] + rules, 443) == foreign
+    assert fixture_port_context([rule("tcp", 8008, 8008, "unsafe label")] + rules, 8008) is None
+    assert fixture_port_context([rule("tcp", 8008, 8008, "unsafe label")], 8008) is None
+
+
+def test_fixture_upstream_eacces_matches_current_worker_and_exact_endpoint():
+    from scripts.ci_native_nginx_activate_guest import fixture_upstream_connect_eacces
+
+    record = ("2026/11/25 18:00:00 [crit] 123#123: *7 "
+              "connect() to 127.0.0.1:8008 failed (13: Permission denied) "
+              "while connecting to upstream, client: fixture")
+    assert fixture_upstream_connect_eacces(record, {123})
+    assert not fixture_upstream_connect_eacces(record, {124})
+    assert not fixture_upstream_connect_eacces(record, set())
+    for old, new in (
+        ("127.0.0.1:8008", "127.0.0.1:443"),
+        ("127.0.0.1:8008", "127.0.0.1:80080"),
+        ("13: Permission denied", "111: Connection refused"),
+        ("connect()", "open()"),
+        ("while connecting to upstream", "while reading upstream"),
+    ):
+        assert not fixture_upstream_connect_eacces(record.replace(old, new), {123})
+    assert not fixture_upstream_connect_eacces("x" * (1024 * 1024 + 1) + record, {123})
+
+
+def test_fixture_control_worker_waits_for_clean_exit(monkeypatch):
+    from scripts import ci_native_nginx_activate_guest as guest
+
+    def state(active, sub, pid):
+        return SimpleNamespace(returncode=0, stdout=(
+            f"LoadState=loaded\nActiveState={active}\nSubState={sub}\n"
+            f"Result=success\nMainPID={pid}\nControlPID=0\nExecMainStatus=0\n"))
+    observations = iter([state("activating", "start", 123),
+                         state("inactive", "dead", 0)])
+    calls = []
+    def run(*args):
+        calls.append(args)
+        return next(observations)
+    monkeypatch.setattr(guest, "run", run)
+    monkeypatch.setattr(guest.time, "sleep", lambda _: None)
+    guest.require_control_worker_idle()
+    assert len(calls) == 2
+    assert all(call[:3] == ("/usr/bin/systemctl", "show",
+                            "repocache-control.service") for call in calls)
+
+
+@pytest.mark.parametrize("change", [
+    "ActiveState=failed", "Result=exit-code", "ExecMainStatus=1",
+    "MainPID=123", "ControlPID=123", "SubState=exited",
+    "ActiveState=active", "ActiveState=activating", "LoadState=not-found",
+    "missing", "duplicate", "command-failed",
+])
+def test_fixture_control_worker_refuses_unclean_or_unavailable_state(monkeypatch, change):
+    from scripts import ci_native_nginx_activate_guest as guest
+
+    fields = dict(LoadState="loaded", ActiveState="inactive", SubState="dead",
+                  Result="success", MainPID="0", ControlPID="0", ExecMainStatus="0")
+    if "=" in change:
+        key, value = change.split("=")
+        fields[key] = value
+    elif change == "missing":
+        del fields["Result"]
+    raw = "\n".join(f"{key}={value}" for key, value in fields.items())
+    if change == "duplicate":
+        raw += "\nResult=success"
+    monkeypatch.setattr(guest, "run", lambda *args: SimpleNamespace(
+        returncode=1 if change == "command-failed" else 0, stdout=raw))
+    with pytest.raises(AssertionError):
+        guest.require_control_worker_idle(timeout=0)
+
+
+def test_isolated_selinux_egress_rules_have_exact_default_and_separate_negative_probe():
+    from scripts import ci_selinux_nginx_egress_guest as guest
+    normal = guest.nft_rules(987)
+    negative = guest.nft_rules(987, negative_port_probe=True)
+    assert "ip daddr 127.0.0.1 tcp dport 443 accept" in normal
+    assert "5432" not in normal
+    assert negative.replace("{443,5432}", "443") == normal
+    assert "meta skuid 987 counter name denied reject" in normal
+    for invalid in (0, -1, True, "987", 2**31):
+        with pytest.raises(AssertionError):
+            guest.nft_rules(invalid)
+
+
+def test_isolated_selinux_egress_guard_precedes_policy_and_network(monkeypatch):
+    from scripts import ci_selinux_nginx_egress_guest as guest
+    def refuse():
+        raise AssertionError("not the authorized VM")
+    monkeypatch.setattr(guest, "guard", refuse)
+    monkeypatch.setattr(guest, "command", lambda *_a, **_kw:
+                        pytest.fail("mutation before native guard"))
+    with pytest.raises(AssertionError, match="authorized VM"):
+        guest.probe()
+
+
+
+def test_isolated_derived_unit_preserves_signed_contract_and_private_paths():
+    from pathlib import Path
+    from scripts import ci_selinux_nginx_egress_guest as guest
+
+    signed = (Path(__file__).resolve().parents[1] /
+              "docs/examples/systemd/repocache-nginx.service").read_bytes()
+    root = Path("/var/lib/repocache-ci-selinux-test")
+    derived = guest.derive_signed_unit(signed, root).decode("ascii")
+    import configparser
+    parsed = configparser.ConfigParser(interpolation=None, strict=True)
+    parsed.optionxform = str
+    parsed.read_string(derived)
+    assert parsed.sections() == ["Unit", "Service"]
+    assert parsed["Unit"]["Description"] == "REPOCACHE CI derived signed unit"
+    assert parsed["Service"]["Type"] == "forking"
+    assert parsed["Service"]["CapabilityBoundingSet"] == ""
+    assert "Type=forking" in derived and "NoNewPrivileges=yes" in derived
+    assert "User=nginx" in derived and "Group=nginx" in derived
+    assert "CapabilityBoundingSet=\n" in derived
+    assert "ProtectHome=yes" in derived and "ProtectSystem=strict" in derived
+    assert "ExecStartPre=" + str(root / "nginx") in derived
+    assert "ExecReload=" + str(root / "nginx") in derived
+    assert "ExecStop=" + str(root / "nginx") in derived
+    assert "/usr/sbin/nginx" not in derived and "/etc/nginx/" not in derived
+    assert "RuntimeDirectory=" not in derived and "[Install]" not in derived
+    for bad in (signed.replace(b"Type=forking", b"Type=exec"),
+                signed.replace(b"NoNewPrivileges=yes", b"NoNewPrivileges=no"),
+                signed.replace(b"KillMode=mixed", b"KillMode=mixed\nExecStartPost=/bin/false")):
+        from repocache.server_native_nginx_effective_unit_v1 import EffectiveNginxUnitError
+        for root_master in (False, True):
+            with pytest.raises(EffectiveNginxUnitError, match="NAMESPACE_UNIT_SOURCE_INVALID"):
+                guest.derive_signed_unit(bad, root, root_master=root_master)
+    with pytest.raises(AssertionError):
+        guest.derive_signed_unit(signed, Path("/"))
+
+
+def test_isolated_derived_root_uses_implicit_identity_and_same_four_caps():
+    import configparser
+    from pathlib import Path
+    from scripts import ci_selinux_nginx_egress_guest as guest
+
+    signed = (Path(__file__).resolve().parents[1] /
+              "docs/examples/systemd/repocache-nginx.service").read_bytes()
+    root = Path("/var/lib/repocache-ci-selinux-test")
+    parsed = configparser.ConfigParser(interpolation=None, strict=True)
+    parsed.optionxform = str
+    parsed.read_string(guest.derive_signed_unit(signed, root, root_master=True).decode("ascii"))
+    svc = parsed["Service"]
+    assert "User" not in svc and "Group" not in svc
+    assert svc["CapabilityBoundingSet"].split() == ["CAP_CHOWN", "CAP_KILL", "CAP_SETGID", "CAP_SETUID"]
+    assert "AmbientCapabilities" not in svc
+    assert svc["NoNewPrivileges"] == "yes"
+    assert svc["RestrictAddressFamilies"] == "AF_UNIX AF_INET AF_INET6"
+    assert svc["ProtectSystem"] == "strict" and svc["ProtectHome"] == "yes"
+    assert svc["Type"] == "forking"
+    assert parsed.sections() == ["Unit", "Service"]
+
+
+def test_isolated_selinux_guard_rejects_optimized_python_before_io():
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    scripts = Path(__file__).resolve().parents[1] / "scripts"
+    code = """
+import sys
+sys.path.insert(0, sys.argv[1])
+import ci_selinux_nginx_egress_guest as guest
+try:
+    guest.guard()
+except AssertionError as exc:
+    if str(exc) == "Native isolated fixture requires assertions enabled":
+        raise SystemExit(0)
+raise SystemExit(91)
+"""
+    result = subprocess.run([sys.executable, "-I", "-O", "-c", code, str(scripts)],
+                            capture_output=True, timeout=15, check=False)
+    assert result.returncode == 0, result.stderr
+
+
+def test_isolated_remote_egress_is_root_only_and_exact_tuple_bound():
+    from scripts import ci_selinux_nginx_egress_guest as guest
+
+    first = guest.nft_rules(987, root_master=True, remote=True)
+    both = guest.nft_rules(987, root_master=True, remote=True, custom_https=True)
+    assert "policy drop" in first
+    assert "meta skuid 0 ip daddr 127.0.0.1 tcp dport 8443 accept" in first
+    assert "meta skuid 987 ip daddr 192.0.2.2 tcp dport 443 accept" in first
+    assert "192.0.2.3" not in first
+    assert "meta skuid 987 ip daddr 192.0.2.3 tcp dport 8008 accept" in both
+    assert "meta skuid 987 ip daddr 192.0.2.2 tcp dport 8008 accept" not in both
+    assert "meta skuid 987 ip daddr 192.0.2.3 tcp dport 443 accept" not in both
+    assert "meta skuid 987 ip daddr 127.0.0.1" not in both
+    assert "meta skuid 0 ip daddr 192.0.2." not in both
+    assert "5432" not in both
+    with pytest.raises(AssertionError):
+        guest.nft_rules(987, remote=True)
+    with pytest.raises(AssertionError):
+        guest.nft_rules(987, root_master=True, remote=True, negative_port_probe=True)
+    with pytest.raises(AssertionError):
+        guest.nft_rules(987, root_master=True, remote=1)
+
+
+def test_peer_denial_counter_requires_exact_named_kernel_counter():
+    from scripts.ci_selinux_nginx_egress_guest import parse_denied_packets
+    data = {"nftables": [{"metainfo": {}}, {"counter": {"family": "inet",
+             "table": "repocache_egress", "name": "denied", "packets": 4}}]}
+    assert parse_denied_packets(data) == 4
+    for field, value in (("family", "ip"), ("table", "foreign"),
+                         ("name", "other"), ("packets", True), ("packets", -1)):
+        bad = {"nftables": [{"counter": {**data["nftables"][1]["counter"], field: value}}]}
+        with pytest.raises(AssertionError):
+            parse_denied_packets(bad)
+
+
+
+def test_isolated_fixed_candidate_keeps_authenticated_installed_executable():
+    import configparser
+    from pathlib import Path
+    from scripts import ci_selinux_nginx_egress_guest as guest
+
+    raw = (Path(__file__).resolve().parents[1] /
+           "docs/examples/systemd/repocache-nginx.service").read_bytes()
+    root = Path("/var/lib/repocache-ci-selinux-test")
+    parsed = configparser.ConfigParser(interpolation=None, strict=True)
+    parsed.optionxform = str
+    parsed.read_string(guest.derive_signed_unit(
+        raw, root, root_master=True, fixed_candidate=True).decode("ascii"))
+    service = parsed["Service"]
+    for action in ("ExecStartPre", "ExecStart", "ExecReload", "ExecStop"):
+        assert service[action].startswith("/usr/libexec/repocache/nginx -e stderr -p " + str(root))
+        assert service[action].endswith("-c " + str(root / "nginx.conf"))
+    assert service["NetworkNamespacePath"] == "/run/netns/repocache-nginx"
+    assert service["NoNewPrivileges"] == "yes"
+    assert service["CapabilityBoundingSet"] == "CAP_CHOWN CAP_KILL CAP_SETGID CAP_SETUID"
+    assert "User" not in service and "AmbientCapabilities" not in service
+    assert parsed.sections() == ["Unit", "Service"]
+    with pytest.raises(AssertionError):
+        guest.derive_signed_unit(raw, root, fixed_candidate=True)
+
+
+@pytest.mark.parametrize("signed,pending", [(False, True), (True, True), (True, False)])
+def test_signed_activation_routes_published_wal_only_with_authenticated_caller(
+        monkeypatch, signed, pending):
+    state = _setup(monkeypatch)
+    calls = []
+    monkeypatch.setattr(host, "_read_file",
+                        lambda *args: b"wal" if pending else None)
+    monkeypatch.setattr(host, "_recover_enabled_inactive_owned_wal_under_lock",
+                        lambda *args: calls.append(args) or {"status": "RECOVERY"})
+    proof = lambda: None
+    if pending:
+        def reject_unowned(*args):
+            raise host.NativeV2TransactionError("PENDING")
+        monkeypatch.setattr(host, "_no_conflicting_pending", reject_unowned)
+    def invoke():
+        return host._activate_audited_native_nginx_under_lock(
+            11, "debian", host._BOOTSTRAP_CONFIG, root_fd=10, unit_bytes=b"signed",
+            recheck_signed_worker=proof if signed else None)
+    if pending and not signed:
+        with pytest.raises(host.NativeV2TransactionError, match="PENDING"):
+            invoke()
+        assert not calls and not state["commands"]
+        return
+    result = invoke()
+    if signed and pending:
+        assert calls == [(10, 11, "debian", b"signed", b"wal", proof)]
+        assert result == {"status": "RECOVERY"}
+        assert not state["commands"]
+    else:
+        assert not calls
+        assert state["commands"] == ["daemon-reload", "start", "enable"]
+
+
+@pytest.mark.parametrize("fault", ["none", "start", "health", "wal-unlink",
+                                    "foreign-master", "disabled", "active",
+                                    "vendor-enabled", "vendor-active"])
+def test_signed_pending_inactive_recovery_preserves_enablement_and_exact_authority(
+        monkeypatch, fault):
+    from contextlib import contextmanager
+    state = _setup(monkeypatch)
+    state["enabled"] = fault != "disabled"
+    state["active"] = fault == "active"
+    original_vendor = host._nginx_systemctl
+    def vendor(action):
+        if fault == "vendor-enabled" and action == "is-enabled":
+            return 0, b"enabled\n"
+        if fault == "vendor-active" and action == "is-active":
+            return 0, b"active\n"
+        return original_vendor(action)
+    monkeypatch.setattr(host, "_nginx_systemctl", vendor)
+    calls = []
+    wal = [b"wal"]
+    old = {host._CATALOG: b"prior", "other": b"bytes"}
+    current = {**old, host._CATALOG: None}
+
+    @contextmanager
+    def layout(root, fd, *, recovering):
+        assert (root, fd, recovering) == (10, 11, True)
+        yield 11, 12, 13, lambda: None
+
+    monkeypatch.setattr(host, "_owned_layout_locked", layout)
+    monkeypatch.setattr(host, "_decode_owned_wal", lambda *a, **kw: (old, {}))
+    monkeypatch.setattr(host, "_validate_owned_resources",
+                        lambda *a, **kw: {"state_generation": 1})
+    monkeypatch.setattr(host, "_owned_socket_require_inactive_routes", lambda _: None)
+    monkeypatch.setattr(host, "_read_exact_owned_unit_at", lambda *a, **kw: (1, 2))
+
+    def guard(*args):
+        assert args[-1] == current
+        if wal[0] != args[-2]:
+            raise host.NativeV2TransactionError("WAL_CHANGED")
+
+    monkeypatch.setattr(host, "_owned_live_guard", guard)
+    monkeypatch.setattr(host, "_owned_live_validate", lambda *a: ({}, 1, "a"*64))
+    monkeypatch.setattr(host, "_cleanup_own_nginx_syntax_pid", lambda: None)
+
+    def prepare(*args, **kw):
+        kw["recheck_stopped_owner"]()
+        assert not state["active"] and state["enabled"]
+        calls.append("prepare")
+
+    def observe(root, *, expected_unit):
+        assert state["active"] and (root, expected_unit) == (10, b"signed")
+        if fault == "foreign-master":
+            raise host.NativeV2TransactionError("MASTER_UNVERIFIED")
+        return 1234, (1, 2)
+
+    def finish(*args, **kw):
+        kw["recheck_active_owner"]()
+        calls.append("finish")
+        if fault == "health":
+            raise host.NativeV2TransactionError("HEALTH")
+        wal[0] = None
+        if fault == "wal-unlink":
+            raise OSError("uncertain unlink")
+        return {"status": "OWNED_INACTIVE_WAL_ROLLBACK_OBSERVED",
+                "prior_generation": 1, "recovery_required": False}
+
+    monkeypatch.setattr(host, "_prepare_owned_inactive_wal_rollback_locked", prepare)
+    monkeypatch.setattr(host, "_owned_live_observe", observe)
+    monkeypatch.setattr(host, "_finish_owned_inactive_wal_rollback_locked", finish)
+    actual = host._nginx_activation_command
+
+    def activate(action):
+        if fault == "start" and action == "start":
+            state["commands"].append(action)
+            raise stage.WorkerStageError("START_FAILED")
+        actual(action)
+
+    monkeypatch.setattr(host, "_nginx_activation_command", activate)
+    def invoke():
+        return host._recover_enabled_inactive_owned_wal_under_lock(
+            10, 11, "debian", b"signed", b"wal", lambda: None)
+
+    if fault == "none":
+        assert invoke()["state_generation"] == 1
+        assert calls == ["prepare", "finish"]
+        assert state["commands"] == ["start"] and state["active"]
+    else:
+        with pytest.raises(stage.WorkerStageError):
+            invoke()
+        if fault in ("disabled", "active", "vendor-enabled", "vendor-active"):
+            assert not calls and not state["commands"]
+        elif fault == "start":
+            assert calls == ["prepare"] and state["commands"] == ["start"]
+            assert not state["active"]
+        elif fault == "health":
+            assert calls == ["prepare", "finish"] and state["commands"] == ["start", "stop"]
+            assert not state["active"]
+        else:
+            assert state["commands"] == ["start"] and state["active"]
+    assert state["enabled"] == (fault != "disabled")
+
+
+
+@pytest.mark.parametrize("directory", [False, True])
+def test_fixture_storage_move_uses_actual_noreplace_api(tmp_path, directory):
+    from scripts.ci_native_nginx_activate_guest import fixture_move_same_parent_noreplace
+
+    source = tmp_path / "legacy"
+    target = tmp_path / "backup"
+    if directory:
+        source.mkdir()
+    else:
+        source.write_bytes(b"owner marker")
+    before = source.stat()
+    fixture_move_same_parent_noreplace(source, target)
+    assert not source.exists()
+    assert (target.stat().st_dev, target.stat().st_ino) == (before.st_dev, before.st_ino)
+    fixture_move_same_parent_noreplace(target, source)
+    assert source.stat().st_ino == before.st_ino
+    assert not target.exists()
+
+
+def test_fixture_storage_move_refuses_foreign_destination(tmp_path, monkeypatch):
+    from scripts.ci_native_nginx_activate_guest import fixture_move_same_parent_noreplace
+    from repocache import server_native_installed_storage_v1 as storage
+
+    source = tmp_path / "legacy"
+    target = tmp_path / "backup"
+    source.write_bytes(b"owned")
+    target.write_bytes(b"foreign")
+    with pytest.raises(AssertionError, match="Unsafe fixture move"):
+        fixture_move_same_parent_noreplace(source, target)
+    target.unlink()
+    original = storage._rename_directory_noreplace
+    def race(parent, stage, directory, name):
+        target.write_bytes(b"foreign")
+        return original(parent, stage, directory, name)
+    monkeypatch.setattr(storage, "_rename_directory_noreplace", race)
+    with pytest.raises(storage.InstalledStorageError, match="DATA_PUBLICATION_REFUSED"):
+        fixture_move_same_parent_noreplace(source, target)
+    assert source.read_bytes() == b"owned"
+    assert target.read_bytes() == b"foreign"
+
+
+def test_fixture_storage_move_refuses_other_parent(tmp_path):
+    from scripts.ci_native_nginx_activate_guest import fixture_move_same_parent_noreplace
+
+    source = tmp_path / "legacy"
+    source.write_bytes(b"owned")
+    other = tmp_path / "other"
+    other.mkdir()
+    with pytest.raises(AssertionError, match="Unsafe fixture move"):
+        fixture_move_same_parent_noreplace(source, other / "backup")
+    assert source.read_bytes() == b"owned"
+    assert not list(other.iterdir())
+
+
+@pytest.mark.parametrize("fault", ["all", "partial", "absent", "foreign", "nonempty",
+                                   "replacement", "symlink", "archive-exists", "parent-mode"])
+def test_fixture_preserves_only_exact_stopped_runtime(tmp_path, monkeypatch, fault):
+    import os
+    import stat
+    from scripts import ci_native_nginx_activate_guest as guest
+    from repocache import server_native_v2_transaction_v1 as tx
+
+    runtime = tmp_path / "run/repocache-nginx"
+    runtime.mkdir(parents=True)
+    names = ("client-body", "proxy", "fastcgi", "scgi", "uwsgi")
+    for name in names:
+        (runtime / name).mkdir(mode=0o700)
+    archive = runtime.parent / ".ci-data-dedicated-runtime"
+    def ident(path):
+        st = path.lstat()
+        return (st.st_dev, st.st_ino, st.st_mode, st.st_uid, st.st_gid)
+    def snapshot(root, *, dedicated, require_all=False, inactive):
+        assert dedicated and inactive and not require_all
+        leaves = {}
+        for path in runtime.iterdir():
+            assert path.name in names and stat.S_ISDIR(path.lstat().st_mode)
+            assert not list(path.iterdir())
+            leaves[path.name] = ident(path) + (b"rw",)
+        return ident(runtime) + (b"pid",), leaves
+    expected = snapshot(0, dedicated=True, inactive=True)
+    monkeypatch.setattr(tx, "_owned_alma_runtime_temps", snapshot)
+    if fault in ("partial", "absent"):
+        for name in (names if fault == "absent" else names[:2]):
+            (runtime / name).rmdir()
+        if fault == "absent":
+            runtime.rmdir()
+    elif fault == "foreign":
+        (runtime / "foreign").mkdir()
+    elif fault == "nonempty":
+        (runtime / names[0] / "retain").write_bytes(b"foreign")
+    elif fault == "replacement":
+        (runtime / names[0]).rename(runtime.parent / "old")
+        (runtime / names[0]).mkdir(mode=0o700)
+    elif fault == "symlink":
+        (runtime / names[0]).rmdir()
+        (runtime / names[0]).symlink_to(tmp_path, target_is_directory=True)
+    elif fault == "archive-exists":
+        archive.mkdir()
+    elif fault == "parent-mode":
+        runtime.chmod(0o777)
+    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        if fault in ("all", "partial", "absent"):
+            assert guest.fixture_archive_stopped_runtime(
+                fd, expected, archive.name) == (fault != "absent")
+            assert not runtime.exists()
+            if fault != "absent":
+                assert ident(archive) == expected[0][:5]
+                assert {p.name for p in archive.iterdir()} == (
+                    set(names) if fault == "all" else set(names[2:]))
+                assert all(ident(p) == expected[1][p.name][:5] for p in archive.iterdir())
+        else:
+            with pytest.raises((AssertionError, OSError)):
+                guest.fixture_archive_stopped_runtime(fd, expected, archive.name)
+            assert runtime.exists()
+            assert archive.exists() == (fault == "archive-exists")
+            if fault == "nonempty":
+                assert (runtime / names[0] / "retain").read_bytes() == b"foreign"
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("fault", ["legacy", "rolled", "partial", "foreign",
+                                    "rollover", "no-wal", "debian", "selection",
+                                    "bridge", "symlink", "bad-selection",
+                                    "committed", "committed-bridge", "committed-selection"])
+def test_authenticated_activation_selects_dedicated_only_from_retained_evidence(
+        monkeypatch, tmp_path, fault):
+    import os
+    from contextlib import contextmanager
+    from repocache import server_native_nginx_effective_unit_v1 as unit
+    from repocache import server_native_egress_candidate_v1 as egress
+    from repocache import server_native_v2_transaction_v1 as tx
+
+    release = dict(commit="a"*40, archive_sha256="b"*64)
+    selected = dict(executable_receipt_sha256="c"*64, profile_receipt_sha256="d"*64,
+                    boot_receipt_sha256="e"*64, wal_sha256="f"*64)
+    names = [unit._NAMESPACE_PROFILE_RECEIPT, egress._BOOT_EGRESS_RECEIPT,
+             egress._BOOT_EGRESS_HISTORY_PREFIX + "11111111-1111-1111-1111-111111111111",
+             host._OWNED_WAL]
+    if fault == "legacy":
+        names = []
+    elif fault == "partial":
+        names = names[:1]
+    elif fault == "foreign":
+        names.append(egress._BOOT_EGRESS_RECEIPT + ".foreign")
+    elif fault == "rollover":
+        names.append(egress._BOOT_EGRESS_ROLLOVER)
+    elif fault == "no-wal" or fault.startswith("committed"):
+        names.remove(host._OWNED_WAL)
+        if fault.startswith("committed"):
+            del selected["wal_sha256"]
+            selected["generation_manifest_sha256"] = "f"*64
+    for name in names:
+        (tmp_path / name).touch()
+    if fault == "symlink":
+        (tmp_path / unit._NAMESPACE_PROFILE_RECEIPT).unlink()
+        (tmp_path / unit._NAMESPACE_PROFILE_RECEIPT).symlink_to(tmp_path / "missing")
+    before = sorted(os.listdir(tmp_path))
+    locked = False
+    calls = []
+    monkeypatch.setattr(host, "_native_distro", lambda: "debian" if fault == "debian" else "almalinux")
+    monkeypatch.setattr(host, "require_native_host_preconditions", lambda: None)
+    monkeypatch.setattr(stage, "verify_installed_worker", lambda *a, **kw: {
+        "status": "AUTHENTICATED_WORKER_FILES_MATCH", "source_sha": release["commit"],
+        "archive_sha256": release["archive_sha256"], "authorizes_host_installation": False,
+        "authorizes_service_activation": False})
+    monkeypatch.setattr(stage, "_authenticated_payloads", lambda *a, **kw: (
+        {stage.CONFIG: host._BOOTSTRAP_CONFIG, host._OWN_UNIT: b"signed unit"}, {}))
+    def audit(*a):
+        assert locked
+        calls.append("audit")
+    monkeypatch.setattr(stage, "_audit_worker_files", audit)
+
+    @contextmanager
+    def lock(root, owner):
+        nonlocal locked
+        fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+        locked = True
+        try:
+            yield fd
+        finally:
+            locked = False
+            os.close(fd)
+    monkeypatch.setattr(host, "_locked", lock)
+    monkeypatch.setattr(host, "_require_audited_native_package_for_activation", lambda *a, **kw: None)
+    def retain(root, state):
+        assert locked
+        calls.append("select")
+        if fault == "selection":
+            raise tx.NativeV2TransactionError("OWNED_BOOT_REFUSED")
+        return None if fault == "bad-selection" else selected
+    monkeypatch.setattr(tx, "_retained_rolled_dedicated_recovery_pins_locked", retain)
+    def retain_committed(root, state):
+        assert locked
+        calls.append("select")
+        if fault in ("no-wal", "committed-selection"):
+            raise tx.NativeV2TransactionError("OWNED_BOOT_REFUSED")
+        return selected
+    monkeypatch.setattr(tx, "_retained_rolled_committed_dedicated_pins_locked", retain_committed)
+    def legacy(*a, **kw):
+        assert locked and fault == "legacy"
+        calls.append("legacy")
+        return {"status": "LEGACY"}
+    monkeypatch.setattr(host, "_activate_audited_native_nginx_under_lock", legacy)
+    def recover(assets, **kw):
+        assert not locked and kw == {**release, "expected_pins": selected}
+        calls.append("recover")
+        if fault == "bridge":
+            raise stage.WorkerStageError("RECOVERY_REFUSED")
+        return {"status": "OWNED_DEDICATED_WAL_ROLLBACK_OBSERVED"}
+    monkeypatch.setattr(host, "_recover_authenticated_rolled_dedicated_nginx", recover)
+    def start(assets, **kw):
+        assert not locked and kw == {**release, "expected_rolled_pins": selected,
+                                     "recovery_pins": None, "start": True}
+        calls.append("start")
+        if fault == "committed-bridge":
+            raise stage.WorkerStageError("START_REFUSED")
+        return {"status": "OWNED_DEDICATED_COMMITTED_START_OBSERVED"}
+    monkeypatch.setattr(host, "_authenticated_prepared_dedicated_bridge", start)
+    if fault == "legacy":
+        assert host.activate_authenticated_native_nginx(tmp_path, **release) == {"status": "LEGACY"}
+        assert calls == ["audit", "legacy"]
+    elif fault == "rolled":
+        assert host.activate_authenticated_native_nginx(tmp_path, **release) == {
+            "status": "OWNED_DEDICATED_WAL_ROLLBACK_OBSERVED",
+            "nginx_active_verified": True, "nginx_enabled_verified": False,
+            "enablement_changed": False}
+        assert calls == ["audit", "select", "audit", "recover"]
+    elif fault == "committed":
+        assert host.activate_authenticated_native_nginx(tmp_path, **release) == {
+            "status": "OWNED_DEDICATED_COMMITTED_START_OBSERVED",
+            "nginx_active_verified": True, "nginx_enabled_verified": False,
+            "enablement_changed": False}
+        assert calls == ["audit", "select", "audit", "start"]
+    else:
+        with pytest.raises((stage.WorkerStageError, tx.NativeV2TransactionError)):
+            host.activate_authenticated_native_nginx(tmp_path, **release)
+        assert calls == (["audit", "select", "audit", "recover"] if fault == "bridge"
+                         else ["audit", "select", "audit", "start"] if fault == "committed-bridge"
+                         else ["audit", "select"] if fault in ("selection", "bad-selection",
+                                                               "no-wal", "committed-selection")
+                         else ["audit"])
+    assert not locked and sorted(os.listdir(tmp_path)) == before
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("DropInPaths=\nNeedDaemonReload=yes\n", False),
+    ("NeedDaemonReload=yes\nDropInPaths=\n", False),
+    ("DropInPaths=/etc/systemd/system/repocache-nginx.service.d/90-repocache-dedicated.conf\nNeedDaemonReload=no\n", True),
+    ("NeedDaemonReload=no\nDropInPaths=/etc/systemd/system/repocache-nginx.service.d/90-repocache-dedicated.conf\n", True),
+    ("DropInPaths=\nNeedDaemonReload=no\n", None),
+    ("DropInPaths=/etc/systemd/system/repocache-nginx.service.d/90-repocache-dedicated.conf\nNeedDaemonReload=yes\n", None),
+    ("DropInPaths=/foreign.conf\nNeedDaemonReload=no\n", None),
+    ("DropInPaths=\nNeedDaemonReload=yes\nNeedDaemonReload=no\n", None),
+    ("NeedDaemonReload=yes\n", None),
+    ("", None),
+])
+def test_fixture_stopped_profile_loaded_requires_exact_pair(raw, expected):
+    from scripts.ci_native_nginx_activate_guest import fixture_stopped_profile_loaded
+    if expected is None:
+        with pytest.raises(AssertionError, match="Unexpected stopped profile state"):
+            fixture_stopped_profile_loaded(raw)
+    else:
+        assert fixture_stopped_profile_loaded(raw) is expected
+
+
+@pytest.mark.parametrize("fault", [None, "open", "timeout", "ref", "body"])
+def test_fixture_stopped_unit_reference_is_fixed_and_closed(monkeypatch, fault):
+    import ctypes as c
+    from types import SimpleNamespace
+    from scripts.ci_native_nginx_activate_guest import fixture_hold_stopped_profile_unit
+
+    calls = []
+
+    def open_bus(out):
+        calls.append("open")
+        if fault == "open":
+            return -1
+        out._obj.value = 123
+        return 0
+
+    def timeout(bus, usec):
+        assert bus.value == 123 and usec == 5_000_000
+        calls.append("timeout")
+        return -1 if fault == "timeout" else 0
+
+    def ref(bus, *args):
+        assert bus.value == 123
+        assert args[:-1] == (b"org.freedesktop.systemd1",
+                             b"/org/freedesktop/systemd1",
+                             b"org.freedesktop.systemd1.Manager",
+                             b"RefUnit", None, None, b"s")
+        assert args[-1].value == b"repocache-nginx.service"
+        calls.append("ref")
+        return -1 if fault == "ref" else 0
+
+    def close(bus):
+        assert bus.value == 123
+        calls.append("close")
+
+    lib = SimpleNamespace(sd_bus_open_system=open_bus,
+                          sd_bus_set_method_call_timeout=timeout,
+                          sd_bus_call_method=ref, sd_bus_close_unref=close)
+
+    def load(name):
+        assert name == "libsystemd.so.0"
+        return lib
+
+    monkeypatch.setattr(c, "CDLL", load)
+
+    def exercise():
+        with fixture_hold_stopped_profile_unit():
+            calls.append("body")
+            if fault == "body":
+                raise ValueError("fixture body failed")
+
+    if fault is None:
+        exercise()
+    else:
+        with pytest.raises(ValueError if fault == "body" else AssertionError):
+            exercise()
+    assert calls == {
+        None: ["open", "timeout", "ref", "body", "close"],
+        "open": ["open"],
+        "timeout": ["open", "timeout", "close"],
+        "ref": ["open", "timeout", "ref", "close"],
+        "body": ["open", "timeout", "ref", "body", "close"],
+    }[fault]

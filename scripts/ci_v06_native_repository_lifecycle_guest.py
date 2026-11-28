@@ -13,6 +13,8 @@ import copy
 import hashlib
 import json
 import os
+import re
+import subprocess
 from pathlib import Path
 import stat
 import sys
@@ -76,7 +78,9 @@ def main(distribution: str) -> None:
     assert not WAL.exists()
 
     sys.path[:0] = [str(SOURCE / "src"), str(SOURCE), str(SOURCE / "scripts")]
-    from repocache.server_native_root_control_client_v1 import request_native_fixed_v2
+    from repocache.server_native_root_control_client_v1 import (
+        NativeRootControlClientError, request_native_fixed_v2,
+    )
     from scripts import install_native_root_worker
     from scripts.prepare_server_repository_lifecycle import (
         OfflineLifecycleError, prepare_offline_lifecycle,
@@ -89,7 +93,18 @@ def main(distribution: str) -> None:
     def fixed(operation: str) -> dict:
         # Installed root worker is a systemd one-shot with strict rate limits.
         time.sleep(3)
-        return request_native_fixed_v2(operation)
+        try:
+            return request_native_fixed_v2(operation)
+        except NativeRootControlClientError:
+            # Report only the worker's fixed redacted transaction vocabulary.
+            logs = subprocess.run(
+                ["/usr/bin/journalctl", "-u", "repocache-control.service",
+                 "--no-pager", "--quiet", "-n", "50", "-o", "cat"],
+                capture_output=True, text=True, timeout=12, check=False)
+            for line in logs.stdout.splitlines()[-50:]:
+                for code in re.findall(r"REPOCACHE_FIXED_TRANSACTION_REFUSAL: (NATIVE_V2_[A-Z0-9_]{2,100})", line):
+                    print("NATIVE_LIFECYCLE_DIAGNOSTIC: " + code, flush=True)
+            raise
 
     def prepare(operation: str, selectors: dict, generation: int, name: str):
         raw_prior = (STATE / "state-v2.json").read_bytes()

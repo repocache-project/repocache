@@ -44,3 +44,38 @@ or unattended monitoring. Track actual completed durations and selected
 job counts before asserting a speedup. Never create work just to fill a
 waiting interval, restart a valuable native run needlessly or merge without
 all applicable evidence.
+
+## Booted VM performance and evidence
+
+Native VM jobs probe real KVM initialization before choosing acceleration.
+If the disposable GitHub-hosted runner has a root-owned KVM device with
+the kvm group, QEMU may run under the existing unprivileged runner UID
+with that group for the process only. Hosted root sudo launches only the
+fixed setpriv executable, which drops to the original nonroot UID/GID,
+retains only the device supplementary group, drops all capabilities and
+sets no-new-privs before executing QEMU. No global device permission
+change, root QEMU or guest privilege change is permitted. KVM selection
+requires a successful probe and an explicit QMP query-kvm response with
+both present and enabled true; otherwise use unprivileged TCG. The runner
+evidence records the access mode, selected acceleration and resources.
+Activation VMs increase their CPU and memory budgets only when the runner
+has spare capacity and either KVM is confirmed or the platform is
+AlmaLinux. Debian TCG retains its original 2 vCPU / 3072 MiB budget.
+These are tuning defaults pending controlled measurements.
+
+Each harness phase emits start/end markers and bounded phase-times.tsv
+evidence (elapsed seconds); the summary includes those timings even on
+failure. The AlmaLinux activation prerequisites use a single DNF
+transaction without moving the signed product installation into that
+transaction. Reboot readiness polls for a valid changed kernel boot ID,
+rather than assuming an arbitrary sleep proves a reboot. Existing exact
+boot-ID comparisons, signed-install checks and SELinux enforcing
+assertions remain mandatory.
+
+Compare complete native runs on exact HEADs and record KVM/TCG, phase
+times and total wall time before reporting a speedup. Keep the existing
+chained committed and pending-WAL reboot checks on the same guest:
+splitting them requires proof of equivalent durable state and evidence.
+Do not cache mutable guest disks, signing identities, or package trust
+state. The full image integrity checks and current acceptance matrices
+remain unchanged.

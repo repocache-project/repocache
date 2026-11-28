@@ -16,8 +16,10 @@ import sys
 import time
 
 def main() -> None:
-    if len(sys.argv) != 3:
+    if len(sys.argv) not in (3, 4) or (len(sys.argv) == 4 and
+            sys.argv[3] != "--isolated-selinux-policy"):
         raise SystemExit("Require exact independently assembled source and SHA")
+    isolated_policy = len(sys.argv) == 4
     source, combined_sha = Path(sys.argv[1]), sys.argv[2]
     assert source == Path("/home/pr237ci/combined")
     assert len(combined_sha) == 40 and all(x in "0123456789abcdef" for x in combined_sha)
@@ -85,6 +87,32 @@ def main() -> None:
     subprocess.run(["/usr/bin/openssl", "pkeyutl", "-sign", "-inkey", str(private),
                     "-rawin", "-in", str(manifest), "-out", str(sig)],
                    check=True, timeout=20, capture_output=True)
+    if isolated_policy:
+        # Supplementary fixture-only envelope, NOT a release inventory member.
+        # Bind the fixed policy source to the same synthetic signing identity,
+        # archive, source and exact signed unit. Never ship the policy installer.
+        from scripts.ci_selinux_nginx_egress_guest import guard, policy_manifest
+        guard()
+        # Only the policy bytes read from the independently assembled source
+        # are authorized. The root-private copy is what the later probe uses.
+        raw_policy = (source / "scripts/ci_selinux_nginx_egress_fixture.te").read_bytes()
+        assert 0 < len(raw_policy) <= 16384
+        policy = private_root / "isolated-policy.te"
+        policy.write_bytes(raw_policy)
+        policy.chmod(0o600)
+        envelope = private_root / "isolated-policy.json"
+        envelope.write_bytes(policy_manifest(
+            combined_sha, digest, hashlib.sha256(manifest.read_bytes()).hexdigest(),
+            hashlib.sha256((source_tree / stage_native_root_worker.UNIT_DIR /
+                            "repocache-nginx.service").read_bytes()).hexdigest(),
+            raw_policy))
+        envelope.chmod(0o600)
+        policy_sig = private_root / "isolated-policy.sig"
+        subprocess.run(["/usr/bin/openssl", "pkeyutl", "-sign", "-inkey", str(private),
+                        "-rawin", "-in", str(envelope), "-out", str(policy_sig)],
+                       check=True, timeout=20, capture_output=True)
+        policy_sig.chmod(0o600)
+        assert len(policy_sig.read_bytes()) == 64
     private.unlink()
     assert len(sig.read_bytes()) == 64
     pins = {"commit": combined_sha, "archive_sha256": digest}

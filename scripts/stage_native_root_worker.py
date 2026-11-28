@@ -10,12 +10,14 @@ from __future__ import annotations
 import argparse
 from contextlib import ExitStack
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import stat
 import sys
 import tempfile
+import zipfile
 
 if __name__ == "__main__":
     checkout = Path(__file__).resolve().parents[1]
@@ -129,6 +131,31 @@ def _authenticated_payloads(
         "authorizes_service_activation": False,
     }
     return payloads, receipt
+
+
+def _signed_owned_policy_from_worker(raw: bytes) -> dict:
+    """Read the fixed policy from independently authenticated worker bytes.
+
+    This parser does not authenticate its argument, load a policy, or
+    authorize host effects. Callers must retain the signed release boundary.
+    """
+    from repocache.server_native_nginx_executable_v1 import (
+        _POLICY_MEMBER, _POLICY_MAX, _policy_candidate, NativeExecutableCandidateError,
+    )
+    if type(raw) is not bytes or not 0 < len(raw) <= 16 * 1024 * 1024:
+        raise WorkerStageError("WORKER_SIGNED_POLICY_SOURCE_REFUSED")
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+            if archive.namelist().count(_POLICY_MEMBER) != 1:
+                raise WorkerStageError("WORKER_SIGNED_POLICY_SOURCE_REFUSED")
+            member = archive.getinfo(_POLICY_MEMBER)
+            if (member.is_dir() or not 1 <= member.file_size <= _POLICY_MAX
+                    or member.flag_bits & 1):
+                raise WorkerStageError("WORKER_SIGNED_POLICY_SOURCE_REFUSED")
+            return _policy_candidate(archive.read(member))
+    except (OSError, ValueError, KeyError, RuntimeError, zipfile.BadZipFile,
+            NativeExecutableCandidateError):
+        raise WorkerStageError("WORKER_SIGNED_POLICY_SOURCE_REFUSED") from None
 
 
 def stage_authenticated_worker(

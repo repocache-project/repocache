@@ -58,7 +58,7 @@ def test_systemd_worker_reference_allows_only_fixed_native_write_domains():
         "ProtectKernelModules": "yes",
         "ProtectControlGroups": "yes",
         "RestrictAddressFamilies": "AF_UNIX AF_INET AF_INET6",
-        "ReadWritePaths": "/etc/nginx/conf.d /var/lib/repocache/server /var/lib/repocache/public /var/log/nginx /var/cache/nginx",
+        "ReadWritePaths": "/etc/nginx/conf.d -/etc/nginx/repocache.d /var/lib/repocache/server /var/lib/repocache/public /var/log/nginx /var/cache/nginx -/run/repocache-nginx",
         "RestrictNamespaces": "yes",
         "RestrictSUIDSGID": "yes",
         "LockPersonality": "yes",

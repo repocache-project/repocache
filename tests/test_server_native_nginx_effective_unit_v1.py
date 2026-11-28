@@ -386,3 +386,368 @@ def test_native_nginx_unit_change_during_kernel_probe_refuses_observation(
         inspect_effective_native_nginx_unit("debian")
     assert [event[0] for event in events].count("run") == 2
     assert ("kernel", 1450) in events
+
+
+def _signed_unit_fixture():
+    from pathlib import Path
+    return (Path(__file__).resolve().parents[1] /
+            "docs/examples/systemd/repocache-nginx.service").read_bytes()
+
+
+@pytest.mark.parametrize("port,low", [(1, True), (443, True), (1023, True),
+                                      (1024, False), (8008, False), (65535, False)])
+def test_namespace_candidate_preserves_closed_signed_unit(port, low):
+    import configparser
+    import hashlib
+
+    raw = _signed_unit_fixture()
+    report = unit._render_owned_nginx_namespace_unit_candidate(raw, https_port=port)
+    candidate = report["unit_bytes"]
+    parser = configparser.ConfigParser(interpolation=None, strict=True)
+    parser.optionxform = str
+    parser.read_string(candidate.decode("ascii"))
+    expected = unit._closed_signed_owned_unit_contract(raw)
+    service = dict(parser["Service"])
+    for name in unit._OWN_EXEC_KEYS:
+        assert service.pop(name) == expected.pop(name).replace(
+            "/usr/sbin/nginx", "/usr/libexec/repocache/nginx", 1)
+    assert service.pop("NetworkNamespacePath") == "/run/netns/repocache-nginx"
+    assert service.pop("RestrictAddressFamilies") == "AF_UNIX AF_INET AF_INET6"
+    assert service.pop("CapabilityBoundingSet") == (
+        "CAP_CHOWN CAP_KILL CAP_SETGID CAP_SETUID" +
+        (" CAP_NET_BIND_SERVICE" if low else ""))
+    assert service == expected
+    assert dict(parser["Install"]) == {"WantedBy": "multi-user.target"}
+    assert report["source_unit_sha256"] == hashlib.sha256(raw).hexdigest()
+    assert report["candidate_unit_sha256"] == hashlib.sha256(candidate).hexdigest()
+    assert report["https_port"] == port
+    for name in ("runtime_namespace_verified", "runtime_selinux_verified",
+                 "authorizes_nginx_activation", "authorizes_systemctl"):
+        assert report[name] is False
+
+
+@pytest.mark.parametrize("port", [0, 65536, True, "443", None])
+def test_namespace_candidate_refuses_invalid_port(port):
+    with pytest.raises(EffectiveNginxUnitError, match="NAMESPACE_UNIT_PORT_INVALID"):
+        unit._render_owned_nginx_namespace_unit_candidate(_signed_unit_fixture(), https_port=port)
+
+
+@pytest.mark.parametrize("old,new", [
+    (b"NoNewPrivileges=yes", b"NoNewPrivileges=no"),
+    (b"ProtectSystem=strict", b"ProtectSystem=full"),
+    (b"ExecStart=/usr/sbin/nginx", b"ExecStart=/tmp/foreign"),
+    (b"UMask=0027", b"UMask=0027\nExecStartPost=/tmp/foreign"),
+    (b"UMask=0027", b"UMask=0027\nUMask=0027"),
+    (b"[Service]", b"[DEFAULT]\nUser=root\n[Service]"),
+    (b"[Service]", b"[DEFAULT]\n[Service]"),
+    (b"UMask=0027", b"UMask:0027"),
+    (b"After=network.target", b"After=network.target\r"),
+    (b"[Install]", b"[Foreign]"),
+])
+def test_namespace_candidate_refuses_unreviewed_source_contract(old, new):
+    raw = _signed_unit_fixture()
+    assert old in raw
+    with pytest.raises(EffectiveNginxUnitError, match="NAMESPACE_UNIT_SOURCE_INVALID"):
+        unit._render_owned_nginx_namespace_unit_candidate(raw.replace(old, new), https_port=8008)
+
+
+def test_namespace_candidate_requires_installed_signed_source():
+    with pytest.raises(EffectiveNginxUnitError, match="SIGNED_OWN_UNIT_SOURCE_REQUIRED"):
+        unit.render_owned_nginx_namespace_unit_candidate(https_port=8008)
+
+
+
+@pytest.mark.parametrize("port", [443, 8008])
+def test_namespace_dropin_resets_exact_executables_without_widening_base(port):
+    import hashlib
+    raw = _signed_unit_fixture()
+    report = unit._render_owned_nginx_namespace_dropin_candidate(raw, https_port=port)
+    dropin = report["dropin_bytes"].decode("ascii").splitlines()
+    assert dropin[0] == "[Service]"
+    source = unit._closed_signed_owned_unit_contract(raw)
+    expected = ["[Service]"]
+    for key in unit._OWN_EXEC_KEYS:
+        expected.extend([key + "=", key + "=" + source[key].replace(
+            "/usr/sbin/nginx", "/usr/libexec/repocache/nginx -e stderr", 1)])
+    expected.extend([
+        "CapabilityBoundingSet=CAP_CHOWN CAP_KILL CAP_SETGID CAP_SETUID" +
+        (" CAP_NET_BIND_SERVICE" if port < 1024 else ""),
+        "NetworkNamespacePath=/run/netns/repocache-nginx",
+        "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
+    ])
+    assert dropin == expected
+    assert hashlib.sha256(report["dropin_bytes"]).hexdigest() == report["dropin_sha256"]
+    assert not report["authorizes_systemctl"] and not report["authorizes_nginx_activation"]
+
+
+def test_namespace_dropin_refuses_foreign_unit_before_rendering():
+    with pytest.raises(EffectiveNginxUnitError, match="NAMESPACE_UNIT_SOURCE_INVALID"):
+        unit._render_owned_nginx_namespace_dropin_candidate(
+            _signed_unit_fixture().replace(b"PrivateTmp=yes", b"PrivateTmp=no"),
+            https_port=443)
+    with pytest.raises(EffectiveNginxUnitError, match="SIGNED_OWN_UNIT_SOURCE_REQUIRED"):
+        unit.render_owned_nginx_namespace_dropin_candidate(https_port=443)
+
+
+def test_exact_persistent_namespace_dropin_and_foreign_refusal(tmp_path):
+    import os
+    raw = unit._render_owned_nginx_namespace_dropin_candidate(
+        _signed_unit_fixture(), https_port=443)["dropin_bytes"]
+    parent = tmp_path / "etc/systemd/system" / unit._NAMESPACE_DROPIN_DIR
+    parent.mkdir(parents=True)
+    parent.chmod(0o755)
+    leaf = parent / unit._NAMESPACE_DROPIN_LEAF
+    leaf.write_bytes(raw)
+    leaf.chmod(0o644)
+    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        def read():
+            return unit._read_exact_namespace_dropin_at(
+                fd, raw, owner_uid=os.getuid(), owner_gid=os.getgid())
+        identity = read()
+        assert identity[:2] == (leaf.stat().st_dev, leaf.stat().st_ino)
+        assert read() == identity
+        foreign = parent / "91-foreign.conf"
+        foreign.write_bytes(b"[Service]\n")
+        with pytest.raises(EffectiveNginxUnitError, match="NAMESPACE_DROPIN_DIRECTORY_REFUSED"):
+            read()
+        assert foreign.read_bytes() == b"[Service]\n"
+        foreign.unlink()
+        leaf.chmod(0o666)
+        with pytest.raises(EffectiveNginxUnitError, match="NAMESPACE_DROPIN_METADATA_REFUSED"):
+            read()
+        leaf.chmod(0o644)
+        leaf.write_bytes(b"x" * len(raw))
+        with pytest.raises(EffectiveNginxUnitError, match="NAMESPACE_DROPIN_CONTENT_CHANGED"):
+            read()
+        leaf.write_bytes(raw)
+        os.link(leaf, tmp_path / "hardlink")
+        with pytest.raises(EffectiveNginxUnitError, match="NAMESPACE_DROPIN_METADATA_REFUSED"):
+            read()
+        (tmp_path / "hardlink").unlink()
+        leaf.unlink()
+        foreign = tmp_path / "foreign"
+        foreign.write_bytes(raw)
+        leaf.symlink_to(foreign)
+        with pytest.raises(EffectiveNginxUnitError, match="NAMESPACE_DROPIN_UNVERIFIED"):
+            read()
+        assert foreign.read_bytes() == raw
+    finally:
+        os.close(fd)
+
+
+def test_namespace_profile_requires_installed_signed_source():
+    with pytest.raises(EffectiveNginxUnitError, match="SIGNED_OWN_UNIT_SOURCE_REQUIRED"):
+        unit.inspect_signed_owned_namespace_unit(https_port=443, active=False)
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_namespace_profile_durable_receipt_and_exact_resume(tmp_path, monkeypatch, interrupted):
+    import os
+    from repocache import server_native_installed_storage_v1 as storage
+
+    raw = _signed_unit_fixture()
+    system = tmp_path / "etc/systemd/system"
+    system.mkdir(parents=True)
+    (system / unit._OWN_UNIT).write_bytes(raw)
+    (system / unit._OWN_UNIT).chmod(0o644)
+    state = tmp_path / "var/lib/repocache/server"
+    state.mkdir(parents=True)
+    state.chmod(0o700)
+    rootfd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    statefd = os.open(state, os.O_RDONLY | os.O_DIRECTORY)
+    final = system / unit._NAMESPACE_DROPIN_DIR
+    pending = system / unit._NAMESPACE_DROPIN_STAGE
+    receipt = state / unit._NAMESPACE_PROFILE_RECEIPT
+    def stage(allow=True, port=443):
+        return unit._stage_namespace_dropin_under_lock(
+            rootfd, statefd, raw, https_port=port, owner_uid=os.getuid(),
+            owner_gid=os.getgid(), allow_create=allow)
+    try:
+        if interrupted:
+            rename = storage._rename_directory_noreplace
+            def stop(*args):
+                raise OSError("simulated interruption before directory publication")
+            monkeypatch.setattr(storage, "_rename_directory_noreplace", stop)
+            with pytest.raises(EffectiveNginxUnitError, match="NAMESPACE_PROFILE_PLACEMENT_REFUSED"):
+                stage()
+            assert receipt.is_file() and pending.is_dir() and not final.exists()
+            prior = receipt.read_bytes()
+            inode = (pending / unit._NAMESPACE_DROPIN_LEAF).stat().st_ino
+            with pytest.raises(EffectiveNginxUnitError, match="NAMESPACE_PROFILE_STAGE_PENDING"):
+                stage(False)
+            monkeypatch.setattr(storage, "_rename_directory_noreplace", rename)
+        result = stage()
+        assert result["receipt_matches_owned_dropin"]
+        assert not result["authorizes_systemctl"] and not result["authorizes_nginx_activation"]
+        assert not pending.exists() and final.is_dir()
+        assert stage(False) == result == stage()
+        if interrupted:
+            assert receipt.read_bytes() == prior
+            assert (final / unit._NAMESPACE_DROPIN_LEAF).stat().st_ino == inode
+        with pytest.raises(EffectiveNginxUnitError):
+            stage(port=8008)
+        leaf = final / unit._NAMESPACE_DROPIN_LEAF
+        data = leaf.read_bytes()
+        leaf.unlink()
+        leaf.write_bytes(data)
+        leaf.chmod(0o644)
+        with pytest.raises(EffectiveNginxUnitError, match="NAMESPACE_PROFILE_RECEIPT_MISMATCH"):
+            stage()
+        assert leaf.read_bytes() == data
+    finally:
+        os.close(statefd)
+        os.close(rootfd)
+
+
+@pytest.mark.parametrize("directory_name", ["_NAMESPACE_DROPIN_DIR", "_NAMESPACE_DROPIN_STAGE"])
+def test_namespace_profile_refuses_unowned_exact_directory(tmp_path, directory_name):
+    import os
+    raw = _signed_unit_fixture()
+    system = tmp_path / "etc/systemd/system"
+    system.mkdir(parents=True)
+    (system / unit._OWN_UNIT).write_bytes(raw)
+    (system / unit._OWN_UNIT).chmod(0o644)
+    state = tmp_path / "var/lib/repocache/server"
+    state.mkdir(parents=True)
+    state.chmod(0o700)
+    folder = system / getattr(unit, directory_name)
+    folder.mkdir(mode=0o755)
+    folder.chmod(0o755)
+    expected = unit._render_owned_nginx_namespace_dropin_candidate(raw, https_port=443)["dropin_bytes"]
+    leaf = folder / unit._NAMESPACE_DROPIN_LEAF
+    leaf.write_bytes(expected)
+    leaf.chmod(0o644)
+    rootfd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    statefd = os.open(state, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        inode = leaf.stat().st_ino
+        with pytest.raises(EffectiveNginxUnitError, match="NAMESPACE_PROFILE_UNOWNED_OR_MISSING"):
+            unit._stage_namespace_dropin_under_lock(
+                rootfd, statefd, raw, https_port=443, owner_uid=os.getuid(),
+                owner_gid=os.getgid(), allow_create=True)
+        assert leaf.read_bytes() == expected and leaf.stat().st_ino == inode
+        assert not (state / unit._NAMESPACE_PROFILE_RECEIPT).exists()
+    finally:
+        os.close(statefd)
+        os.close(rootfd)
+
+
+def _dedicated_status(port, **changes):
+    cap = (1 << 0) | (1 << 5) | (1 << 6) | (1 << 7)
+    if port < 1024:
+        cap |= 1 << 10
+    fields = {"Uid": "0 0 0 0", "Gid": "0 0 0 0",
+              "CapEff": f"{cap:016x}", "CapPrm": f"{cap:016x}",
+              "CapBnd": f"{cap:016x}", "CapAmb": "0000000000000000",
+              "NoNewPrivs": "1"}
+    fields.update(changes)
+    return "".join(f"{key}:\t{value}\n" for key, value in fields.items()).encode()
+
+
+@pytest.mark.parametrize("port", [443, 8008])
+def test_dedicated_master_status_exact_capability_boundary(port):
+    unit._validate_dedicated_master_status(_dedicated_status(port), https_port=port)
+
+
+@pytest.mark.parametrize("changes", [
+    {"Uid": "0 0 1 0"}, {"Gid": "0 0 0 1"}, {"NoNewPrivs": "0"},
+    {"CapEff": "00000000000004e3"}, {"CapBnd": "00000000000004e3"},
+    {"CapPrm": "00000000000004e3"}, {"CapAmb": "0000000000000400"},
+    {"CapEff": "4e1"}, {"CapEff": "00000000000000e1"},
+])
+def test_dedicated_master_status_refuses_credential_or_capability_drift(changes):
+    with pytest.raises(EffectiveNginxUnitError):
+        unit._validate_dedicated_master_status(_dedicated_status(443, **changes), https_port=443)
+
+
+def test_dedicated_master_status_refuses_duplicate_missing_or_oversize():
+    raw = _dedicated_status(443)
+    for bad in (raw + b"Uid: 0 0 0 0\n", raw.split(b"CapAmb:")[0], b"a" * 65537):
+        with pytest.raises(EffectiveNginxUnitError):
+            unit._validate_dedicated_master_status(bad, https_port=443)
+
+
+@pytest.mark.parametrize("fault", ["none", "namespace", "owner", "master", "scope"])
+def test_dedicated_runtime_readback_binds_fixed_namespace_and_exact_unit(monkeypatch, fault):
+    from contextlib import contextmanager
+    from repocache import server_native_egress_candidate_v1 as egress
+    samples = []
+    calls = []
+
+    @contextmanager
+    def scope():
+        def recheck():
+            if fault == "scope" and samples:
+                raise egress.NativeEgressCandidateError("CHANGED")
+        yield 11, (17, 29) if fault != "namespace" else (17, 30), recheck
+
+    def observe(*, https_port, active):
+        assert (https_port, active) == (443, True)
+        calls.append(1)
+        return {"main_pid_observed": 123 if fault != "owner" or len(calls) == 1 else 124,
+                "authorizes_nginx_activation": False,
+                "runtime_selinux_verified": False}
+
+    def sample(pid, **kw):
+        assert pid == 123
+        assert kw == {"https_port": 443, "namespace_identity": (17, 29),
+                      "executable_identity": (31, 41)}
+        samples.append(1)
+        return (51, 61 if fault != "master" or len(samples) == 1 else 62)
+
+    monkeypatch.setattr(egress, "_fixed_namespace_scope", scope)
+    monkeypatch.setattr(unit, "inspect_signed_owned_namespace_unit", observe)
+    monkeypatch.setattr(unit, "_sample_dedicated_master_runtime", sample)
+    def invoke():
+        return unit._inspect_signed_owned_namespace_runtime(
+            https_port=443, namespace_identity=(17, 29), executable_identity=(31, 41))
+    if fault == "none":
+        result = invoke()
+        assert result["master_process_identity"] == (51, 61)
+        assert result["runtime_namespace_verified"]
+        assert result["runtime_master_domain_verified"]
+        assert result["runtime_master_capabilities_verified"]
+        assert not result["authorizes_nginx_activation"]
+        assert not result["runtime_selinux_verified"]
+        assert len(samples) == 2
+    else:
+        with pytest.raises(EffectiveNginxUnitError):
+            invoke()
+        assert len(samples) == {"namespace": 0, "owner": 1, "master": 2, "scope": 1}[fault]
+
+
+@pytest.mark.parametrize("case", ["pending", "loaded", "foreign", "active", "changing", "ordinary"])
+def test_stopped_profile_load_state_is_closed_and_read_only(monkeypatch, case):
+    monkeypatch.setattr(unit, "_observe_systemd_pid1", lambda: None)
+    monkeypatch.setattr(unit, "_safe_native_systemctl", lambda: None)
+    calls = []
+
+    def run(argv, **kw):
+        assert argv == unit._OWN_SHOW
+        assert kw["shell"] is False and kw["close_fds"] is True
+        calls.append(argv)
+        loaded = case == "loaded" or (case == "changing" and len(calls) == 2)
+        response = _response(
+            Id=unit._OWN_UNIT, Names=unit._OWN_UNIT,
+            FragmentPath="/etc/systemd/system/" + unit._OWN_UNIT,
+            DropInPaths=(unit._NAMESPACE_DROPIN_PATH if loaded else
+                         "/foreign.conf" if case == "foreign" else ""),
+            ActiveState="active" if case == "active" else "inactive",
+            SubState="running" if case == "active" else "dead",
+            MainPID="42" if case == "active" else "0",
+            NeedDaemonReload="no" if loaded else "yes")
+        return SimpleNamespace(returncode=0, stdout=response, stderr="")
+
+    monkeypatch.setattr(unit.subprocess, "run", run)
+    if case in ("pending", "loaded"):
+        result = unit._inspect_effective_owned_nginx_unit(
+            active=False, dedicated=True, loading_profile=True)
+        assert result["profile_loaded"] is (case == "loaded")
+        assert result["main_pid_observed"] == 0
+        assert result["authorizes_systemctl"] is False
+        assert len(calls) == 2
+    else:
+        with pytest.raises(EffectiveNginxUnitError):
+            unit._inspect_effective_owned_nginx_unit(
+                active=False, dedicated=True, loading_profile=case != "ordinary")

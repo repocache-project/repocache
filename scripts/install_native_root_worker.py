@@ -34,9 +34,13 @@ from repocache.server_native_nginx_ownership_v1 import inspect_fresh_nginx_footp
 from repocache.server_native_nginx_package_journal_v1 import _retain_native_package_journal_lock_under_root
 from repocache.server_native_package_trust_v1 import _NATIVE, _native_install_commands, _run as _native_run, _trusted_key
 from repocache.server_native_nginx_service_unit_v1 import inspect_native_nginx_unit
-from repocache.server_protected_state_inspect_v1 import _FIXED_STATE_ROOT
+from repocache.server_protected_state_inspect_v1 import _FIXED_STATE_ROOT, _walk, _recheck
 from repocache.server_stock_nginx_package_owner_v1 import inspect_stock_nginx_package_owner, inspect_stock_nginx_package_file_integrity
-from repocache.server_protected_namespace_bootstrap_v1 import bootstrap_protected_namespace_under_root
+from repocache.server_protected_namespace_bootstrap_v1 import (
+    bootstrap_protected_namespace_under_root, _dedicated_ancestry,
+    _dedicated_public_directory, _prepare_dedicated_worker_namespace_under_root,
+    _require_dedicated_worker_claim, _DEDICATED_WORKER_CLAIM,
+)
 from repocache.server_locked_manifest_reconcile_v1 import (
     _validate_proposed_v2_snapshot, preview_proposed_v2_state_transition,
 )
@@ -45,16 +49,26 @@ from repocache.server_native_v2_transaction_v1 import (
     _no_conflicting_pending, _write_private,
     _require_audited_native_package_for_activation,
     _native_syntax_check, _OWNED_BOOTSTRAP_CONFIG,
+    _owned_layout_locked, _read_owned_resources, _validate_owned_resources,
+    _owned_live_observe, _owned_live_validate, _owned_live_health_bound,
+    _owned_socket_require_inactive_routes, _no_conflicting_owned_wal_pending,
+    _owned_debian_runtime_temps, _owned_alma_runtime_temps, _OWNED_WAL, _MAX_WAL, _CATALOG,
+    _decode_owned_wal, _owned_live_guard,
+    _prepare_owned_inactive_wal_rollback_locked,
+    _finish_owned_inactive_wal_rollback_locked,
+    NativeV2TransactionError,
 )
 from repocache.server_native_nginx_effective_unit_v1 import (
     inspect_effective_native_nginx_unit, _observe_systemd_pid1,
     _safe_native_systemctl, _FIXED_ARGS as _EFFECTIVE_SYSTEMCTL_ARGS,
     EffectiveNginxUnitError, inspect_effective_owned_nginx_unit,
-    OWNED_NGINX_CONFIG_MARKER_PREFIX,
+    OWNED_NGINX_CONFIG_MARKER_PREFIX, _read_exact_owned_unit_at,
 )
 from repocache.server_root_control_full_context_v1 import _capture_default_nginx_dump_private
 from repocache.server_proposed_state_v2_store import _read_v2
-from repocache.server_protected_state_store_v1 import _canonical, _locked, _unlink_known
+from repocache.server_protected_state_store_v1 import (
+    _canonical, _locked, _unlink_known, _read_file,
+)
 from repocache.server_root_control_fixed_candidate_v1 import (
     _MAX_ENVELOPE, _MAX_STATE, _NAME as _PROPOSAL, _canonical_json, _proposal,
 )
@@ -65,6 +79,7 @@ from scripts import stage_native_root_worker as stage
 
 
 _MARKER = ".native-worker-placement."
+_RUNTIME_RECEIPT = ".native-worker-receipt-v1.json"
 _TEMP = ".repocache-worker-part-"
 _UNIT_DIRECTORY = ("etc", "systemd", "system")
 
@@ -262,14 +277,30 @@ def _reject_conflicting_units(root: Path, unit_paths: tuple[str, ...]) -> None:
 def _place_worker_files(
     root: Path, payloads: dict[str, bytes], receipt: dict, *, unit_paths: tuple[str, ...],
     prepare_namespace: bool = False,
+    _dedicated_policy_sha256: str | None = None,
 ) -> None:
-    digest = hashlib.sha256(stage._json_line(receipt)).hexdigest()
+    # Private candidate composition only. The caller independently verifies
+    # the release and loaded policy; the source digest is not that proof.
+    dedicated = _dedicated_policy_sha256 is not None
+    if dedicated and (prepare_namespace is not True
+                      or type(_dedicated_policy_sha256) is not str
+                      or signatures.HEX64.fullmatch(_dedicated_policy_sha256) is None
+                      or stage._signed_owned_policy_from_worker(payloads.get(stage.WORKER))[
+                          "policy_sha256"] != _dedicated_policy_sha256):
+        _reject("NATIVE_WORKER_DEDICATED_POLICY_REFUSED")
+    labels = _Labels("almalinux", dedicated=True) if dedicated else None
+    receipt_raw = stage._json_line(receipt)
+    digest = hashlib.sha256(receipt_raw).hexdigest()
     pending = _MARKER + "pending-" + digest
     complete = _MARKER + "complete-" + digest
     with ExitStack() as stack:
         fd = os.open(root, stage._DIRECTORY)
         stack.callback(os.close, fd)
         stage._protected_directory(fd)
+        if dedicated and _identity(os.fstat(fd)) == _identity(os.stat("/")):
+            # The current fresh composition is detached-root only. Actual
+            # first-install policy/activation orchestration is separate.
+            _reject("NATIVE_WORKER_DEDICATED_HOST_PLACEMENT_REFUSED")
         usr = _open_directory(fd, "usr", stack)
         units = fd
         for component in _UNIT_DIRECTORY:
@@ -286,8 +317,31 @@ def _place_worker_files(
                             for name in (stage.WORKER, _TEMP + stage.WORKER)))
                         or os.path.lexists(root / "run/repocache/server-control.sock")):
                     _reject("FOREIGN_EXISTING_DESTINATION")
-            bootstrap_protected_namespace_under_root(fd, owner_uid=0, public_catalog=True)
+            if dedicated:
+                namespace = _prepare_dedicated_worker_namespace_under_root(
+                    fd, receipt_sha256=digest)
+                if (namespace.get("dedicated_public_label_verified") is not True
+                        or namespace.get("worker_receipt_claim_verified") is not True):
+                    _reject("NATIVE_WORKER_DEDICATED_PUBLIC_REFUSED")
+            else:
+                namespace = bootstrap_protected_namespace_under_root(
+                    fd, owner_uid=0, public_catalog=True)
         with _locked(fd, 0) as state:
+            if not dedicated and _named(state, _DEDICATED_WORKER_CLAIM) is not None:
+                _reject("NATIVE_WORKER_DEDICATED_NAMESPACE_REFUSED")
+            if dedicated:
+                public, public_chain = _walk(fd, ("var", "lib", "repocache", "public"), stack, 0)
+
+            def check_public():
+                if dedicated:
+                    labels.finish()
+                    _recheck(public_chain, 0)
+                    _dedicated_ancestry(fd, public_chain)
+                    _dedicated_public_directory(public)
+                    _require_dedicated_worker_claim(
+                        fd, public_chain[-2][2], state, public, digest)
+
+            check_public()
             markers = {name for name in os.listdir(state) if name.startswith(_MARKER)}
             if markers - {pending, complete}:
                 _reject("OTHER_CANDIDATE")
@@ -308,6 +362,10 @@ def _place_worker_files(
                        for directory, name in targets):
                     _reject("FOREIGN_PARTIAL_FILE")
                 stage._audit_worker_files(root, payloads)
+                # Only an independently authenticated identical installation
+                # can fill the local receipt on an older completed placement.
+                check_public()
+                _place_file(state, _RUNTIME_RECEIPT, receipt_raw, 0o600)
             else:
                 try:
                     (root / "run/repocache/server-control.sock").lstat()
@@ -316,21 +374,288 @@ def _place_worker_files(
                 else:
                     _reject("LIVE_CONTROL_SOCKET")
                 if pending not in markers:
+                    if any(_named(state, name) is not None for name in (
+                            _RUNTIME_RECEIPT, _TEMP + _RUNTIME_RECEIPT)):
+                        _reject("FOREIGN_RUNTIME_RECEIPT")
                     for directory, name in targets:
                         if _named(directory, name) is not None or _named(directory, _TEMP + name) is not None:
                             _reject("FOREIGN_EXISTING_DESTINATION")
+                    check_public()
                     _create_marker(state, pending)
+                check_public()
                 worker = _worker_directory(usr, stack, create=True)
+                check_public()
                 _place_file(worker, stage.WORKER, payloads[stage.WORKER], 0o755)
                 for unit in stage.UNITS:
+                    check_public()
                     _place_file(units, unit, payloads[unit], 0o644)
                 stage._audit_worker_files(root, payloads)
+                check_public()
+                _place_file(state, _RUNTIME_RECEIPT, receipt_raw, 0o600)
+                check_public()
                 _create_marker(state, complete)
+            check_public()
             final_pending = _named(state, pending)
             if final_pending is not None:
                 _check_marker(final_pending)
                 os.unlink(pending, dir_fd=state)
                 os.fsync(state)
+            check_public()
+
+
+def _observe_fixed_dedicated_policy(expected_sha256: str) -> dict:
+    """Observe an exact compiled HLL module; never load or authorize policy.
+
+    The digest must come from an independently authenticated compilation
+    of the signed source. This observation alone proves neither that
+    provenance nor the entire effective kernel policy.
+    """
+    if (type(expected_sha256) is not str
+            or signatures.HEX64.fullmatch(expected_sha256) is None):
+        _reject("DEDICATED_POLICY_DIGEST_REFUSED")
+    if _native_distro() != "almalinux":
+        _reject("DEDICATED_POLICY_TARGET_REFUSED")
+    require_native_host_preconditions()
+    labels = _Labels("almalinux", dedicated=True)
+    module = "repocache_nginx"
+    leaf = module + ".pp"
+
+    def observe(*args, cwd="/"):
+        try:
+            result = subprocess.run(
+                ("/usr/sbin/semodule", *args), stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"},
+                cwd=cwd, timeout=120, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            _reject("DEDICATED_POLICY_OBSERVATION_FAILED")
+        if (result.returncode or type(result.stdout) is not bytes
+                or len(result.stdout) > 1024 * 1024):
+            _reject("DEDICATED_POLICY_OBSERVATION_FAILED")
+        return result.stdout
+
+    def inventory():
+        try:
+            full = [tuple(line.split()) for line in
+                    observe("-lfull").decode("ascii").splitlines() if line.strip()]
+            enabled = [tuple(line.split()) for line in
+                       observe("-l").decode("ascii").splitlines() if line.strip()]
+        except UnicodeError:
+            _reject("DEDICATED_POLICY_INVENTORY_REFUSED")
+        if (not full or not enabled
+                or any(len(row) < 3 or not row[0].isascii()
+                       or not row[0].isdecimal() for row in full)
+                or len(full) != len(set(full))
+                or len(enabled) != len(set(enabled))
+                or {row for row in full if row[1] == module}
+                   != {("400", module, "pp")}
+                or sum(row[0] == module for row in enabled) != 1):
+            _reject("DEDICATED_POLICY_INVENTORY_REFUSED")
+        return frozenset(full), frozenset(enabled)
+
+    before = inventory()
+    try:
+        # Fixed local name and a newly created root-only directory. No
+        # semodule install, enable, disable, reload or rebuild operation.
+        with tempfile.TemporaryDirectory(prefix="repocache-policy-readback-", dir="/var/tmp") as place:
+            with ExitStack() as stack:
+                directory = os.open(place, stage._DIRECTORY)
+                stack.callback(os.close, directory)
+                original = os.fstat(directory)
+
+                def check_workspace():
+                    current = os.fstat(directory)
+                    named = os.lstat(place)
+                    if (not stat.S_ISDIR(current.st_mode)
+                            or current.st_uid != 0 or current.st_gid != 0
+                            or stat.S_IMODE(current.st_mode) != 0o700
+                            or _identity(current) != _identity(original)
+                            or _identity(named) != _identity(current)
+                            or (named.st_mode, named.st_uid, named.st_gid) !=
+                               (current.st_mode, current.st_uid, current.st_gid)):
+                        _reject("DEDICATED_POLICY_WORKSPACE_REFUSED")
+
+                check_workspace()
+                if os.listdir(directory):
+                    _reject("DEDICATED_POLICY_WORKSPACE_REFUSED")
+                observe("-X", "400", "--hll", "-E", module, cwd=place)
+                check_workspace()
+                if os.listdir(directory) != [leaf]:
+                    _reject("DEDICATED_POLICY_WORKSPACE_REFUSED")
+                info = os.stat(leaf, dir_fd=directory, follow_symlinks=False)
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
+                        or info.st_gid != 0 or info.st_mode & 0o022
+                        or info.st_nlink != 1):
+                    _reject("DEDICATED_POLICY_MODULE_REFUSED")
+                raw = stage._asset_bytes(directory, leaf, 4 * 1024 * 1024,
+                                         installed_mode=stat.S_IMODE(info.st_mode))
+                after = os.stat(leaf, dir_fd=directory, follow_symlinks=False)
+                check_workspace()
+                if (_identity(after) != _identity(info) or after.st_ctime_ns != info.st_ctime_ns
+                        or os.listdir(directory) != [leaf]
+                        or hashlib.sha256(raw).hexdigest() != expected_sha256):
+                    _reject("DEDICATED_POLICY_MODULE_REFUSED")
+    except OSError:
+        _reject("DEDICATED_POLICY_OBSERVATION_FAILED")
+    if inventory() != before:
+        _reject("DEDICATED_POLICY_INVENTORY_CHANGED")
+    labels.finish()
+    require_native_host_preconditions()
+    return {
+        "compiled_policy_sha256": expected_sha256,
+        "stored_hll_verified": True,
+        "enabled_priority": 400,
+        "signed_source_compilation_verified": False,
+        "runtime_selinux_policy_verified": False,
+        "authorizes_policy_installation": False,
+        "authorizes_host_installation": False,
+        "authorizes_nginx_activation": False,
+    }
+
+
+def _compile_authenticated_fixed_dedicated_policy(
+    assets: Path, *, commit: str, archive_sha256: str,
+) -> tuple[bytes, dict]:
+    """Compile the fixed authenticated policy in a private native workspace.
+
+    No policy installation or existing inode relabeling. This does not
+    attest the compiler's complete native-package provenance or confer
+    permission to install the returned bytes.
+    """
+    if _native_distro() != "almalinux":
+        _reject("DEDICATED_POLICY_TARGET_REFUSED")
+    require_native_host_preconditions()
+    labels = _Labels("almalinux", dedicated=True)
+    payloads, receipt = stage._authenticated_payloads(
+        assets, commit=commit, archive_sha256=archive_sha256, system=None)
+    worker = payloads.get(stage.WORKER)
+    if (type(worker) is not bytes
+            or receipt.get("source_sha") != commit
+            or receipt.get("archive_sha256") != archive_sha256
+            or receipt.get("files", {}).get(stage.WORKER) != hashlib.sha256(worker).hexdigest()):
+        _reject("DEDICATED_POLICY_SIGNED_WORKER_REFUSED")
+    policy = stage._signed_owned_policy_from_worker(worker)
+    raw = policy["policy_bytes"]
+    source = "repocache_nginx.te"
+    target = "repocache_nginx.pp"
+
+    # Fixed distribution-supplied build inputs, never a caller's command,
+    # makefile or environment. Retain root-owned ancestry and leaf identities.
+    tools = ("/usr/bin/make", "/usr/share/selinux/devel/Makefile")
+    try:
+        with ExitStack() as stack:
+            root = os.open("/", stage._DIRECTORY)
+            stack.callback(os.close, root)
+            stage._protected_directory(root)
+            retained = []
+
+            def pin(path):
+                parent = root
+                for name in path.strip("/").split("/")[:-1]:
+                    child = _open_directory(parent, name, stack)
+                    retained.append((parent, name, child, os.fstat(child)))
+                    parent = child
+                name = path.rsplit("/", 1)[1]
+                fd = os.open(name, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+                stack.callback(os.close, fd)
+                info = os.fstat(fd)
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
+                        or info.st_gid != 0 or info.st_mode & 0o022
+                        or not 1 <= info.st_size <= 32 * 1024 * 1024):
+                    _reject("DEDICATED_POLICY_BUILD_INPUT_REFUSED")
+                retained.append((parent, name, fd, info))
+
+            for path in tools:
+                pin(path)
+
+            def identity(info):
+                return (info.st_dev, info.st_ino, info.st_uid, info.st_gid, info.st_mode,
+                        info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+            def check_tools():
+                for parent, name, fd, original in retained:
+                    current = os.fstat(fd)
+                    named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                    if stat.S_ISDIR(original.st_mode):
+                        # Directory entry timestamps may change through
+                        # unrelated native activity; ownership may not.
+                        stage._protected_directory(fd)
+                        if identity(current)[:5] != identity(original)[:5] or identity(named)[:5] != identity(current)[:5]:
+                            _reject("DEDICATED_POLICY_BUILD_INPUT_CHANGED")
+                    elif identity(current) != identity(original) or identity(named) != identity(current):
+                        _reject("DEDICATED_POLICY_BUILD_INPUT_CHANGED")
+
+            check_tools()
+            with tempfile.TemporaryDirectory(prefix="repocache-policy-build-", dir="/var/tmp") as place:
+                with ExitStack() as workspace:
+                    directory = os.open(place, stage._DIRECTORY)
+                    workspace.callback(os.close, directory)
+                    initial = os.fstat(directory)
+
+                    def check_workspace():
+                        current = os.fstat(directory)
+                        named = os.lstat(place)
+                        if (not stat.S_ISDIR(current.st_mode)
+                                or current.st_uid != 0 or current.st_gid != 0
+                                or stat.S_IMODE(current.st_mode) != 0o700
+                                or identity(current)[:5] != identity(initial)[:5]
+                                or identity(named)[:5] != identity(current)[:5]):
+                            _reject("DEDICATED_POLICY_WORKSPACE_REFUSED")
+
+                    check_workspace()
+                    if os.listdir(directory):
+                        _reject("DEDICATED_POLICY_WORKSPACE_REFUSED")
+                    stage._write(directory, source, raw, 0o600)
+                    source_info = os.stat(source, dir_fd=directory, follow_symlinks=False)
+
+                    def check_source():
+                        if (stage._asset_bytes(directory, source, 16384, installed_mode=0o600) != raw
+                                or identity(os.stat(source, dir_fd=directory, follow_symlinks=False))
+                                   != identity(source_info)):
+                            _reject("DEDICATED_POLICY_SOURCE_CHANGED")
+
+                    check_source()
+                    check_tools()
+                    result = subprocess.run(
+                        (tools[0], "-C", place, "-f", tools[1], target),
+                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL, cwd=place, timeout=120, check=False,
+                        env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"},
+                    )
+                    if result.returncode:
+                        _reject("DEDICATED_POLICY_COMPILATION_FAILED")
+                    check_workspace()
+                    check_tools()
+                    check_source()
+                    info = os.stat(target, dir_fd=directory, follow_symlinks=False)
+                    if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_gid != 0
+                            or info.st_mode & 0o022 or info.st_nlink != 1):
+                        _reject("DEDICATED_POLICY_COMPILED_MODULE_REFUSED")
+                    compiled = stage._asset_bytes(directory, target, 4 * 1024 * 1024,
+                                                  installed_mode=stat.S_IMODE(info.st_mode))
+                    if identity(os.stat(target, dir_fd=directory, follow_symlinks=False)) != identity(info):
+                        _reject("DEDICATED_POLICY_COMPILED_MODULE_REFUSED")
+                    check_workspace()
+                    check_source()
+                    check_tools()
+    except (OSError, subprocess.TimeoutExpired):
+        _reject("DEDICATED_POLICY_COMPILATION_FAILED")
+    labels.finish()
+    require_native_host_preconditions()
+    return compiled, {
+        "source_sha": commit,
+        "archive_sha256": archive_sha256,
+        "worker_sha256": hashlib.sha256(worker).hexdigest(),
+        "policy_sha256": hashlib.sha256(raw).hexdigest(),
+        "compiled_policy_sha256": hashlib.sha256(compiled).hexdigest(),
+        "signed_source_compilation_observed": True,
+        "native_toolchain_provenance_verified": False,
+        "runtime_selinux_policy_verified": False,
+        "authorizes_policy_installation": False,
+        "authorizes_host_installation": False,
+        "authorizes_nginx_activation": False,
+    }
 
 
 def install_authenticated_worker(
@@ -406,6 +731,464 @@ def _native_workspace_is_root_owned(work: Path) -> bool:
     return (info.st_uid == 0 and info.st_gid == 0
             and stat.S_IMODE(info.st_mode) == 0o700
             and stat.S_ISDIR(info.st_mode))
+
+
+def _candidate_payload_sha256(path: Path) -> str:
+    """Bounded fixed-workspace payload read; no archive extraction."""
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    with os.fdopen(os.open(path, flags), "rb") as stream:
+        before = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != 0
+                or before.st_gid != 0 or before.st_nlink != 1
+                or before.st_mode & 0o022 or not 0 < before.st_size <= 32 * 1024 * 1024):
+            _reject("NATIVE_EXECUTABLE_PAYLOAD_UNSAFE")
+        raw = stream.read(32 * 1024 * 1024 + 1)
+        after = os.fstat(stream.fileno())
+        named = path.lstat()
+        fields = ("st_dev", "st_ino", "st_uid", "st_gid", "st_mode",
+                  "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if (len(raw) != before.st_size or
+                any(getattr(before, k) != getattr(after, k) or
+                    getattr(after, k) != getattr(named, k) for k in fields)):
+            _reject("NATIVE_EXECUTABLE_PAYLOAD_CHANGED")
+        return hashlib.sha256(raw).hexdigest()
+
+
+def _candidate_native_identity(distribution: str, work: Path) -> str:
+    if distribution == "debian":
+        version = _native_package_command(
+            ["/usr/bin/dpkg-query", "-W", "-f=${Version}\\t${Status}\\t${Architecture}",
+             "nginx:amd64"], work)
+        fields = version.split("\t")
+        if (len(fields) != 3 or fields[1:] != ["install ok installed", "amd64"]
+                or re.fullmatch(r"(?:[0-9]+:)?[0-9][A-Za-z0-9.+~:-]{0,127}", fields[0]) is None):
+            _reject("NATIVE_EXECUTABLE_PACKAGE_IDENTITY_REFUSED")
+        return "nginx:amd64=" + fields[0]
+    if distribution == "almalinux":
+        identity = _native_package_command(
+            ["/usr/bin/rpm", "-q", "--queryformat=%{NAME}-%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}",
+             "nginx-core"], work)
+        if re.fullmatch(r"nginx-core-[0-9]+:[A-Za-z0-9._+~-]+-[A-Za-z0-9._+~-]+\.x86_64", identity) is None:
+            _reject("NATIVE_EXECUTABLE_PACKAGE_IDENTITY_REFUSED")
+        return identity
+    _reject("NATIVE_EXECUTABLE_DISTRIBUTION_REFUSED")
+
+
+def _authenticate_candidate_deb(work: Path, identity: str) -> tuple[str, str]:
+    from repocache.server_native_package_trust_v1 import _apt_commands
+    from repocache.server_native_nginx_executable_v1 import (
+        debian_nginx_metadata_digest, debian_nginx_tar_digest,
+    )
+    refresh, query = _apt_commands(work)
+    if refresh[-1] != "update" or query[-2:] != ["policy", "nginx"]:
+        _reject("NATIVE_EXECUTABLE_APT_PROFILE_CHANGED")
+    _native_package_command(refresh, work)
+    version = identity.removeprefix("nginx:amd64=")
+    metadata = _native_package_command([*query[:-2], "show", identity], work)
+    expected = debian_nginx_metadata_digest(metadata, version)
+    _native_package_command([*refresh[:-1], "download", identity], work)
+    packages = list(work.glob("*.deb"))
+    if len(packages) != 1 or _candidate_payload_sha256(packages[0]) != expected:
+        _reject("NATIVE_EXECUTABLE_DEB_DIGEST_REFUSED")
+    payload = packages[0]
+    for field, value in (("Package", "nginx"), ("Version", version), ("Architecture", "amd64")):
+        if _native_package_command(["/usr/bin/dpkg-deb", "--field", str(payload), field], work) != value:
+            _reject("NATIVE_EXECUTABLE_DEB_IDENTITY_REFUSED")
+    data = work / "payload.tar"
+    with data.open("xb") as out:
+        os.fchmod(out.fileno(), 0o600)
+        subprocess.run(
+            ["/usr/bin/prlimit", "--fsize=67108864:67108864", "--",
+             "/usr/bin/dpkg-deb", "--fsys-tarfile", str(payload)],
+            stdout=out, stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            check=True, timeout=60, cwd=str(work),
+            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C", "LANG": "C"},
+        )
+        out.flush()
+        os.fsync(out.fileno())
+    if (not 0 < data.stat().st_size <= 64 * 1024 * 1024
+            or _candidate_payload_sha256(payload) != expected):
+        _reject("NATIVE_EXECUTABLE_DEB_DIGEST_REFUSED")
+    return expected, debian_nginx_tar_digest(data.read_bytes())
+
+
+# Fixed distro payload members, never a request-controlled package or path.
+_FIXED_ALMA_RPM_MEMBERS = {
+    "nginx-core": ("/usr/sbin/nginx", "x86_64", 0o755),
+    "make": ("/usr/bin/make", "x86_64", 0o755),
+    "selinux-policy-devel": ("/usr/share/selinux/devel/Makefile", "noarch", 0o644),
+    "policycoreutils": ("/usr/sbin/semodule", "x86_64", 0o755),
+}
+_FIXED_POLICY_PACKAGES = frozenset(("make", "selinux-policy-devel", "policycoreutils"))
+
+
+def _fixed_alma_rpm_identity(package: str, identity: str) -> None:
+    if (type(package) is not str or package not in _FIXED_ALMA_RPM_MEMBERS
+            or type(identity) is not str or not 1 <= len(identity) <= 256):
+        _reject("NATIVE_EXECUTABLE_RPM_IDENTITY_REFUSED")
+    arch = _FIXED_ALMA_RPM_MEMBERS[package][1]
+    if re.fullmatch(re.escape(package) + r"-[0-9]+:[A-Za-z0-9._+~-]+-"
+                    r"[A-Za-z0-9._+~-]+\." + re.escape(arch), identity) is None:
+        _reject("NATIVE_EXECUTABLE_RPM_IDENTITY_REFUSED")
+
+
+def _fixed_alma_rpm_inventory_limit(package: str) -> int:
+    # The development policy RPM contains a much larger interface/macro
+    # manifest than the ordinary executable RPMs. This exception is only
+    # for a fixed, independently signature-verified RPM file inventory.
+    if type(package) is not str or package not in _FIXED_ALMA_RPM_MEMBERS:
+        _reject("NATIVE_EXECUTABLE_RPM_MEMBER_REFUSED")
+    return 4 * 1024 * 1024 if package == "selinux-policy-devel" else 64 * 1024
+
+
+def _query_fixed_alma_rpm_file_inventory(package: str, work: Path, db: Path, payload: Path) -> str:
+    """Read only a previously authenticated fixed RPM's file digest inventory."""
+    limit = _fixed_alma_rpm_inventory_limit(package)
+    if payload != work / (package + ".rpm"):
+        _reject("NATIVE_EXECUTABLE_RPM_INVENTORY_PATH_REFUSED")
+    # Keep the general native manager output bound unchanged. A signed
+    # development RPM's longer inventory has its own bounded read and
+    # redacted failure classes, not a general-purpose RPM command seam.
+    try:
+        with tempfile.TemporaryFile(dir=work) as output, tempfile.TemporaryFile(dir=work) as errors:
+            result = subprocess.run(
+                ["/usr/bin/rpm", "--dbpath", str(db), "-qp",
+                 r"--queryformat=[%{FILENAMES}\t%{FILEDIGESTS}\n]", str(payload)],
+                stdin=subprocess.DEVNULL, stdout=output, stderr=errors,
+                cwd=str(work), env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+                                    "HOME": str(work), "TMPDIR": str(work),
+                                    "LC_ALL": "C", "LANG": "C"},
+                timeout=120, check=False,
+            )
+            if type(result.returncode) is not int or result.returncode != 0:
+                _reject("NATIVE_EXECUTABLE_RPM_INVENTORY_COMMAND_FAILED")
+            if errors.tell() != 0:
+                _reject("NATIVE_EXECUTABLE_RPM_INVENTORY_DIAGNOSTIC")
+            if not 0 < output.tell() <= limit:
+                _reject("NATIVE_EXECUTABLE_RPM_INVENTORY_LIMIT_REFUSED")
+            output.seek(0)
+            raw = output.read(limit + 1)
+            if not 0 < len(raw) <= limit:
+                _reject("NATIVE_EXECUTABLE_RPM_INVENTORY_LIMIT_REFUSED")
+            return raw.decode("utf-8")
+    except (OSError, UnicodeError, subprocess.TimeoutExpired):
+        _reject("NATIVE_EXECUTABLE_RPM_INVENTORY_READ_FAILED")
+
+
+def _fixed_alma_rpm_member_digest(package: str, rows: str) -> str:
+    if type(package) is not str or package not in _FIXED_ALMA_RPM_MEMBERS:
+        _reject("NATIVE_EXECUTABLE_RPM_MEMBER_REFUSED")
+    member = _FIXED_ALMA_RPM_MEMBERS[package][0]
+    if type(rows) is not str or len(rows) > _fixed_alma_rpm_inventory_limit(package):
+        _reject("NATIVE_EXECUTABLE_RPM_MEMBER_REFUSED")
+    matching = [row.split("\t", 1)[1] for row in rows.splitlines()
+                if row.startswith(member + "\t")]
+    if len(matching) != 1 or re.fullmatch(r"[0-9a-f]{64}", matching[0]) is None:
+        _reject("NATIVE_EXECUTABLE_RPM_MEMBER_REFUSED")
+    return matching[0]
+
+
+def _authenticate_fixed_alma_rpm_members(work: Path, identities: dict[str, str]) -> dict:
+    """Independently verify fixed RPM members using the native distro anchor.
+
+    Reuse one isolated DNF metadata view and one isolated RPMDB per bounded
+    candidate. No package installation, extraction or host trust change.
+    """
+    if (type(identities) is not dict
+            or set(identities) not in ({"nginx-core"}, _FIXED_POLICY_PACKAGES)):
+        _reject("NATIVE_EXECUTABLE_RPM_IDENTITY_REFUSED")
+    for package, identity in identities.items():
+        _fixed_alma_rpm_identity(package, identity)
+    from repocache.server_native_package_trust_v1 import _dnf_commands
+    update, query = _dnf_commands(work)
+    if query[-4:] != ["repoquery", "--available", "--queryformat=%{name}", "nginx"]:
+        _reject("NATIVE_EXECUTABLE_DNF_PROFILE_CHANGED")
+    _native_package_command(update, work)
+    key = _NATIVE["almalinux"][2]
+    if not _trusted_key(key):
+        _reject("NATIVE_EXECUTABLE_TRUST_ANCHOR_REFUSED")
+    results = {}
+    # The private verification database is a new root-owned scratch inode,
+    # not the native system database or a new system trust anchor. Match
+    # its existing distro RPMDB label, never change a policy or host path.
+    with tempfile.TemporaryDirectory(prefix="repocache-native-executable-rpmdb-", dir="/var/lib") as tmp:
+        db = Path(tmp)
+        if not _native_workspace_is_root_owned(db) or any(db.iterdir()):
+            _reject("NATIVE_EXECUTABLE_RPMDB_REFUSED")
+        with ExitStack() as stack:
+            reference = os.open("/usr/lib/sysimage/rpm", stage._DIRECTORY)
+            stack.callback(os.close, reference)
+            stage._protected_directory(reference)
+            directory = os.open(db, stage._DIRECTORY)
+            stack.callback(os.close, directory)
+            stage._protected_directory(directory)
+            label = os.getxattr(reference, "security.selinux")
+            if label.split(b":")[2:3] != [b"rpm_var_lib_t"]:
+                _reject("NATIVE_EXECUTABLE_RPMDB_LABEL_REFUSED")
+            os.setxattr(directory, "security.selinux", label)
+            if os.getxattr(directory, "security.selinux") != label:
+                _reject("NATIVE_EXECUTABLE_RPMDB_LABEL_REFUSED")
+        for action in (["--initdb"], ["--import", key]):
+            _native_package_command(["/usr/bin/rpm", "--dbpath", str(db), *action], work)
+        for package, identity in sorted(identities.items()):
+            urls = set(_native_package_command(
+                [*query[:-4], "-q", "repoquery", "--available", "--location", identity], work).splitlines())
+            if len(urls) != 1:
+                _reject("NATIVE_EXECUTABLE_RPM_LOCATION_REFUSED")
+            url = urls.pop()
+            if re.fullmatch(
+                r"https://repo\.almalinux\.org/almalinux/10/(?:AppStream|BaseOS)/"
+                r"x86_64/os/Packages/(?:[A-Za-z0-9._+~-]+/)*" + re.escape(package)
+                + r"-[A-Za-z0-9._+~-]+\.rpm", url,
+            ) is None:
+                _reject("NATIVE_EXECUTABLE_RPM_LOCATION_REFUSED")
+            payload = work / (package + ".rpm")
+            if os.path.lexists(payload):
+                _reject("NATIVE_EXECUTABLE_PAYLOAD_UNSAFE")
+            _native_package_command(["/usr/bin/curl", "--fail", "--silent", "--show-error",
+                                     "--proto", "=https", "--tlsv1.2", "--max-filesize", "33554432",
+                                     "--max-time", "90", "--output", str(payload), url], work)
+            archive_digest = _candidate_payload_sha256(payload)
+            verified = _native_package_command(
+                ["/usr/bin/rpmkeys", "--dbpath", str(db), "--checksig", str(payload)], work)
+            if verified != str(payload) + ": digests signatures OK":
+                _reject("NATIVE_EXECUTABLE_RPM_SIGNATURE_REFUSED")
+            if _candidate_payload_sha256(payload) != archive_digest:
+                _reject("NATIVE_EXECUTABLE_PAYLOAD_CHANGED")
+
+            def query_rpm(fmt):
+                return _native_package_command(
+                    ["/usr/bin/rpm", "--dbpath", str(db), "-qp", "--queryformat=" + fmt,
+                     str(payload)], work)
+
+            if (query_rpm("%{NAME}-%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}") != identity
+                    or query_rpm("%{FILEDIGESTALGO}") != "8"):
+                _reject("NATIVE_EXECUTABLE_RPM_IDENTITY_REFUSED")
+            member = _fixed_alma_rpm_member_digest(
+                package, _query_fixed_alma_rpm_file_inventory(package, work, db, payload))
+            if _candidate_payload_sha256(payload) != archive_digest:
+                _reject("NATIVE_EXECUTABLE_PAYLOAD_CHANGED")
+            results[package] = (archive_digest, member)
+    return results
+
+
+def _authenticate_candidate_rpm(work: Path, identity: str) -> tuple[str, str]:
+    return _authenticate_fixed_alma_rpm_members(work, {"nginx-core": identity})["nginx-core"]
+
+
+def _fixed_policy_tool_snapshot() -> dict:
+    """Read only fixed top-level compiler and policy-store native files."""
+    result = {}
+    with ExitStack() as stack:
+        root = os.open("/", stage._DIRECTORY)
+        stack.callback(os.close, root)
+        stage._protected_directory(root)
+        for package in sorted(_FIXED_POLICY_PACKAGES):
+            path, _, mode = _FIXED_ALMA_RPM_MEMBERS[package]
+            parent = root
+            chain = []
+            for component in path.strip("/").split("/")[:-1]:
+                child = _open_directory(parent, component, stack)
+                chain.append((parent, component, child, os.fstat(child)))
+                parent = child
+            leaf = path.rsplit("/", 1)[1]
+            info = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
+            raw = stage._asset_bytes(parent, leaf, 32 * 1024 * 1024, installed_mode=mode)
+
+            def identity(st):
+                return (st.st_dev, st.st_ino, st.st_uid, st.st_gid, st.st_mode,
+                        st.st_nlink, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+            if identity(os.stat(leaf, dir_fd=parent, follow_symlinks=False)) != identity(info):
+                _reject("DEDICATED_POLICY_NATIVE_TOOL_CHANGED")
+            for directory, name, child, original in chain:
+                current = os.fstat(child)
+                named = os.stat(name, dir_fd=directory, follow_symlinks=False)
+                stage._protected_directory(child)
+                if identity(current)[:5] != identity(original)[:5] or identity(named)[:5] != identity(current)[:5]:
+                    _reject("DEDICATED_POLICY_NATIVE_TOOL_CHANGED")
+            result[package] = (identity(info), hashlib.sha256(raw).hexdigest())
+    return result
+
+
+def _authenticate_fixed_policy_tools() -> dict:
+    """Verify exact top-level installed tool bytes against signed native RPMs.
+
+    This is necessary evidence, not proof of the entire transitive toolchain,
+    effective SELinux policy, permission to install policy or host authority.
+    """
+    if _native_distro() != "almalinux":
+        _reject("DEDICATED_POLICY_TARGET_REFUSED")
+    require_native_host_preconditions()
+    labels = _Labels("almalinux", dedicated=True)
+    before = _fixed_policy_tool_snapshot()
+    with tempfile.TemporaryDirectory(prefix="repocache-policy-native-tools-", dir="/var/tmp") as place:
+        work = Path(place)
+        if not _native_workspace_is_root_owned(work) or any(work.iterdir()):
+            _reject("DEDICATED_POLICY_WORKSPACE_REFUSED")
+
+        def owners():
+            result = {}
+            for package in sorted(_FIXED_POLICY_PACKAGES):
+                path = _FIXED_ALMA_RPM_MEMBERS[package][0]
+                identity = _native_package_command(
+                    ["/usr/bin/rpm", "-qf", "--queryformat=%{NAME}-%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}",
+                     path], work)
+                _fixed_alma_rpm_identity(package, identity)
+                result[package] = identity
+            return result
+
+        identities = owners()
+        members = _authenticate_fixed_alma_rpm_members(work, identities)
+        if (set(members) != _FIXED_POLICY_PACKAGES or owners() != identities
+                or _fixed_policy_tool_snapshot() != before):
+            _reject("DEDICATED_POLICY_NATIVE_TOOL_CHANGED")
+        for package, (_, digest) in before.items():
+            if members[package][1] != digest:
+                _reject("DEDICATED_POLICY_NATIVE_TOOL_PAYLOAD_REFUSED")
+    labels.finish()
+    require_native_host_preconditions()
+    return {
+        "native_fixed_tool_payloads_verified": True,
+        "native_toolchain_provenance_verified": False,
+        "packages": {package: {"identity": identities[package],
+                               "rpm_sha256": members[package][0],
+                               "file_sha256": members[package][1]}
+                     for package in sorted(identities)},
+        "authorizes_policy_installation": False,
+        "authorizes_host_installation": False,
+        "authorizes_nginx_activation": False,
+    }
+
+
+def _stage_authenticated_native_executable_candidate(
+    assets: Path, *, commit: str, archive_sha256: str,
+    dedicated_selinux: bool = False,
+) -> dict:
+    """Internal candidate placement only; not a CLI or activation path.
+
+    The caller is the authorized isolated installer harness. Re-authenticate
+    source and native package, retain the existing server-state lock, stage
+    only the fixed executable in the existing authenticated worker directory.
+    No systemd unit, SELinux policy, vendor label or firewall is modified.
+    The optional dedicated mode requires an already loaded, independently
+    verified policy and assigns its fixed label only to the unpublished
+    new inode. Refuse uncertain receipt/placement; never adopt or execute.
+    """
+    from repocache.server_native_nginx_executable_v1 import (
+        NativeExecutableCandidateError, stage_nginx_candidate_with_receipt,
+        _identity as executable_identity, _verify_leaf, _read_executable_receipt,
+    )
+    from repocache.server_protected_state_store_v1 import _read_file
+    distribution = _native_distro()
+    if type(dedicated_selinux) is not bool or (dedicated_selinux and distribution != "almalinux"):
+        _reject("NATIVE_EXECUTABLE_DEDICATED_POLICY_TARGET_REFUSED")
+    require_native_host_preconditions()
+    payloads, receipt = stage._authenticated_payloads(
+        assets, commit=commit, archive_sha256=archive_sha256, system=None)
+    policy_digest = None
+    labels = None
+    if dedicated_selinux:
+        labels = _Labels(distribution)
+        # Read the fixed member of the authenticated candidate before any
+        # native effect. Use the same bounded parser as fresh placement.
+        try:
+            policy_digest = stage._signed_owned_policy_from_worker(payloads[stage.WORKER])["policy_sha256"]
+        except (KeyError, stage.WorkerStageError):
+            _reject("NATIVE_EXECUTABLE_DEDICATED_POLICY_REFUSED")
+    expected = stage._json_line(receipt)
+    completed = _MARKER + "complete-" + hashlib.sha256(expected).hexdigest()
+    with ExitStack() as stack:
+        root = os.open("/", stage._DIRECTORY)
+        stack.callback(os.close, root)
+        # The private APT workspace and isolated RPM database are created
+        # and removed under /var/lib. Reuse the audited native-effects lock
+        # contract for shared-parent metadata only; the private REPOCACHE
+        # ancestor, state directory, lock and mount checks remain enforced.
+        state = stack.enter_context(_locked(
+            root, 0, allow_native_package_parent_changes=True))
+        def require_boundary():
+            if labels is not None:
+                labels.finish()
+            stage._audit_worker_files(Path("/"), payloads)
+            if (_read_file(state, _RUNTIME_RECEIPT, 0, 8192) != expected
+                    or {name for name in os.listdir(state) if name.startswith(_MARKER)} != {completed}
+                    or _read_file(state, completed, 0, 0) != b""):
+                _reject("NATIVE_EXECUTABLE_WORKER_RECEIPT_REFUSED")
+            _no_conflicting_owned_wal_pending(state)
+            _require_audited_native_package_for_activation(state, distribution=distribution)
+            if (_read_v2(state, 0)[0] is not None or
+                    _nginx_systemctl("is-enabled") != (1, b"disabled\n")
+                    or _nginx_systemctl("is-active") != (3, b"inactive\n")
+                    or _own_systemctl("is-enabled") != (1, b"disabled\n")
+                    or _own_systemctl("is-active") != (3, b"inactive\n")):
+                _reject("NATIVE_EXECUTABLE_INACTIVE_BOUNDARY_REFUSED")
+        require_boundary()
+        usr = _open_directory(root, "usr", stack)
+        sbin = _open_directory(usr, "sbin", stack)
+        libexec = _open_directory(usr, "libexec", stack)
+        destination = _open_directory(libexec, "repocache", stack)
+        vendor = os.open("nginx", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK |
+                         os.O_CLOEXEC, dir_fd=sbin)
+        stack.callback(os.close, vendor)
+        vendor_before = executable_identity(os.fstat(vendor))
+        def recheck_paths():
+            for parent, name, fd in ((root, "usr", usr), (usr, "sbin", sbin),
+                                     (usr, "libexec", libexec),
+                                     (libexec, "repocache", destination)):
+                stage._protected_directory(fd)
+                if _identity(os.fstat(fd)) != _identity(os.stat(
+                        name, dir_fd=parent, follow_symlinks=False)):
+                    _reject("NATIVE_EXECUTABLE_PARENT_CHANGED")
+            if (executable_identity(os.fstat(vendor)) != vendor_before or
+                    executable_identity(os.stat("nginx", dir_fd=sbin,
+                                                follow_symlinks=False)) != vendor_before):
+                _reject("NATIVE_EXECUTABLE_VENDOR_CHANGED")
+        recheck_paths()
+        if not _trusted_key(_NATIVE[distribution][2]):
+            _reject("NATIVE_EXECUTABLE_TRUST_ANCHOR_REFUSED")
+        # Refuse an unowned preexisting leaf or pending evidence before any
+        # package download. Only the exact known receipt may enable repeat.
+        if (_named(destination, ".repocache-nginx-executable.pending") is not None
+                or (_named(destination, "nginx") is not None and
+                    _read_executable_receipt(destination) is None)):
+            _reject("NATIVE_EXECUTABLE_FOREIGN_OR_PENDING")
+        with tempfile.TemporaryDirectory(prefix="repocache-native-executable-", dir="/var/lib") as tmp:
+            work = Path(tmp)
+            if not _native_workspace_is_root_owned(work):
+                _reject("NATIVE_EXECUTABLE_WORKSPACE_REFUSED")
+            identity = _candidate_native_identity(distribution, work)
+            package_digest, binary_digest = (
+                _authenticate_candidate_deb(work, identity) if distribution == "debian"
+                else _authenticate_candidate_rpm(work, identity))
+            require_boundary()
+            recheck_paths()
+            if (_candidate_native_identity(distribution, work) != identity
+                    or not _trusted_key(_NATIVE[distribution][2])):
+                _reject("NATIVE_EXECUTABLE_PACKAGE_CHANGED")
+            options = dict(distribution=distribution, package_identity=identity,
+                           native_payload_sha256=package_digest, authenticated_sha256=binary_digest,
+                           release_source_sha=commit, release_archive_sha256=archive_sha256,
+                           dedicated_policy_sha256=policy_digest)
+            try:
+                result = stage_nginx_candidate_with_receipt(destination, vendor, **options)
+                again = stage_nginx_candidate_with_receipt(destination, vendor, **options)
+                if (again["status"] != "NGINX_EXECUTABLE_CANDIDATE_UNCHANGED"
+                        or again["receipt_sha256"] != result["receipt_sha256"]
+                        or _verify_leaf(destination, binary_digest,
+                                        dedicated_selinux=dedicated_selinux)[:2] !=
+                           (result["device"], result["inode"])):
+                    _reject("NATIVE_EXECUTABLE_READBACK_REFUSED")
+            except NativeExecutableCandidateError:
+                _reject("NATIVE_EXECUTABLE_PLACEMENT_REFUSED")
+            require_boundary()
+            recheck_paths()
+            if _candidate_native_identity(distribution, work) != identity:
+                _reject("NATIVE_EXECUTABLE_PACKAGE_CHANGED")
+        return {**result, "native_payload_authenticated_by_installer": True,
+                "package_identity": identity, "native_payload_sha256": package_digest,
+                "release_source_sha": commit, "release_archive_sha256": archive_sha256,
+                "service_enabled": False, "service_active": False}
 
 
 def _ensure_fixed_nginx_cache_parent_under_root(
@@ -491,14 +1274,15 @@ def _ensure_fixed_nginx_cache_parent_under_root(
 
 
 _OWN_UNIT = "repocache-nginx.service"
-_OWN_CONFIG = "/etc/nginx/repocache.conf"
+_OWN_CONFIG = "/etc/nginx/repocache.d/repocache.conf"
 # Activation ownership marker is intentionally separate from the signed worker
 # receipt: no unrelated root-owned file is implicitly adopted on first use.
 _CONFIG_MARKER_PREFIX = OWNED_NGINX_CONFIG_MARKER_PREFIX
 # A fixed, reviewed immutable bootstrap; the source archive must contain
 # precisely these signed bytes. Managed TLS deployment is a different step.
 _BOOTSTRAP_CONFIG = _OWNED_BOOTSTRAP_CONFIG
-_CONFIG_MARKER = _CONFIG_MARKER_PREFIX + hashlib.sha256(_BOOTSTRAP_CONFIG).hexdigest()
+_CONFIG_MARKER = _CONFIG_MARKER_PREFIX + hashlib.sha256(
+    b"/etc/nginx/repocache.d/\0" + _BOOTSTRAP_CONFIG).hexdigest()
 
 
 
@@ -510,7 +1294,10 @@ def _private_config_present() -> None:
             stack.callback(os.close, root)
             etc = _open_directory(root, "etc", stack)
             nginx = _open_directory(etc, "nginx", stack)
-            _exact_file(nginx, stage.CONFIG, _BOOTSTRAP_CONFIG, 0o644)
+            dedicated = _open_directory(nginx, "repocache.d", stack)
+            if stat.S_IMODE(os.fstat(dedicated).st_mode) != 0o755:
+                _reject("NATIVE_PRIVATE_DIRECTORY_UNSAFE")
+            _exact_file(dedicated, stage.CONFIG, _BOOTSTRAP_CONFIG, 0o644)
     except stage.WorkerStageError:
         raise
     except (OSError, ValueError, TypeError):
@@ -555,8 +1342,35 @@ def _place_signed_private_config(raw: bytes, state_fd: int) -> None:
             stack.callback(os.close, root)
             etc = _open_directory(root, "etc", stack)
             nginx = _open_directory(etc, "nginx", stack)
+            # Refuse the previous layout, including dangling entries. No
+            # implicit migration/adoption or removal of any foreign file.
+            for name in (stage.CONFIG, "repocache-managed.conf",
+                         _TEMP + stage.CONFIG, ".repocache-owned-main.stage",
+                         ".repocache-owned-include.stage"):
+                if _named(nginx, name) is not None:
+                    _reject("NATIVE_PRIVATE_CONFIG_LEGACY_LAYOUT_REFUSED")
+            existing = _named(nginx, "repocache.d")
+            if _named(state_fd, _CONFIG_MARKER) is None and existing is not None:
+                _reject("NATIVE_PRIVATE_CONFIG_FOREIGN_COLLISION")
             _require_owned_private_config_intent(state_fd, nginx)
-            _place_file(nginx, stage.CONFIG, raw, 0o644)
+            if existing is None:
+                # The signed intent is durable before mkdir. Explicitly
+                # set the new directory mode, independent of caller umask.
+                os.mkdir("repocache.d", mode=0o755, dir_fd=nginx)
+                new_fd = _open_directory(nginx, "repocache.d", stack)
+                os.fchmod(new_fd, 0o755)
+                os.fsync(new_fd)
+                os.fsync(nginx)
+            dedicated = _open_directory(nginx, "repocache.d", stack)
+            if (stat.S_IMODE(os.fstat(dedicated).st_mode) != 0o755
+                    or os.fstat(dedicated).st_dev != os.fstat(nginx).st_dev
+                    or set(os.listxattr(nginx)) - {"security.selinux"}
+                    or set(os.listxattr(dedicated)) - {"security.selinux"}
+                    or set(os.listdir(dedicated)) - {stage.CONFIG, _TEMP + stage.CONFIG}):
+                _reject("NATIVE_PRIVATE_DIRECTORY_UNSAFE")
+            os.fsync(dedicated)
+            os.fsync(nginx)
+            _place_file(dedicated, stage.CONFIG, raw, 0o644)
         _private_config_present()
     except stage.WorkerStageError:
         raise
@@ -598,8 +1412,9 @@ def _cleanup_own_nginx_syntax_pid() -> None:
         _reject("NATIVE_RUNTIME_PID_UNVERIFIED")
 
 
-def _prepare_own_runtime_directory() -> None:
-    """Make a bounded empty /run directory before pre-start nginx -t.
+def _prepare_own_runtime_directory(*, managed_debian: bool = False,
+                                   managed_almalinux: bool = False) -> None:
+    """Make a bounded /run directory before pre-start nginx -t.
 
     PID1 will independently own and clean RuntimeDirectory at service startup.
     Never adopt a foreign/linked directory or a leftover master PID file.
@@ -621,7 +1436,16 @@ def _prepare_own_runtime_directory() -> None:
                 _reject("NATIVE_RUNTIME_DIRECTORY_UNSAFE")
             _unlink_inert_nginx_syntax_pid(own)
             if os.listdir(own):
-                _reject("NATIVE_RUNTIME_DIRECTORY_UNSAFE")
+                # Retry an interrupted inactive syntax check only with the
+                # exact empty scratch names and safe metadata. Never delete
+                # or adopt foreign content; systemd owns runtime cleanup.
+                if managed_debian and not managed_almalinux:
+                    _owned_debian_runtime_temps(root, require_all=False, inactive=True)
+                elif managed_almalinux and not managed_debian:
+                    _owned_alma_runtime_temps(root, dedicated=False,
+                                              require_all=False, inactive=True)
+                else:
+                    _reject("NATIVE_RUNTIME_DIRECTORY_UNSAFE")
             if stat.S_IMODE(os.fstat(own).st_mode) == 0o700:
                 os.fchmod(own, 0o755)
             os.fsync(run)
@@ -747,20 +1571,322 @@ def _nginx_activation_command(action: str) -> None:
         _reject("NATIVE_ACTIVATION_COMMAND_FAILED")
 
 
+def _verify_active_managed_nginx_under_lock(
+    root_fd: int, state_fd: int, distribution: str, unit_bytes: bytes,
+) -> dict:
+    """Same-version active managed no-op; never rewrite or reload resources.
+
+    Called only after the signed installer independently authenticated and
+    audited the exact worker and unit. Retain the existing state lock.
+    Pending, legacy and active-route cases remain fail closed here.
+    """
+    if (_own_systemctl("is-enabled") != (0, b"enabled\n")
+            or _own_systemctl("is-active") != (0, b"active\n")):
+        _reject("NATIVE_ACTIVATION_MANAGED_STATE_REFUSED")
+    try:
+        with _owned_layout_locked(root_fd, state_fd, recovering=False) as layout:
+            _, nginx_fd, public_fd, check = layout
+            old = _read_owned_resources(state_fd, nginx_fd, public_fd)
+            snapshot = _validate_owned_resources(old, distribution=distribution)
+            if snapshot is None:
+                _reject("NATIVE_ACTIVATION_MANAGED_STATE_REFUSED")
+            _owned_socket_require_inactive_routes(snapshot)
+            storage = prepare_installed_storage(distribution, allow_create=False)
+            identity = _owned_live_observe(root_fd, expected_unit=unit_bytes)
+            verify_service_storage_mounts(identity[0])
+            context = _owned_live_validate(root_fd, state_fd, old)
+            _owned_live_health_bound(root_fd, identity, context, old["catalog.json"],
+                                     publish=True, expected_unit=unit_bytes)
+            check()
+            _no_conflicting_owned_wal_pending(state_fd)
+            _require_audited_native_package_for_activation(state_fd, distribution=distribution)
+            _nginx_inactive_vendor_service(distribution)
+            if (prepare_installed_storage(distribution, allow_create=False) != storage
+                    or _owned_live_observe(root_fd, expected_unit=unit_bytes) != identity
+                    or _read_owned_resources(state_fd, nginx_fd, public_fd) != old
+                    or _owned_live_validate(root_fd, state_fd, old) != context
+                    or _own_systemctl("is-enabled") != (0, b"enabled\n")
+                    or _own_systemctl("is-active") != (0, b"active\n")):
+                _reject("NATIVE_ACTIVATION_MANAGED_STATE_CHANGED")
+            verify_service_storage_mounts(identity[0])
+            _owned_live_health_bound(root_fd, identity, context, old["catalog.json"],
+                                     publish=True, expected_unit=unit_bytes)
+            check()
+            _no_conflicting_owned_wal_pending(state_fd)
+            if _read_owned_resources(state_fd, nginx_fd, public_fd) != old:
+                _reject("NATIVE_ACTIVATION_MANAGED_STATE_CHANGED")
+            return {"status": "AUTHENTICATED_REPOCACHE_NGINX_ALREADY_ACTIVE",
+                    "nginx_active_verified": True, "nginx_enabled_verified": True,
+                    "storage": storage, "service_storage_mounts_verified": True,
+                    "state_generation": snapshot["state_generation"]}
+    except stage.WorkerStageError:
+        raise
+    except (NativeV2TransactionError, EffectiveNginxUnitError, OSError, ValueError, TypeError):
+        _reject("NATIVE_ACTIVATION_MANAGED_STATE_REFUSED")
+
+
+def _repair_inactive_managed_nginx_under_lock(
+    root_fd: int, state_fd: int, distribution: str, unit_bytes: bytes,
+) -> dict:
+    """Restart only the exact enabled, inactive, clean managed generation.
+
+    No configuration, catalog, storage or enablement changes are authorized.
+    The explicit signed installer invocation and original lock are required.
+    A disabled service is not implicitly enabled; pending WAL, foreign
+    state and active repositories remain refused.
+    """
+    def inactive_identity():
+        before = _read_exact_owned_unit_at(root_fd, unit_bytes, owner_uid=0, owner_gid=0)
+        if (_own_systemctl("is-enabled") != (0, b"enabled\n")
+                or _own_systemctl("is-active") != (3, b"inactive\n")
+                or _own_service_observation(active=False)["main_pid_observed"] != 0
+                or _read_exact_owned_unit_at(root_fd, unit_bytes, owner_uid=0, owner_gid=0) != before):
+            _reject("NATIVE_ACTIVATION_MANAGED_STATE_REFUSED")
+        return before
+
+    try:
+        with _owned_layout_locked(root_fd, state_fd, recovering=False) as layout:
+            _, nginx_fd, public_fd, check = layout
+            old = _read_owned_resources(state_fd, nginx_fd, public_fd)
+            snapshot = _validate_owned_resources(old, distribution=distribution)
+            if snapshot is None:
+                _reject("NATIVE_ACTIVATION_MANAGED_STATE_REFUSED")
+            _owned_socket_require_inactive_routes(snapshot)
+            unit_identity = inactive_identity()
+            storage = prepare_installed_storage(distribution, allow_create=False)
+
+            def clean():
+                check()
+                _no_conflicting_owned_wal_pending(state_fd)
+                if (_read_owned_resources(state_fd, nginx_fd, public_fd) != old
+                        or prepare_installed_storage(distribution, allow_create=False) != storage
+                        or _read_exact_owned_unit_at(root_fd, unit_bytes, owner_uid=0,
+                                                     owner_gid=0) != unit_identity):
+                    _reject("NATIVE_ACTIVATION_MANAGED_STATE_CHANGED")
+
+            clean()
+            _prepare_own_runtime_directory(managed_debian=distribution == "debian",
+                                           managed_almalinux=distribution == "almalinux")
+            # nginx -T may create an inert PID file while inactive.
+            # Never remove it unless the exact unit is still inactive.
+            try:
+                context = _owned_live_validate(root_fd, state_fd, old)
+            finally:
+                if inactive_identity() != unit_identity:
+                    _reject("NATIVE_ACTIVATION_MANAGED_STATE_CHANGED")
+                _cleanup_own_nginx_syntax_pid()
+            _require_audited_native_package_for_activation(state_fd, distribution=distribution)
+            _nginx_inactive_vendor_service(distribution)
+            clean()
+            if inactive_identity() != unit_identity:
+                _reject("NATIVE_ACTIVATION_MANAGED_STATE_CHANGED")
+            identity = None
+            try:
+                _nginx_activation_command("start")
+                identity = _owned_live_observe(root_fd, expected_unit=unit_bytes)
+                if identity[1] != unit_identity:
+                    _reject("NATIVE_ACTIVATION_MANAGED_STATE_CHANGED")
+                verify_service_storage_mounts(identity[0])
+                _owned_live_health_bound(root_fd, identity, context, old["catalog.json"],
+                                         publish=True, expected_unit=unit_bytes)
+                # Reuse the complete active repeat assessment, retaining
+                # the original lock and exact pre-start resource snapshot.
+                result = _verify_active_managed_nginx_under_lock(
+                    root_fd, state_fd, distribution, unit_bytes,
+                )
+                clean()
+                if (_owned_live_observe(root_fd, expected_unit=unit_bytes) != identity
+                        or result["state_generation"] != snapshot["state_generation"]):
+                    _reject("NATIVE_ACTIVATION_MANAGED_STATE_CHANGED")
+                return {**result, "status": "AUTHENTICATED_REPOCACHE_NGINX_ACTIVE"}
+            except Exception:
+                # Restore the original inactive/enabled state only when
+                # the exact unit and unchanged resources still establish
+                # our authority. Never stop an unverified process.
+                try:
+                    clean()
+                    current = _own_systemctl("is-active")
+                    if current == (0, b"active\n"):
+                        current_identity = _owned_live_observe(root_fd, expected_unit=unit_bytes)
+                        if (current_identity[1] != unit_identity
+                                or (identity is not None and current_identity != identity)):
+                            _reject("NATIVE_ACTIVATION_RECOVERY_REQUIRED")
+                        _nginx_activation_command("stop")
+                    elif current != (3, b"inactive\n"):
+                        _reject("NATIVE_ACTIVATION_RECOVERY_REQUIRED")
+                    if inactive_identity() != unit_identity:
+                        _reject("NATIVE_ACTIVATION_RECOVERY_REQUIRED")
+                    clean()
+                except Exception:
+                    _reject("NATIVE_ACTIVATION_RECOVERY_REQUIRED")
+                _reject("NATIVE_ACTIVATION_FAILED_ROLLED_BACK")
+    except stage.WorkerStageError:
+        raise
+    except (NativeV2TransactionError, EffectiveNginxUnitError, OSError, ValueError, TypeError):
+        _reject("NATIVE_ACTIVATION_MANAGED_STATE_REFUSED")
+
+
+def _recover_enabled_inactive_owned_wal_under_lock(
+    root_fd: int, state_fd: int, distribution: str, unit_bytes: bytes,
+    expected_wal: bytes, recheck_signed_worker,
+) -> dict:
+    """Explicit signed installer recovery of an already enabled stopped unit.
+
+    Preserve the original WAL through prior-byte preparation and exact
+    runtime verification; keep the catalog withdrawn until the old service
+    is proven. No enablement, foreign unit, active route or dedicated
+    namespace transition is authorized here. The existing signed caller
+    retains the original state lock and exact release payload.
+    """
+    if not callable(recheck_signed_worker):
+        _reject("NATIVE_ACTIVATION_MANAGED_STATE_REFUSED")
+    try:
+        with _owned_layout_locked(root_fd, state_fd, recovering=True) as layout:
+            _, nginx_fd, public_fd, check = layout
+            old, _ = _decode_owned_wal(expected_wal, distribution=distribution)
+            snapshot = _validate_owned_resources(old, distribution=distribution)
+            _owned_socket_require_inactive_routes(snapshot)
+            withdrawn = {**old, _CATALOG: None}
+            unit_identity = _read_exact_owned_unit_at(
+                root_fd, unit_bytes, owner_uid=0, owner_gid=0)
+            storage = prepare_installed_storage(distribution, allow_create=False)
+
+            def fixed_owner():
+                recheck_signed_worker()
+                _nginx_inactive_vendor_service(distribution)
+                if (_nginx_systemctl("is-enabled") != (1, b"disabled\n")
+                        or _nginx_systemctl("is-active") != (3, b"inactive\n")
+                        or _read_exact_owned_unit_at(root_fd, unit_bytes, owner_uid=0,
+                                                    owner_gid=0) != unit_identity
+                        or _own_systemctl("is-enabled") != (0, b"enabled\n")
+                        or prepare_installed_storage(distribution, allow_create=False) != storage):
+                    _reject("NATIVE_ACTIVATION_MANAGED_STATE_CHANGED")
+
+            def stopped():
+                fixed_owner()
+                if (_own_systemctl("is-active") != (3, b"inactive\n")
+                        or _own_service_observation(active=False)["main_pid_observed"] != 0):
+                    _reject("NATIVE_ACTIVATION_MANAGED_STATE_REFUSED")
+
+            def retained(owner):
+                _owned_live_guard(state_fd, nginx_fd, public_fd, check,
+                                  expected_wal, withdrawn)
+                owner()
+                _owned_live_guard(state_fd, nginx_fd, public_fd, check,
+                                  expected_wal, withdrawn)
+
+            stopped()
+            _prepare_owned_inactive_wal_rollback_locked(
+                *layout, distribution=distribution, expected_wal=expected_wal,
+                recheck_stopped_owner=stopped)
+            retained(stopped)
+            _prepare_own_runtime_directory(
+                managed_debian=distribution == "debian" and snapshot is not None,
+                managed_almalinux=distribution == "almalinux" and snapshot is not None)
+            try:
+                _owned_live_validate(root_fd, state_fd, old)
+            finally:
+                retained(stopped)
+                _cleanup_own_nginx_syntax_pid()
+            _require_audited_native_package_for_activation(state_fd, distribution=distribution)
+            retained(stopped)
+            identity = None
+            try:
+                _nginx_activation_command("start")
+                identity = _owned_live_observe(root_fd, expected_unit=unit_bytes)
+                if identity[1] != unit_identity:
+                    _reject("NATIVE_ACTIVATION_MANAGED_STATE_CHANGED")
+
+                def active():
+                    fixed_owner()
+                    if (_own_systemctl("is-active") != (0, b"active\n")
+                            or _owned_live_observe(root_fd, expected_unit=unit_bytes) != identity):
+                        _reject("NATIVE_ACTIVATION_MANAGED_STATE_CHANGED")
+                    verify_service_storage_mounts(identity[0])
+
+                retained(active)
+                _require_audited_native_package_for_activation(state_fd, distribution=distribution)
+                retained(active)
+                result = _finish_owned_inactive_wal_rollback_locked(
+                    root_fd, *layout, distribution=distribution,
+                    expected_wal=expected_wal, expected_unit=unit_bytes,
+                    recheck_active_owner=active)
+                generation = None if snapshot is None else snapshot["state_generation"]
+                if result != {"status": "OWNED_INACTIVE_WAL_ROLLBACK_OBSERVED",
+                              "prior_generation": generation, "recovery_required": False}:
+                    _reject("NATIVE_ACTIVATION_RECOVERY_REQUIRED")
+                report = {"status": "AUTHENTICATED_REPOCACHE_NGINX_ACTIVE",
+                          "nginx_active_verified": True, "nginx_enabled_verified": True,
+                          "storage": storage, "service_storage_mounts_verified": True}
+                if generation is not None:
+                    report["state_generation"] = generation
+                return report
+            except Exception:
+                # Compensate only while the exact pending WAL and withdrawn
+                # prior bytes still authorize a stop. Never stop after an
+                # uncertain unlink, changed unit, unknown master or catalog.
+                try:
+                    retained(fixed_owner)
+                    current = _own_systemctl("is-active")
+                    if current == (0, b"active\n"):
+                        observed = _owned_live_observe(root_fd, expected_unit=unit_bytes)
+                        if (observed[1] != unit_identity
+                                or (identity is not None and observed != identity)):
+                            _reject("NATIVE_ACTIVATION_RECOVERY_REQUIRED")
+                        retained(fixed_owner)
+                        if _owned_live_observe(root_fd, expected_unit=unit_bytes) != observed:
+                            _reject("NATIVE_ACTIVATION_RECOVERY_REQUIRED")
+                        _nginx_activation_command("stop")
+                    elif current != (3, b"inactive\n"):
+                        _reject("NATIVE_ACTIVATION_RECOVERY_REQUIRED")
+                    retained(stopped)
+                except Exception:
+                    _reject("NATIVE_ACTIVATION_RECOVERY_REQUIRED")
+                # Prior bytes are prepared, but runtime recovery is pending.
+                _reject("NATIVE_ACTIVATION_RECOVERY_REQUIRED")
+    except stage.WorkerStageError:
+        raise
+    except (NativeV2TransactionError, EffectiveNginxUnitError, OSError, ValueError, TypeError):
+        _reject("NATIVE_ACTIVATION_RECOVERY_REQUIRED")
+
+
 def _activate_audited_native_nginx_under_lock(
-    state_fd: int, distribution: str, config: bytes,
+    state_fd: int, distribution: str, config: bytes, *,
+    root_fd: int | None = None, unit_bytes: bytes | None = None,
+    recheck_signed_worker=None,
 ) -> dict:
     """Start only signed REPOCACHE unit; never start or override vendor NGINX."""
     _require_audited_native_package_for_activation(state_fd, distribution=distribution)
-    _no_conflicting_pending(state_fd)
-    if _read_v2(state_fd, 0)[0] is not None:
+    if recheck_signed_worker is not None:
+        if (not callable(recheck_signed_worker) or root_fd is None
+                or type(unit_bytes) is not bytes or not unit_bytes):
+            _reject("NATIVE_SIGNED_WORKER_AUDIT_UNVERIFIED")
+        recheck_signed_worker()
+        pending = _read_file(state_fd, _OWNED_WAL, 0, _MAX_WAL)
+        if pending is not None:
+            return _recover_enabled_inactive_owned_wal_under_lock(
+                root_fd, state_fd, distribution, unit_bytes, pending,
+                recheck_signed_worker)
+    managed = _read_v2(state_fd, 0)[0] is not None
+    if managed and (root_fd is None or unit_bytes is None):
         _reject("NATIVE_ACTIVATION_MANAGED_STATE_REFUSED")
+    if not managed:
+        _no_conflicting_pending(state_fd)
     # The native distro service is separately verified but MUST stay disabled.
     # An active or enabled foreign daemon is never adopted or stopped.
     _nginx_inactive_vendor_service(distribution)
     if (_nginx_systemctl("is-enabled") != (1, b"disabled\n")
             or _nginx_systemctl("is-active") != (3, b"inactive\n")):
         _reject("NATIVE_ACTIVATION_VENDOR_SERVICE_STATE")
+    if managed:
+        if (_own_systemctl("is-enabled") == (0, b"enabled\n")
+                and _own_systemctl("is-active") == (3, b"inactive\n")):
+            return _repair_inactive_managed_nginx_under_lock(
+                root_fd, state_fd, distribution, unit_bytes,
+            )
+        return _verify_active_managed_nginx_under_lock(
+            root_fd, state_fd, distribution, unit_bytes,
+        )
     _place_signed_private_config(config, state_fd)
     current_enabled = _own_systemctl("is-enabled")
     current_active = _own_systemctl("is-active")
@@ -824,10 +1950,879 @@ def _activate_audited_native_nginx_under_lock(
         _reject("NATIVE_ACTIVATION_FAILED_ROLLED_BACK")
 
 
+# Fixed installer-only bootstrap, not a new socket or CLI operation.
+_DEDICATED_RECOVERY_CHILD = r"""
+import hashlib,json,os,re,stat,sys
+from contextlib import ExitStack
+if os.getresuid()!=(0,0,0) or os.getresgid()!=(0,0,0) or not sys.flags.isolated:
+    raise SystemExit(2)
+raw=sys.stdin.buffer.read(8193)
+if not 0<len(raw)<=8192:
+    raise SystemExit(2)
+pins=json.loads(raw)
+if (type(pins) is not dict or type(pins.get("worker_sha256")) is not str
+        or re.fullmatch(r"[0-9a-f]{64}",pins["worker_sha256"]) is None):
+    raise SystemExit(2)
+worker="/usr/libexec/repocache/server-control-worker"
+flags=os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC
+with ExitStack() as stack:
+    fd=os.open("/",flags|os.O_DIRECTORY)
+    stack.callback(os.close,fd)
+    chain=[]
+    def protected_directory(directory):
+        info=os.fstat(directory)
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid!=0 or info.st_gid!=0
+                or info.st_mode&0o022 or set(os.listxattr(directory))-{"security.selinux"}):
+            raise SystemExit(2)
+        return (info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_gid)
+    for name in ("usr","libexec","repocache"):
+        protected_directory(fd)
+        parent=fd
+        fd=os.open(name,flags|os.O_DIRECTORY,dir_fd=parent)
+        stack.callback(os.close,fd)
+        chain.append((parent,name,fd,protected_directory(fd)))
+    def recheck():
+        for parent,name,directory,expected in chain:
+            seen=os.stat(name,dir_fd=parent,follow_symlinks=False)
+            if (protected_directory(directory)!=expected or
+                    (seen.st_dev,seen.st_ino,seen.st_mode,seen.st_uid,seen.st_gid)!=expected):
+                raise SystemExit(2)
+    recheck()
+    leaf=os.open("server-control-worker",flags|os.O_NONBLOCK,dir_fd=fd)
+    stack.callback(os.close,leaf)
+    info=os.fstat(leaf)
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid!=0 or info.st_gid!=0
+            or info.st_nlink!=1 or stat.S_IMODE(info.st_mode)!=0o755
+            or not 0<info.st_size<=16*1024*1024
+            or set(os.listxattr(leaf))-{"security.selinux"}):
+        raise SystemExit(2)
+    with os.fdopen(os.dup(leaf),"rb") as stream:
+        data=stream.read(16*1024*1024+1)
+    def identity(value):
+        return (value.st_dev,value.st_ino,value.st_mode,value.st_uid,value.st_gid,
+                value.st_nlink,value.st_size,value.st_mtime_ns,value.st_ctime_ns)
+    if (len(data)!=info.st_size or hashlib.sha256(data).hexdigest()!=pins["worker_sha256"]
+            or identity(os.fstat(leaf))!=identity(info)
+            or identity(os.stat(worker,follow_symlinks=False))!=identity(info)):
+        raise SystemExit(2)
+    recheck()
+    sys.path.insert(0,worker)
+    from repocache import server_native_v2_transaction_v1 as transaction
+    recheck()
+    try:
+        report=transaction._recover_installed_prepared_dedicated(pins)
+    except Exception as exc:
+        transaction._audit_native_failure(exc)
+        raise SystemExit(2) from None
+    sys.stdout.write(json.dumps(report,sort_keys=True,separators=(",",":"))+"\n")
+"""
+
+
+# Literal installer phase table. The fixed child source is generated only
+# from these closed names, never from a socket peer or caller-provided code.
+_INITIAL_PENDING_ACTIONS = {
+    "profile": {"prepare": True, "stage_profile": True},
+    "load": {"prepare": True, "load_profile": True},
+    "boot": {"prepare": True, "pending_prepare": True},
+    "boot-resume": {"prepare": True, "pending_prepare": True, "resume_boot": True},
+    "boot-rollover": {"prepare": True, "pending_prepare": True, "rollover": True},
+    "storage": {"prepare_storage": True, "pending_placement": True},
+    "runtime": {"prepare_runtime": True, "pending_placement": True},
+    "start": {"start": True, "pending_start": True},
+    "finish": {},
+}
+_DEDICATED_INITIAL_PENDING_CHILDREN = {
+    action: _DEDICATED_RECOVERY_CHILD.replace(
+        "transaction._recover_installed_prepared_dedicated(pins)",
+        "transaction._installed_initial_dedicated_pending(pins, " + repr(action) + ")")
+    for action in _INITIAL_PENDING_ACTIONS
+}
+
+
+def _authenticated_initial_dedicated_pending(
+    assets: Path, *, commit: str, archive_sha256: str,
+    action: str, recovery_pins: dict,
+) -> dict:
+    """Private fixed-phase bridge for the initial WAL successor."""
+    if type(action) is not str or action not in _INITIAL_PENDING_ACTIONS:
+        _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
+    return _authenticated_prepared_dedicated_bridge(
+        assets, commit=commit, archive_sha256=archive_sha256,
+        recovery_pins=recovery_pins, initial_pending_action=action,
+        **_INITIAL_PENDING_ACTIONS[action])
+
+
+_DEDICATED_INITIAL_STAGE_CHILD = _DEDICATED_RECOVERY_CHILD.replace(
+    "transaction._recover_installed_prepared_dedicated(pins)",
+    "transaction._stage_installed_initial_dedicated_generation(pins)")
+_DEDICATED_INITIAL_RESTORE_CHILD = _DEDICATED_RECOVERY_CHILD.replace(
+    "transaction._recover_installed_prepared_dedicated(pins)",
+    "transaction._restore_installed_initial_dedicated_generation(pins)")
+
+
+def _stage_authenticated_initial_dedicated_generation(
+    assets: Path, *, commit: str, archive_sha256: str,
+    executable_receipt_sha256: str, proposal_sha256: str,
+) -> dict:
+    """Authenticated stopped first-generation staging, never start or publish."""
+    return _authenticated_prepared_dedicated_bridge(
+        assets, commit=commit, archive_sha256=archive_sha256, initial_action="stage",
+        recovery_pins=dict(executable_receipt_sha256=executable_receipt_sha256,
+                           proposal_sha256=proposal_sha256))
+
+
+def _restore_authenticated_initial_dedicated_generation(
+    assets: Path, *, commit: str, archive_sha256: str,
+    executable_receipt_sha256: str, wal_sha256: str,
+) -> dict:
+    """Restore only a stopped, pre-profile initial generation under its exact WAL."""
+    return _authenticated_prepared_dedicated_bridge(
+        assets, commit=commit, archive_sha256=archive_sha256, initial_action="restore",
+        recovery_pins=dict(executable_receipt_sha256=executable_receipt_sha256,
+                           wal_sha256=wal_sha256))
+
+
+def _recover_authenticated_prepared_dedicated_nginx(
+    assets: Path, *, commit: str, archive_sha256: str,
+    executable_receipt_sha256: str, profile_receipt_sha256: str,
+    boot_receipt_sha256: str, wal_sha256: str,
+) -> dict:
+    """Private authenticated installer bridge for an already prepared profile.
+
+    Receipt pins come from the trusted lifecycle caller, not from the
+    files being verified. No public CLI selector or transferred lock fd.
+    Authenticate in a read-only phase (private package scratch only);
+    the installed child acquires its own lock and rechecks every pin.
+    """
+    return _authenticated_prepared_dedicated_bridge(
+        assets, commit=commit, archive_sha256=archive_sha256,
+        recovery_pins=dict(executable_receipt_sha256=executable_receipt_sha256,
+                           profile_receipt_sha256=profile_receipt_sha256,
+                           boot_receipt_sha256=boot_receipt_sha256, wal_sha256=wal_sha256))
+
+
+def _recover_authenticated_rolled_dedicated_nginx(
+    assets: Path, *, commit: str, archive_sha256: str,
+    expected_pins: dict | None = None,
+) -> dict:
+    """Select already prepared recovery from protected prior-boot intent."""
+    return _authenticated_prepared_dedicated_bridge(
+        assets, commit=commit, archive_sha256=archive_sha256, recovery_pins=None,
+        expected_rolled_pins=expected_pins)
+
+
+_DEDICATED_PREPARE_CHILD = _DEDICATED_RECOVERY_CHILD.replace(
+    "transaction._recover_installed_prepared_dedicated(pins)",
+    "transaction._prepare_installed_committed_dedicated(pins)")
+
+
+_DEDICATED_PROFILE_CHILD = _DEDICATED_RECOVERY_CHILD.replace(
+    "transaction._recover_installed_prepared_dedicated(pins)",
+    "transaction._stage_installed_committed_dedicated_profile(pins)")
+
+
+def _stage_authenticated_committed_dedicated_profile(
+    assets: Path, *, commit: str, archive_sha256: str,
+    executable_receipt_sha256: str, generation_manifest_sha256: str,
+) -> dict:
+    """Place only a fresh fixed profile for an authenticated stopped generation."""
+    return _authenticated_prepared_dedicated_bridge(
+        assets, commit=commit, archive_sha256=archive_sha256,
+        prepare=True, stage_profile=True,
+        recovery_pins=dict(executable_receipt_sha256=executable_receipt_sha256,
+                           generation_manifest_sha256=generation_manifest_sha256))
+
+
+_DEDICATED_PROFILE_LOAD_CHILD = _DEDICATED_RECOVERY_CHILD.replace(
+    "transaction._recover_installed_prepared_dedicated(pins)",
+    "transaction._load_installed_committed_dedicated_profile(pins)")
+
+
+def _load_authenticated_committed_dedicated_profile(
+    assets: Path, *, commit: str, archive_sha256: str,
+    executable_receipt_sha256: str, profile_receipt_sha256: str,
+    generation_manifest_sha256: str,
+) -> dict:
+    """Load only the exact previously placed stopped profile; repeat is read-only."""
+    return _authenticated_prepared_dedicated_bridge(
+        assets, commit=commit, archive_sha256=archive_sha256,
+        prepare=True, load_profile=True,
+        recovery_pins=dict(executable_receipt_sha256=executable_receipt_sha256,
+                           profile_receipt_sha256=profile_receipt_sha256,
+                           generation_manifest_sha256=generation_manifest_sha256))
+
+
+def _prepare_authenticated_committed_dedicated_nginx(
+    assets: Path, *, commit: str, archive_sha256: str,
+    executable_receipt_sha256: str, profile_receipt_sha256: str,
+    generation_manifest_sha256: str,
+) -> dict:
+    """Prepare only an absent first-boot namespace for an exact managed profile."""
+    return _authenticated_prepared_dedicated_bridge(
+        assets, commit=commit, archive_sha256=archive_sha256, prepare=True,
+        recovery_pins=dict(executable_receipt_sha256=executable_receipt_sha256,
+                           profile_receipt_sha256=profile_receipt_sha256,
+                           generation_manifest_sha256=generation_manifest_sha256))
+
+
+_DEDICATED_ROLLOVER_CHILD = _DEDICATED_RECOVERY_CHILD.replace(
+    "transaction._recover_installed_prepared_dedicated(pins)",
+    "transaction._rollover_installed_committed_dedicated(pins)")
+
+
+def _rollover_authenticated_committed_dedicated_nginx(
+    assets: Path, *, commit: str, archive_sha256: str,
+    executable_receipt_sha256: str, profile_receipt_sha256: str,
+    generation_manifest_sha256: str, previous_boot_receipt_sha256: str,
+) -> dict:
+    """Private explicit recreation after a different boot; never adopt a namespace."""
+    return _authenticated_prepared_dedicated_bridge(
+        assets, commit=commit, archive_sha256=archive_sha256, prepare=True, rollover=True,
+        recovery_pins=dict(executable_receipt_sha256=executable_receipt_sha256,
+                           profile_receipt_sha256=profile_receipt_sha256,
+                           generation_manifest_sha256=generation_manifest_sha256,
+                           previous_boot_receipt_sha256=previous_boot_receipt_sha256))
+
+
+_DEDICATED_PENDING_PREPARE_CHILD = _DEDICATED_RECOVERY_CHILD.replace(
+    "transaction._recover_installed_prepared_dedicated(pins)",
+    "transaction._prepare_installed_prepared_wal_dedicated(pins)")
+
+
+def _prepare_authenticated_prepared_wal_dedicated_nginx(
+    assets: Path, *, commit: str, archive_sha256: str,
+    executable_receipt_sha256: str, profile_receipt_sha256: str,
+    generation_manifest_sha256: str, wal_sha256: str,
+) -> dict:
+    """Prepare an absent first-boot namespace for the exact withdrawn prior WAL."""
+    return _authenticated_prepared_dedicated_bridge(
+        assets, commit=commit, archive_sha256=archive_sha256,
+        prepare=True, pending_prepare=True,
+        recovery_pins=dict(executable_receipt_sha256=executable_receipt_sha256,
+                           profile_receipt_sha256=profile_receipt_sha256,
+                           generation_manifest_sha256=generation_manifest_sha256,
+                           wal_sha256=wal_sha256))
+
+
+_DEDICATED_COMMITTED_RESUME_CHILD = _DEDICATED_RECOVERY_CHILD.replace(
+    "transaction._recover_installed_prepared_dedicated(pins)",
+    "transaction._resume_installed_committed_dedicated(pins)")
+
+
+def _resume_authenticated_committed_dedicated_nginx(
+    assets: Path, *, commit: str, archive_sha256: str,
+    executable_receipt_sha256: str, profile_receipt_sha256: str,
+    generation_manifest_sha256: str, boot_receipt_sha256: str,
+) -> dict:
+    """Resume only an exact retained same-boot committed namespace intent."""
+    return _authenticated_prepared_dedicated_bridge(
+        assets, commit=commit, archive_sha256=archive_sha256,
+        prepare=True, resume_boot=True,
+        recovery_pins=dict(executable_receipt_sha256=executable_receipt_sha256,
+                           profile_receipt_sha256=profile_receipt_sha256,
+                           generation_manifest_sha256=generation_manifest_sha256,
+                           boot_receipt_sha256=boot_receipt_sha256))
+
+
+_DEDICATED_PENDING_RESUME_CHILD = _DEDICATED_RECOVERY_CHILD.replace(
+    "transaction._recover_installed_prepared_dedicated(pins)",
+    "transaction._resume_installed_prepared_wal_dedicated(pins)")
+
+
+def _resume_authenticated_prepared_wal_dedicated_nginx(
+    assets: Path, *, commit: str, archive_sha256: str,
+    executable_receipt_sha256: str, profile_receipt_sha256: str,
+    generation_manifest_sha256: str, wal_sha256: str, boot_receipt_sha256: str,
+) -> dict:
+    """Resume only the exact same-boot pending WAL namespace intent."""
+    return _authenticated_prepared_dedicated_bridge(
+        assets, commit=commit, archive_sha256=archive_sha256,
+        prepare=True, pending_prepare=True, resume_boot=True,
+        recovery_pins=dict(executable_receipt_sha256=executable_receipt_sha256,
+                           profile_receipt_sha256=profile_receipt_sha256,
+                           generation_manifest_sha256=generation_manifest_sha256,
+                           wal_sha256=wal_sha256, boot_receipt_sha256=boot_receipt_sha256))
+
+
+_DEDICATED_PENDING_ROLLOVER_CHILD = _DEDICATED_RECOVERY_CHILD.replace(
+    "transaction._recover_installed_prepared_dedicated(pins)",
+    "transaction._rollover_installed_prepared_wal_dedicated(pins)")
+
+
+def _rollover_authenticated_prepared_wal_dedicated_nginx(
+    assets: Path, *, commit: str, archive_sha256: str,
+    executable_receipt_sha256: str, profile_receipt_sha256: str,
+    generation_manifest_sha256: str, previous_boot_receipt_sha256: str,
+    wal_sha256: str,
+) -> dict:
+    """Recreate only the exact withdrawn prior generation under a retained WAL."""
+    return _authenticated_prepared_dedicated_bridge(
+        assets, commit=commit, archive_sha256=archive_sha256,
+        prepare=True, rollover=True, pending_prepare=True,
+        recovery_pins=dict(executable_receipt_sha256=executable_receipt_sha256,
+                           profile_receipt_sha256=profile_receipt_sha256,
+                           generation_manifest_sha256=generation_manifest_sha256,
+                           previous_boot_receipt_sha256=previous_boot_receipt_sha256,
+                           wal_sha256=wal_sha256))
+
+
+_DEDICATED_START_CHILD = _DEDICATED_RECOVERY_CHILD.replace(
+    "transaction._recover_installed_prepared_dedicated(pins)",
+    "transaction._start_installed_committed_dedicated(pins)")
+
+
+_DEDICATED_STORAGE_CHILD = _DEDICATED_RECOVERY_CHILD.replace(
+    "transaction._recover_installed_prepared_dedicated(pins)",
+    "transaction._prepare_installed_committed_dedicated_storage(pins)")
+
+
+def _prepare_authenticated_committed_dedicated_storage(
+    assets: Path, *, commit: str, archive_sha256: str,
+    executable_receipt_sha256: str, profile_receipt_sha256: str,
+    generation_manifest_sha256: str, boot_receipt_sha256: str,
+) -> dict:
+    """Private stopped committed storage placement, never migration or start."""
+    return _authenticated_prepared_dedicated_bridge(
+        assets, commit=commit, archive_sha256=archive_sha256,
+        prepare_storage=True,
+        recovery_pins=dict(executable_receipt_sha256=executable_receipt_sha256,
+                           profile_receipt_sha256=profile_receipt_sha256,
+                           generation_manifest_sha256=generation_manifest_sha256,
+                           boot_receipt_sha256=boot_receipt_sha256))
+
+
+_DEDICATED_RUNTIME_CHILD = _DEDICATED_RECOVERY_CHILD.replace(
+    "transaction._recover_installed_prepared_dedicated(pins)",
+    "transaction._prepare_installed_committed_dedicated_runtime(pins)")
+
+
+def _prepare_authenticated_committed_dedicated_runtime(
+    assets: Path, *, commit: str, archive_sha256: str,
+    executable_receipt_sha256: str, profile_receipt_sha256: str,
+    generation_manifest_sha256: str, boot_receipt_sha256: str,
+) -> dict:
+    """Private stopped committed runtime placement, never service activation."""
+    return _authenticated_prepared_dedicated_bridge(
+        assets, commit=commit, archive_sha256=archive_sha256,
+        prepare_runtime=True,
+        recovery_pins=dict(executable_receipt_sha256=executable_receipt_sha256,
+                           profile_receipt_sha256=profile_receipt_sha256,
+                           generation_manifest_sha256=generation_manifest_sha256,
+                           boot_receipt_sha256=boot_receipt_sha256))
+
+
+_DEDICATED_PENDING_STORAGE_CHILD = _DEDICATED_RECOVERY_CHILD.replace(
+    "transaction._recover_installed_prepared_dedicated(pins)",
+    "transaction._prepare_installed_prepared_wal_dedicated_storage(pins)")
+
+
+_DEDICATED_PENDING_RUNTIME_CHILD = _DEDICATED_RECOVERY_CHILD.replace(
+    "transaction._recover_installed_prepared_dedicated(pins)",
+    "transaction._prepare_installed_prepared_wal_dedicated_runtime(pins)")
+
+
+def _prepare_authenticated_prepared_wal_dedicated_storage(
+    assets: Path, *, commit: str, archive_sha256: str,
+    executable_receipt_sha256: str, profile_receipt_sha256: str,
+    generation_manifest_sha256: str, boot_receipt_sha256: str, wal_sha256: str,
+) -> dict:
+    """Private prior-generation storage placement; retain WAL and withdrawal."""
+    return _authenticated_prepared_dedicated_bridge(
+        assets, commit=commit, archive_sha256=archive_sha256,
+        prepare_storage=True, pending_placement=True,
+        recovery_pins=dict(executable_receipt_sha256=executable_receipt_sha256,
+                           profile_receipt_sha256=profile_receipt_sha256,
+                           generation_manifest_sha256=generation_manifest_sha256,
+                           boot_receipt_sha256=boot_receipt_sha256, wal_sha256=wal_sha256))
+
+
+def _prepare_authenticated_prepared_wal_dedicated_runtime(
+    assets: Path, *, commit: str, archive_sha256: str,
+    executable_receipt_sha256: str, profile_receipt_sha256: str,
+    generation_manifest_sha256: str, boot_receipt_sha256: str, wal_sha256: str,
+) -> dict:
+    """Private prior-generation runtime placement; retain WAL and withdrawal."""
+    return _authenticated_prepared_dedicated_bridge(
+        assets, commit=commit, archive_sha256=archive_sha256,
+        prepare_runtime=True, pending_placement=True,
+        recovery_pins=dict(executable_receipt_sha256=executable_receipt_sha256,
+                           profile_receipt_sha256=profile_receipt_sha256,
+                           generation_manifest_sha256=generation_manifest_sha256,
+                           boot_receipt_sha256=boot_receipt_sha256, wal_sha256=wal_sha256))
+
+
+def _start_authenticated_committed_dedicated_nginx(
+    assets: Path, *, commit: str, archive_sha256: str,
+    executable_receipt_sha256: str, profile_receipt_sha256: str,
+    generation_manifest_sha256: str, boot_receipt_sha256: str,
+) -> dict:
+    """Private explicit start of an already prepared, disabled loopback service."""
+    return _authenticated_prepared_dedicated_bridge(
+        assets, commit=commit, archive_sha256=archive_sha256, start=True,
+        recovery_pins=dict(executable_receipt_sha256=executable_receipt_sha256,
+                           profile_receipt_sha256=profile_receipt_sha256,
+                           generation_manifest_sha256=generation_manifest_sha256,
+                           boot_receipt_sha256=boot_receipt_sha256))
+
+
+_DEDICATED_ROLLED_START_CHILD = _DEDICATED_RECOVERY_CHILD.replace(
+    "transaction._recover_installed_prepared_dedicated(pins)",
+    "transaction._start_or_verify_installed_committed_dedicated(pins)")
+
+
+_DEDICATED_PENDING_START_CHILD = _DEDICATED_RECOVERY_CHILD.replace(
+    "transaction._recover_installed_prepared_dedicated(pins)",
+    "transaction._start_installed_prepared_wal_dedicated(pins)")
+
+
+def _start_authenticated_prepared_wal_dedicated_nginx(
+    assets: Path, *, commit: str, archive_sha256: str,
+    executable_receipt_sha256: str, profile_receipt_sha256: str,
+    generation_manifest_sha256: str, boot_receipt_sha256: str, wal_sha256: str,
+) -> dict:
+    """Start only the prepared prior loopback generation; keep WAL and withdrawal."""
+    return _authenticated_prepared_dedicated_bridge(
+        assets, commit=commit, archive_sha256=archive_sha256, start=True,
+        pending_start=True,
+        recovery_pins=dict(executable_receipt_sha256=executable_receipt_sha256,
+                           profile_receipt_sha256=profile_receipt_sha256,
+                           generation_manifest_sha256=generation_manifest_sha256,
+                           boot_receipt_sha256=boot_receipt_sha256, wal_sha256=wal_sha256))
+
+
+def _authenticated_prepared_dedicated_bridge(
+    assets: Path, *, commit: str, archive_sha256: str, recovery_pins: dict | None,
+    prepare: bool = False, start: bool = False, rollover: bool = False,
+    pending_prepare: bool = False, resume_boot: bool = False,
+    pending_start: bool = False, expected_rolled_pins: dict | None = None,
+    stage_profile: bool = False, load_profile: bool = False,
+    prepare_storage: bool = False, prepare_runtime: bool = False,
+    pending_placement: bool = False,
+    initial_action: str | None = None,
+    initial_pending_action: str | None = None,
+) -> dict:
+    initial_pending = initial_pending_action is not None
+    if initial_pending:
+        flags = dict(prepare=prepare, start=start, rollover=rollover,
+                     pending_prepare=pending_prepare, resume_boot=resume_boot,
+                     pending_start=pending_start, stage_profile=stage_profile,
+                     load_profile=load_profile, prepare_storage=prepare_storage,
+                     prepare_runtime=prepare_runtime, pending_placement=pending_placement)
+        if (type(initial_pending_action) is not str
+                or initial_pending_action not in _INITIAL_PENDING_ACTIONS
+                or recovery_pins is None or expected_rolled_pins is not None
+                or initial_action is not None
+                or {key: value for key, value in flags.items() if value} !=
+                   _INITIAL_PENDING_ACTIONS[initial_pending_action]):
+            _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
+    if (initial_action not in (None, "stage", "restore")
+            or (initial_action is not None and (
+                recovery_pins is None or expected_rolled_pins is not None or any((
+                    prepare, start, rollover, pending_prepare, resume_boot, pending_start,
+                    stage_profile, load_profile, prepare_storage, prepare_runtime,
+                    pending_placement))))
+            or expected_rolled_pins is not None and recovery_pins is not None
+            or type(prepare) is not bool or type(start) is not bool or type(rollover) is not bool
+            or type(pending_prepare) is not bool or (pending_prepare and not prepare)
+            or type(resume_boot) is not bool or (resume_boot and (not prepare or rollover))
+            or type(pending_start) is not bool or (pending_start and not start)
+            or type(stage_profile) is not bool or (stage_profile and (
+                not prepare or rollover or pending_prepare or resume_boot))
+            or type(load_profile) is not bool or (load_profile and (
+                not prepare or rollover or pending_prepare or resume_boot or stage_profile))
+            or type(prepare_storage) is not bool or (prepare_storage and (
+                prepare or start or recovery_pins is None or expected_rolled_pins is not None))
+            or type(prepare_runtime) is not bool or (prepare_runtime and (
+                prepare or start or prepare_storage or recovery_pins is None or expected_rolled_pins is not None))
+            or type(pending_placement) is not bool
+            or (pending_placement and not (prepare_storage or prepare_runtime))
+            or (prepare and start) or (rollover and not prepare)
+            or (prepare and recovery_pins is None)
+            or (start and recovery_pins is None and
+                (pending_start or expected_rolled_pins is None))):
+        _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
+    rolled_start = start and recovery_pins is None
+    fields = {"executable_receipt_sha256", "profile_receipt_sha256"} | (
+        {"generation_manifest_sha256"} if prepare else
+        {"generation_manifest_sha256", "boot_receipt_sha256"} if start or prepare_storage or prepare_runtime else
+        {"boot_receipt_sha256", "wal_sha256"})
+    if initial_action is not None:
+        fields = {"executable_receipt_sha256",
+                  "proposal_sha256" if initial_action == "stage" else "wal_sha256"}
+    if stage_profile:
+        fields.remove("profile_receipt_sha256")
+    if rollover:
+        fields.add("previous_boot_receipt_sha256")
+    if pending_prepare or pending_start or pending_placement:
+        fields.add("wal_sha256")
+    if resume_boot:
+        fields.add("boot_receipt_sha256")
+    if initial_pending:
+        fields.update(("wal_sha256", "generation_manifest_sha256"))
+
+    def validate_pins(pins):
+        if (type(pins) is not dict or set(pins) != fields
+                or any(type(value) is not str or signatures.HEX64.fullmatch(value) is None
+                       for value in pins.values())):
+            _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
+
+    if recovery_pins is not None:
+        validate_pins(recovery_pins)
+    if expected_rolled_pins is not None:
+        validate_pins(expected_rolled_pins)
+    if (type(archive_sha256) is not str or signatures.HEX64.fullmatch(archive_sha256) is None
+            or type(commit) is not str or signatures.HEX40.fullmatch(commit) is None
+            or _native_distro() != "almalinux"):
+        _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
+    require_native_host_preconditions()
+    payloads, receipt = stage._authenticated_payloads(
+        assets, commit=commit, archive_sha256=archive_sha256, system=None)
+    if payloads.get(stage.CONFIG) != _BOOTSTRAP_CONFIG:
+        _reject("NATIVE_SIGNED_CONFIG_UNEXPECTED")
+    expected = stage._json_line(receipt)
+    placement_sha = hashlib.sha256(expected).hexdigest()
+    root = os.open("/", stage._DIRECTORY)
+    try:
+        with _locked(root, 0, allow_native_package_parent_changes=True) as state:
+            stage._audit_worker_files(Path("/"), payloads)
+            if (_read_file(state, _RUNTIME_RECEIPT, 0, 8192) != expected
+                    or {name for name in os.listdir(state) if name.startswith(_MARKER)}
+                       != {_MARKER + "complete-" + placement_sha}
+                    or _read_file(state, _MARKER + "complete-" + placement_sha, 0, 0) != b""):
+                _reject("NATIVE_DEDICATED_RECOVERY_PLACEMENT_REFUSED")
+            if recovery_pins is None:
+                from repocache.server_native_v2_transaction_v1 import (
+                    _retained_rolled_dedicated_recovery_pins_locked,
+                    _retained_rolled_committed_dedicated_pins_locked,
+                )
+                select = (_retained_rolled_committed_dedicated_pins_locked if start else
+                          _retained_rolled_dedicated_recovery_pins_locked)
+                recovery_pins = select(root, state)
+                if expected_rolled_pins is not None and recovery_pins != expected_rolled_pins:
+                    _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
+            validate_pins(recovery_pins)
+            if initial_action is not None:
+                from repocache.server_native_v2_transaction_v1 import (
+                    _OWNED_WAL_TMP, _owned_layout_locked, _read_owned_resources,
+                    _validate_owned_resources,
+                )
+                from repocache.server_root_control_fixed_candidate_v1 import _load_private_under_root
+                with _owned_layout_locked(root, state, recovering=initial_action == "restore") as layout:
+                    if initial_action == "stage":
+                        old = _read_owned_resources(*layout[:3])
+                        if (_validate_owned_resources(old, distribution="almalinux") is not None
+                                or _read_file(state, _OWNED_WAL, 0, _MAX_WAL) is not None
+                                or _read_file(state, _OWNED_WAL_TMP, 0, _MAX_WAL) is not None):
+                            _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
+                        report, proposal = _load_private_under_root(root, owner_uid=0, owner_gid=0)
+                        if (report["expected_generation"] != 0
+                                or report["expected_state_sha256"] is not None
+                                or hashlib.sha256(proposal).hexdigest() != recovery_pins["proposal_sha256"]):
+                            _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
+                    else:
+                        wal = _read_file(state, _OWNED_WAL, 0, _MAX_WAL)
+                        tmp = _read_file(state, _OWNED_WAL_TMP, 0, _MAX_WAL)
+                        if (wal is None) == (tmp is None):
+                            _reject("NATIVE_DEDICATED_RECOVERY_WAL_REFUSED")
+                        if hashlib.sha256(wal if wal is not None else tmp).hexdigest() != recovery_pins["wal_sha256"]:
+                            _reject("NATIVE_DEDICATED_RECOVERY_WAL_REFUSED")
+            elif initial_pending or prepare or start or prepare_storage or prepare_runtime:
+                from repocache.server_native_v2_transaction_v1 import (
+                    _OWNED_MANIFEST, _OWNED_LIMIT, _OWNED_WAL_TMP,
+                )
+                from repocache.server_native_egress_candidate_v1 import (
+                    _read_boot_egress_receipt, _BOOT_EGRESS_HISTORY_PREFIX, _BOOT_EGRESS_ROLLOVER,
+                )
+                manifest = _read_file(state, _OWNED_MANIFEST, 0, _OWNED_LIMIT[_OWNED_MANIFEST])
+                wal = _read_file(state, _OWNED_WAL, 0, _MAX_WAL)
+                if initial_pending or pending_prepare or pending_start or pending_placement:
+                    if wal is None or hashlib.sha256(wal).hexdigest() != recovery_pins["wal_sha256"]:
+                        _reject("NATIVE_DEDICATED_RECOVERY_WAL_REFUSED")
+                elif wal is not None:
+                    _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
+                if (manifest is None or hashlib.sha256(manifest).hexdigest() !=
+                        recovery_pins["generation_manifest_sha256"]
+                        or _read_file(state, _OWNED_WAL_TMP, 0, _MAX_WAL) is not None
+                        or _BOOT_EGRESS_ROLLOVER in os.listdir(state)):
+                    _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
+                boot = _read_boot_egress_receipt(state, 0, 0)
+                if stage_profile:
+                    from repocache.server_native_nginx_effective_unit_v1 import (
+                        _NAMESPACE_PROFILE_RECEIPT,
+                    )
+                    if any(name.startswith(_NAMESPACE_PROFILE_RECEIPT.removesuffix(".json"))
+                           for name in os.listdir(state)):
+                        _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
+                if rollover:
+                    if (boot is None or hashlib.sha256(boot).hexdigest() !=
+                            recovery_pins["previous_boot_receipt_sha256"]):
+                        _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
+                elif resume_boot:
+                    if boot is None or hashlib.sha256(boot).hexdigest() != recovery_pins["boot_receipt_sha256"]:
+                        _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
+                elif prepare:
+                    if boot is not None or any(name.startswith(_BOOT_EGRESS_HISTORY_PREFIX)
+                                               for name in os.listdir(state)):
+                        _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
+                elif boot is None or hashlib.sha256(boot).hexdigest() != recovery_pins["boot_receipt_sha256"]:
+                    _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
+            else:
+                wal_sha256 = recovery_pins["wal_sha256"]
+                wal = _read_file(state, _OWNED_WAL, 0, _MAX_WAL)
+                if wal is None or hashlib.sha256(wal).hexdigest() != wal_sha256:
+                    _reject("NATIVE_DEDICATED_RECOVERY_WAL_REFUSED")
+            _require_audited_native_package_for_activation(state, distribution="almalinux")
+            with tempfile.TemporaryDirectory(prefix="repocache-native-recovery-", dir="/var/lib") as tmp:
+                work = Path(tmp)
+                if not _native_workspace_is_root_owned(work):
+                    _reject("NATIVE_EXECUTABLE_WORKSPACE_REFUSED")
+                package = _candidate_native_identity("almalinux", work)
+                native_digest, binary_digest = _authenticate_candidate_rpm(work, package)
+                if _candidate_native_identity("almalinux", work) != package:
+                    _reject("NATIVE_EXECUTABLE_PACKAGE_CHANGED")
+            stage._audit_worker_files(Path("/"), payloads)
+    finally:
+        os.close(root)
+    # No protected resource changed before releasing the first lock.
+    # A concurrent change must be refused by the child's fresh pin checks.
+    pins = dict(source_sha=commit, archive_sha256=archive_sha256,
+                worker_sha256=hashlib.sha256(payloads[stage.WORKER]).hexdigest(),
+                placement_sha256=placement_sha, package_identity=package,
+                native_payload_sha256=native_digest, binary_sha256=binary_digest,
+                **recovery_pins)
+    try:
+        result = subprocess.run(
+            ("/usr/bin/python3", "-IS", "-B", "-c",
+             _DEDICATED_INITIAL_PENDING_CHILDREN[initial_pending_action] if initial_pending else
+             _DEDICATED_INITIAL_STAGE_CHILD if initial_action == "stage" else
+             _DEDICATED_INITIAL_RESTORE_CHILD if initial_action == "restore" else
+             _DEDICATED_PROFILE_CHILD if stage_profile else
+             _DEDICATED_PROFILE_LOAD_CHILD if load_profile else
+             _DEDICATED_PENDING_RESUME_CHILD if resume_boot and pending_prepare else
+             _DEDICATED_COMMITTED_RESUME_CHILD if resume_boot else
+             _DEDICATED_PENDING_ROLLOVER_CHILD if pending_prepare and rollover else
+             _DEDICATED_PENDING_PREPARE_CHILD if pending_prepare else
+             _DEDICATED_ROLLOVER_CHILD if rollover else
+             _DEDICATED_PREPARE_CHILD if prepare else
+             _DEDICATED_PENDING_START_CHILD if pending_start else
+             _DEDICATED_ROLLED_START_CHILD if rolled_start else
+             _DEDICATED_PENDING_STORAGE_CHILD if prepare_storage and pending_placement else
+             _DEDICATED_PENDING_RUNTIME_CHILD if prepare_runtime and pending_placement else
+             _DEDICATED_STORAGE_CHILD if prepare_storage else
+             _DEDICATED_RUNTIME_CHILD if prepare_runtime else
+             _DEDICATED_START_CHILD if start else _DEDICATED_RECOVERY_CHILD),
+            input=json.dumps(pins, sort_keys=True).encode("ascii"),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd="/",
+            env={"PATH": "/usr/sbin:/usr/bin:/bin", "LC_ALL": "C"},
+            shell=False, close_fds=True, timeout=420, check=False)
+        if result.returncode != 0 or not 0 < len(result.stdout) <= 65536:
+            # Preserve only the worker's closed, non-sensitive audit codes.
+            from repocache.server_native_v2_transaction_v1 import _AUDIT_FAILURE_CODES
+            for line in result.stderr.splitlines():
+                prefix = b"REPOCACHE_FIXED_TRANSACTION_REFUSAL: "
+                if line.startswith(prefix) and line[len(prefix):].isascii():
+                    code = line[len(prefix):].decode("ascii")
+                    if code in _AUDIT_FAILURE_CODES:
+                        print(prefix.decode("ascii") + code, file=sys.stderr)
+            _reject("NATIVE_DEDICATED_RECOVERY_CHILD_REFUSED")
+        report = json.loads(result.stdout)
+        if type(report) is not dict:
+            _reject("NATIVE_DEDICATED_RECOVERY_CHILD_REFUSED")
+        if initial_action is not None:
+            expected_status = ("OWNED_INITIAL_INSTALLED_GENERATION_STAGED" if initial_action == "stage"
+                               else "OWNED_INITIAL_INSTALLED_BOOTSTRAP_RESTORED")
+            required = {"status", "wal_sha256", "catalog_withdrawn", "recovery_required",
+                        "executable_receipt_sha256", "authorizes_systemctl",
+                        "authorizes_nginx_activation", "authorizes_catalog_publication"}
+            if initial_action == "stage":
+                required |= {"proposal_sha256", "generation_manifest_sha256"}
+            if (set(report) != required or report["status"] != expected_status
+                    or any(report.get(key) != recovery_pins[key] for key in fields)
+                    or any(type(report[key]) is not str or signatures.HEX64.fullmatch(report[key]) is None
+                           for key in required & {"wal_sha256", "generation_manifest_sha256"})
+                    or report["catalog_withdrawn"] is not True
+                    or report["recovery_required"] is not (initial_action == "stage")
+                    or any(report[key] is not False for key in (
+                        "authorizes_systemctl", "authorizes_nginx_activation",
+                        "authorizes_catalog_publication"))):
+                _reject("NATIVE_DEDICATED_RECOVERY_CHILD_REFUSED")
+        elif stage_profile:
+            if (report.get("status") != "OWNED_DEDICATED_PROFILE_STAGED"
+                    or (initial_pending and (
+                        report.get("initial_resources_verified") is not True
+                        or report.get("wal_sha256") != recovery_pins["wal_sha256"]
+                        or report.get("catalog_withdrawn") is not True
+                        or report.get("recovery_required") is not True))
+                    or report.get("generation_manifest_sha256") !=
+                       recovery_pins["generation_manifest_sha256"]
+                    or report.get("executable_receipt_sha256") !=
+                       recovery_pins["executable_receipt_sha256"]
+                    or type(report.get("receipt_sha256")) is not str
+                    or signatures.HEX64.fullmatch(report["receipt_sha256"]) is None
+                    or report.get("receipt_matches_owned_dropin") is not True
+                    or report.get("authorizes_systemctl") is not False
+                    or report.get("authorizes_nginx_activation") is not False
+                    or report.get("authorizes_catalog_publication") is not False):
+                _reject("NATIVE_DEDICATED_RECOVERY_CHILD_REFUSED")
+        elif load_profile:
+            if (report.get("status") != "OWNED_DEDICATED_PROFILE_LOADED"
+                    or (initial_pending and (
+                        report.get("initial_resources_verified") is not True
+                        or report.get("wal_sha256") != recovery_pins["wal_sha256"]
+                        or report.get("catalog_withdrawn") is not True
+                        or report.get("recovery_required") is not True))
+                    or report.get("generation_manifest_sha256") !=
+                       recovery_pins["generation_manifest_sha256"]
+                    or report.get("executable_receipt_sha256") !=
+                       recovery_pins["executable_receipt_sha256"]
+                    or report.get("receipt_sha256") != recovery_pins["profile_receipt_sha256"]
+                    or report.get("profile_loaded") is not True
+                    or type(report.get("daemon_reloaded")) is not bool
+                    or report.get("receipt_matches_owned_dropin") is not True
+                    or report.get("authorizes_systemctl") is not False
+                    or report.get("authorizes_nginx_activation") is not False
+                    or report.get("authorizes_catalog_publication") is not False):
+                _reject("NATIVE_DEDICATED_RECOVERY_CHILD_REFUSED")
+        elif prepare:
+            if (report.get("status") != "NATIVE_EGRESS_BOOT_RECEIPT_VERIFIED"
+                    or report.get("generation_manifest_sha256") !=
+                    recovery_pins["generation_manifest_sha256"]
+                    or (not pending_prepare and report.get("committed_resources_verified") is not True)
+                    or (pending_prepare and (
+                        report.get("initial_resources_verified" if initial_pending else
+                                   "prior_resources_verified") is not True
+                        or report.get("recovery_required") is not True
+                        or report.get("catalog_withdrawn") is not True
+                        or report.get("wal_sha256") != recovery_pins["wal_sha256"]
+                        or "committed_resources_verified" in report
+                        or (initial_pending and "prior_resources_verified" in report)))
+                    or report.get("authorizes_nginx_activation") is not False
+                    or report.get("authorizes_catalog_publication") is not False
+                    or type(report.get("receipt_sha256")) is not str
+                    or signatures.HEX64.fullmatch(report["receipt_sha256"]) is None
+                    or (rollover and report["receipt_sha256"] ==
+                        recovery_pins["previous_boot_receipt_sha256"])
+                    or (resume_boot and report["receipt_sha256"] != recovery_pins["boot_receipt_sha256"])):
+                _reject("NATIVE_DEDICATED_RECOVERY_CHILD_REFUSED")
+        elif prepare_storage or prepare_runtime:
+            from repocache.server_native_v2_transaction_v1 import (
+                _closed_committed_dedicated_storage_report,
+            )
+            expected_status = (("OWNED_DEDICATED_INITIAL_WAL_RUNTIME_PREPARED" if prepare_runtime
+                                else "OWNED_DEDICATED_INITIAL_WAL_STORAGE_PREPARED") if initial_pending else
+                               ("OWNED_DEDICATED_PREPARED_WAL_RUNTIME_PREPARED" if prepare_runtime
+                               else "OWNED_DEDICATED_PREPARED_WAL_STORAGE_PREPARED") if pending_placement else (
+                               "OWNED_DEDICATED_COMMITTED_RUNTIME_PREPARED" if prepare_runtime
+                               else "OWNED_DEDICATED_COMMITTED_STORAGE_PREPARED"))
+            if (report.get("status") != expected_status
+                    or (prepare_runtime and (type(report.get("scratch_count")) is not int
+                                             or report["scratch_count"] != 5))
+                    or (prepare_storage and "scratch_count" in report)
+                    or any(report.get(key) != recovery_pins[key] for key in fields)
+                    or (initial_pending and report.get("initial_resources_verified") is not True)
+                    or (pending_placement and (
+                        report.get("catalog_withdrawn") is not True or report.get("recovery_required") is not True))
+                    or (not pending_placement and any(key in report for key in (
+                        "wal_sha256", "catalog_withdrawn", "recovery_required")))
+                    or not _closed_committed_dedicated_storage_report(report.get("storage"))
+                    or report.get("authorizes_systemctl") is not False
+                    or report.get("authorizes_nginx_activation") is not False
+                    or report.get("authorizes_catalog_publication") is not False):
+                _reject("NATIVE_DEDICATED_RECOVERY_CHILD_REFUSED")
+        elif start:
+            accepted_status = ({"OWNED_DEDICATED_INITIAL_WAL_START_OBSERVED"} if initial_pending
+                               else {"OWNED_DEDICATED_PREPARED_WAL_START_OBSERVED"} if pending_start
+                               else {"OWNED_DEDICATED_COMMITTED_START_OBSERVED"})
+            if rolled_start:
+                accepted_status.add("OWNED_DEDICATED_COMMITTED_ACTIVE_VERIFIED")
+            if (report.get("status") not in accepted_status
+                    or report.get("generation_manifest_sha256") != recovery_pins["generation_manifest_sha256"]
+                    or report.get("boot_receipt_sha256") != recovery_pins["boot_receipt_sha256"]
+                    or report.get("catalog_observed") is not (not pending_start)
+                    or (pending_start and (report.get("wal_sha256") != recovery_pins["wal_sha256"]
+                                           or report.get("catalog_withdrawn") is not True
+                                           or report.get("recovery_required") is not True))
+                    or report.get("service_storage_mounts_verified") is not True
+                    or report.get("service_scratch_mounts_verified") is not True
+                    or report.get("enablement_changed") is not False
+                    or any(type(report.get(key)) is not int or report[key] <= 0
+                           for key in ("main_pid", "listener_inode"))):
+                _reject("NATIVE_DEDICATED_RECOVERY_CHILD_REFUSED")
+        elif initial_pending:
+            if (report.get("status") != "OWNED_DEDICATED_INITIAL_WAL_COMMIT_OBSERVED"
+                    or type(report.get("generation")) is not int
+                    or report["generation"] != 1
+                    or report.get("generation_manifest_sha256") != recovery_pins["generation_manifest_sha256"]
+                    or report.get("wal_sha256") != recovery_pins["wal_sha256"]
+                    or report.get("recovery_required") is not False
+                    or report.get("catalog_observed") is not True):
+                _reject("NATIVE_DEDICATED_RECOVERY_CHILD_REFUSED")
+        elif (report.get("status") != "OWNED_DEDICATED_WAL_ROLLBACK_OBSERVED"
+                or report.get("wal_sha256") != wal_sha256
+                or report.get("recovery_required") is not False
+                or report.get("catalog_observed") is not True):
+            _reject("NATIVE_DEDICATED_RECOVERY_CHILD_REFUSED")
+        return report
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        _reject("NATIVE_DEDICATED_RECOVERY_CHILD_REFUSED")
+
+
+def _select_rolled_activation_recovery_locked(root: int, state: int, distribution: str) -> dict | None:
+    """Recognize dedicated intent without adopting or repairing any resource.
+
+    The signed caller retains the lock. Presence of incomplete dedicated
+    evidence is a refusal, not permission to try legacy activation.
+    """
+    from repocache.server_native_nginx_effective_unit_v1 import _NAMESPACE_PROFILE_RECEIPT
+    from repocache.server_native_egress_candidate_v1 import (
+        _BOOT_EGRESS_RECEIPT, _BOOT_EGRESS_HISTORY_PREFIX, _BOOT_EGRESS_ROLLOVER,
+    )
+    from repocache.server_native_v2_transaction_v1 import (
+        _retained_rolled_dedicated_recovery_pins_locked,
+        _retained_rolled_committed_dedicated_pins_locked,
+    )
+
+    names = set(os.listdir(state))
+    prefixes = (_NAMESPACE_PROFILE_RECEIPT.removesuffix(".json"),
+                _BOOT_EGRESS_RECEIPT.removesuffix(".json"))
+    if not any(name.startswith(prefixes) for name in names):
+        if _DEDICATED_WORKER_CLAIM in names:
+            _reject("NATIVE_DEDICATED_ACTIVATION_RECOVERY_REFUSED")
+        return None
+    if (distribution != "almalinux"
+            or not {_NAMESPACE_PROFILE_RECEIPT, _BOOT_EGRESS_RECEIPT} <= names
+            or _BOOT_EGRESS_ROLLOVER in names
+            or not any(name.startswith(_BOOT_EGRESS_HISTORY_PREFIX) for name in names)
+            or any(name.startswith(prefixes) and name not in
+                   (_NAMESPACE_PROFILE_RECEIPT, _BOOT_EGRESS_RECEIPT)
+                   and not name.startswith(_BOOT_EGRESS_HISTORY_PREFIX) for name in names)):
+        _reject("NATIVE_DEDICATED_ACTIVATION_RECOVERY_REFUSED")
+    # No following symlinks, including dangling dedicated markers. Full
+    # ownership, byte and label verification is still required downstream.
+    pending = _OWNED_WAL in names
+    for name in (_NAMESPACE_PROFILE_RECEIPT, _BOOT_EGRESS_RECEIPT,
+                 *([_OWNED_WAL] if pending else [])):
+        info = _named(state, name)
+        if info is None or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            _reject("NATIVE_DEDICATED_ACTIVATION_RECOVERY_REFUSED")
+    _require_audited_native_package_for_activation(state, distribution=distribution)
+    select = (_retained_rolled_dedicated_recovery_pins_locked if pending else
+              _retained_rolled_committed_dedicated_pins_locked)
+    selected = select(root, state)
+    fields = {"executable_receipt_sha256", "profile_receipt_sha256",
+              "boot_receipt_sha256", "wal_sha256" if pending else "generation_manifest_sha256"}
+    if (type(selected) is not dict
+            or set(selected) != fields
+            or any(type(value) is not str or signatures.HEX64.fullmatch(value) is None
+                   for value in selected.values())):
+        _reject("NATIVE_DEDICATED_ACTIVATION_RECOVERY_REFUSED")
+    return selected
+
+
 def activate_authenticated_native_nginx(
     assets: Path, *, commit: str, archive_sha256: str,
 ) -> dict:
-    """Explicit signed-release activation of REPOCACHE's independent unit."""
+    """Explicit signed activation; dedicated recovery never enables a unit."""
     distribution = _native_distro()
     require_native_host_preconditions()
     attested = stage.verify_installed_worker(
@@ -849,17 +2844,39 @@ def activate_authenticated_native_nginx(
     try:
         with _locked(root, 0) as state:
             # Recheck installed source identity after acquiring shared lock.
-            stage._audit_worker_files(Path("/"), payloads)
-            return _activate_audited_native_nginx_under_lock(
-                state, distribution, payloads[stage.CONFIG],
-            )
+            def recheck_signed_worker():
+                stage._audit_worker_files(Path("/"), payloads)
+            recheck_signed_worker()
+            selected = _select_rolled_activation_recovery_locked(root, state, distribution)
+            if selected is None:
+                result = _activate_audited_native_nginx_under_lock(
+                    state, distribution, payloads[stage.CONFIG], root_fd=root,
+                    unit_bytes=payloads[_OWN_UNIT],
+                    recheck_signed_worker=recheck_signed_worker,
+                )
+                if "state_generation" in result:
+                    stage._audit_worker_files(Path("/"), payloads)
+                return result
+            recheck_signed_worker()
     finally:
         os.close(root)
+    # The signed bridge reconstructs the selection again under its own
+    # lock and the installed child independently rechecks the exact pins.
+    # A changed or failed selection never falls through to legacy start.
+    if "wal_sha256" in selected:
+        report = _recover_authenticated_rolled_dedicated_nginx(
+            assets, commit=commit, archive_sha256=archive_sha256, expected_pins=selected)
+    else:
+        report = _authenticated_prepared_dedicated_bridge(
+            assets, commit=commit, archive_sha256=archive_sha256,
+            recovery_pins=None, start=True, expected_rolled_pins=selected)
+    return {**report, "nginx_active_verified": True,
+            "nginx_enabled_verified": False, "enablement_changed": False}
 
 
 def _execute_native_nginx_install_locked(
     root_fd: int, *, distribution: str, document: dict, os_release: str,
-    owner_uid: int = 0,
+    owner_uid: int = 0, expected_worker_receipt: bytes | None = None,
 ) -> dict:
     """Host APT/DNF; one durable marker and lock across signed-source install.
 
@@ -879,6 +2896,7 @@ def _execute_native_nginx_install_locked(
         root_fd, owner_uid=owner_uid, distribution=distribution,
         allow_native_package_parent_changes=True, expose_audited_completion=True,
         preflight_before_journal=refuse_stable_foreign_host_before_journal,
+        expected_worker_receipt=expected_worker_receipt,
     ) as transaction:
         if (transaction.get("status") != "NATIVE_PACKAGE_EFFECTS_JOURNAL_DURABLE"
                 or transaction.get("authorizes_package_installation") is not False
@@ -999,6 +3017,9 @@ def install_authenticated_native_nginx(
         stack.callback(os.close, root)
         return _execute_native_nginx_install_locked(
             root, distribution=distribution, document=parsed, os_release=os_release,
+            expected_worker_receipt=stage._json_line({
+                **attested, "status": "AUTHENTICATED_WORKER_STAGED",
+            }),
         )
 
 
@@ -1143,11 +3164,24 @@ def _stage_proposal_under_root(
         type(expected_state_sha256) is not str or not signatures.HEX64.fullmatch(expected_state_sha256)
     ):
         _reject("PREVIOUS_STATE_PIN_MISMATCH")
-    with _locked(root_fd, 0) as state:
-        # Native package-effects markers and all unresolved WALs must stay
-        # in place. Proposal staging grants no recovery or activation authority.
-        _no_conflicting_pending(state)
+    with ExitStack() as stack:
+        state = stack.enter_context(_locked(root_fd, 0))
+        # Staging never adopts foreign files or consumes a pending WAL.
+        # A dedicated ownership claim must select the dedicated manifest
+        # domain, even when no managed generation has yet been committed.
+        claimed = any(name.startswith(OWNED_NGINX_CONFIG_MARKER_PREFIX)
+                      for name in os.listdir(state))
+        if claimed:
+            _, nginx, public, check_layout = stack.enter_context(
+                _owned_layout_locked(root_fd, state, recovering=False),
+            )
+            owned = _read_owned_resources(state, nginx, public)
+            _validate_owned_resources(owned)
+        else:
+            _no_conflicting_pending(state)
         previous, previous_raw = _read_v2(state, 0)
+        if claimed and previous_raw != owned["state-v2.json"]:
+            _reject("PROPOSAL_OWNED_STATE_CHANGED")
         generation = 0 if previous is None else previous["state_generation"]
         prior = _read_proposal_at(state, _PROPOSAL)
         interrupted = _read_proposal_at(state, _PROPOSAL_STAGE)
@@ -1194,6 +3228,10 @@ def _stage_proposal_under_root(
             _, prior_state = _proposal(prior)
             if prior_state != previous_raw:
                 _reject("UNCOMMITTED_PRIOR_PROPOSAL")
+        if claimed:
+            check_layout()
+            if _read_owned_resources(state, nginx, public) != owned:
+                _reject("PROPOSAL_OWNED_STATE_CHANGED")
         if interrupted is not None:
             _unlink_known(state, _PROPOSAL_STAGE, envelope, 0, _MAX_ENVELOPE)
         if prior != envelope:

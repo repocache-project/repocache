@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import socket
+import stat
 import tempfile
 from pathlib import Path
 
@@ -43,6 +44,7 @@ def filesystem(tmp_path, monkeypatch):
         (("var", "lib", "repocache", "server"), 0o700),
         (("var", "lib", "repocache", "public"), 0o755),
         (("etc", "nginx", "conf.d"), 0o755),
+        (("etc", "nginx", "repocache.d"), 0o755),
     ]:
         current = root
         for part in parts:
@@ -63,10 +65,14 @@ def filesystem(tmp_path, monkeypatch):
                         lambda *_: events.append("tls"))
     monkeypatch.setattr(native, "_native_syntax_check",
                         lambda: events.append("syntax"))
-    monkeypatch.setattr(native, "_reload_native",
-                        lambda distro: events.append(("reload", distro)))
+    identity = ("a" * 64, 123)
+    def fixture_reload(distribution):
+        events.append(("reload", distribution))
+        return identity
+    monkeypatch.setattr(native, "_reload_native", fixture_reload)
+    monkeypatch.setattr(native, "_native_reload_identity", lambda distro: identity)
     monkeypatch.setattr(native, "_local_https_generation",
-                        lambda document, generation: events.append(
+                        lambda document, generation, **kw: events.append(
                             ("exposure", generation)))
     monkeypatch.setattr(native, "_route_dump_check",
                         lambda *_args: events.append("dump"))
@@ -765,11 +771,11 @@ def test_failed_native_phase_rolls_back_previous_bytes(filesystem, monkeypatch,
     old = getattr(native, function)
     attempts = []
 
-    def fail_once(*args):
+    def fail_once(*args, **kwargs):
         attempts.append(1)
         if len(attempts) == 1:
             raise native.NativeV2TransactionError("SIMULATED_REFUSAL")
-        return old(*args)
+        return old(*args, **kwargs)
 
     monkeypatch.setattr(native, function, fail_once)
     with pytest.raises(native.NativeV2TransactionError,
@@ -832,7 +838,7 @@ def test_same_version_repair_preserves_prior_catalog_and_rolls_back(
                        match="APPLY_FAILED_RECOVERY_REQUIRED"):
         apply(filesystem)
     assert (state / native._WAL).is_file()
-    monkeypatch.setattr(native, "_reload_native", lambda *_: None)
+    monkeypatch.setattr(native, "_reload_native", lambda *_: ("a" * 64, 123))
     assert recover(filesystem)["status"] == "NATIVE_V2_ROLLED_BACK"
     assert [(state / V2_STATE).read_bytes(), include.read_bytes(),
             catalog.read_bytes(), (state / native._MANIFEST).read_bytes()] == old_bytes
@@ -1139,19 +1145,35 @@ def test_generated_complete_managed_nginx_server_passes_real_distro_parser(
     assert len(observed_catalog["repositories"]) == int(active)
 
     # The new dedicated context must also pass the real distro parser.
-    # Substitute ONLY the fixed include and runtime PID paths with private
-    # disposable fixture paths; never write the live /etc/nginx directory.
+    # Render the fixed production layout first, then substitute only the
+    # include, runtime PID and cache paths in the disposable parser fixture.
     cfg["deployment"]["paths"]["generated_include"] = native._OWNED_INCLUDE_PATH
+    fixed_cache = b"/var/cache/nginx/repocache-managed"
+    fixture_cache = str(tmp_path / "cache").encode("ascii")
+    cfg["deployment"]["paths"]["cache_root"] = fixed_cache.decode("ascii")
+    cfg["deployment"]["paths"]["log_root"] = "/var/log/nginx/repocache-managed"
     distro = "debian" if "ca-certificates" in ca else "almalinux"
     main, owned_include, owned_catalog = native._render_owned_managed_candidate(
         cfg, 1, distro, pins,
     )
-    assert owned_include == source and owned_catalog == catalog
+    assert owned_include.replace(fixed_cache, fixture_cache) == source
+    assert owned_catalog == catalog
     owned_config = tmp_path / "repocache.conf"
     own_pid = str(tmp_path / "owned-nginx.pid").encode("ascii")
     fixture_main = main.replace(b"/run/repocache-nginx/nginx.pid", own_pid).replace(
         native._OWNED_INCLUDE_PATH.encode("ascii"), str(candidate).encode("ascii"),
     )
+    # Redirect only the fixed scratch paths for this disposable parser.
+    # The production path is exercised separately inside the confined VM.
+    scratch_pairs = []
+    scratch = tmp_path / "owned-runtime"
+    scratch.mkdir(mode=0o755)
+    for directive, leaf in native._OWNED_RUNTIME_TEMP_NAMES:
+        fixed = f"/run/repocache-nginx/{leaf}".encode("ascii")
+        fixture = str(scratch / leaf).encode("ascii")
+        assert directive.encode("ascii") + b" " + fixed + b";" in fixture_main
+        fixture_main = fixture_main.replace(fixed + b";", fixture + b";")
+        scratch_pairs.append((fixture, fixed))
     owned_config.write_bytes(fixture_main)
     completed = subprocess.run(
         [nginx, "-T", "-c", str(owned_config), "-p", str(tmp_path)],
@@ -1159,14 +1181,18 @@ def test_generated_complete_managed_nginx_server_passes_real_distro_parser(
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
     )
     assert completed.returncode == 0, "dedicated managed NGINX context rejected"
-    # Normalize the two test-only paths back to the production constants
+    # Normalize the test-only paths back to the production constants
     # before exercising exact complete-context comparison.
     normalized = completed.stdout.replace(
         b"# configuration file " + str(owned_config).encode("ascii") + b":",
         b"# configuration file " + native._OWNED_MAIN_PATH.encode("ascii") + b":",
     ).replace(str(candidate).encode("ascii"), native._OWNED_INCLUDE_PATH.encode("ascii")
-    ).replace(own_pid, b"/run/repocache-nginx/nginx.pid")
-    native._verify_owned_context_dump(normalized, owned_include)
+    ).replace(own_pid, b"/run/repocache-nginx/nginx.pid").replace(
+        fixture_cache, fixed_cache,
+    )
+    for fixture, fixed in scratch_pairs:
+        normalized = normalized.replace(fixture + b";", fixed + b";")
+    native._verify_owned_context_dump(normalized, owned_include, managed_main=main)
 
 
 @pytest.mark.parametrize("resource", ["public_include", "private_state"])
@@ -1492,12 +1518,12 @@ def test_owned_marker_scan_failure_refuses_legacy_vendor_mode(monkeypatch):
                        match="^NATIVE_V2_NGINX_OWNERSHIP_UNVERIFIED$"):
         native._refuse_legacy_vendor_mode_after_owned_claim(123)
 
-def _owned_dump(include=None):
+def _owned_dump(include=None, *, distribution="debian"):
     main = (native._OWNED_BOOTSTRAP_CONFIG if include is None
-            else native._OWNED_MANAGED_CONFIG)
-    result = b"# configuration file /etc/nginx/repocache.conf:\n" + main + b"\n"
+            else native._owned_managed_config(distribution))
+    result = b"# configuration file /etc/nginx/repocache.d/repocache.conf:\n" + main + b"\n"
     if include is not None:
-        result += (b"# configuration file /etc/nginx/repocache-managed.conf:\n"
+        result += (b"# configuration file /etc/nginx/repocache.d/repocache-managed.conf:\n"
                    + include + b"\n")
     return result
 
@@ -1506,7 +1532,8 @@ def test_owned_context_bootstrap_matches_signed_archive_source():
     source = (Path(__file__).resolve().parents[1]
               / "docs/examples/nginx/repocache.conf").read_bytes()
     assert native._OWNED_BOOTSTRAP_CONFIG == installer._BOOTSTRAP_CONFIG == source
-    assert installer._CONFIG_MARKER.endswith(hashlib.sha256(source).hexdigest())
+    assert installer._CONFIG_MARKER.endswith(hashlib.sha256(
+        b"/etc/nginx/repocache.d/\0" + source).hexdigest())
     assert b"listen 127.0.0.1:8008;" in source
     assert b"include " not in source.split(b"\npid ", 1)[1]
     native._verify_owned_context_dump(_owned_dump(), None)
@@ -1538,7 +1565,7 @@ def test_owned_context_candidate_exact_complete_dump(active):
         cfg, 1, "debian", pins,
     )
     assert main == native._OWNED_MANAGED_CONFIG
-    assert b"include /etc/nginx/repocache-managed.conf;" in main
+    assert b"include /etc/nginx/repocache.d/repocache-managed.conf;" in main
     assert b"conf.d" not in main and b"nginx.conf" not in main
     assert b"127.0.0.1:8008" not in main
     assert b'X-Repocache-Generation "1"' in include
@@ -1554,11 +1581,11 @@ def test_owned_context_candidate_exact_complete_dump(active):
 def test_owned_context_refuses_any_foreign_or_incomplete_section(tamper):
     include = b"# REPOCACHE managed v2\nserver { listen 443 ssl; }\n"
     dump = _owned_dump(include)
-    section = b"# configuration file /etc/nginx/repocache-managed.conf:\n"
+    section = b"# configuration file /etc/nginx/repocache.d/repocache-managed.conf:\n"
     if tamper == "foreign-main":
-        dump = dump.replace(b"/etc/nginx/repocache.conf:", b"/etc/nginx/nginx.conf:")
+        dump = dump.replace(b"/etc/nginx/repocache.d/repocache.conf:", b"/etc/nginx/nginx.conf:")
     elif tamper == "foreign-include":
-        dump = dump.replace(b"/etc/nginx/repocache-managed.conf:", b"/etc/nginx/conf.d/repocache-managed.conf:")
+        dump = dump.replace(b"/etc/nginx/repocache.d/repocache-managed.conf:", b"/etc/nginx/conf.d/repocache-managed.conf:")
     elif tamper == "duplicate":
         dump += section + include + b"\n"
     elif tamper == "extra-section":
@@ -1598,7 +1625,7 @@ def test_owned_context_native_probe_requires_exact_files_and_claim(
 ):
     root = tmp_path / "root"
     root.mkdir(mode=0o755)
-    directory = root / "etc/nginx"
+    directory = root / "etc/nginx/repocache.d"
     directory.mkdir(parents=True)
     state = root / "state"
     state.mkdir(mode=0o700)
@@ -1631,6 +1658,8 @@ def test_owned_context_native_probe_requires_exact_files_and_claim(
         return _owned_dump(expected)
 
     monkeypatch.setattr(native, "_capture_owned_nginx_dump_private", capture)
+    monkeypatch.setattr(native, "_owned_debian_runtime_temps",
+                        lambda *_args, **_kwargs: ((1,), {}))
     rfd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
     sfd = os.open(state, os.O_RDONLY | os.O_DIRECTORY)
     try:
@@ -1653,13 +1682,15 @@ def _owned_bootstrap_resources():
     }
 
 
-def _owned_generation(generation=1, previous=None, *, active=True):
+def _owned_generation(generation=1, previous=None, *, active=True, distribution="debian",
+                      bind_address="127.0.0.1"):
     cfg = document(1, generation=generation)
+    cfg["deployment"]["listen"]["bind_address"] = bind_address
     cfg["deployment"]["paths"]["generated_include"] = native._OWNED_INCLUDE_PATH
     cfg["repositories"][0]["desired_state"] = "active" if active else "disabled"
     state = _canon(snapshot(generation=generation, previous=previous, doc=cfg))
     main, include, catalog = native._render_owned_managed_candidate(
-        cfg, generation, "debian",
+        cfg, generation, distribution,
         {"repo-0": {"mirror0.example.invalid": ["8.8.8.8"]}} if active else {},
     )
     return {
@@ -1741,7 +1772,7 @@ def test_owned_wal_fixture_publication_preserves_all_previous_resources(filesyst
     fd, state, vendor, catalog, events = filesystem
     marker = state / installer._CONFIG_MARKER
     marker.touch(mode=0o600)
-    main = vendor.parent.parent / native._OWNED_MAIN
+    main = vendor.parent.parent / "repocache.d" / native._OWNED_MAIN
     main.write_bytes(native._OWNED_BOOTSTRAP_CONFIG)
     main.chmod(0o644)
     journal = native._publish_owned_wal_fixture(fd, _owned_generation())
@@ -1788,7 +1819,7 @@ def test_owned_wal_fixture_accepts_exact_committed_generation(filesystem):
     fd, state, vendor, catalog, events = filesystem
     (state / installer._CONFIG_MARKER).touch(mode=0o600)
     old = _owned_generation()
-    main = vendor.parent.parent / native._OWNED_MAIN
+    main = vendor.parent.parent / "repocache.d" / native._OWNED_MAIN
     include = main.parent / native._INCLUDE
     paths = {
         V2_STATE: state / V2_STATE, native._OWNED_MAIN: main,
@@ -1810,7 +1841,7 @@ def test_owned_wal_fixture_interrupted_rename_preserves_temp_and_bootstrap(
 ):
     fd, state, vendor, catalog, events = filesystem
     (state / installer._CONFIG_MARKER).touch(mode=0o600)
-    main = vendor.parent.parent / native._OWNED_MAIN
+    main = vendor.parent.parent / "repocache.d" / native._OWNED_MAIN
     main.write_bytes(native._OWNED_BOOTSTRAP_CONFIG)
     main.chmod(0o644)
     actual = os.replace
@@ -1859,7 +1890,7 @@ def test_owned_domain_refused_by_state_only_and_legacy_v1_interlocks(
 def _owned_fixture_paths(filesystem, old):
     fd, state, vendor, catalog, _ = filesystem
     (state / installer._CONFIG_MARKER).touch(mode=0o600)
-    main = vendor.parent.parent / native._OWNED_MAIN
+    main = vendor.parent.parent / "repocache.d" / native._OWNED_MAIN
     paths = {
         V2_STATE: state / V2_STATE, native._OWNED_MAIN: main,
         native._INCLUDE: main.parent / native._INCLUDE, native._CATALOG: catalog,
@@ -2131,13 +2162,16 @@ def test_owned_files_fixture_real_sigkill_then_interrupted_recovery_retries(
     _assert_owned_fixture_clean(filesystem, paths)
 
 @pytest.mark.parametrize("kind", ["symlink", "hardlink", "writable"])
-def test_owned_files_fixture_refuses_unsafe_stage_inode(filesystem, kind):
+def test_owned_files_fixture_refuses_unsafe_stage_inode(filesystem, tmp_path, kind):
     old = _owned_bootstrap_resources()
     paths = _owned_fixture_paths(filesystem, old)
     fd, state, _, _, _ = filesystem
     wal = native._publish_owned_wal_fixture(fd, _owned_generation())
     stage = paths[native._INCLUDE].parent / native._OWNED_STAGES[native._INCLUDE]
-    foreign = stage.parent / "unrelated-file"
+    # Keep the link target outside the strictly allowlisted owned directory.
+    # Otherwise the directory guard refuses the fixture before the stage-inode
+    # guard is exercised. The foreign-entry guard has its own regression test.
+    foreign = tmp_path / "unrelated-file"
     foreign.write_bytes(b"unrelated")
     foreign.chmod(0o644)
     if kind == "symlink":
@@ -2239,3 +2273,4464 @@ def test_owned_files_fixture_recovers_empty_private_stage(filesystem, name):
     assert native._recover_owned_files_fixture(fd)["status"] == "OWNED_FIXTURE_FILES_RESTORED"
     assert _fixture_resource_bytes(paths) == old
     _assert_owned_fixture_clean(filesystem, paths)
+
+@pytest.fixture
+def owned_live_simulation(monkeypatch):
+    """Actual fixture bytes/WAL, simulated private native observations only."""
+    events = []
+    monkeypatch.setattr(native, "_owned_live_observe", lambda fd: (123, (1, 2)))
+    monkeypatch.setattr(native, "_owned_live_verify_listener", lambda *args: 999)
+    def validate(root, state, resources):
+        snapshot = native._validate_owned_resources(resources)
+        generation = None if snapshot is None else snapshot["state_generation"]
+        events.append(("validate", generation))
+        return None if generation is None else {}, generation, "a" * 64
+    def reload(root, identity):
+        events.append(("reload",))
+    def health(context, catalog, *, publish):
+        events.append(("health", context[1], publish))
+    monkeypatch.setattr(native, "_owned_live_validate", validate)
+    monkeypatch.setattr(native, "_owned_live_reload", reload)
+    monkeypatch.setattr(native, "_owned_live_health", health)
+    return events
+
+
+@pytest.mark.parametrize("initial", [True, False])
+def test_owned_live_wal_catalog_withdrawal_and_commit(
+    filesystem, monkeypatch, owned_live_simulation, initial,
+):
+    old = _owned_bootstrap_resources() if initial else _owned_generation()
+    new = _owned_generation(1 if initial else 2,
+                            previous=None if initial else json.loads(old[V2_STATE]),
+                            active=initial)
+    paths = _owned_fixture_paths(filesystem, old)
+    fd, state, _, _, _ = filesystem
+    events = owned_live_simulation
+    def reload(root, identity):
+        assert (state / native._OWNED_WAL).exists()
+        assert not paths[native._CATALOG].exists()
+        assert paths[native._INCLUDE].read_bytes() == new[native._INCLUDE]
+        events.append(("reload",))
+    def health(context, catalog, *, publish):
+        if ("reload",) in events:
+            assert (state / native._OWNED_WAL).exists()
+            if publish:
+                assert paths[native._CATALOG].read_bytes() == catalog
+            else:
+                assert not paths[native._CATALOG].exists()
+        events.append(("health", context[1], publish))
+    monkeypatch.setattr(native, "_owned_live_reload", reload)
+    monkeypatch.setattr(native, "_owned_live_health", health)
+    with native._owned_fixture_layout(fd, recovering=False) as layout:
+        result = native._apply_owned_live_locked(fd, *layout, new)
+    assert result["status"] == "OWNED_LIVE_COMMIT_OBSERVED"
+    assert _fixture_resource_bytes(paths) == new
+    _assert_owned_fixture_clean(filesystem, paths)
+    assert events.count(("reload",)) == 1
+
+
+@pytest.mark.parametrize("initial", [True, False])
+def test_owned_live_wal_rollback_retains_record_until_prior_health(
+    filesystem, monkeypatch, owned_live_simulation, initial,
+):
+    old = _owned_bootstrap_resources() if initial else _owned_generation()
+    new = _owned_generation(1 if initial else 2,
+                            previous=None if initial else json.loads(old[V2_STATE]),
+                            active=initial)
+    paths = _owned_fixture_paths(filesystem, old)
+    fd, state, _, _, _ = filesystem
+    calls = []
+    def reload(root, identity):
+        assert (state / native._OWNED_WAL).exists()
+        assert not paths[native._CATALOG].exists()
+        calls.append(paths[native._OWNED_MAIN].read_bytes())
+        if len(calls) == 1:
+            raise native.NativeV2TransactionError("injected reload fault")
+    monkeypatch.setattr(native, "_owned_live_reload", reload)
+    with native._owned_fixture_layout(fd, recovering=False) as layout:
+        with pytest.raises(native.NativeV2TransactionError, match="OWNED_LIVE_APPLY_ROLLED_BACK"):
+            native._apply_owned_live_locked(fd, *layout, new)
+    assert calls == [new[native._OWNED_MAIN], old[native._OWNED_MAIN]]
+    assert _fixture_resource_bytes(paths) == old
+    _assert_owned_fixture_clean(filesystem, paths)
+
+
+def test_owned_live_failed_compensation_retains_wal_and_withdraws_catalog(
+    filesystem, monkeypatch, owned_live_simulation,
+):
+    old = _owned_generation()
+    new = _owned_generation(2, previous=json.loads(old[V2_STATE]), active=False)
+    paths = _owned_fixture_paths(filesystem, old)
+    fd, state, _, _, _ = filesystem
+    def fail(*args):
+        raise native.NativeV2TransactionError("injected unavailable service")
+    monkeypatch.setattr(native, "_owned_live_reload", fail)
+    with native._owned_fixture_layout(fd, recovering=False) as layout:
+        with pytest.raises(native.NativeV2TransactionError, match="OWNED_LIVE_APPLY_RECOVERY_REQUIRED"):
+            native._apply_owned_live_locked(fd, *layout, new)
+    assert not paths[native._CATALOG].exists()
+    assert (state / native._OWNED_WAL).exists()
+    with pytest.raises(native.NativeV2TransactionError, match="OWNED_LIVE_WAL_REQUIRES_RUNTIME_RECOVERY"):
+        native._recover_owned_files_fixture(fd)
+    monkeypatch.setattr(native, "_owned_live_reload", lambda *args: None)
+    with native._owned_fixture_layout(fd, recovering=True) as layout:
+        assert native._recover_owned_live_locked(fd, *layout)["status"] == "OWNED_LIVE_ROLLBACK_OBSERVED"
+    assert _fixture_resource_bytes(paths) == old
+    _assert_owned_fixture_clean(filesystem, paths)
+
+
+def test_owned_live_wal_never_accepts_v2_catalog_gap():
+    old = _owned_generation()
+    new = _owned_generation(2, previous=json.loads(old[V2_STATE]), active=False)
+    current = dict(old)
+    current[native._CATALOG] = None
+    _, hashes = native._decode_owned_wal(native._owned_wal_record(old, new))
+    with pytest.raises(native.NativeV2TransactionError, match="OWNED_WAL_FOREIGN_DRIFT"):
+        native._owned_wal_resource_drift(old, hashes, current, unpublished=False)
+    live = native._owned_wal_record(old, new, live=True)
+    _, hashes = native._decode_owned_wal(live)
+    native._owned_wal_resource_drift(old, hashes, current, unpublished=False,
+                                      catalog_withdrawal=True)
+    with pytest.raises(native.NativeV2TransactionError, match="OWNED_WAL_UNPUBLISHED_DRIFT"):
+        native._owned_wal_resource_drift(old, hashes, current, unpublished=True,
+                                          catalog_withdrawal=True)
+
+def test_owned_live_unpublished_wal_requires_prior_runtime_proof(
+    filesystem, monkeypatch, owned_live_simulation,
+):
+    old = _owned_generation()
+    new = _owned_generation(2, previous=json.loads(old[V2_STATE]), active=False)
+    paths = _owned_fixture_paths(filesystem, old)
+    fd, state, _, _, _ = filesystem
+    temporary = state / native._OWNED_WAL_TMP
+    temporary.write_bytes(native._owned_wal_record(old, new, live=True))
+    temporary.chmod(0o600)
+    def fail(*args, **kwargs):
+        raise native.NativeV2TransactionError("injected prior health fault")
+    prior_health = native._owned_live_health
+    monkeypatch.setattr(native, "_owned_live_health", fail)
+    with native._owned_fixture_layout(fd, recovering=True) as layout:
+        with pytest.raises(native.NativeV2TransactionError, match="prior health fault"):
+            native._recover_owned_live_locked(fd, *layout)
+    assert temporary.exists()
+    assert _fixture_resource_bytes(paths) == old
+    monkeypatch.setattr(native, "_owned_live_health", prior_health)
+    with native._owned_fixture_layout(fd, recovering=True) as layout:
+        result = native._recover_owned_live_locked(fd, *layout)
+    assert result["status"] == "OWNED_LIVE_UNPUBLISHED_WAL_DISCARDED"
+    _assert_owned_fixture_clean(filesystem, paths)
+
+
+def test_owned_live_catalog_rewithdrawn_after_failed_prior_exposure(
+    filesystem, monkeypatch, owned_live_simulation,
+):
+    old = _owned_generation()
+    new = _owned_generation(2, previous=json.loads(old[V2_STATE]), active=False)
+    paths = _owned_fixture_paths(filesystem, old)
+    fd, state, _, _, _ = filesystem
+    with native._owned_fixture_layout(fd, recovering=False) as layout:
+        native._publish_owned_wal_locked(*layout[:3], old, new, layout[3], live=True)
+    def health(context, catalog, *, publish):
+        if publish:
+            raise native.NativeV2TransactionError("injected prior catalog exposure fault")
+    monkeypatch.setattr(native, "_owned_live_health", health)
+    with native._owned_fixture_layout(fd, recovering=True) as layout:
+        with pytest.raises(native.NativeV2TransactionError, match="prior catalog exposure fault"):
+            native._recover_owned_live_locked(fd, *layout)
+    assert not paths[native._CATALOG].exists()
+    assert (state / native._OWNED_WAL).exists()
+    monkeypatch.setattr(native, "_owned_live_health", lambda *a, **kw: None)
+    with native._owned_fixture_layout(fd, recovering=True) as layout:
+        native._recover_owned_live_locked(fd, *layout)
+    assert _fixture_resource_bytes(paths) == old
+    _assert_owned_fixture_clean(filesystem, paths)
+
+
+def test_owned_live_reload_fixed_arguments_and_changed_unit_refusal(monkeypatch):
+    from types import SimpleNamespace
+    identity = (123, (1, 2))
+    observations = iter([identity, (124, (1, 2))])
+    monkeypatch.setattr(native, "_owned_live_observe", lambda fd: next(observations))
+    calls = []
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setattr(native.subprocess, "run", run)
+    with pytest.raises(native.NativeV2TransactionError, match="OWNED_LIVE_UNIT_CHANGED"):
+        native._owned_live_reload(0, identity)
+    assert len(calls) == 1
+    argv, kwargs = calls[0]
+    assert argv == ("/usr/bin/systemctl", "reload", "repocache-nginx.service")
+    assert kwargs["shell"] is False and kwargs["timeout"] == 10
+    assert kwargs["cwd"] == "/" and kwargs["env"] == native._ENV
+
+
+def test_owned_live_generation_wait_is_bounded_and_rechecks_unit(monkeypatch):
+    identity = (123, (1, 2))
+    observations = iter([identity, identity, (124, (1, 2))])
+    monkeypatch.setattr(native, "_owned_live_observe", lambda fd: next(observations))
+    monkeypatch.setattr(native.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(native, "_owned_live_verify_listener", lambda *args: 999)
+    calls = []
+    def stale(*args, **kwargs):
+        calls.append(1)
+        raise native.NativeV2TransactionError("stale generation")
+    monkeypatch.setattr(native, "_owned_live_health", stale)
+    with pytest.raises(native.NativeV2TransactionError, match="OWNED_LIVE_UNIT_CHANGED"):
+        native._owned_live_wait_generation(0, identity, ({}, 2, "a" * 64))
+    assert len(calls) == 2
+
+@pytest.mark.parametrize("reload", [True, False])
+def test_owned_live_committed_reload_never_writes(
+    filesystem, monkeypatch, owned_live_simulation, reload,
+):
+    old = _owned_generation()
+    paths = _owned_fixture_paths(filesystem, old)
+    fd, state, _, _, _ = filesystem
+    before = {name: path.stat() for name, path in paths.items()}
+    with native._owned_fixture_layout(fd, recovering=False) as layout:
+        result = native._reload_owned_live_committed_locked(fd, *layout, reload=reload)
+    assert result["status"] == ("OWNED_LIVE_RELOADED" if reload else "OWNED_LIVE_NO_CHANGE")
+    assert owned_live_simulation.count(("reload",)) == int(reload)
+    assert _fixture_resource_bytes(paths) == old
+    for name, path in paths.items():
+        after = path.stat()
+        assert (after.st_ino, after.st_mtime_ns) == (
+            before[name].st_ino, before[name].st_mtime_ns)
+    _assert_owned_fixture_clean(filesystem, paths)
+
+
+def test_owned_live_committed_reload_refuses_pending_before_service_observation(
+    filesystem, owned_live_simulation,
+):
+    old = _owned_generation()
+    new = _owned_generation(2, previous=json.loads(old[V2_STATE]), active=False)
+    _owned_fixture_paths(filesystem, old)
+    fd, state, _, _, _ = filesystem
+    with native._owned_fixture_layout(fd, recovering=False) as layout:
+        native._publish_owned_wal_locked(*layout[:3], old, new, layout[3], live=True)
+    with native._owned_fixture_layout(fd, recovering=True) as layout:
+        with pytest.raises(native.NativeV2TransactionError, match="ORPHAN_STAGE"):
+            native._reload_owned_live_committed_locked(fd, *layout)
+    assert owned_live_simulation == []
+    assert (state / native._OWNED_WAL).exists()
+
+
+@pytest.mark.parametrize("stale", [False, True])
+def test_owned_live_prepare_fixed_intake_cas(
+    filesystem, monkeypatch, stale,
+):
+    old = _owned_bootstrap_resources()
+    new = _owned_generation()
+    paths = _owned_fixture_paths(filesystem, old)
+    fd, state, _, _, _ = filesystem
+    report = {"expected_generation": 1 if stale else 0,
+              "expected_state_sha256": None}
+    monkeypatch.setattr(native, "_load_private_under_root",
+                        lambda *args, **kwargs: (report, new[V2_STATE]))
+    monkeypatch.setattr(native, "_verify_tls_pair", lambda *args, **kwargs: "a" * 64)
+    monkeypatch.setattr(native, "_resolve_pins",
+                        lambda doc: {"repo-0": {"mirror0.example.invalid": ["8.8.8.8"]}})
+    with native._owned_fixture_layout(fd, recovering=False) as layout:
+        if stale:
+            with pytest.raises(native.NativeV2TransactionError, match="STATE_STALE"):
+                native._prepare_owned_live_candidate_locked(fd, *layout[:3], "debian")
+        else:
+            assert native._prepare_owned_live_candidate_locked(
+                fd, *layout[:3], "debian") == (old, new, report)
+    assert _fixture_resource_bytes(paths) == old
+    _assert_owned_fixture_clean(filesystem, paths)
+
+
+def _listener_table(*rows):
+    return ("sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode\n"
+            + "\n".join(rows) + "\n").encode("ascii")
+
+
+@pytest.mark.parametrize("address,ipv6,expected", [
+    ("0100007F", False, "127.0.0.1"),
+    ("00000000", False, "0.0.0.0"),
+    ("00000000000000000000000001000000", True, "::1"),
+    ("00000000000000000000000000000000", True, "::"),
+])
+def test_owned_listener_parses_kernel_address_and_only_listen(address, ipv6, expected):
+    table = _listener_table(
+        f"0: {address}:1F48 {address}:0000 0A 0:0 0:0 0 0 0 123",
+        f"1: {address}:1F48 {address}:0000 01 0:0 0:0 0 0 0 456",
+        f"2: {address}:1F49 {address}:0000 0A 0:0 0:0 0 0 0 789",
+    )
+    assert native._owned_listener_rows(table, ipv6=ipv6, port=8008) == [(expected, 123)]
+
+
+@pytest.mark.parametrize("rows,sockets", [
+    ([], {123}),
+    ([("127.0.0.1", 123)], {456}),
+    ([("0.0.0.0", 123)], {123}),
+    ([("127.0.0.1", 123), ("::", 456)], {123, 456}),
+    ([("127.0.0.1", 123), ("127.0.0.1", 456)], {123, 456}),
+])
+def test_owned_listener_refuses_foreign_or_ambiguous_binding(rows, sockets):
+    with pytest.raises(native.NativeV2TransactionError, match="OWNED_LIVE_LISTENER_UNVERIFIED"):
+        native._owned_require_listener(rows, sockets, "127.0.0.1")
+
+
+def test_owned_listener_matches_unique_master_inode():
+    assert native._owned_require_listener([("127.0.0.1", 123)], {123, 456},
+                                          "127.0.0.1") == 123
+
+
+def test_owned_live_health_refuses_listener_replacement(monkeypatch):
+    inodes = iter([123, 456])
+    monkeypatch.setattr(native, "_owned_live_verify_listener", lambda *args: next(inodes))
+    monkeypatch.setattr(native, "_owned_live_health", lambda *args, **kwargs: None)
+    with pytest.raises(native.NativeV2TransactionError, match="OWNED_LIVE_LISTENER_CHANGED"):
+        native._owned_live_health_bound(0, (123, (1, 2)), (None, None, None), None,
+                                        publish=False)
+
+
+def test_owned_live_intake_rechecked_at_wal_boundary(
+    filesystem, monkeypatch, owned_live_simulation,
+):
+    old = _owned_bootstrap_resources()
+    new = _owned_generation()
+    paths = _owned_fixture_paths(filesystem, old)
+    fd, state, _, _, _ = filesystem
+    report = {"expected_generation": 0, "expected_state_sha256": None}
+    monkeypatch.setattr(native, "_load_private_under_root",
+                        lambda *a, **kw: (report, b"changed intake"))
+    with native._owned_fixture_layout(fd, recovering=False) as layout:
+        with pytest.raises(native.NativeV2TransactionError, match="CANDIDATE_CHANGED"):
+            native._apply_owned_live_locked(fd, *layout, new, expected_intake=report)
+    assert _fixture_resource_bytes(paths) == old
+    _assert_owned_fixture_clean(filesystem, paths)
+
+
+def test_owned_live_fixed_intake_apply_and_replay(
+    filesystem, monkeypatch, owned_live_simulation,
+):
+    old = _owned_bootstrap_resources()
+    new = _owned_generation()
+    paths = _owned_fixture_paths(filesystem, old)
+    fd, state, _, _, _ = filesystem
+    report = {"expected_generation": 0, "expected_state_sha256": None}
+    monkeypatch.setattr(native, "_load_private_under_root",
+                        lambda *a, **kw: (report, new[V2_STATE]))
+    monkeypatch.setattr(native, "_verify_tls_pair", lambda *a, **kw: "a" * 64)
+    monkeypatch.setattr(native, "_resolve_pins",
+                        lambda doc: {"repo-0": {"mirror0.example.invalid": ["8.8.8.8"]}})
+    with native._owned_fixture_layout(fd, recovering=False) as layout:
+        assert native._apply_prepared_owned_live_locked(fd, *layout, "debian")[
+            "status"] == "OWNED_LIVE_COMMIT_OBSERVED"
+    with native._owned_fixture_layout(fd, recovering=False) as layout:
+        assert native._apply_prepared_owned_live_locked(fd, *layout, "debian")[
+            "status"] == "OWNED_LIVE_NO_CHANGE"
+    assert _fixture_resource_bytes(paths) == new
+    _assert_owned_fixture_clean(filesystem, paths)
+
+
+@pytest.mark.parametrize("operation", ["APPLY_V2", "RECOVER_V2", "RELOAD_V2"])
+def test_owned_socket_claim_never_dispatches_vendor(filesystem, monkeypatch, operation):
+    fd, state, _, _, _ = filesystem
+    (state / (native.OWNED_NGINX_CONFIG_MARKER_PREFIX + "foreign")).touch(mode=0o600)
+    monkeypatch.setattr(native, "inspect_effective_native_nginx_unit",
+                        lambda *_: pytest.fail("vendor fallthrough"))
+    monkeypatch.setattr(native, "_apply_locked",
+                        lambda *_a, **_kw: pytest.fail("vendor apply"))
+    monkeypatch.setattr(native, "_recover_locked",
+                        lambda *_: pytest.fail("vendor recovery"))
+    monkeypatch.setattr(native, "_reload_owned_locked",
+                        lambda *_: pytest.fail("vendor reload"))
+    def reject(*args):
+        assert args[0] == fd and args[-1] == operation
+        raise native.NativeV2TransactionError("OWNED_SOCKET_TEST_REFUSAL")
+    monkeypatch.setattr(native, "_owned_socket_operation_locked", reject)
+    with pytest.raises(native.NativeV2TransactionError, match="OWNED_SOCKET_TEST_REFUSAL"):
+        native._operation_under_root(fd, distribution="debian",
+                                     operation=operation, socket_dispatch=True)
+
+
+def test_owned_socket_active_candidate_refused_before_wal(filesystem, monkeypatch):
+    from contextlib import contextmanager
+    fd, state, _, _, _ = filesystem
+    @contextmanager
+    def layout(*_a, **_kw):
+        yield (1, 2, 3, lambda: None)
+    monkeypatch.setattr(native, "_owned_layout_locked", layout)
+    monkeypatch.setattr(native, "_owned_socket_host_boundary", lambda *_: None)
+    monkeypatch.setattr(native, "_owned_socket_recheck_write_boundary", lambda *_: None)
+    monkeypatch.setattr(native, "_read_owned_resources",
+                        lambda *_: {native.V2_STATE: None})
+    monkeypatch.setattr(native, "_validate_owned_resources", lambda *_a, **_kw: None)
+    candidate = _owned_generation(active=True)[V2_STATE]
+    monkeypatch.setattr(native, "_load_private_under_root",
+                        lambda *_a, **_kw: ({"expected_generation": 0}, candidate))
+    monkeypatch.setattr(native, "_prepare_owned_live_candidate_locked",
+                        lambda *_: pytest.fail("active candidate reached preparation"))
+    with pytest.raises(native.NativeV2TransactionError,
+                       match="OWNED_SOCKET_ACTIVE_STORAGE_UNVERIFIED"):
+        native._owned_socket_operation_locked(fd, 1, "debian", "APPLY_V2")
+    assert not (state / native._OWNED_WAL).exists()
+
+
+@pytest.mark.parametrize("name", ["repocache.conf", "repocache-managed.conf"])
+def test_isolated_owned_layout_never_adopts_legacy_siblings(filesystem, name):
+    fd, state, vendor, _, _ = filesystem
+    old = _owned_bootstrap_resources()
+    paths = _owned_fixture_paths(filesystem, old)
+    foreign = vendor.parent.parent / name
+    foreign.symlink_to("missing")
+    with pytest.raises(native.NativeV2TransactionError, match="ORPHAN_STAGE"):
+        with native._owned_fixture_layout(fd, recovering=False):
+            pytest.fail("legacy sibling was adopted")
+    assert foreign.is_symlink()
+    assert _fixture_resource_bytes(paths) == old
+    assert not (state / native._OWNED_WAL).exists()
+
+
+def test_old_path_claim_is_not_new_directory_authority(filesystem):
+    fd, state, vendor, _, _ = filesystem
+    main = vendor.parent.parent / "repocache.d" / native._OWNED_MAIN
+    main.write_bytes(native._OWNED_BOOTSTRAP_CONFIG)
+    main.chmod(0o644)
+    old_claim = state / (installer._CONFIG_MARKER_PREFIX
+                         + hashlib.sha256(native._OWNED_BOOTSTRAP_CONFIG).hexdigest())
+    old_claim.touch(mode=0o600)
+    with pytest.raises(native.NativeV2TransactionError, match="OWNED_CONTEXT_CLAIM_REQUIRED"):
+        with native._owned_fixture_layout(fd, recovering=False):
+            pytest.fail("old path claim reused")
+    assert old_claim.exists()
+    assert main.read_bytes() == native._OWNED_BOOTSTRAP_CONFIG
+
+
+def test_isolated_owned_layout_refuses_unrelated_directory_entry(filesystem):
+    fd, state, vendor, _, _ = filesystem
+    old = _owned_bootstrap_resources()
+    paths = _owned_fixture_paths(filesystem, old)
+    foreign = paths[native._OWNED_MAIN].parent / "foreign.conf"
+    foreign.write_bytes(b"foreign")
+    with pytest.raises(native.NativeV2TransactionError, match="OWNED_DIRECTORY_FOREIGN_ENTRY"):
+        with native._owned_fixture_layout(fd, recovering=False):
+            pytest.fail("unrelated file in isolated directory adopted")
+    assert foreign.read_bytes() == b"foreign"
+    assert _fixture_resource_bytes(paths) == old
+
+
+def test_socket_apply_binds_storage_check_to_exact_prepared_candidate(
+    filesystem, monkeypatch, owned_live_simulation,
+):
+    fd, state, _, _, _ = filesystem
+    old = _owned_bootstrap_resources()
+    new = _owned_generation(active=False)
+    paths = _owned_fixture_paths(filesystem, old)
+    report = {"expected_generation": 0, "expected_state_sha256": None}
+    monkeypatch.setattr(native, "_owned_socket_host_boundary", lambda *_: None)
+    monkeypatch.setattr(native, "_owned_socket_recheck_write_boundary", lambda *_: None)
+    monkeypatch.setattr(native, "_load_private_under_root",
+                        lambda *_a, **_kw: (report, new[V2_STATE]))
+    monkeypatch.setattr(native, "_prepare_owned_live_candidate_locked",
+                        lambda *_: (old, new, report))
+    with native._locked(fd, 0) as state_fd:
+        result = native._owned_socket_operation_locked(fd, state_fd, "debian", "APPLY_V2")
+    assert result == {"status": "NATIVE_V2_COMMITTED", "state_generation": 1}
+    assert _fixture_resource_bytes(paths) == new
+    _assert_owned_fixture_clean(filesystem, paths)
+
+
+def test_socket_recovery_dispatches_prior_snapshot_not_partial_current(
+    filesystem, monkeypatch, owned_live_simulation,
+):
+    fd, state, _, _, _ = filesystem
+    old = _owned_bootstrap_resources()
+    new = _owned_generation(active=False)
+    paths = _owned_fixture_paths(filesystem, old)
+    monkeypatch.setattr(native, "_owned_socket_host_boundary", lambda *_: None)
+    monkeypatch.setattr(native, "_owned_socket_recheck_write_boundary", lambda *_: None)
+    with native._owned_fixture_layout(fd, recovering=False) as layout:
+        state_fd, nginx_fd, public_fd, check_layout = layout
+        native._publish_owned_wal_locked(state_fd, nginx_fd, public_fd,
+                                        old, new, check_layout, live=True)
+    paths[native._INCLUDE].write_bytes(new[native._INCLUDE])
+    paths[native._INCLUDE].chmod(0o644)
+    with native._locked(fd, 0) as state_fd:
+        result = native._owned_socket_operation_locked(fd, state_fd, "debian", "RECOVER_V2")
+    assert result == {"status": "NATIVE_V2_ROLLED_BACK"}
+    assert _fixture_resource_bytes(paths) == old
+    _assert_owned_fixture_clean(filesystem, paths)
+
+@pytest.mark.parametrize("key", ["cache_root", "log_root"])
+def test_owned_active_candidate_refuses_unbound_storage_paths(key):
+    cfg = document(1)
+    cfg["expected_state_generation"] = 1
+    cfg["deployment"]["paths"]["generated_include"] = native._OWNED_INCLUDE_PATH
+    cfg["deployment"]["paths"][key] = "/tmp/foreign"
+    cfg["repositories"][0]["desired_state"] = "active"
+    with pytest.raises(native.NativeV2TransactionError,
+                       match="OWNED_CONTEXT_LAYOUT_UNSUPPORTED"):
+        native._render_owned_managed_candidate(
+            cfg, 1, "debian", {"repo-0": {"mirror0.example.invalid": ["8.8.8.8"]}},
+        )
+
+@pytest.mark.parametrize(("distribution", "directive", "other"), [
+    ("debian", b"user www-data www-data;", "almalinux"),
+    ("almalinux", b"user nginx nginx;", "debian"),
+])
+def test_managed_main_requires_exact_fixed_distro_worker(distribution, directive, other):
+    cfg = document(1)
+    cfg["expected_state_generation"] = 1
+    cfg["deployment"]["paths"]["generated_include"] = native._OWNED_INCLUDE_PATH
+    cfg["repositories"][0]["desired_state"] = "disabled"
+    main, include, catalog = native._render_owned_managed_candidate(cfg, 1, distribution, {})
+    assert main.splitlines()[1] == directive
+    assert main == native._owned_managed_config(distribution)
+    native._verify_owned_context_dump(_owned_dump(include, distribution=distribution),
+                                      include, managed_main=main)
+    with pytest.raises(native.NativeV2TransactionError, match="OWNED_CONTEXT_DUMP_MISMATCH"):
+        native._verify_owned_context_dump(_owned_dump(include, distribution=other),
+                                          include, managed_main=main)
+    with pytest.raises(native.NativeV2TransactionError, match="OWNED_CONTEXT_DUMP_INVALID"):
+        native._verify_owned_context_dump(_owned_dump(include, distribution=distribution),
+                                          include, managed_main=main.replace(directive, b"user root;"))
+
+
+def test_owned_managed_worker_identity_not_caller_selectable():
+    for value in ("root", "nginx", "www-data", "", None):
+        with pytest.raises(native.NativeV2TransactionError, match="DISTRIBUTION_UNSUPPORTED"):
+            native._owned_managed_config(value)
+
+def test_bootstrap_wal_binds_selected_distro_and_managed_wal_refuses_switch():
+    old = _owned_bootstrap_resources()
+    debian = _owned_generation(active=False)
+    alma = dict(debian)
+    alma[native._OWNED_MAIN] = native._owned_managed_config("almalinux")
+    alma[native._OWNED_MANIFEST] = native._owned_manifest_for(
+        alma[V2_STATE], alma[native._OWNED_MAIN],
+        alma[native._INCLUDE], alma[native._CATALOG],
+    )
+    assert native._validate_owned_resources(alma, distribution="almalinux")
+    with pytest.raises(native.NativeV2TransactionError, match="OWNED_WAL_MANIFEST_DRIFT"):
+        native._validate_owned_resources(alma, distribution="debian")
+    raw = native._owned_wal_record(old, alma, live=True)
+    assert native._decode_owned_wal(raw, distribution="almalinux")[0] == old
+    with pytest.raises(native.NativeV2TransactionError, match="OWNED_WAL_INVALID"):
+        native._decode_owned_wal(raw, distribution="debian")
+    next_generation = _owned_generation(2, previous=json.loads(alma[V2_STATE]), active=False)
+    with pytest.raises(native.NativeV2TransactionError,
+                       match="OWNED_WAL_MANAGED_IDENTITY_CHANGED"):
+        native._owned_wal_record(alma, next_generation, live=True)
+
+
+@pytest.mark.parametrize("distribution", ["debian", "almalinux"])
+def test_managed_context_explicit_private_temp_paths(distribution):
+    main = native._owned_managed_config(distribution)
+    for directive, name in native._OWNED_RUNTIME_TEMP_NAMES:
+        assert main.count(f"{directive} /run/repocache-nginx/{name};".encode("ascii")) == 1
+        assert directive.encode("ascii") not in native._OWNED_BOOTSTRAP_CONFIG
+    assert b"/var/lib/nginx" not in main
+
+
+@pytest.mark.parametrize("fault", ["none", "missing", "symlink", "mode", "group",
+                                  "owner", "nonempty", "extra", "xattr"])
+def test_debian_runtime_scratch_is_fixed_and_safe(tmp_path, monkeypatch, fault):
+    import stat
+    from types import SimpleNamespace
+    # Use actual root-owned disposable paths; independent of distro passwd DB.
+    monkeypatch.setattr(native.pwd, "getpwnam", lambda _: SimpleNamespace(pw_uid=33))
+    runtime = tmp_path / "run/repocache-nginx"
+    runtime.mkdir(parents=True, mode=0o755)
+    runtime.chmod(0o755)
+    for _, name in native._OWNED_RUNTIME_TEMP_NAMES:
+        path = runtime / name
+        path.mkdir(mode=0o700)
+        os.chown(path, 33, 0)
+    first = runtime / native._OWNED_RUNTIME_TEMP_NAMES[0][1]
+    if fault == "missing":
+        first.rmdir()
+    elif fault == "symlink":
+        first.rmdir()
+        first.symlink_to(tmp_path, target_is_directory=True)
+    elif fault == "mode":
+        first.chmod(0o770)
+    elif fault == "group":
+        os.chown(first, 33, 33)
+    elif fault == "owner":
+        os.chown(first, 65534, 0)
+    elif fault == "nonempty":
+        (first / "foreign").write_bytes(b"retain")
+    elif fault == "extra":
+        (runtime / "foreign").mkdir()
+    elif fault == "xattr":
+        os.setxattr(first, "user.repocache-ci", b"retain")
+    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        if fault in ("none", "missing"):
+            _, found = native._owned_debian_runtime_temps(
+                fd, require_all=fault == "none", inactive=True,
+            )
+            assert len(found) == (5 if fault == "none" else 4)
+            if fault == "missing":
+                with pytest.raises(native.NativeV2TransactionError,
+                                   match="OWNED_CONTEXT_RUNTIME_TEMP_UNVERIFIED"):
+                    native._owned_debian_runtime_temps(fd, require_all=True)
+        else:
+            with pytest.raises(native.NativeV2TransactionError,
+                               match="OWNED_CONTEXT_RUNTIME_TEMP_UNVERIFIED"):
+                native._owned_debian_runtime_temps(fd, require_all=True, inactive=True)
+        if fault == "none":
+            # Recoverable partial mkdir: root-owned and empty before nginx
+            # chown, but never acceptable as a completed native observation.
+            os.chown(first, 0, 0)
+            native._owned_debian_runtime_temps(fd, require_all=False, inactive=True)
+            with pytest.raises(native.NativeV2TransactionError,
+                               match="OWNED_CONTEXT_RUNTIME_TEMP_UNVERIFIED"):
+                native._owned_debian_runtime_temps(fd, require_all=True)
+            assert stat.S_IMODE(first.stat().st_mode) == 0o700
+    finally:
+        os.close(fd)
+
+
+def test_owned_wal_refuses_rehashed_unapproved_egress_tuple():
+    new = _owned_generation()
+    raw = new[native._INCLUDE]
+    assert raw.count(b"server 8.8.8.8:443;") == 1
+    new[native._INCLUDE] = raw.replace(b"server 8.8.8.8:443;", b"server 8.8.8.8:8008;")
+    new[native._OWNED_MANIFEST] = native._owned_manifest_for(
+        new[V2_STATE], new[native._OWNED_MAIN], new[native._INCLUDE], new[native._CATALOG],
+    )
+    with pytest.raises(native.NativeV2TransactionError,
+                       match="OWNED_WAL_EGRESS_CANDIDATE_INVALID"):
+        native._owned_wal_record(_owned_bootstrap_resources(), new)
+
+
+@pytest.mark.parametrize("initial", [True, False])
+def test_live_egress_recovery_derives_exact_policies_without_catalog(initial, monkeypatch):
+    old = _owned_bootstrap_resources() if initial else _owned_generation()
+    previous = None if initial else json.loads(old[V2_STATE])
+    new = _owned_generation(1 if initial else 2, previous=previous, active=initial)
+    wal = native._owned_wal_record(old, new, live=True)
+    def never(*args, **kwargs):
+        pytest.fail("recovery must not resolve DNS")
+    monkeypatch.setattr(native, "bounded_getaddrinfo", never)
+    partial = native._owned_live_egress_recovery_candidates(
+        wal, old, distribution="debian", worker_uid=33)
+    assert partial["proposed"] is None
+    current = {**new, native._CATALOG: None, native._OWNED_MANIFEST: old[native._OWNED_MANIFEST]}
+    report = native._owned_live_egress_recovery_candidates(
+        wal, current, distribution="debian", worker_uid=33)
+    assert report["prior"]["generation"] == (0 if initial else 1)
+    assert report["proposed"]["generation"] == (1 if initial else 2)
+    assert report["prior"]["destinations"] == (() if initial else (("8.8.8.8", 443),))
+    assert report["proposed"]["destinations"] == ((("8.8.8.8", 443),) if initial else ())
+    assert report["wal_sha256"] == hashlib.sha256(wal).hexdigest()
+    assert all(report[key] is False for key in (
+        "runtime_egress_verified", "authorizes_firewall_change",
+        "authorizes_nginx_activation", "authorizes_catalog_publication"))
+    assert "policy drop;" in report["prior"]["nft_candidate"]
+    if initial:
+        assert '127.0.0.1 tcp dport 8008' in report["prior"]["nft_candidate"]
+
+
+def test_live_egress_recovery_refuses_foreign_and_inconsistent_wal():
+    old = _owned_bootstrap_resources()
+    new = _owned_generation()
+    current = {**new, native._CATALOG: None}
+    raw = native._owned_wal_record(old, new, live=True)
+    with pytest.raises(native.NativeV2TransactionError):
+        native._owned_live_egress_recovery_candidates(
+            native._owned_wal_record(old, new), current, distribution="debian", worker_uid=33)
+    with pytest.raises(native.NativeV2TransactionError, match="FOREIGN_DRIFT"):
+        native._owned_live_egress_recovery_candidates(
+            raw, {**current, native._INCLUDE: b"foreign"}, distribution="debian", worker_uid=33)
+    altered = json.loads(raw)
+    altered["new_sha256"][native._CATALOG] = "0" * 64
+    with pytest.raises(native.NativeV2TransactionError, match="PROPOSED_WAL_DRIFT"):
+        native._owned_live_egress_recovery_candidates(
+            _canon(altered), current, distribution="debian", worker_uid=33)
+
+
+
+@pytest.mark.parametrize("fault", ["none", "restore", "catalog", "partial",
+                                    "wal-drift", "resource-drift", "owner-drift"])
+def test_owned_egress_replacement_requires_exact_durable_wal_and_withdrawn_catalog(
+        monkeypatch, fault):
+    old = _owned_bootstrap_resources()
+    new = _owned_generation()
+    wal = native._owned_wal_record(old, new, live=True)
+    current = [{**new, native._CATALOG: None}]
+    if fault == "catalog":
+        current[0] = new
+    elif fault == "partial":
+        current[0] = {**old, native._CATALOG: None}
+    checks = []
+    calls = []
+
+    def exact(fd, raw):
+        assert fd == 101 and raw == wal
+        checks.append("wal")
+        if fault == "wal-drift" and calls:
+            raise native.NativeV2TransactionError("WAL_CHANGED")
+
+    def read(*fds):
+        assert fds == (101, 102, 103)
+        return dict(current[0])
+
+    def owner():
+        checks.append("owner")
+        if fault == "owner-drift" and calls:
+            raise native.NativeV2TransactionError("OWNER_CHANGED")
+
+    def replace(previous, proposed, *, namespace_identity, recheck_owned):
+        assert namespace_identity == (7, 9)
+        calls.append((previous, proposed))
+        if fault == "resource-drift":
+            current[0][native._CATALOG] = b"unexpected"
+        recheck_owned()
+        return {"status": "NAMESPACE_EGRESS_REPLACEMENT_OBSERVED"}
+
+    monkeypatch.setattr(native, "_owned_require_exact_wal", exact)
+    monkeypatch.setattr(native, "_read_owned_resources", read)
+    monkeypatch.setattr(native, "_replace_fixed_namespace_egress", replace)
+    kwargs = dict(wal=wal, distribution="debian", worker_uid=33,
+                  namespace_identity=(7, 9), recheck_namespace_owner=owner,
+                  restore=fault == "restore")
+    if fault in ("none", "restore"):
+        result = native._owned_live_replace_egress_locked(
+            101, 102, 103, lambda: checks.append("layout"), **kwargs)
+        assert result["wal_sha256"] == hashlib.sha256(wal).hexdigest()
+        assert (result["from_generation"], result["to_generation"]) == (
+            (1, 0) if fault == "restore" else (0, 1))
+        assert "8.8.8.8" in calls[0][0 if fault == "restore" else 1]
+        assert "8.8.8.8" not in calls[0][1 if fault == "restore" else 0]
+        assert not result["authorizes_catalog_publication"]
+        assert not result["authorizes_nginx_activation"]
+    else:
+        with pytest.raises(native.NativeV2TransactionError):
+            native._owned_live_replace_egress_locked(
+                101, 102, 103, lambda: checks.append("layout"), **kwargs)
+        assert len(calls) == (0 if fault in ("catalog", "partial") else 1)
+
+
+@pytest.mark.parametrize("kind", ["bootstrap", "disabled", "active"])
+@pytest.mark.parametrize("fault", ["none", "pending", "orphan", "resource-drift", "owner-drift"])
+def test_committed_boot_egress_retains_generation_and_excludes_pending(
+        filesystem, monkeypatch, kind, fault):
+    rootfd, state, _, _, _ = filesystem
+    old = (_owned_bootstrap_resources() if kind == "bootstrap" else
+           _owned_generation(active=kind == "active"))
+    paths = _owned_fixture_paths(filesystem, old)
+    if fault == "pending":
+        # Presence, including an invalid pending intent, is sufficient to
+        # forbid boot-time policy initialization before recovery.
+        (state / native._OWNED_WAL).write_bytes(b"pending")
+        (state / native._OWNED_WAL).chmod(0o600)
+    elif fault == "orphan":
+        orphan = paths[native._OWNED_MAIN].parent / native._OWNED_STAGES[native._OWNED_MAIN]
+        orphan.write_bytes(b"orphan")
+        orphan.chmod(0o644)
+    calls = []
+    def owned():
+        if fault == "owner-drift" and calls:
+            raise native.NativeV2TransactionError("OWNER_CHANGED")
+    def prepare(got_root, got_state, rules, **kw):
+        assert got_root == rootfd
+        assert got_state == statefd
+        assert kw["namespace_identity"] == (17, 29)
+        assert kw["generation"] == (0 if kind == "bootstrap" else 1)
+        assert ("8.8.8.8" in rules) == (kind == "active")
+        assert kw["profile_receipt_sha256"] == "a" * 64
+        assert kw["executable_receipt_sha256"] == "b" * 64
+        if kind != "bootstrap":
+            assert kw["generation_manifest_sha256"] == hashlib.sha256(
+                old[native._OWNED_MANIFEST]).hexdigest()
+        calls.append(kw["generation_manifest_sha256"])
+        if fault == "resource-drift":
+            paths[native._OWNED_MAIN].write_bytes(b"foreign")
+        kw["recheck_owned"]()
+        return {"status": "NATIVE_EGRESS_BOOT_RECEIPT_VERIFIED"}
+    monkeypatch.setattr(native, "_prepare_boot_egress_locked", prepare)
+    with native._locked(rootfd, 0) as statefd:
+        def invoke():
+            return native._prepare_owned_committed_boot_egress_locked(
+                rootfd, statefd, distribution="debian", worker_uid=33,
+                namespace_identity=(17, 29), profile_receipt_sha256="a"*64,
+                executable_receipt_sha256="b"*64,
+                recheck_namespace_owner=owned, allow_prepare=True)
+        if fault == "none":
+            result = invoke()
+            assert result["generation_manifest_sha256"] == calls[0]
+            assert result["committed_resources_verified"]
+            assert not result["authorizes_nginx_activation"]
+            assert not result["authorizes_catalog_publication"]
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                invoke()
+            assert len(calls) == (0 if fault in ("pending", "orphan") else 1)
+    if fault != "resource-drift":
+        assert _fixture_resource_bytes(paths) == old
+
+
+@pytest.mark.parametrize("fault", ["none", "empty", "type", "verify-only", "rollover", "drift"])
+def test_committed_boot_resume_forwards_exact_receipt_and_generation_guard(
+        filesystem, monkeypatch, fault):
+    rootfd, _, _, _, _ = filesystem
+    old = _owned_generation(active=False)
+    paths = _owned_fixture_paths(filesystem, old)
+    saved = b"exact retained intent"
+    calls = []
+
+    def prepare(root, state, rules, **kw):
+        assert root == rootfd and state == statefd
+        assert kw["expected_previous_receipt"] == saved
+        assert kw["allow_prepare"] is True and kw["allow_boot_rollover"] is False
+        assert kw["generation_manifest_sha256"] == hashlib.sha256(
+            old[native._OWNED_MANIFEST]).hexdigest()
+        calls.append("prepare")
+        kw["recheck_owned"]()
+        if fault == "drift":
+            paths[native._OWNED_MAIN].write_bytes(b"foreign")
+            kw["recheck_owned"]()
+        return {"status": "NATIVE_EGRESS_BOOT_RECEIPT_VERIFIED"}
+
+    monkeypatch.setattr(native, "_prepare_boot_egress_locked", prepare)
+    with native._locked(rootfd, 0) as statefd:
+        def invoke():
+            return native._prepare_owned_committed_boot_egress_locked(
+                rootfd, statefd, distribution="debian", worker_uid=33,
+                namespace_identity=(17, 29), profile_receipt_sha256="a"*64,
+                executable_receipt_sha256="b"*64, recheck_namespace_owner=lambda: None,
+                allow_prepare=fault != "verify-only", allow_boot_rollover=fault == "rollover",
+                expected_existing_receipt=b"" if fault == "empty" else
+                "foreign type" if fault == "type" else saved)
+        if fault == "none":
+            assert invoke()["committed_resources_verified"] is True
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                invoke()
+        assert calls == (["prepare"] if fault in ("none", "drift") else [])
+    if fault != "drift":
+        assert _fixture_resource_bytes(paths) == old
+
+
+def test_committed_boot_egress_generation_recheck_expires(filesystem):
+    rootfd, _, _, _, _ = filesystem
+    old = _owned_bootstrap_resources()
+    _owned_fixture_paths(filesystem, old)
+    with native._locked(rootfd, 0) as statefd:
+        with native._owned_committed_boot_egress_generation_locked(
+                rootfd, statefd, distribution="debian", worker_uid=33,
+        ) as (plan, recheck):
+            assert plan["generation"] == 0
+            recheck()
+        with pytest.raises(native.NativeV2TransactionError, match="SCOPE_EXPIRED"):
+            recheck()
+
+
+@pytest.mark.parametrize("kind", ["bootstrap", "disabled", "active"])
+@pytest.mark.parametrize("fault", ["none", "pending", "orphan", "intent", "owner", "drift"])
+def test_fresh_boot_namespace_retains_committed_resources_before_creation(
+        filesystem, monkeypatch, kind, fault):
+    rootfd, state, _, _, _ = filesystem
+    old = (_owned_bootstrap_resources() if kind == "bootstrap" else
+           _owned_generation(active=kind == "active"))
+    paths = _owned_fixture_paths(filesystem, old)
+    if fault == "pending":
+        (state / native._OWNED_WAL).write_bytes(b"pending")
+        (state / native._OWNED_WAL).chmod(0o600)
+    elif fault == "orphan":
+        orphan = paths[native._OWNED_MAIN].parent / native._OWNED_STAGES[native._OWNED_MAIN]
+        orphan.write_bytes(b"orphan")
+        orphan.chmod(0o644)
+    calls = []
+    boot = "12345678-1234-1234-1234-123456789abc"
+
+    def owner():
+        if fault == "owner":
+            raise native.NativeV2TransactionError("OWNER_CHANGED")
+
+    def intent(got_state, rules, **kw):
+        assert got_state == statefd
+        if fault == "intent":
+            raise native.NativeV2TransactionError("INTENT_REFUSED")
+        return boot, None
+
+    def create(*, recheck_owned):
+        recheck_owned()
+        calls.append("create")
+        if fault == "drift":
+            paths[native._OWNED_MAIN].write_bytes(b"foreign")
+        recheck_owned()
+        return {"boot_id": boot, "namespace_device": 17, "namespace_inode": 29,
+                "loopback_only_observed": True, "empty_ruleset_observed": True}
+
+    def prepare(got_root, got_state, rules, **kw):
+        assert (got_root, got_state) == (rootfd, statefd)
+        assert kw["namespace_identity"] == (17, 29)
+        assert kw["generation"] == (0 if kind == "bootstrap" else 1)
+        assert kw["allow_prepare"] and not kw["allow_boot_rollover"]
+        assert kw["expected_previous_receipt"] is None
+        kw["recheck_owned"]()
+        calls.append("prepare")
+        return {"boot_id": boot, "namespace_device": 17, "namespace_inode": 29}
+
+    monkeypatch.setattr(native, "_fresh_boot_egress_intent_locked", intent)
+    monkeypatch.setattr(native, "_create_fixed_loopback_namespace_locked", create)
+    monkeypatch.setattr(native, "_prepare_boot_egress_locked", prepare)
+    with native._locked(rootfd, 0) as statefd:
+        def invoke():
+            return native._create_owned_committed_boot_egress_locked(
+                rootfd, statefd, distribution="debian", worker_uid=33,
+                profile_receipt_sha256="a"*64, executable_receipt_sha256="b"*64,
+                recheck_stopped_owner=owner)
+        if kind != "active" and fault == "none":
+            result = invoke()
+            assert calls == ["create", "prepare"]
+            assert result["committed_resources_verified"]
+            assert not result["authorizes_nginx_activation"]
+            assert not result["authorizes_catalog_publication"]
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                invoke()
+            assert calls == (["create"] if kind != "active" and fault == "drift" else [])
+    if kind == "active" or fault != "drift":
+        assert _fixture_resource_bytes(paths) == old
+
+
+@pytest.mark.parametrize("initial", [True, False])
+@pytest.mark.parametrize("boundary", ["none", "catalog", "main", "include", "state", "manifest"])
+def test_inactive_live_wal_prepare_preserves_wal_and_withdraws_catalog(
+        filesystem, monkeypatch, initial, boundary):
+    old = _owned_bootstrap_resources() if initial else _owned_generation(active=False)
+    new = _owned_generation(1 if initial else 2,
+                            previous=None if initial else json.loads(old[V2_STATE]),
+                            active=False)
+    paths = _owned_fixture_paths(filesystem, new)
+    fd, state, _, _, events = filesystem
+    wal = native._owned_wal_record(old, new, live=True)
+    record = state / native._OWNED_WAL
+    record.write_bytes(wal)
+    record.chmod(0o600)
+    inode = record.stat().st_ino
+    target = {"catalog": native._CATALOG, "main": native._OWNED_MAIN,
+              "include": native._INCLUDE, "state": V2_STATE,
+              "manifest": native._OWNED_MANIFEST}.get(boundary)
+    actual = native._owned_write_resource
+
+    def interrupted(*args):
+        actual(*args)
+        if args[3] == target:
+            assert record.read_bytes() == wal
+            assert not paths[native._CATALOG].exists()
+            raise _OwnedFixturePowerLoss()
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("Inactive byte preparation reached runtime or publication")
+
+    for name in ("_owned_live_observe", "_owned_live_validate",
+                 "_owned_live_reload", "_owned_live_finish"):
+        monkeypatch.setattr(native, name, unexpected)
+
+    def prepare():
+        with native._owned_fixture_layout(fd, recovering=True) as layout:
+            return native._prepare_owned_inactive_wal_rollback_locked(
+                *layout, distribution="debian", expected_wal=wal,
+                recheck_stopped_owner=lambda: None)
+
+    if boundary != "none":
+        with monkeypatch.context() as m:
+            m.setattr(native, "_owned_write_resource", interrupted)
+            with pytest.raises(_OwnedFixturePowerLoss):
+                prepare()
+        assert record.read_bytes() == wal
+        assert not paths[native._CATALOG].exists()
+    result = prepare()
+    assert result["status"] == "OWNED_INACTIVE_WAL_PRIOR_BYTES_PREPARED"
+    assert result["wal_sha256"] == hashlib.sha256(wal).hexdigest()
+    assert result["prior_generation"] == (None if initial else 1)
+    assert result["catalog_withdrawn"] and result["recovery_required"]
+    assert not result["runtime_verified"]
+    assert not result["authorizes_nginx_activation"]
+    assert not result["authorizes_catalog_publication"]
+    assert _fixture_resource_bytes(paths) == {**old, native._CATALOG: None}
+    assert record.read_bytes() == wal and record.stat().st_ino == inode
+    assert prepare() == result
+    assert not events
+
+
+@pytest.mark.parametrize("fault", ["active-prior", "v2", "unpublished",
+                                    "foreign-target", "foreign-stage",
+                                    "changed-wal", "stopped-owner"])
+def test_inactive_live_wal_prepare_refuses_before_target_effects(
+        filesystem, fault):
+    old = _owned_generation(active=fault == "active-prior")
+    new = _owned_generation(2, previous=json.loads(old[V2_STATE]), active=False)
+    paths = _owned_fixture_paths(filesystem, new)
+    fd, state, _, _, events = filesystem
+    wal = native._owned_wal_record(old, new, live=fault != "v2")
+    record = state / (native._OWNED_WAL_TMP if fault == "unpublished" else native._OWNED_WAL)
+    record.write_bytes(wal)
+    record.chmod(0o600)
+    if fault == "foreign-target":
+        paths[native._INCLUDE].write_bytes(b"foreign")
+    if fault == "foreign-stage":
+        stage = paths[native._INCLUDE].parent / native._OWNED_STAGES[native._INCLUDE]
+        stage.write_bytes(b"foreign")
+        stage.chmod(0o644)
+    before = _fixture_resource_bytes(paths)
+
+    def stopped():
+        if fault == "stopped-owner":
+            raise native.NativeV2TransactionError("OWNER_CHANGED")
+
+    with native._owned_fixture_layout(fd, recovering=True) as layout:
+        with pytest.raises(native.NativeV2TransactionError):
+            native._prepare_owned_inactive_wal_rollback_locked(
+                *layout, distribution="debian",
+                expected_wal=b"changed" if fault == "changed-wal" else wal,
+                recheck_stopped_owner=stopped)
+    assert _fixture_resource_bytes(paths) == before
+    assert record.read_bytes() == wal
+    if fault == "foreign-stage":
+        assert stage.read_bytes() == b"foreign"
+    assert not events
+
+
+@pytest.mark.parametrize("fault", ["none", "pre-health", "post-health", "owner-drift",
+                                    "catalog-drift", "wal-unlink"])
+def test_finish_inactive_wal_requires_prior_runtime_and_exact_publication(
+        filesystem, monkeypatch, fault):
+    old = _owned_generation(active=False)
+    new = _owned_generation(2, previous=json.loads(old[V2_STATE]), active=False)
+    withdrawn = {**old, native._CATALOG: None}
+    paths = _owned_fixture_paths(filesystem, withdrawn)
+    root, state, _, _, _ = filesystem
+    wal = native._owned_wal_record(old, new, live=True)
+    record = state / native._OWNED_WAL
+    record.write_bytes(wal)
+    record.chmod(0o600)
+    events = []
+    identity = (123, (1, 2))
+    context = ({}, 1, "a"*64)
+
+    def observe(fd, *, expected_unit):
+        assert fd == root and expected_unit == b"signed"
+        return identity
+
+    def validate(fd, state_fd, resources):
+        assert fd == root and resources == old
+        return context
+
+    def health(fd, observed, checked, catalog, *, publish, expected_unit):
+        assert (fd, observed, checked, expected_unit) == (root, identity, context, b"signed")
+        assert record.read_bytes() == wal
+        assert _fixture_resource_bytes(paths) == (old if publish else withdrawn)
+        assert catalog == (old[native._CATALOG] if publish else None)
+        events.append(publish)
+        if fault == "pre-health" and not publish:
+            raise native.NativeV2TransactionError("PRE_HEALTH")
+        if fault == "post-health" and publish:
+            raise native.NativeV2TransactionError("POST_HEALTH")
+        if fault == "catalog-drift" and publish:
+            paths[native._CATALOG].write_bytes(b"foreign")
+            raise native.NativeV2TransactionError("CATALOG_CHANGED")
+
+    def owner():
+        if fault == "owner-drift" and paths[native._CATALOG].exists():
+            raise native.NativeV2TransactionError("OWNER_CHANGED")
+
+    monkeypatch.setattr(native, "_owned_live_observe", observe)
+    monkeypatch.setattr(native, "_owned_live_validate", validate)
+    monkeypatch.setattr(native, "_owned_live_health_bound", health)
+    if fault == "wal-unlink":
+        actual_unlink = native._unlink_known
+
+        def unlink(*args):
+            actual_unlink(*args)
+            if args[1] == native._OWNED_WAL:
+                raise OSError("uncertain fsync after WAL unlink")
+        monkeypatch.setattr(native, "_unlink_known", unlink)
+
+    with native._owned_fixture_layout(root, recovering=True) as layout:
+        def finish():
+            return native._finish_owned_inactive_wal_rollback_locked(
+                root, *layout, distribution="debian", expected_wal=wal,
+                expected_unit=b"signed", recheck_active_owner=owner)
+        if fault == "none":
+            assert finish() == {
+                "status": "OWNED_INACTIVE_WAL_ROLLBACK_OBSERVED",
+                "prior_generation": 1, "recovery_required": False,
+            }
+        else:
+            with pytest.raises((native.NativeV2TransactionError, OSError)):
+                finish()
+
+    if fault in ("none", "wal-unlink"):
+        assert _fixture_resource_bytes(paths) == old and not record.exists()
+    elif fault == "catalog-drift":
+        assert paths[native._CATALOG].read_bytes() == b"foreign"
+        assert record.read_bytes() == wal
+    else:
+        assert _fixture_resource_bytes(paths) == withdrawn and record.read_bytes() == wal
+    assert events == ([False] if fault in ("pre-health", "owner-drift") else [False, True])
+
+
+@pytest.mark.parametrize("kind", ["bootstrap", "disabled", "active"])
+@pytest.mark.parametrize("fault", ["none", "missing-wal", "v2", "orphan",
+                                    "unprepared", "owner", "wal-drift", "resource-drift"])
+def test_prepared_wal_boot_namespace_requires_exact_prior_and_keeps_catalog_withdrawn(
+        filesystem, monkeypatch, kind, fault):
+    rootfd, state, _, _, _ = filesystem
+    old = (_owned_bootstrap_resources() if kind == "bootstrap" else
+           _owned_generation(active=kind == "active"))
+    new = _owned_generation(1 if kind == "bootstrap" else 2,
+                            previous=None if kind == "bootstrap" else json.loads(old[V2_STATE]),
+                            active=False)
+    withdrawn = {**old, native._CATALOG: None}
+    current = new if fault == "unprepared" else withdrawn
+    paths = _owned_fixture_paths(filesystem, current)
+    wal = native._owned_wal_record(old, new, live=fault != "v2")
+    record = state / native._OWNED_WAL
+    if fault != "missing-wal":
+        record.write_bytes(wal)
+        record.chmod(0o600)
+    if fault == "orphan":
+        orphan = paths[native._OWNED_MAIN].parent / native._OWNED_STAGES[native._OWNED_MAIN]
+        orphan.write_bytes(b"foreign")
+        orphan.chmod(0o644)
+    calls = []
+    boot = "12345678-1234-1234-1234-123456789abc"
+
+    def owner():
+        if fault == "owner":
+            raise native.NativeV2TransactionError("OWNER_CHANGED")
+
+    def intent(got_state, rules, **kw):
+        assert got_state == statefd and "8.8.8.8" not in rules
+        assert kw["generation"] == (0 if kind == "bootstrap" else 1)
+        if kind != "bootstrap":
+            assert kw["generation_manifest_sha256"] == hashlib.sha256(
+                old[native._OWNED_MANIFEST]).hexdigest()
+        return boot, b"prior receipt"
+
+    def create(*, recheck_owned):
+        recheck_owned()
+        calls.append("create")
+        if fault == "wal-drift":
+            record.write_bytes(b"foreign")
+        if fault == "resource-drift":
+            paths[native._OWNED_MAIN].write_bytes(b"foreign")
+        recheck_owned()
+        return {"boot_id": boot, "namespace_device": 17, "namespace_inode": 29,
+                "loopback_only_observed": True, "empty_ruleset_observed": True}
+
+    def prepare(got_root, got_state, rules, **kw):
+        assert (got_root, got_state) == (rootfd, statefd)
+        assert kw["namespace_identity"] == (17, 29)
+        assert kw["expected_previous_receipt"] == b"prior receipt"
+        assert kw["allow_boot_rollover"] and kw["allow_prepare"]
+        kw["recheck_owned"]()
+        calls.append("prepare")
+        return {"boot_id": boot, "namespace_device": 17, "namespace_inode": 29}
+
+    monkeypatch.setattr(native, "_fresh_boot_egress_intent_locked", intent)
+    monkeypatch.setattr(native, "_create_fixed_loopback_namespace_locked", create)
+    monkeypatch.setattr(native, "_prepare_boot_egress_locked", prepare)
+    with native._locked(rootfd, 0) as statefd:
+        def invoke():
+            return native._create_owned_prepared_wal_boot_egress_locked(
+                rootfd, statefd, distribution="debian", worker_uid=33,
+                expected_wal=wal, profile_receipt_sha256="a"*64,
+                executable_receipt_sha256="b"*64, recheck_stopped_owner=owner,
+                allow_boot_rollover=True)
+        if kind != "active" and fault == "none":
+            result = invoke()
+            assert calls == ["create", "prepare"]
+            assert result["prior_resources_verified"] and result["recovery_required"]
+            assert result["catalog_withdrawn"]
+            assert result["wal_sha256"] == hashlib.sha256(wal).hexdigest()
+            assert "committed_resources_verified" not in result
+            assert not result["authorizes_nginx_activation"]
+            assert not result["authorizes_catalog_publication"]
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                invoke()
+            assert calls == (["create"] if kind != "active" and fault in
+                             ("wal-drift", "resource-drift") else [])
+    if fault == "missing-wal":
+        assert not record.exists()
+    else:
+        assert record.read_bytes() == (b"foreign" if calls and fault == "wal-drift" else wal)
+    if not (calls and fault == "resource-drift"):
+        assert _fixture_resource_bytes(paths) == current
+
+
+def test_prepared_wal_boot_egress_scope_expires(filesystem):
+    rootfd, state, _, _, _ = filesystem
+    old = _owned_bootstrap_resources()
+    new = _owned_generation(active=False)
+    _owned_fixture_paths(filesystem, old)
+    wal = native._owned_wal_record(old, new, live=True)
+    record = state / native._OWNED_WAL
+    record.write_bytes(wal)
+    record.chmod(0o600)
+    with native._locked(rootfd, 0) as statefd:
+        with native._owned_prepared_wal_boot_egress_generation_locked(
+                rootfd, statefd, distribution="debian", worker_uid=33,
+                expected_wal=wal) as (plan, recheck):
+            assert plan["generation"] == 0
+            recheck()
+        with pytest.raises(native.NativeV2TransactionError, match="SCOPE_EXPIRED"):
+            recheck()
+
+
+@pytest.mark.parametrize("fault", ["none", "wrong-namespace", "owner-drift", "catalog-drift"])
+def test_verify_prepared_wal_boot_egress_never_prepares_or_publishes(
+        filesystem, monkeypatch, fault):
+    rootfd, state, _, _, _ = filesystem
+    old = _owned_generation(active=False)
+    new = _owned_generation(2, previous=json.loads(old[V2_STATE]), active=False)
+    withdrawn = {**old, native._CATALOG: None}
+    paths = _owned_fixture_paths(filesystem, withdrawn)
+    wal = native._owned_wal_record(old, new, live=True)
+    record = state / native._OWNED_WAL
+    record.write_bytes(wal)
+    record.chmod(0o600)
+    calls = []
+
+    def stopped():
+        if calls and fault == "owner-drift":
+            raise native.NativeV2TransactionError("OWNER_CHANGED")
+
+    def verify(got_root, got_state, rules, **kw):
+        assert (got_root, got_state) == (rootfd, statefd)
+        assert kw["namespace_identity"] == (17, 29)
+        assert not kw["allow_prepare"] and not kw["allow_boot_rollover"]
+        assert kw["generation"] == 1
+        assert kw["generation_manifest_sha256"] == hashlib.sha256(
+            old[native._OWNED_MANIFEST]).hexdigest()
+        calls.append("verify")
+        if fault == "wrong-namespace":
+            raise native.NativeV2TransactionError("WRONG_NAMESPACE")
+        if fault == "catalog-drift":
+            paths[native._CATALOG].write_bytes(b"foreign")
+        kw["recheck_owned"]()
+        return {"status": "NATIVE_EGRESS_BOOT_RECEIPT_VERIFIED"}
+
+    monkeypatch.setattr(native, "_prepare_boot_egress_locked", verify)
+    with native._locked(rootfd, 0) as statefd:
+        def invoke():
+            return native._verify_owned_prepared_wal_boot_egress_locked(
+                rootfd, statefd, distribution="debian", worker_uid=33,
+                expected_wal=wal, namespace_identity=(17, 29),
+                profile_receipt_sha256="a"*64, executable_receipt_sha256="b"*64,
+                recheck_stopped_owner=stopped)
+        if fault == "none":
+            result = invoke()
+            assert result["prior_resources_verified"] and result["recovery_required"]
+            assert result["catalog_withdrawn"]
+            assert not result["authorizes_nginx_activation"]
+            assert not result["authorizes_catalog_publication"]
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                invoke()
+    assert calls == ["verify"]
+    assert record.read_bytes() == wal
+    if fault == "catalog-drift":
+        assert paths[native._CATALOG].read_bytes() == b"foreign"
+    else:
+        assert _fixture_resource_bytes(paths) == withdrawn
+
+
+@pytest.mark.parametrize("fault", ["none", "namespace", "owner", "listener", "child"])
+def test_dedicated_health_binds_listener_before_and_after_fixed_child(monkeypatch, fault):
+    from contextlib import contextmanager
+    from repocache import server_native_egress_candidate_v1 as egress
+    from repocache import server_native_nginx_effective_unit_v1 as unit
+    calls = []
+    context = (None, None, None)
+    expected = {"main_pid_observed": 123, "private_unit_identity": (31, 41)}
+    namespace = (17, 29)
+
+    @contextmanager
+    def scope():
+        yield 11, namespace if fault != "namespace" else (17, 30), lambda: None
+
+    def owned():
+        if fault == "owner" and "child" in calls:
+            raise native.NativeV2TransactionError("OWNER_CHANGED")
+
+    def observe(**kw):
+        assert kw == {"https_port": 8008, "namespace_identity": namespace,
+                      "executable_identity": (51, 61)}
+        return expected
+
+    def listener(identity, got_context, reobserve, *, namespace_identity):
+        assert identity == (123, (31, 41)) and got_context == context
+        assert namespace_identity == namespace and reobserve() == identity
+        calls.append("listener")
+        return 78 if fault == "listener" and "child" in calls else 77
+
+    def child(net, identity, got_context, catalog, *, publish):
+        assert (net, identity, got_context, catalog, publish) == (11, namespace, context, None, False)
+        calls.append("child")
+        if fault == "child":
+            raise native.NativeV2TransactionError("CHILD_FAILED")
+
+    monkeypatch.setattr(native, "_verify_current_root_fd", lambda fd: None)
+    monkeypatch.setattr(egress, "_fixed_namespace_scope", scope)
+    monkeypatch.setattr(unit, "_inspect_signed_owned_namespace_runtime", observe)
+    monkeypatch.setattr(native, "_owned_master_listener", listener)
+    monkeypatch.setattr(native, "_run_dedicated_health_child", child)
+    def invoke():
+        return native._owned_dedicated_live_health_bound(
+            10, context, None, publish=False, namespace_identity=namespace,
+            executable_identity=(51, 61), recheck_owned=owned)
+    if fault == "none":
+        result = invoke()
+        assert result["status"] == "OWNED_DEDICATED_HEALTH_OBSERVED"
+        assert result["listener_inode"] == 77
+        assert not result["authorizes_nginx_activation"]
+        assert not result["authorizes_catalog_publication"]
+        assert calls == ["listener", "child", "listener"]
+    else:
+        with pytest.raises(native.NativeV2TransactionError):
+            invoke()
+        assert calls == {"namespace": [], "owner": ["listener", "child"],
+                         "listener": ["listener", "child", "listener"],
+                         "child": ["listener", "child"]}[fault]
+
+
+@pytest.mark.parametrize("exit_status", [0, 256])
+def test_dedicated_health_parent_reaps_only_fixed_child(monkeypatch, exit_status):
+    import signal
+    import threading
+    from types import SimpleNamespace
+    calls = []
+    monkeypatch.setattr(threading, "active_count", lambda: 1)
+    monkeypatch.setattr(signal, "getsignal", lambda signum: signal.SIG_DFL)
+    monkeypatch.setattr(native, "os", SimpleNamespace(
+        listdir=lambda path: ["1"], setns=lambda *args: None, CLONE_NEWNET=1,
+        fork=lambda: 123, WNOHANG=1, WIFEXITED=lambda status: True,
+        WEXITSTATUS=lambda status: status >> 8,
+        waitpid=lambda pid, mode: calls.append((pid, mode)) or (pid, exit_status)))
+    def invoke():
+        native._run_dedicated_health_child(11, (17, 29), (None, None, None), None,
+                                          publish=False)
+    if exit_status:
+        with pytest.raises(native.NativeV2TransactionError, match="HEALTH_UNVERIFIED"):
+            invoke()
+    else:
+        invoke()
+    assert calls == [(123, 1)]
+
+
+@pytest.mark.parametrize("fault", ["none", "missing-receipt", "owner", "receipt-race", "catalog-drift"])
+def test_resume_prepared_wal_boot_egress_requires_existing_exact_receipt(
+        filesystem, monkeypatch, fault):
+    rootfd, state, _, _, _ = filesystem
+    old = _owned_generation(active=False)
+    new = _owned_generation(2, previous=json.loads(old[V2_STATE]), active=False)
+    withdrawn = {**old, native._CATALOG: None}
+    paths = _owned_fixture_paths(filesystem, withdrawn)
+    wal = native._owned_wal_record(old, new, live=True)
+    record = state / native._OWNED_WAL
+    record.write_bytes(wal)
+    record.chmod(0o600)
+    calls = []
+
+    def stopped():
+        if fault == "owner":
+            raise native.NativeV2TransactionError("OWNER_CHANGED")
+
+    def receipt(got_state, owner, group):
+        assert (got_state, owner, group) == (statefd, 0, 0)
+        return None if fault == "missing-receipt" else b"exact prior intent"
+
+    def prepare(got_root, got_state, rules, **kw):
+        assert (got_root, got_state) == (rootfd, statefd)
+        assert kw["namespace_identity"] == (17, 29)
+        assert kw["allow_prepare"] and not kw["allow_boot_rollover"]
+        assert kw["expected_previous_receipt"] == b"exact prior intent"
+        assert kw["generation"] == 1
+        calls.append("prepare")
+        if fault == "receipt-race":
+            raise native.NativeV2TransactionError("RECEIPT_CHANGED")
+        if fault == "catalog-drift":
+            paths[native._CATALOG].write_bytes(b"foreign")
+        kw["recheck_owned"]()
+        return {"status": "NATIVE_EGRESS_BOOT_RECEIPT_VERIFIED"}
+
+    monkeypatch.setattr(native, "_read_boot_egress_receipt", receipt)
+    monkeypatch.setattr(native, "_prepare_boot_egress_locked", prepare)
+    with native._locked(rootfd, 0) as statefd:
+        def invoke():
+            return native._resume_owned_prepared_wal_boot_egress_locked(
+                rootfd, statefd, distribution="debian", worker_uid=33,
+                expected_wal=wal, namespace_identity=(17, 29),
+                profile_receipt_sha256="a"*64, executable_receipt_sha256="b"*64,
+                recheck_stopped_owner=stopped)
+        if fault == "none":
+            result = invoke()
+            assert result["recovery_required"] and result["catalog_withdrawn"]
+            assert not result["authorizes_nginx_activation"]
+            assert not result["authorizes_catalog_publication"]
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                invoke()
+    assert calls == ([] if fault in ("owner", "missing-receipt") else ["prepare"])
+    assert record.read_bytes() == wal
+    if fault == "catalog-drift":
+        assert paths[native._CATALOG].read_bytes() == b"foreign"
+    else:
+        assert _fixture_resource_bytes(paths) == withdrawn
+
+
+@pytest.mark.parametrize("fault", ["timeout", "reaped", "thread", "handler"])
+def test_dedicated_health_child_timeout_and_preflight_do_not_signal_foreign_pid(
+        monkeypatch, fault):
+    import signal
+    import threading
+    from types import SimpleNamespace
+    calls = []
+    monkeypatch.setattr(threading, "active_count", lambda: 2 if fault == "thread" else 1)
+    monkeypatch.setattr(signal, "getsignal",
+                        lambda signum: signal.SIG_IGN if fault == "handler" else signal.SIG_DFL)
+    times = iter([0, 46])
+    monkeypatch.setattr(native, "time", SimpleNamespace(monotonic=lambda: next(times)))
+    def fork():
+        calls.append("fork")
+        return 123
+    def wait(pid, mode):
+        assert pid == 123
+        calls.append(("wait", mode))
+        if fault == "reaped" and calls.count(("wait", 1)) == 2:
+            raise ChildProcessError
+        return 0, 0
+    def kill(pid, sig):
+        assert (pid, sig) == (123, signal.SIGKILL)
+        calls.append("kill")
+    monkeypatch.setattr(native, "os", SimpleNamespace(
+        listdir=lambda path: ["1"], setns=lambda *args: None, CLONE_NEWNET=1,
+        fork=fork, WNOHANG=1, waitpid=wait, kill=kill))
+    with pytest.raises(native.NativeV2TransactionError):
+        native._run_dedicated_health_child(11, (17, 29), (None, None, None), None,
+                                          publish=False)
+    if fault == "timeout":
+        assert calls == ["fork", ("wait", 1), ("wait", 1), "kill", ("wait", 0)]
+    elif fault == "reaped":
+        assert calls == ["fork", ("wait", 1), ("wait", 1)]
+    else:
+        assert not calls
+
+
+@pytest.mark.parametrize("prepared", [False, True, "repeat", "initial"])
+@pytest.mark.parametrize("fault", ["none", "active-route", "nonloopback", "pending",
+                                    "policy", "policy-drift", "storage-drift", "scratch-drift", "scratch-service",
+                                    "config-label", "config-label-drift", "tls-label", "tls-label-drift", "enabled", "start", "health",
+                                    "foreign-master", "generation-drift", "selected-drift"])
+def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
+        filesystem, monkeypatch, fault, prepared):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from repocache import server_native_nginx_effective_unit_v1 as unit
+    from repocache import server_native_installed_storage_v1 as storage
+    from repocache import server_root_control_host_preflight_v1 as host
+
+    repeat = prepared == "repeat"
+    initial_generation = prepared == "initial"
+    prepared = prepared is True or initial_generation
+    if repeat and fault in ("start", "selected-drift"):
+        pytest.skip("Start failure and stopped identity do not apply to observation")
+    rootfd, state, _, _, _ = filesystem
+    cfg = document(1, generation=1)
+    cfg["deployment"]["paths"]["generated_include"] = native._OWNED_INCLUDE_PATH
+    cfg["deployment"]["listen"]["bind_address"] = (
+        "0.0.0.0" if fault == "nonloopback" else "127.0.0.1")
+    cfg["repositories"][0]["desired_state"] = "active" if fault == "active-route" else "disabled"
+    raw = _canon(snapshot(generation=1, doc=cfg))
+    main, include, catalog = native._render_owned_managed_candidate(
+        cfg, 1, "almalinux",
+        {"repo-0": {"mirror0.example.invalid": ["8.8.8.8"]}} if fault == "active-route" else {})
+    resources = {V2_STATE: raw, native._OWNED_MAIN: main, native._INCLUDE: include,
+                 native._CATALOG: catalog, native._OWNED_MANIFEST:
+                     native._owned_manifest_for(raw, main, include, catalog)}
+    wal = None
+    if prepared:
+        next_cfg = {**cfg, "expected_state_generation": 2}
+        next_raw = _canon(snapshot(generation=2, previous=json.loads(raw), doc=next_cfg))
+        next_main, next_include, next_catalog = native._render_owned_managed_candidate(
+            next_cfg, 2, "almalinux",
+            {"repo-0": {"mirror0.example.invalid": ["8.8.8.8"]}} if fault == "active-route" else {})
+        new = {V2_STATE: next_raw, native._OWNED_MAIN: next_main,
+               native._INCLUDE: next_include, native._CATALOG: next_catalog,
+               native._OWNED_MANIFEST:
+                   native._owned_manifest_for(next_raw, next_main, next_include, next_catalog)}
+        wal = native._owned_wal_record(
+            _owned_bootstrap_resources() if initial_generation else resources,
+            resources if initial_generation else new, live=True)
+        resources = {**resources, native._CATALOG: None}
+    paths = _owned_fixture_paths(filesystem, resources)
+    if fault == "pending" or prepared:
+        pending = state / native._OWNED_WAL
+        pending.write_bytes(b"existing pending evidence" if fault == "pending" else wal)
+        pending.chmod(0o600)
+    calls = []
+    running = repeat
+    foreign = False
+    policy_reads = 0
+    storage_reads = 0
+    scratch_reads = 0
+    label_reads = 0
+    tls_label_reads = 0
+    ns, exe = (17, 29), (31, 41)
+
+    # Retain the real layout before replacing its public test seam, so
+    # nested fixture calls cannot accidentally recurse into the mock.
+    real_layout = native._owned_layout_locked
+
+    @contextmanager
+    def layout(root, statefd, *, recovering):
+        assert root == rootfd and recovering == prepared
+        with native._locked(rootfd, 0) as locked_state:
+            with real_layout(rootfd, locked_state, recovering=recovering) as result:
+                yield result
+
+    def observe(*, https_port, active):
+        if active != running:
+            raise unit.EffectiveNginxUnitError("WRONG_STATE")
+        return {"main_pid_observed": 123 if active else 0,
+                "private_unit_identity": (51, 61),
+                "private_dropin_identity": (71, 81)}
+
+    def runtime(*, https_port, namespace_identity, executable_identity):
+        assert namespace_identity == ns and executable_identity == exe
+        assert running
+        result = observe(https_port=https_port, active=True)
+        if foreign:
+            result["private_unit_identity"] = (51, 62)
+        return result
+
+    def command(argv, **kwargs):
+        nonlocal running
+        assert argv[0] == native._SYSTEMCTL and argv[2] == native._OWNED_WAL_DOMAIN
+        assert not kwargs["shell"]
+        if argv[1] == "is-enabled":
+            return SimpleNamespace(returncode=0 if fault == "enabled" else 1,
+                                   stdout=b"enabled\n" if fault == "enabled" else b"disabled\n")
+        if argv[1] == "is-active":
+            assert repeat
+            return SimpleNamespace(returncode=0 if running else 3,
+                                   stdout=b"active\n" if running else b"inactive\n")
+        calls.append(argv[1])
+        if argv[1] == "start":
+            running = True
+            return SimpleNamespace(returncode=1 if fault == "start" else 0)
+        assert argv[1] == "stop" and running
+        running = False
+        return SimpleNamespace(returncode=0)
+
+    def policy(root, statefd, rules, **kwargs):
+        nonlocal policy_reads
+        policy_reads += 1
+        assert not kwargs["allow_prepare"] and not kwargs["allow_boot_rollover"]
+        assert kwargs["namespace_identity"] == ns
+        kwargs["recheck_owned"]()
+        if fault == "policy":
+            raise native.NativeV2TransactionError("POLICY_REFUSED")
+        digest = "b" if fault == "policy-drift" and policy_reads >= 2 else "a"
+        return {"receipt_sha256": digest*64}
+
+    def inspect_storage(*args, **kwargs):
+        nonlocal storage_reads
+        storage_reads += 1
+        assert not kwargs["allow_create"]
+        if fault == "storage-drift" and storage_reads >= 2:
+            return {"repository_cache_roots_verified": [], "changed": True}
+        return {"repository_cache_roots_verified": []}
+
+    def health(root, context, catalog_bytes, **kwargs):
+        nonlocal foreign
+        assert running and catalog_bytes == (None if prepared else catalog)
+        assert kwargs["publish"] == (not prepared)
+        assert kwargs.get("require_withdrawn", False) == prepared
+        kwargs["recheck_owned"]()
+        calls.append("health")
+        if fault == "generation-drift":
+            paths[native._CATALOG].write_bytes(b"foreign catalog")
+            raise native.NativeV2TransactionError("GENERATION_CHANGED")
+        if fault in ("health", "foreign-master"):
+            foreign = fault == "foreign-master"
+            raise native.NativeV2TransactionError("TLS_REFUSED")
+        return {"main_pid": 123, "catalog_observed": not prepared, "generation": 1,
+                "listener_inode": 1234, "authorizes_nginx_activation": False,
+                "authorizes_catalog_publication": False}
+
+    monkeypatch.setattr(host, "require_native_host_preconditions", lambda: {})
+    monkeypatch.setattr(native, "_verify_current_root_fd", lambda root: None)
+    monkeypatch.setattr(native, "_require_audited_native_package_for_activation", lambda *a, **kw: None)
+    monkeypatch.setattr(native, "_owned_layout_locked", layout)
+    monkeypatch.setattr(native, "_verify_tls_pair", lambda *a, **kw: "c"*64)
+    monkeypatch.setattr(native, "_prepare_boot_egress_locked", policy)
+    monkeypatch.setattr(native, "_owned_dedicated_live_health_bound", health)
+    monkeypatch.setattr(unit, "inspect_signed_owned_namespace_unit", observe)
+    monkeypatch.setattr(unit, "_inspect_signed_owned_namespace_runtime", runtime)
+    monkeypatch.setattr(unit, "_safe_native_systemctl", lambda: None)
+    monkeypatch.setattr(native.subprocess, "run", command)
+    monkeypatch.setattr(storage, "prepare_dedicated_candidate_storage", inspect_storage)
+    def inspect_scratch(*args, **kwargs):
+        nonlocal scratch_reads
+        scratch_reads += 1
+        assert kwargs["dedicated"] and not kwargs.get("allow_create", False)
+        inode = 3 if fault == "scratch-drift" and scratch_reads >= 2 else 2
+        return ((1,), {"scratch": (inode,)})
+    monkeypatch.setattr(native, "_owned_alma_runtime_temps", inspect_scratch)
+
+    def config_labels(nginx, public, *, catalog_present):
+        nonlocal label_reads
+        label_reads += 1
+        assert catalog_present is (not prepared)
+        if fault == "config-label":
+            raise native.NativeV2TransactionError("LABEL_REFUSED")
+        return ("changed",) if fault == "config-label-drift" and label_reads > 1 else ("exact",)
+
+    monkeypatch.setattr(native, "_dedicated_readonly_config_labels", config_labels)
+    if initial_generation:
+        # Reconstruction and private identity have separate filesystem tests.
+        monkeypatch.setattr(native, "_read_owned_initial_dedicated_prepared_locked",
+                            lambda *a, **kw: {**resources, native._CATALOG: catalog})
+        monkeypatch.setattr(native, "_owned_initial_private_targets_proof", lambda *a: ("exact",))
+        monkeypatch.setattr(native._Labels, "_command", staticmethod(lambda *a: b"Enforcing"))
+
+    def tls_labels(root, document):
+        nonlocal tls_label_reads
+        tls_label_reads += 1
+        if fault == "tls-label":
+            raise native.NativeV2TransactionError("TLS_LABEL_REFUSED")
+        return ("changed",) if fault == "tls-label-drift" and tls_label_reads > 1 else ("exact",)
+
+    monkeypatch.setattr(native, "_dedicated_readonly_tls_labels", tls_labels)
+    def service_scratch(pid, expected):
+        assert running and pid == 123 and expected == ((1,), {"scratch": (2,)})
+        if fault == "scratch-service":
+            raise native.NativeV2TransactionError("SCRATCH_MOUNT_REFUSED")
+    monkeypatch.setattr(native, "_verify_owned_alma_runtime_service_view", service_scratch)
+    monkeypatch.setattr(native, "verify_service_storage_mounts", lambda pid: None)
+    monkeypatch.setattr(native.pwd, "getpwnam", lambda name: SimpleNamespace(pw_uid=33))
+    # The fixture already has an owned lock; the mocked layout is the
+    # existing descriptor-only fixture and no real systemctl runs.
+    def invoke():
+        entry = (native._start_owned_prepared_wal_dedicated_locked if prepared else
+                 native._start_or_verify_owned_committed_dedicated_locked if repeat else
+                 native._start_owned_committed_dedicated_locked)
+        return entry(
+            rootfd, 0, namespace_identity=ns, executable_identity=exe,
+            **({"expected_wal": wal, "expected_stopped": (
+                {"main_pid_observed": 0, "private_unit_identity": (51, 62),
+                 "private_dropin_identity": (71, 81)} if fault == "selected-drift" else None)}
+                if prepared else {}),
+            **({"initial_generation": True} if initial_generation else {}),
+            profile_receipt_sha256="a"*64, executable_receipt_sha256="b"*64,
+            recheck_authenticated_owner=lambda: None)
+    if fault == "selected-drift" and not prepared:
+        pytest.skip("Only the composed prepared-WAL path supplies the stopped identity")
+    if fault == "none":
+        result = invoke()
+        assert result["status"] == ("OWNED_DEDICATED_INITIAL_WAL_START_OBSERVED" if initial_generation
+                                    else "OWNED_DEDICATED_PREPARED_WAL_START_OBSERVED" if prepared
+                                    else "OWNED_DEDICATED_COMMITTED_ACTIVE_VERIFIED" if repeat
+                                    else "OWNED_DEDICATED_COMMITTED_START_OBSERVED")
+        if prepared:
+            assert result["catalog_withdrawn"] and result["recovery_required"]
+            assert result["wal_sha256"] == hashlib.sha256(wal).hexdigest()
+            assert not result["catalog_observed"]
+        assert result["service_storage_mounts_verified"]
+        assert result["service_scratch_mounts_verified"]
+        assert not result["enablement_changed"]
+        assert calls == (["health"] if repeat else ["start", "health"]) and running
+    elif repeat:
+        with pytest.raises(native.NativeV2TransactionError):
+            invoke()
+        assert calls == ([] if fault in ("active-route", "nonloopback", "pending", "policy", "enabled",
+                                                    "config-label", "config-label-drift", "tls-label", "tls-label-drift")
+                         else ["health"])
+        assert running  # A pre-existing process is never stopped on failure.
+    else:
+        with pytest.raises(native.NativeV2TransactionError):
+            invoke()
+        assert calls == {"active-route": [], "nonloopback": [], "pending": [],
+                         "policy": [], "policy-drift": [], "storage-drift": [], "scratch-drift": [],
+                         "config-label": [], "config-label-drift": [],
+                         "tls-label": [], "tls-label-drift": [],
+                         "enabled": [], "selected-drift": [],
+                         "start": ["start", "stop"], "health": ["start", "health", "stop"],
+                         "scratch-service": ["start", "health", "stop"],
+                         "foreign-master": ["start", "health"],
+                         "generation-drift": ["start", "health"]}[fault]
+        assert running == (fault in ("foreign-master", "generation-drift"))
+    if fault == "policy-drift":
+        assert policy_reads == 2
+    if fault == "storage-drift":
+        assert storage_reads == 2
+    if fault == "scratch-drift":
+        assert scratch_reads == 2
+    expected = ({**resources, native._CATALOG: b"foreign catalog"}
+                if fault == "generation-drift" else resources)
+    assert _fixture_resource_bytes(paths) == expected
+    if fault == "pending" or prepared:
+        assert pending.read_bytes() == (b"existing pending evidence" if fault == "pending" else wal)
+
+
+
+@pytest.mark.parametrize("dedicated", [False, True])
+@pytest.mark.parametrize("fault", ["fresh", "repeat", "missing", "parent-mode",
+                                   "parent-label", "child-label", "symlink", "mode",
+                                   "owner", "group", "xattr", "nonempty", "extra",
+                                   "preflight-all", "permissive"])
+def test_alma_runtime_scratch_fresh_only_and_exact_identity(tmp_path, monkeypatch,
+                                                          dedicated, fault):
+    """Real dirfds/modes/ownership, synthetic SELinux xattr seam only."""
+    from types import SimpleNamespace
+
+    runtime = tmp_path / "run/repocache-nginx"
+    runtime.mkdir(parents=True, mode=0o755)
+    runtime.chmod(0o755)
+    names = sorted(name for _, name in native._OWNED_RUNTIME_TEMP_NAMES)
+    parent_type = b"repocache_nginx_pid_t" if dedicated else b"var_run_t"
+    child_type = b"repocache_nginx_rw_t" if dedicated else b"httpd_var_run_t"
+    def context(kind):
+        return b"system_u:object_r:" + kind + b":s0\x00"
+    labels = {runtime.stat().st_ino: context(parent_type)}
+    writes = []
+    if fault != "fresh":
+        for name in names:
+            leaf = runtime / name
+            leaf.mkdir(mode=0o700)
+            os.chown(leaf, 33, 0)
+            labels[leaf.stat().st_ino] = context(child_type)
+    first, last = runtime / names[0], runtime / names[-1]
+    if fault == "missing":
+        first.rmdir()
+    elif fault == "parent-mode":
+        runtime.chmod(0o775)
+    elif fault == "parent-label":
+        labels[runtime.stat().st_ino] = context(b"var_t")
+    elif fault in ("child-label", "preflight-all"):
+        labels[last.stat().st_ino] = context(b"httpd_cache_t")
+        if fault == "preflight-all":
+            first.rmdir()
+    elif fault == "symlink":
+        first.rmdir()
+        first.symlink_to(tmp_path, target_is_directory=True)
+    elif fault == "mode":
+        first.chmod(0o750)
+    elif fault == "owner":
+        os.chown(first, 65534, 0)
+    elif fault == "group":
+        os.chown(first, 33, 33)
+    elif fault == "nonempty":
+        (first / "retain").write_bytes(b"foreign")
+    elif fault == "extra":
+        (runtime / "foreign").mkdir()
+
+    def inode(fd):
+        return os.fstat(fd).st_ino
+    def listxattr(fd):
+        return (["security.selinux", "user.foreign"] if
+                fault == "xattr" and inode(fd) == first.stat().st_ino else
+                ["security.selinux"])
+    def getxattr(fd, name):
+        assert name == "security.selinux"
+        return labels.get(inode(fd), context(parent_type))
+    def setxattr(fd, name, value):
+        assert name == "security.selinux" and value == context(child_type)
+        assert os.fstat(fd).st_uid == 0
+        labels[inode(fd)] = value
+        writes.append(inode(fd))
+
+    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with monkeypatch.context() as patch:
+            def policy(distribution, *, dedicated):
+                assert distribution == "almalinux"
+                if fault == "permissive":
+                    raise native.InstalledStorageError("SELINUX_NOT_ENFORCING")
+                return SimpleNamespace(finish=lambda: None)
+            patch.setattr(native, "_Labels", policy)
+            patch.setattr(native.pwd, "getpwnam", lambda name: SimpleNamespace(pw_uid=33))
+            patch.setattr(native.os, "listxattr", listxattr)
+            patch.setattr(native.os, "getxattr", getxattr)
+            patch.setattr(native.os, "setxattr", setxattr)
+            def observe(create=False, require_all=True):
+                return native._owned_alma_runtime_temps(
+                    fd, dedicated=dedicated, allow_create=create,
+                    require_all=require_all, inactive=True)
+            if fault in ("fresh", "repeat"):
+                result = observe(create=True)
+                assert set(result[1]) == set(names)
+                assert len(writes) == (5 if fault == "fresh" else 0)
+                assert observe() == observe(create=True) == result
+                assert len(writes) == (5 if fault == "fresh" else 0)
+                for name in names:
+                    assert (runtime / name).stat().st_uid == 33
+                    assert result[1][name][-1] == context(child_type).rstrip(b"\x00")
+            elif fault == "missing":
+                assert len(observe(require_all=False)[1]) == 4
+                with pytest.raises(native.NativeV2TransactionError,
+                                   match="OWNED_CONTEXT_RUNTIME_TEMP_UNVERIFIED"):
+                    observe()
+                assert not first.exists() and not writes
+            else:
+                with pytest.raises(native.NativeV2TransactionError,
+                                   match="OWNED_CONTEXT_RUNTIME_TEMP_UNVERIFIED"):
+                    observe(create=True)
+                assert not writes
+                if fault == "preflight-all":
+                    assert not first.exists()
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("status", [404, 200, 403, 301, 500])
+def test_dedicated_withdrawn_catalog_requires_fresh_pinned_tls_404(monkeypatch, status):
+    doc = document(1)
+    leaf = "a" * 64
+    calls = []
+    def request(got_doc, path, maximum, *, expected_leaf_sha256):
+        assert got_doc is doc and expected_leaf_sha256 == leaf
+        calls.append((path, maximum))
+        return f"HTTP/1.1 {status} Test\r\nContent-Length: 0\r\n\r\n".encode("ascii")
+    monkeypatch.setattr(native, "_fixed_https_get", request)
+    if status == 404:
+        native._require_dedicated_catalog_withdrawn((doc, 1, leaf))
+    else:
+        with pytest.raises(native.NativeV2TransactionError, match="WITHDRAWAL_UNVERIFIED"):
+            native._require_dedicated_catalog_withdrawn((doc, 1, leaf))
+    assert calls == [("/.well-known/repocache/catalog.json", 8192)]
+
+
+@pytest.mark.parametrize("fault", ["none", "wrong-wal", "pre-health", "post-health",
+                                   "listener", "owner-drift", "foreign-catalog",
+                                   "wal-lost", "policy-drift", "active-route",
+                                   "published-retry", "published-bad-label",
+                                   "published-owner-drift", "published-wal-lost",
+                                   "published-pre-health", "initial-foreign-catalog",
+                                   "tls-label", "tls-label-drift", "config-label",
+                                   "config-label-after-publish", "config-inode-drift"])
+@pytest.mark.parametrize("initial_generation", [False, True])
+def test_dedicated_wal_finalization_publishes_only_verified_prior(
+        filesystem, monkeypatch, fault, initial_generation):
+    """Real owned WAL/resource filesystem; mocked runtime and policy only."""
+    from types import SimpleNamespace
+    from repocache import server_native_nginx_effective_unit_v1 as unit
+    from repocache import server_native_installed_storage_v1 as storage
+    from repocache import server_root_control_host_preflight_v1 as host
+
+    root, state, _, _, _ = filesystem
+
+    def generation(number, previous=None):
+        cfg = document(1, generation=number)
+        cfg["deployment"]["paths"]["generated_include"] = native._OWNED_INCLUDE_PATH
+        cfg["deployment"]["listen"]["bind_address"] = "127.0.0.1"
+        active = fault == "active-route"
+        cfg["repositories"][0]["desired_state"] = "active" if active else "disabled"
+        raw = _canon(snapshot(generation=number, previous=previous, doc=cfg))
+        main, include, catalog = native._render_owned_managed_candidate(
+            cfg, number, "almalinux",
+            {"repo-0": {"mirror0.example.invalid": ["8.8.8.8"]}} if active else {})
+        return {V2_STATE: raw, native._OWNED_MAIN: main, native._INCLUDE: include,
+                native._CATALOG: catalog, native._OWNED_MANIFEST:
+                    native._owned_manifest_for(raw, main, include, catalog)}
+
+    old = generation(1)
+    new = generation(2, json.loads(old[V2_STATE]))
+    withdrawn = {**old, native._CATALOG: None}
+    initial = (old if fault.startswith("published-") else
+               {**old, native._CATALOG: b"foreign initial catalog"}
+               if fault == "initial-foreign-catalog" else withdrawn)
+    paths = _owned_fixture_paths(filesystem, initial)
+    catalog = paths[native._CATALOG]
+    wal = native._owned_wal_record(
+        _owned_bootstrap_resources() if initial_generation else old,
+        old if initial_generation else new, live=True)
+    pending = state / native._OWNED_WAL
+    pending.write_bytes(wal if fault != "wrong-wal" else b"foreign WAL")
+    pending.chmod(0o600)
+    calls = []
+    ns, exe = (17, 29), (31, 41)
+
+    def auth():
+        if fault in ("owner-drift", "published-owner-drift") and catalog.exists():
+            raise native.NativeV2TransactionError("OWNER_CHANGED")
+
+    def runtime(**kwargs):
+        assert kwargs["namespace_identity"] == ns and kwargs["executable_identity"] == exe
+        return {"main_pid_observed": 123}
+
+    def policy(*args, **kwargs):
+        assert not kwargs["allow_prepare"] and not kwargs["allow_boot_rollover"]
+        kwargs["recheck_owned"]()
+        return {"receipt": "different" if fault == "policy-drift" and catalog.exists() else "exact"}
+
+    def health(root_fd, context, catalog_bytes, **kwargs):
+        publish = kwargs["publish"]
+        assert kwargs["require_withdrawn"] is not publish
+        kwargs["recheck_owned"]()
+        calls.append(publish)
+        assert pending.read_bytes() == wal
+        if fault == "config-inode-drift" and not publish:
+            include = paths[native._INCLUDE]
+            replacement = include.with_name("fixture-replacement")
+            replacement.write_bytes(include.read_bytes())
+            replacement.chmod(0o644)
+            os.replace(replacement, include)
+            labels[include.stat().st_ino] = native._DEDICATED_PUBLIC_CONTEXT + b"\0"
+        if fault == "foreign-catalog" and publish:
+            catalog.write_bytes(b"foreign catalog")
+            raise native.NativeV2TransactionError("FOREIGN_CATALOG")
+        if fault == "wal-lost" and publish:
+            pending.unlink()
+            raise native.NativeV2TransactionError("WAL_LOST")
+        if (fault == ("post-health" if publish else "pre-health")
+                or (fault == "published-pre-health" and not publish)):
+            raise native.NativeV2TransactionError("HEALTH_REFUSED")
+        assert (catalog.read_bytes() if catalog.exists() else None) == catalog_bytes
+        return {"main_pid": 123, "generation": 1, "catalog_observed": publish,
+                "listener_inode": 5678 if publish and fault == "listener" else 1234}
+
+    monkeypatch.setattr(host, "require_native_host_preconditions", lambda: None)
+    monkeypatch.setattr(native, "_verify_current_root_fd", lambda *a: None)
+    monkeypatch.setattr(native, "_require_audited_native_package_for_activation", lambda *a, **kw: None)
+    monkeypatch.setattr(native, "_verify_tls_pair", lambda *a, **kw: "c"*64)
+    tls_reads = 0
+
+    def tls_labels(*args):
+        nonlocal tls_reads
+        tls_reads += 1
+        if fault == "tls-label":
+            raise native.NativeV2TransactionError("TLS_LABEL_REFUSED")
+        return ("changed",) if fault == "tls-label-drift" and tls_reads > 1 else ("exact",)
+
+    monkeypatch.setattr(native, "_dedicated_readonly_tls_labels", tls_labels)
+    monkeypatch.setattr(native, "_prepare_boot_egress_locked", policy)
+    monkeypatch.setattr(native, "_owned_dedicated_live_health_bound", health)
+    monkeypatch.setattr(unit, "_inspect_signed_owned_namespace_runtime", runtime)
+    monkeypatch.setattr(storage, "prepare_dedicated_candidate_storage", lambda *a, **kw: {})
+    monkeypatch.setattr(native, "_owned_alma_runtime_temps", lambda *a, **kw: ())
+    monkeypatch.setattr(native, "verify_service_storage_mounts", lambda *a: None)
+    monkeypatch.setattr(native, "_verify_owned_alma_runtime_service_view", lambda *a: None)
+    monkeypatch.setattr(native.pwd, "getpwnam", lambda name: SimpleNamespace(pw_uid=33))
+    labels = {
+        paths[name].stat().st_ino: native._DEDICATED_PUBLIC_CONTEXT + b"\0"
+        for name in (native._OWNED_MAIN, native._INCLUDE)
+    }
+    config_inode = paths[native._OWNED_MAIN].stat().st_ino
+    if fault.startswith("published-") and fault != "published-bad-label":
+        labels[catalog.stat().st_ino] = native._DEDICATED_PUBLIC_CONTEXT + b"\0"
+    if fault == "published-wal-lost":
+        pending.unlink()
+    def label(fd, name):
+        assert name == "security.selinux"
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            return native._DEDICATED_PUBLIC_CONTEXT + b"\0"
+        inode = os.fstat(fd).st_ino
+        if inode == config_inode and (fault == "config-label" or (
+                fault == "config-label-after-publish" and catalog.exists())):
+            return b"system_u:object_r:httpd_config_t:s0\0"
+        return labels.get(inode, b"unconfined_u:object_r:repocache_nginx_ro_t:s0\0")
+    def set_label(fd, name, value):
+        assert name == "security.selinux" and value == native._DEDICATED_PUBLIC_CONTEXT + b"\0"
+        assert stat.S_IMODE(os.fstat(fd).st_mode) == 0o600
+        assert not catalog.exists()
+        labels[os.fstat(fd).st_ino] = value
+    monkeypatch.setattr(native.os, "listxattr", lambda fd: ["security.selinux"])
+    monkeypatch.setattr(native.os, "getxattr", label)
+    monkeypatch.setattr(native.os, "setxattr", set_label)
+    monkeypatch.setattr(native._Labels, "_command", staticmethod(lambda *a: b"Enforcing"))
+
+    def invoke():
+        with native._locked(root, 0) as state_fd:
+            return native._finish_owned_prepared_wal_dedicated_locked(
+                root, state_fd, namespace_identity=ns, executable_identity=exe,
+                expected_wal=wal, profile_receipt_sha256="a"*64,
+                executable_receipt_sha256="b"*64, recheck_authenticated_owner=auth,
+                initial_generation=initial_generation)
+
+    if fault in ("none", "published-retry"):
+        result = invoke()
+        assert result["status"] == ("OWNED_DEDICATED_INITIAL_WAL_COMMIT_OBSERVED"
+                                    if initial_generation else "OWNED_DEDICATED_WAL_ROLLBACK_OBSERVED")
+        assert result["catalog_observed"] and not result["recovery_required"]
+        assert result["wal_sha256"] == hashlib.sha256(wal).hexdigest()
+        assert calls == [False, True]
+        assert _fixture_resource_bytes(paths) == old
+        _assert_owned_fixture_clean(filesystem, paths)
+        with pytest.raises(native.NativeV2TransactionError):
+            invoke()
+        assert _fixture_resource_bytes(paths) == old
+    else:
+        with pytest.raises(native.NativeV2TransactionError):
+            invoke()
+        expected = ({**old, native._CATALOG: b"foreign catalog"} if fault == "foreign-catalog"
+                    else initial if fault in ("initial-foreign-catalog", "published-bad-label",
+                                             "published-owner-drift", "published-wal-lost")
+                    else old if fault == "wal-lost" else withdrawn)
+        assert _fixture_resource_bytes(paths) == expected
+        if fault in ("wal-lost", "published-wal-lost"):
+            assert not pending.exists()
+        else:
+            assert pending.read_bytes() == (b"foreign WAL" if fault == "wrong-wal" else wal)
+        if fault in ("wrong-wal", "active-route", "initial-foreign-catalog",
+                     "published-bad-label", "published-owner-drift", "published-wal-lost",
+                     "tls-label", "tls-label-drift", "config-label"):
+            assert not calls
+        if fault in ("config-inode-drift", "config-label-after-publish"):
+            assert calls == [False]
+        assert not any((path.parent / native._OWNED_STAGES[name]).exists()
+                       for name, path in paths.items())
+
+
+@pytest.mark.parametrize("fault", ["stale", "timeout", "authority"])
+def test_owned_live_generation_wait_uses_deadline_without_extending_authority_retry(monkeypatch, fault):
+    identity = (123, (1, 2))
+    clock = [0.0]
+    calls = []
+    monkeypatch.setattr(native.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(native.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    monkeypatch.setattr(native, "_owned_live_observe", lambda fd: identity)
+    def health(*args, **kwargs):
+        calls.append(1)
+        if fault == "stale" and len(calls) == 7:
+            return
+        native._deny("OWNED_LIVE_UNIT_CHANGED" if fault == "authority"
+                     else "OWNED_LIVE_GENERATION_UNVERIFIED")
+    monkeypatch.setattr(native, "_owned_live_health_bound", health)
+    if fault == "stale":
+        native._owned_live_wait_generation(0, identity, ({}, 2, "a" * 64))
+        assert len(calls) == 7
+    else:
+        with pytest.raises(native.NativeV2TransactionError):
+            native._owned_live_wait_generation(0, identity, ({}, 2, "a" * 64))
+        assert len(calls) <= 61 and clock[0] <= 12
+        if fault == "authority":
+            assert len(calls) == 3
+        else:
+            assert clock[0] >= 11.9
+
+
+@pytest.mark.parametrize("scenario", ["late", "rollback", "timeout", "wrong", "duplicate",
+                                      "body", "encoding", "tls", "master-before", "master-after"])
+def test_legacy_reload_generation_wait_is_bounded_and_exact(monkeypatch, scenario):
+    expected, prior = (1, 2) if scenario == "rollback" else (2, 1)
+    identity = ("a" * 64, 123)
+    clock = [0.0]
+    calls = []
+    monkeypatch.setattr(native.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(native.time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    def observe(distribution):
+        assert distribution == "debian"
+        if scenario == "master-before" or (scenario == "master-after" and calls):
+            return ("a" * 64, 124)
+        return identity
+    monkeypatch.setattr(native, "_native_reload_identity", observe)
+    def request(doc, path, maximum):
+        calls.append(1)
+        assert path == native._HEALTH and maximum == 8192
+        if scenario == "tls":
+            native._deny("EXPOSURE_UNVERIFIED")
+        value = (99 if scenario == "wrong" else expected if
+                 scenario in ("duplicate", "body", "encoding", "master-after") or
+                 (scenario in ("late", "rollback") and len(calls) >= 7) else prior)
+        header = b"HTTP/1.1 204 No Content\r\nX-Repocache-Generation: " + str(value).encode()
+        if scenario == "duplicate":
+            header += b"\r\nX-Repocache-Generation: 2"
+        if scenario == "encoding":
+            header += b"\r\nContent-Encoding: gzip"
+        return header + b"\r\n\r\n" + (b"unexpected" if scenario == "body" else b"")
+    monkeypatch.setattr(native, "_fixed_https_get", request)
+    if scenario in ("late", "rollback"):
+        native._wait_native_generation({}, expected, "debian", identity, stale_generation=prior)
+        assert len(calls) == 7
+    else:
+        with pytest.raises(native.NativeV2TransactionError):
+            native._wait_native_generation({}, expected, "debian", identity, stale_generation=prior)
+        if scenario == "timeout":
+            assert 11.9 <= clock[0] <= 12 and len(calls) <= 61
+        else:
+            assert len(calls) == (0 if scenario == "master-before" else 1)
+            assert clock[0] == 0
+
+
+def test_legacy_compensation_audit_is_closed_and_redacted(capsys):
+    for code in ("LEGACY_GENERATION_STALE", "APPLY_FAILED_ROLLED_BACK",
+                 "APPLY_FAILED_RECOVERY_REQUIRED", "UNIT_CHANGED"):
+        native._audit_native_failure(native.NativeV2TransactionError("NATIVE_V2_" + code))
+    native._audit_native_failure(ValueError("private untrusted contents"))
+    output = capsys.readouterr().err
+    assert "private untrusted contents" not in output
+    assert output.splitlines() == [
+        "REPOCACHE_FIXED_TRANSACTION_REFUSAL: NATIVE_V2_" + code
+        for code in ("LEGACY_GENERATION_STALE", "APPLY_FAILED_ROLLED_BACK",
+                     "APPLY_FAILED_RECOVERY_REQUIRED", "UNIT_CHANGED", "OTHER_REFUSAL")]
+
+
+@pytest.mark.parametrize("scenario", ["stopped", "active", "published", "foreign",
+                                     "enabled", "vendor-active", "vendor-enabled",
+                                     "failed-state", "changed-selection", "changed-master",
+                                     "changed-unit", "bad-start", "finish-refusal",
+                                     "stopped-published", "bad-wal", "owner-refusal"])
+def test_composed_prepared_dedicated_recovery_selects_exact_service(monkeypatch, scenario):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from repocache import server_native_nginx_effective_unit_v1 as unit
+    from repocache import server_root_control_host_preflight_v1 as host
+    wal = b"exact WAL"
+    old = {native._CATALOG: b"prior"}
+    current = dict(old) if scenario in ("published", "stopped-published") else {native._CATALOG: None}
+    if scenario == "foreign":
+        current[native._CATALOG] = b"foreign"
+    active = scenario in ("active", "published")
+    calls = []
+    observations = []
+    @contextmanager
+    def layout(root, state, *, recovering):
+        assert (root, state, recovering) == (1, 2, True)
+        yield state, 3, 4, lambda: None
+    monkeypatch.setattr(host, "require_native_host_preconditions", lambda: None)
+    monkeypatch.setattr(native, "_verify_current_root_fd", lambda *a: None)
+    monkeypatch.setattr(native, "_require_audited_native_package_for_activation", lambda *a, **kw: None)
+    monkeypatch.setattr(native, "_owned_layout_locked", layout)
+    def require_wal(state, raw):
+        assert (state, raw) == (2, wal)
+        if scenario == "bad-wal":
+            native._deny("OWNED_WAL_CHANGED")
+    monkeypatch.setattr(native, "_owned_require_exact_wal", require_wal)
+    monkeypatch.setattr(native, "_decode_owned_wal", lambda *a, **kw: (old, {}))
+    monkeypatch.setattr(native, "_json", lambda *a, **kw: {"version": 3})
+    snapshot = {"configuration_base64": "e30=", "state_generation": 1}
+    monkeypatch.setattr(native, "_validate_owned_resources", lambda *a, **kw: snapshot)
+    monkeypatch.setattr(native, "_owned_socket_require_inactive_routes", lambda *a: None)
+    monkeypatch.setattr(native, "parse_install_bytes", lambda *a, **kw: {
+        "deployment": {"listen": {"bind_address": "127.0.0.1", "https_port": 443}}})
+    monkeypatch.setattr(native, "_read_owned_resources", lambda *a: current)
+    monkeypatch.setattr(native, "_owned_live_guard", lambda *a: require_wal(2, a[-2]))
+    monkeypatch.setattr(native, "_owned_check_stages_absent", lambda *a: None)
+    monkeypatch.setattr(native, "_require_dedicated_public_label", lambda *a: None)
+    monkeypatch.setattr(native, "_require_dedicated_catalog_label", lambda *a: None)
+    monkeypatch.setattr(unit, "_safe_native_systemctl", lambda: None)
+    def command(argv, **kw):
+        assert argv[0] == native._SYSTEMCTL and kw["shell"] is False
+        action, service = argv[1:]
+        assert action in ("is-active", "is-enabled")
+        if action == "is-enabled":
+            enabled = ((scenario == "enabled" and service == native._OWNED_WAL_DOMAIN)
+                       or (scenario == "vendor-enabled" and service == native._UNIT))
+            return SimpleNamespace(returncode=0 if enabled else 1,
+                                   stdout=b"enabled\n" if enabled else b"disabled\n")
+        if service == native._UNIT:
+            running = scenario == "vendor-active"
+        else:
+            observations.append(active)
+            if scenario == "failed-state":
+                return SimpleNamespace(returncode=3, stdout=b"failed\n")
+            running = active or (scenario == "changed-selection" and len(observations) > 1)
+        return SimpleNamespace(returncode=0 if running else 3,
+                               stdout=b"active\n" if running else b"inactive\n")
+    monkeypatch.setattr(native.subprocess, "run", command)
+    def observe(*, https_port, active):
+        assert https_port == 443
+        return {"main_pid_observed": 123 if active else 0,
+                "private_unit_identity": (5, 6), "private_dropin_identity": (7, 8)}
+    monkeypatch.setattr(unit, "inspect_signed_owned_namespace_unit", observe)
+    def runtime(**kw):
+        assert active
+        result = observe(https_port=kw["https_port"], active=True)
+        if scenario == "changed-master":
+            result["main_pid_observed"] = 124
+        if scenario == "changed-unit":
+            result["private_dropin_identity"] = (7, 9)
+        return result
+    monkeypatch.setattr(unit, "_inspect_signed_owned_namespace_runtime", runtime)
+    def start(root, state, **kw):
+        nonlocal active
+        assert (root, state) == (1, 2) and not active
+        assert kw["expected_stopped"] == observe(https_port=443, active=False)
+        kw["recheck_authenticated_owner"]()
+        calls.append("start")
+        active = True
+        return {"status": "OWNED_DEDICATED_PREPARED_WAL_START_OBSERVED",
+                "wal_sha256": hashlib.sha256(wal).hexdigest(),
+                "catalog_withdrawn": scenario != "bad-start", "recovery_required": True,
+                "generation": 1, "enablement_changed": False, "main_pid": 123,
+                "listener_inode": 567}
+    monkeypatch.setattr(native, "_start_owned_prepared_wal_dedicated_locked", start)
+    def finish(root, state, **kw):
+        assert (root, state) == (1, 2) and active
+        kw["recheck_authenticated_owner"]()
+        assert kw["expected_runtime"] == observe(https_port=443, active=True)
+        assert kw["expected_listener"] == (567 if "start" in calls else None)
+        calls.append("finish")
+        if scenario == "finish-refusal":
+            native._deny("FINISH_REFUSED")
+        return {"status": "OWNED_DEDICATED_WAL_ROLLBACK_OBSERVED"}
+    monkeypatch.setattr(native, "_finish_owned_prepared_wal_dedicated_locked", finish)
+    def auth():
+        if scenario == "owner-refusal":
+            native._deny("OWNER_REFUSED")
+    def invoke():
+        return native._recover_owned_prepared_dedicated_locked(
+            1, 2, namespace_identity=(17, 29), executable_identity=(31, 41),
+            profile_receipt_sha256="a"*64, executable_receipt_sha256="b"*64,
+            expected_wal=wal, recheck_authenticated_owner=auth)
+    if scenario in ("stopped", "active", "published"):
+        assert invoke()["status"] == "OWNED_DEDICATED_WAL_ROLLBACK_OBSERVED"
+        assert calls == (["start", "finish"] if scenario == "stopped" else ["finish"])
+    else:
+        with pytest.raises(native.NativeV2TransactionError):
+            invoke()
+        assert calls == (["start", "finish"] if scenario == "finish-refusal" else
+                         ["start"] if scenario in ("changed-master", "changed-unit", "bad-start") else [])
+
+
+def test_installed_dedicated_recovery_refuses_source_loader_before_host_access(monkeypatch):
+    from repocache import server_root_control_host_preflight_v1 as host
+    def forbidden():
+        pytest.fail("source checkout must not authorize installed recovery")
+    monkeypatch.setattr(host, "require_native_host_preconditions", forbidden)
+    with pytest.raises(native.NativeV2TransactionError, match="INSTALLER_PIN_REFUSED"):
+        native._recover_installed_prepared_dedicated({})
+    with pytest.raises(native.NativeV2TransactionError, match="INSTALLER_PIN_REFUSED"):
+        native._prepare_installed_committed_dedicated({})
+    with pytest.raises(native.NativeV2TransactionError, match="INSTALLER_PIN_REFUSED"):
+        native._start_installed_committed_dedicated({})
+    with pytest.raises(native.NativeV2TransactionError, match="INSTALLER_PIN_REFUSED"):
+        native._rollover_installed_committed_dedicated({})
+    with pytest.raises(native.NativeV2TransactionError, match="INSTALLER_PIN_REFUSED"):
+        native._rollover_installed_prepared_wal_dedicated({})
+    with pytest.raises(native.NativeV2TransactionError, match="INSTALLER_PIN_REFUSED"):
+        native._prepare_installed_prepared_wal_dedicated({})
+    with pytest.raises(native.NativeV2TransactionError, match="INSTALLER_PIN_REFUSED"):
+        native._resume_installed_prepared_wal_dedicated({})
+    with pytest.raises(native.NativeV2TransactionError, match="INSTALLER_PIN_REFUSED"):
+        native._resume_installed_committed_dedicated({})
+    with pytest.raises(native.NativeV2TransactionError, match="INSTALLER_PIN_REFUSED"):
+        native._start_installed_prepared_wal_dedicated({})
+    with pytest.raises(native.NativeV2TransactionError, match="INSTALLER_PIN_REFUSED"):
+        native._start_or_verify_installed_committed_dedicated({})
+    with pytest.raises(native.NativeV2TransactionError, match="INSTALLER_PIN_REFUSED"):
+        native._stage_installed_committed_dedicated_profile({})
+    with pytest.raises(native.NativeV2TransactionError, match="INSTALLER_PIN_REFUSED"):
+        native._load_installed_committed_dedicated_profile({})
+    with pytest.raises(native.NativeV2TransactionError, match="INSTALLER_PIN_REFUSED"):
+        native._stage_installed_initial_dedicated_generation({})
+    with pytest.raises(native.NativeV2TransactionError, match="INSTALLER_PIN_REFUSED"):
+        native._restore_installed_initial_dedicated_generation({})
+
+
+@pytest.mark.parametrize("fault", ["none", "lock-held", "placement", "worker-drift",
+                                   "package", "vendor-drift", "wal", "executable",
+                                   "profile", "boot", "boot-drift", "result",
+                                   "prepare", "prepare-manifest", "prepare-service",
+                                   "prepare-resource-drift", "prepare-result", "prepare-mixed",
+                                   "start", "start-manifest", "start-boot", "start-service",
+                                   "start-resource-drift", "start-result", "start-mixed",
+                                   "rollover", "rollover-pin", "rollover-same-boot",
+                                   "rollover-archive", "rollover-resource-drift",
+                                   "pending-rollover", "pending-rollover-wal",
+                                   "pending-rollover-catalog", "pending-rollover-drift",
+                                   "pending-prepare", "pending-prepare-wal",
+                                   "pending-prepare-catalog", "pending-prepare-drift",
+                                   "pending-resume", "pending-resume-boot",
+                                   "pending-resume-wal", "pending-resume-catalog",
+                                   "pending-resume-drift", "pending-resume-result",
+                                   "pending-start", "pending-start-wal", "pending-start-boot",
+                                   "pending-start-catalog", "pending-start-drift", "pending-start-result",
+                                   "committed-resume", "committed-resume-boot",
+                                   "committed-resume-drift", "committed-resume-result",
+                                   "start-repeat", "start-repeat-wal", "start-repeat-boot",
+                                   "start-repeat-result", "profile-stage", "profile-stage-manifest",
+                                   "profile-stage-existing", "profile-stage-service",
+                                   "profile-stage-drift", "profile-stage-result",
+                                   "profile-load", "profile-load-repeat", "profile-load-wrong-pin",
+                                   "profile-load-service", "profile-load-drift", "profile-load-failure",
+                                   "profile-load-readback", "profile-load-timeout",
+                                   "profile-load-observation-drift",
+                                   "storage", "storage-wal", "storage-boot", "storage-service",
+                                   "storage-policy", "storage-drift", "storage-result",
+                                   "storage-readback", "storage-int-report",
+                                   "storage-int-readback", "runtime", "runtime-wal",
+                                   "runtime-boot", "runtime-service", "runtime-policy",
+                                   "runtime-storage", "runtime-drift", "runtime-readback",
+                                   "pending-storage", "pending-storage-wal", "pending-storage-catalog",
+                                   "pending-storage-policy", "pending-runtime", "pending-runtime-wal",
+                                   "pending-runtime-catalog", "pending-runtime-policy"])
+def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, monkeypatch, fault):
+    """Actual protected files and flock; loader/host/package/runtime observations simulated."""
+    import fcntl
+    import subprocess
+    import zipimport
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from repocache import server_native_nginx_effective_unit_v1 as unit
+    from repocache import server_native_nginx_executable_v1 as executable
+    from repocache import server_native_egress_candidate_v1 as egress
+    from repocache import server_root_control_host_preflight_v1 as host
+    from repocache import server_root_control_worker_v1 as worker
+    from repocache.server_protected_state_store_v1 import ProtectedStateStoreError, _canonical
+
+    rootfd, state_path, _, _, _ = filesystem
+    directory = state_path.parents[3] / "usr/libexec/repocache"
+    directory.mkdir(parents=True, mode=0o755)
+    wal = b"exact test WAL"
+    pending_rolling = fault.startswith("pending-rollover")
+    rolling = fault.startswith("rollover") or pending_rolling
+    pending_first = fault.startswith("pending-prepare")
+    committed_resume = fault.startswith("committed-resume")
+    resuming = fault.startswith("pending-resume") or committed_resume
+    pending_start = fault.startswith("pending-start")
+    pending_storage = fault.startswith("pending-storage")
+    pending_runtime = fault.startswith("pending-runtime")
+    pending_placement = pending_storage or pending_runtime
+    pending = pending_first or pending_rolling or (resuming and not committed_resume) or pending_start or pending_placement
+    prior_boot_id = "11111111-1111-1111-1111-111111111111"
+    new_boot_id = "22222222-2222-2222-2222-222222222222"
+    boot = (_canonical({"boot_id": prior_boot_id}, limit=8192)
+            if rolling else b"exact boot intent")
+    placement = {
+        "schema_version": 1, "status": "AUTHENTICATED_WORKER_STAGED", "version": "0.6.0",
+        "source_sha": "a"*40, "archive_sha256": "b"*64, "manifest_sha256": "c"*64,
+        "publisher_key_id": "test-only",
+        "files": {name: "d"*64 for name in worker._RECEIPT_FILES},
+        "authorizes_host_installation": False, "authorizes_service_activation": False,
+    }
+    raw = (json.dumps(placement, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+    placement_sha = hashlib.sha256(raw).hexdigest()
+    complete = worker._PLACEMENT_PREFIX + "complete-" + placement_sha
+    for name, content in ((worker._RUNTIME_RECEIPT, b"foreign" if fault == "placement" else raw),
+                          (complete, b""), (native._OWNED_WAL, wal),
+                          (egress._BOOT_EGRESS_RECEIPT, boot)):
+        path = state_path / name
+        path.write_bytes(content)
+        path.chmod(0o600)
+    pins = dict(source_sha="a"*40, archive_sha256="b"*64, worker_sha256="d"*64,
+                placement_sha256=placement_sha, package_identity="nginx-core-0:1.2-3.x86_64",
+                native_payload_sha256="e"*64, binary_sha256="f"*64,
+                executable_receipt_sha256="1"*64, profile_receipt_sha256="2"*64,
+                boot_receipt_sha256=hashlib.sha256(boot).hexdigest(),
+                wal_sha256="3"*64 if fault == "wal" else hashlib.sha256(wal).hexdigest())
+    calls = []
+    staging_profile = fault.startswith("profile-stage")
+    loading_profile = fault.startswith("profile-load")
+    preparing = (fault.startswith("prepare") or rolling or pending_first or resuming
+                 or staging_profile or loading_profile)
+    loaded = fault == "profile-load-repeat"
+    runtime_prep = fault.startswith("runtime") or pending_runtime
+    storage_prep = fault.startswith("storage") or pending_storage or runtime_prep
+    starting = fault.startswith("start") or pending_start or storage_prep
+    active_repeat = fault.startswith("start-repeat")
+    manifest = b"exact committed manifest"
+    resources = {native._OWNED_MANIFEST: manifest, native._CATALOG: b"catalog"}
+    if preparing:
+        if not pending:
+            (state_path / native._OWNED_WAL).unlink()
+        if not rolling and not resuming:
+            (state_path / egress._BOOT_EGRESS_RECEIPT).unlink()
+        pins["generation_manifest_sha256"] = ("0"*64 if fault == "prepare-manifest"
+                                               else hashlib.sha256(manifest).hexdigest())
+        if fault != "prepare-mixed":
+            del pins["wal_sha256"], pins["boot_receipt_sha256"]
+        if staging_profile:
+            del pins["profile_receipt_sha256"]
+            if fault == "profile-stage-manifest":
+                pins["generation_manifest_sha256"] = "0"*64
+            if fault == "profile-stage-existing":
+                (state_path / unit._NAMESPACE_PROFILE_RECEIPT).touch()
+        if loading_profile:
+            (state_path / unit._NAMESPACE_PROFILE_RECEIPT).touch()
+            if fault == "profile-load-wrong-pin":
+                pins["profile_receipt_sha256"] = "0"*64
+        if rolling:
+            pins["previous_boot_receipt_sha256"] = ("0"*64 if fault == "rollover-pin"
+                                                    else hashlib.sha256(boot).hexdigest())
+            monkeypatch.setattr(egress, "_current_boot_id",
+                                lambda: prior_boot_id if fault == "rollover-same-boot" else new_boot_id)
+        if pending:
+            pins["wal_sha256"] = ("0"*64 if fault.endswith("-wal")
+                                  else hashlib.sha256(wal).hexdigest())
+        if resuming:
+            pins["boot_receipt_sha256"] = ("0"*64 if fault in ("pending-resume-boot", "committed-resume-boot")
+                                            else hashlib.sha256(boot).hexdigest())
+    if starting:
+        if not pending_start and not pending_placement and fault not in ("start-repeat-wal", "storage-wal", "runtime-wal"):
+            (state_path / native._OWNED_WAL).unlink()
+        pins["generation_manifest_sha256"] = ("0"*64 if fault == "start-manifest"
+                                               else hashlib.sha256(manifest).hexdigest())
+        if pending_start or pending_placement:
+            if fault.endswith("-wal"):
+                pins["wal_sha256"] = "0"*64
+        elif fault != "start-mixed":
+            del pins["wal_sha256"]
+        if fault in ("start-boot", "pending-start-boot", "start-repeat-boot", "storage-boot", "runtime-boot"):
+            pins["boot_receipt_sha256"] = "0"*64
+    class Loader:
+        archive = worker._WORKER
+    monkeypatch.setattr(zipimport, "zipimporter", Loader)
+    monkeypatch.setattr(native, "__loader__", Loader())
+    monkeypatch.setattr(native, "sys", SimpleNamespace(flags=SimpleNamespace(isolated=True)))
+    monkeypatch.setattr(host, "require_native_host_preconditions", lambda: None)
+    monkeypatch.setattr(dispatcher, "_native_distro", lambda: "almalinux")
+    monkeypatch.setattr(native, "_verify_current_root_fd", lambda *_: None)
+    monkeypatch.setattr(native, "_require_audited_native_package_for_activation", lambda *a, **kw: None)
+    real_locked, real_walk = native._locked, native._walk
+    monkeypatch.setattr(native, "_locked", lambda root, uid: real_locked(rootfd, uid))
+    monkeypatch.setattr(native, "_walk", lambda root, parts, stack, uid: real_walk(rootfd, parts, stack, uid))
+    def digest(root, segments, mode, limit):
+        if segments[-1] == "nginx":
+            return "0"*64 if fault == "vendor-drift" else pins["binary_sha256"]
+        return "0"*64 if fault == "worker-drift" else placement["files"][segments[-1]]
+    monkeypatch.setattr(worker, "_placement_file_digest", digest)
+    def rpm(argv, **kw):
+        nonlocal loaded
+        if argv == (native._SYSTEMCTL, "daemon-reload"):
+            assert loading_profile
+            assert kw["shell"] is False and kw["close_fds"] is True
+            calls.append("daemon-reload")
+            if fault == "profile-load-timeout":
+                raise subprocess.TimeoutExpired(argv, 30)
+            loaded = fault not in ("profile-load-failure", "profile-load-readback")
+            if fault == "profile-load-drift":
+                resources[native._CATALOG] = b"changed"
+            return SimpleNamespace(returncode=1 if fault == "profile-load-failure" else 0)
+        if argv[0] == native._SYSTEMCTL:
+            assert (preparing or starting) and argv[2] in (native._UNIT, native._OWNED_WAL_DOMAIN)
+            assert argv[1] in ("is-active", "is-enabled")
+            if argv[1] == "is-active":
+                active = fault in ("prepare-service", "start-service", "profile-stage-service", "profile-load-service", "storage-service", "runtime-service")
+                return SimpleNamespace(returncode=0 if active else 3,
+                                       stdout=b"active\n" if active else b"inactive\n")
+            return SimpleNamespace(returncode=1, stdout=b"disabled\n")
+        assert argv == ("/usr/bin/rpm", "-q",
+                        "--queryformat=%{NAME}-%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}",
+                        "nginx-core")
+        return SimpleNamespace(returncode=0, stderr=b"",
+                               stdout=(b"wrong" if fault == "package" else pins["package_identity"].encode()))
+    monkeypatch.setattr(native.subprocess, "run", rpm)
+    monkeypatch.setattr(native, "_decode_owned_wal", lambda *a, **kw: ({}, {}))
+    monkeypatch.setattr(native, "_validate_owned_resources", lambda *a, **kw: {
+        "configuration_base64": "e30=", "state_generation": 1})
+    monkeypatch.setattr(native, "_owned_socket_require_inactive_routes", lambda *a: None)
+    monkeypatch.setattr(native, "parse_install_bytes", lambda *a, **kw: {
+        "deployment": {"listen": {"https_port": 443, "bind_address": "127.0.0.1"}}})
+    monkeypatch.setattr(unit, "_signed_owned_unit_bytes", lambda: b"signed unit")
+    if preparing or starting:
+        @contextmanager
+        def layout(root, state, *, recovering):
+            assert recovering is pending
+            if not recovering:
+                # Retain the production layout's no-WAL gate even though
+                # resource enumeration below uses a simulated layout.
+                native._no_conflicting_owned_wal_pending(state)
+            yield state, 11, 12, lambda: None
+        monkeypatch.setattr(native, "_owned_layout_locked", layout)
+        if pending:
+            prior_resources = dict(resources)
+            monkeypatch.setattr(native, "_decode_owned_wal", lambda *a, **kw: (prior_resources, {}))
+            resources[native._CATALOG] = b"foreign" if fault.endswith("-catalog") else None
+            def live_guard(state, nginx, public, check, expected_wal, expected_resources):
+                check()
+                if ((state_path / native._OWNED_WAL).read_bytes() != expected_wal
+                        or resources != expected_resources):
+                    native._deny("OWNED_LIVE_RESOURCE_DRIFT")
+            monkeypatch.setattr(native, "_owned_live_guard", live_guard)
+            monkeypatch.setattr(native, "_owned_check_stages_absent", lambda *a: None)
+        monkeypatch.setattr(native, "_read_owned_resources", lambda *a: dict(resources))
+        monkeypatch.setattr(unit, "_safe_native_systemctl", lambda: None)
+        monkeypatch.setattr(unit, "inspect_signed_owned_namespace_unit", lambda **kw: {
+            "main_pid_observed": 0})
+        monkeypatch.setattr(native.pwd, "getpwnam", lambda *_: SimpleNamespace(pw_uid=987))
+    monkeypatch.setattr(executable, "signed_owned_nginx_policy_candidate",
+                        lambda: {"policy_sha256": "4"*64})
+    def verify(directory_fd, **kw):
+        assert kw["expected_receipt_sha256"] == pins["executable_receipt_sha256"]
+        assert kw["native_payload_sha256"] == pins["native_payload_sha256"]
+        assert kw["authenticated_sha256"] == pins["binary_sha256"]
+        assert kw["dedicated_policy_sha256"] == "4"*64
+        if fault == "executable":
+            native._deny("EXECUTABLE_REFUSED")
+        return {"executable_identity": (17, 29)}
+    monkeypatch.setattr(executable, "verify_nginx_candidate_receipt", verify)
+    def profile(*a, **kw):
+        if staging_profile:
+            calls.append("place" if kw["allow_create"] else "profile-read")
+            if kw["allow_create"]:
+                contender = os.open(state_path / LOCK_NAME, os.O_RDONLY)
+                try:
+                    with pytest.raises(BlockingIOError):
+                        fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                finally:
+                    os.close(contender)
+                (state_path / unit._NAMESPACE_PROFILE_RECEIPT).touch()
+                if fault == "profile-stage-drift":
+                    resources[native._CATALOG] = b"changed"
+            return {"receipt_sha256": "2"*64, "receipt_matches_owned_dropin": True,
+                    "authorizes_systemctl": fault == "profile-stage-result",
+                    "authorizes_nginx_activation": False}
+        assert kw["allow_create"] is False
+        if loading_profile:
+            return {"receipt_sha256": "2"*64, "receipt_matches_owned_dropin": True,
+                    "authorizes_systemctl": False, "authorizes_nginx_activation": False}
+        return {"receipt_sha256": "0"*64 if fault == "profile" else pins["profile_receipt_sha256"]}
+    monkeypatch.setattr(unit, "_stage_namespace_dropin_under_lock", profile)
+    if loading_profile:
+        monkeypatch.setattr(unit, "_NAMESPACE_PATH", str(state_path / "absent-netns"))
+        samples = []
+        def load_state(**kw):
+            samples.append(kw)
+            return {"profile_loaded": loaded or (
+                fault == "profile-load-observation-drift" and len(samples) == 3),
+                    "main_pid_observed": 0}
+        monkeypatch.setattr(unit, "_inspect_signed_owned_namespace_load_state", load_state)
+        monkeypatch.setattr(native, "_owned_check_stages_absent", lambda *a: None)
+        if fault in ("profile-load", "profile-load-repeat"):
+            assert native._load_installed_committed_dedicated_profile(pins)[
+                "daemon_reloaded"] is (fault == "profile-load")
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                native._load_installed_committed_dedicated_profile(pins)
+        assert calls == (["daemon-reload"] if fault in (
+            "profile-load", "profile-load-drift", "profile-load-failure",
+            "profile-load-readback", "profile-load-timeout") else [])
+        assert (state_path / unit._NAMESPACE_PROFILE_RECEIPT).exists()
+        assert not (state_path / native._OWNED_WAL).exists()
+        assert not (state_path / egress._BOOT_EGRESS_RECEIPT).exists()
+        with real_locked(rootfd, 0):
+            pass
+        return
+    if staging_profile:
+        monkeypatch.setattr(unit, "_NAMESPACE_PATH", str(state_path / "absent-netns"))
+        monkeypatch.setattr(unit, "inspect_effective_owned_nginx_unit",
+                            lambda **kw: {"main_pid_observed": 0})
+        monkeypatch.setattr(native, "_owned_check_stages_absent", lambda *a: None)
+        if fault == "profile-stage":
+            assert native._stage_installed_committed_dedicated_profile(pins)[
+                "receipt_matches_owned_dropin"]
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                native._stage_installed_committed_dedicated_profile(pins)
+        assert calls == (["place", "profile-read"] if fault in (
+            "profile-stage", "profile-stage-result") else ["place"] if
+            fault == "profile-stage-drift" else [])
+        assert not (state_path / native._OWNED_WAL).exists()
+        assert not (state_path / egress._BOOT_EGRESS_RECEIPT).exists()
+        with real_locked(rootfd, 0):
+            pass
+        return
+    @contextmanager
+    def namespace():
+        yield 11, (31, 41), lambda: None
+    monkeypatch.setattr(egress, "_fixed_namespace_scope", namespace)
+    if storage_prep:
+        from repocache import server_native_installed_storage_v1 as storage
+        monkeypatch.setattr(native, "_owned_check_stages_absent", lambda *a: None)
+        def verify_policy(root, state, **kw):
+            assert kw["namespace_identity"] == (31, 41)
+            if pending_placement:
+                assert kw["expected_wal"] == wal and "allow_prepare" not in kw
+                kw["recheck_stopped_owner"]()
+            else:
+                assert kw["allow_prepare"] is False
+                kw["recheck_namespace_owner"]()
+            calls.append("policy")
+            result = {"receipt_sha256": "0"*64 if fault.endswith("-policy") else pins["boot_receipt_sha256"],
+                      "generation_manifest_sha256": pins["generation_manifest_sha256"],
+                      "authorizes_nginx_activation": False, "authorizes_catalog_publication": False}
+            if pending_placement:
+                result.update(prior_resources_verified=True, recovery_required=True,
+                              catalog_withdrawn=True, wal_sha256=pins["wal_sha256"])
+            else:
+                result["committed_resources_verified"] = True
+            return result
+        monkeypatch.setattr(native, "_prepare_owned_committed_boot_egress_locked", verify_policy)
+        monkeypatch.setattr(native, "_verify_owned_prepared_wal_boot_egress_locked", verify_policy)
+        def prepare_storage(dist, document, *, allow_create):
+            assert dist == "almalinux"
+            assert not runtime_prep or not allow_create
+            calls.append("create" if allow_create else "read")
+            contender = os.open(state_path / LOCK_NAME, os.O_RDONLY)
+            try:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                os.close(contender)
+            if fault == "storage-drift":
+                resources[native._CATALOG] = b"changed"
+            return {"repository_cache_roots_verified": [], "metrics_file_verified": False,
+                    "selinux_enforcing_labels_verified": (
+                        1 if fault == "storage-int-report" or (
+                            fault == "storage-int-readback" and not allow_create)
+                        else not (fault == "storage-readback" and not allow_create)),
+                    "actual_service_write_verified": fault in ("storage-result", "runtime-storage")}
+        monkeypatch.setattr(storage, "prepare_dedicated_candidate_storage", prepare_storage)
+        if runtime_prep:
+            scratch = (("runtime",), {str(i): i for i in range(5)})
+            def runtime_prepare(root, *, recheck_owned):
+                calls.append("runtime")
+                contender = os.open(state_path / LOCK_NAME, os.O_RDONLY)
+                try:
+                    with pytest.raises(BlockingIOError):
+                        fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                finally:
+                    os.close(contender)
+                recheck_owned()
+                if fault == "runtime-drift":
+                    resources[native._CATALOG] = b"changed"
+                    recheck_owned()
+                return scratch
+            def runtime_verify(*a, **kw):
+                assert kw == {"dedicated": True, "inactive": True}
+                calls.append("runtime-read")
+                return (("foreign",), {}) if fault == "runtime-readback" else scratch
+            monkeypatch.setattr(native, "_prepare_owned_dedicated_runtime_locked", runtime_prepare)
+            monkeypatch.setattr(native, "_owned_alma_runtime_temps", runtime_verify)
+            invoke_runtime = (native._prepare_installed_prepared_wal_dedicated_runtime if pending_placement
+                              else native._prepare_installed_committed_dedicated_runtime)
+            if fault in ("runtime", "pending-runtime"):
+                report = invoke_runtime(pins)
+                assert report["scratch_count"] == 5
+                assert report["status"] == ("OWNED_DEDICATED_PREPARED_WAL_RUNTIME_PREPARED" if pending_placement
+                                            else "OWNED_DEDICATED_COMMITTED_RUNTIME_PREPARED")
+                if pending_placement:
+                    assert report["wal_sha256"] == pins["wal_sha256"]
+                    assert report["catalog_withdrawn"] and report["recovery_required"]
+            else:
+                with pytest.raises(native.NativeV2TransactionError):
+                    invoke_runtime(pins)
+            assert calls == {
+                "runtime": ["policy", "read", "runtime", "read", "policy", "runtime-read"],
+                "runtime-wal": [], "runtime-boot": [], "runtime-service": [],
+                "runtime-policy": ["policy"], "runtime-storage": ["policy", "read"],
+                "runtime-drift": ["policy", "read", "runtime"],
+                "runtime-readback": ["policy", "read", "runtime", "read", "policy", "runtime-read"],
+                "pending-runtime": ["policy", "read", "runtime", "read", "policy", "runtime-read"],
+                "pending-runtime-wal": [], "pending-runtime-catalog": [],
+                "pending-runtime-policy": ["policy"],
+            }[fault]
+            if pending_placement:
+                assert (state_path / native._OWNED_WAL).read_bytes() == wal
+            assert (state_path / egress._BOOT_EGRESS_RECEIPT).read_bytes() == boot
+            with real_locked(rootfd, 0):
+                pass
+            return
+        invoke_storage = (native._prepare_installed_prepared_wal_dedicated_storage if pending_placement
+                          else native._prepare_installed_committed_dedicated_storage)
+        if fault in ("storage", "pending-storage"):
+            result = invoke_storage(pins)
+            assert result["status"] == ("OWNED_DEDICATED_PREPARED_WAL_STORAGE_PREPARED" if pending_placement
+                                        else "OWNED_DEDICATED_COMMITTED_STORAGE_PREPARED")
+            assert result["storage"]["selinux_enforcing_labels_verified"]
+            if pending_placement:
+                assert result["wal_sha256"] == pins["wal_sha256"]
+                assert result["catalog_withdrawn"] and result["recovery_required"]
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                invoke_storage(pins)
+        assert calls == {
+            "storage": ["policy", "create", "read", "policy"],
+            "storage-wal": [], "storage-boot": [], "storage-service": [],
+            "storage-policy": ["policy"], "storage-drift": ["policy", "create"],
+            "storage-result": ["policy", "create"],
+            "storage-readback": ["policy", "create", "read"],
+            "storage-int-report": ["policy", "create"],
+            "storage-int-readback": ["policy", "create", "read"],
+            "pending-storage": ["policy", "create", "read", "policy"],
+            "pending-storage-wal": [], "pending-storage-catalog": [],
+            "pending-storage-policy": ["policy"],
+        }[fault]
+        if pending_placement:
+            assert (state_path / native._OWNED_WAL).read_bytes() == wal
+        assert (state_path / egress._BOOT_EGRESS_RECEIPT).read_bytes() == boot
+        with real_locked(rootfd, 0):
+            pass
+        return
+    if fault == "boot":
+        pins["boot_receipt_sha256"] = "0"*64
+    def recover(root, state, **kw):
+        calls.append("recover")
+        # A separate open file description must be excluded even in this
+        # process; a directory descriptor alone cannot establish this.
+        contender = os.open(state_path / LOCK_NAME, os.O_RDONLY)
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(contender)
+        assert kw["expected_wal"] == wal and kw["namespace_identity"] == (31, 41)
+        assert kw["executable_identity"] == (17, 29)
+        kw["recheck_authenticated_owner"]()
+        if fault == "boot-drift":
+            (state_path / egress._BOOT_EGRESS_RECEIPT).write_bytes(b"changed")
+            kw["recheck_authenticated_owner"]()
+        if fault != "result":
+            os.unlink(native._OWNED_WAL, dir_fd=state)
+        return {"status": "OWNED_DEDICATED_WAL_ROLLBACK_OBSERVED",
+                "wal_sha256": pins["wal_sha256"], "recovery_required": False,
+                "catalog_observed": True}
+    monkeypatch.setattr(native, "_recover_owned_prepared_dedicated_locked", recover)
+    if preparing:
+        def create(root, state, **kw):
+            calls.append("prepare")
+            contender = os.open(state_path / LOCK_NAME, os.O_RDONLY)
+            try:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                os.close(contender)
+            assert kw["allow_boot_rollover"] is rolling
+            if rolling:
+                assert kw["expected_previous_receipt_sha256"] == hashlib.sha256(boot).hexdigest()
+            if pending:
+                assert kw["expected_wal"] == wal
+            kw["recheck_stopped_owner"]()
+            if fault in ("prepare-resource-drift", "rollover-resource-drift", "pending-rollover-drift", "pending-prepare-drift"):
+                resources[native._CATALOG] = b"changed"
+                kw["recheck_stopped_owner"]()
+            if rolling and fault != "rollover-archive":
+                archive = state_path / (egress._BOOT_EGRESS_HISTORY_PREFIX + prior_boot_id)
+                archive.write_bytes(boot)
+                archive.chmod(0o600)
+            if rolling:
+                (state_path / egress._BOOT_EGRESS_RECEIPT).write_bytes(b"new boot intent")
+            return {"namespace_device": 31, "namespace_inode": 41,
+                    "generation_manifest_sha256": hashlib.sha256(manifest).hexdigest(),
+                    **({"boot_id": new_boot_id, "receipt_sha256": hashlib.sha256(b"new boot intent").hexdigest()}
+                       if rolling else {})}
+
+        def resume(root, state, **kw):
+            calls.append("resume")
+            contender = os.open(state_path / LOCK_NAME, os.O_RDONLY)
+            try:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                os.close(contender)
+            assert kw["expected_wal"] == wal and kw["namespace_identity"] == (31, 41)
+            kw["recheck_stopped_owner"]()
+            if fault == "pending-resume-drift":
+                (state_path / egress._BOOT_EGRESS_RECEIPT).write_bytes(b"foreign")
+                kw["recheck_stopped_owner"]()
+            return {"namespace_device": 31, "namespace_inode": 41,
+                    "generation_manifest_sha256": hashlib.sha256(manifest).hexdigest(),
+                    "receipt_sha256": "0"*64 if fault == "pending-resume-result"
+                    else hashlib.sha256(boot).hexdigest()}
+
+        def verify_boot(root, state, **kw):
+            if committed_resume and kw["allow_prepare"]:
+                calls.append("resume")
+                assert kw["expected_existing_receipt"] == boot
+                assert kw["namespace_identity"] == (31, 41)
+                contender = os.open(state_path / LOCK_NAME, os.O_RDONLY)
+                try:
+                    with pytest.raises(BlockingIOError):
+                        fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                finally:
+                    os.close(contender)
+                kw["recheck_namespace_owner"]()
+                if fault == "committed-resume-drift":
+                    (state_path / egress._BOOT_EGRESS_RECEIPT).write_bytes(b"foreign")
+                    kw["recheck_namespace_owner"]()
+                return {"namespace_device": 31, "namespace_inode": 41,
+                        "generation_manifest_sha256": hashlib.sha256(manifest).hexdigest(),
+                        "receipt_sha256": "0"*64 if fault == "committed-resume-result"
+                        else hashlib.sha256(boot).hexdigest()}
+            calls.append("verify")
+            assert kw["namespace_identity"] == (31, 41)
+            if pending:
+                assert kw["expected_wal"] == wal
+                kw["recheck_stopped_owner"]()
+            else:
+                assert kw["allow_prepare"] is False
+                kw["recheck_namespace_owner"]()
+            return {"namespace_device": 31, "namespace_inode": 41,
+                    "generation_manifest_sha256": "0"*64 if fault == "prepare-result"
+                    else hashlib.sha256(manifest).hexdigest(),
+                    **({"boot_id": new_boot_id, "receipt_sha256": hashlib.sha256(b"new boot intent").hexdigest()}
+                       if rolling else {"receipt_sha256": hashlib.sha256(boot).hexdigest()} if resuming else {})}
+
+        monkeypatch.setattr(native, "_resume_owned_prepared_wal_boot_egress_locked", resume)
+        monkeypatch.setattr(native, "_create_owned_committed_boot_egress_locked", create)
+        monkeypatch.setattr(native, "_prepare_owned_committed_boot_egress_locked", verify_boot)
+        monkeypatch.setattr(native, "_create_owned_prepared_wal_boot_egress_locked", create)
+        monkeypatch.setattr(native, "_verify_owned_prepared_wal_boot_egress_locked", verify_boot)
+        invoke = (native._resume_installed_committed_dedicated if committed_resume
+                  else native._resume_installed_prepared_wal_dedicated if resuming
+                  else native._rollover_installed_prepared_wal_dedicated if pending_rolling
+                  else native._prepare_installed_prepared_wal_dedicated if pending_first
+                  else native._rollover_installed_committed_dedicated if rolling
+                  else native._prepare_installed_committed_dedicated)
+        if fault in ("prepare", "rollover", "pending-rollover", "pending-prepare", "pending-resume",
+                     "committed-resume"):
+            assert invoke(pins)["namespace_inode"] == 41
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                invoke(pins)
+        assert calls == (["resume", "verify"] if fault in ("pending-resume", "pending-resume-result",
+                                                           "committed-resume", "committed-resume-result") else
+                         ["resume"] if fault in ("pending-resume-drift", "committed-resume-drift") else
+                         ["prepare", "verify"] if fault in (
+                             "prepare", "prepare-result", "rollover", "rollover-archive",
+                             "pending-rollover", "pending-prepare") else
+                         ["prepare"] if fault in ("prepare-resource-drift", "rollover-resource-drift",
+                                                  "pending-rollover-drift", "pending-prepare-drift") else [])
+        if rolling and fault in ("rollover-pin", "rollover-same-boot", "rollover-resource-drift",
+                                 "pending-rollover-wal", "pending-rollover-catalog", "pending-rollover-drift"):
+            assert (state_path / egress._BOOT_EGRESS_RECEIPT).read_bytes() == boot
+            assert not list(state_path.glob(egress._BOOT_EGRESS_HISTORY_PREFIX + "*"))
+        if resuming and not fault.endswith("-drift"):
+            assert (state_path / egress._BOOT_EGRESS_RECEIPT).read_bytes() == boot
+        if pending_first and fault != "pending-prepare":
+            assert not (state_path / egress._BOOT_EGRESS_RECEIPT).exists()
+            assert not list(state_path.glob(egress._BOOT_EGRESS_HISTORY_PREFIX + "*"))
+        if pending:
+            assert (state_path / native._OWNED_WAL).read_bytes() == wal
+        else:
+            assert not (state_path / native._OWNED_WAL).exists()
+        return
+    if starting:
+        def start(root, state, **kw):
+            calls.append("start")
+            contender = os.open(state_path / LOCK_NAME, os.O_RDONLY)
+            try:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                os.close(contender)
+            assert kw["namespace_identity"] == (31, 41)
+            assert kw["executable_identity"] == (17, 29)
+            kw["recheck_authenticated_owner"]()
+            if pending_start:
+                assert kw["expected_wal"] == wal
+            else:
+                assert "expected_wal" not in kw
+            if fault in ("start-resource-drift", "pending-start-drift"):
+                resources[native._CATALOG] = b"changed"
+                kw["recheck_authenticated_owner"]()
+            result = {"status": "OWNED_DEDICATED_COMMITTED_START_OBSERVED",
+                      "generation": 1, "catalog_observed": True,
+                      "service_storage_mounts_verified": True,
+                      "service_scratch_mounts_verified": True,
+                      "enablement_changed": fault == "start-result"}
+            if active_repeat:
+                result.update(status="OWNED_DEDICATED_COMMITTED_ACTIVE_VERIFIED",
+                              enablement_changed=fault == "start-repeat-result")
+            if pending_start:
+                result.update(status="OWNED_DEDICATED_PREPARED_WAL_START_OBSERVED",
+                              catalog_observed=fault == "pending-start-result",
+                              catalog_withdrawn=True, recovery_required=True,
+                              wal_sha256=hashlib.sha256(wal).hexdigest())
+            return result
+        monkeypatch.setattr(native, "_start_owned_committed_dedicated_locked", start)
+        monkeypatch.setattr(native, "_start_or_verify_owned_committed_dedicated_locked", start)
+        monkeypatch.setattr(native, "_start_owned_prepared_wal_dedicated_locked", start)
+        invoke = (native._start_installed_prepared_wal_dedicated if pending_start
+                  else native._start_or_verify_installed_committed_dedicated if active_repeat
+                  else native._start_installed_committed_dedicated)
+        if fault in ("start", "pending-start", "start-repeat"):
+            assert invoke(pins)["catalog_observed"] is (not pending_start)
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                invoke(pins)
+        assert calls == (["start"] if fault in ("start", "start-resource-drift", "start-result",
+                                                "pending-start", "pending-start-drift", "pending-start-result",
+                                                "start-repeat", "start-repeat-result") else [])
+        if pending_start or fault == "start-repeat-wal":
+            assert (state_path / native._OWNED_WAL).read_bytes() == wal
+        else:
+            assert not (state_path / native._OWNED_WAL).exists()
+        assert (state_path / egress._BOOT_EGRESS_RECEIPT).read_bytes() == boot
+        return
+    if fault == "none":
+        assert native._recover_installed_prepared_dedicated(pins)["catalog_observed"]
+        assert not (state_path / native._OWNED_WAL).exists()
+    elif fault == "lock-held":
+        with real_locked(rootfd, 0):
+            with pytest.raises(ProtectedStateStoreError, match="LOCK_UNAVAILABLE"):
+                native._recover_installed_prepared_dedicated(pins)
+    else:
+        with pytest.raises(native.NativeV2TransactionError):
+            native._recover_installed_prepared_dedicated(pins)
+    assert calls == (["recover"] if fault in ("none", "boot-drift", "result") else [])
+    if fault != "none":
+        assert (state_path / native._OWNED_WAL).read_bytes() == wal
+    # Whether successful or refused, the worker must release its lock.
+    with real_locked(rootfd, 0):
+        pass
+
+@pytest.mark.parametrize("previous, pin", [(None, "a"*64), (b"old", "a"*64)])
+def test_committed_rollover_pin_refusal_precedes_namespace_effect(monkeypatch, previous, pin):
+    calls = []
+    monkeypatch.setattr(native, "_fresh_boot_egress_intent_locked",
+                        lambda *a, **kw: ("new-boot", previous))
+    def create(**kw):
+        pytest.fail("mismatched prior boot reached namespace creation")
+    monkeypatch.setattr(native, "_create_fixed_loopback_namespace_locked", create)
+    plan = {"destinations": [], "nft_candidate": "test", "generation": 1,
+            "generation_manifest_sha256": "a"*64}
+    with pytest.raises(native.NativeV2TransactionError, match="INTENT_CHANGED"):
+        native._create_owned_boot_egress_from_plan_locked(
+            1, 2, plan, lambda: calls.append("state"),
+            profile_receipt_sha256="b"*64, executable_receipt_sha256="c"*64,
+            recheck_stopped_owner=lambda: calls.append("owner"),
+            allow_boot_rollover=True, expected_previous_receipt_sha256=pin)
+    assert calls == ["state", "owner", "state"]
+
+
+@pytest.mark.parametrize("fault", ["none", "missing-history", "foreign-history", "wrong-current",
+                                    "wal", "orphan", "rules", "drift", "history-drift"])
+def test_retained_rolled_committed_selection_reconstructs_from_real_protected_bytes(
+        filesystem, monkeypatch, fault):
+    """Real retained resources and history; only kernel namespace IO simulated."""
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from repocache import server_native_egress_candidate_v1 as egress
+    from repocache.server_protected_state_store_v1 import _canonical
+
+    rootfd, state, _, _, events = filesystem
+    cfg = document(1, generation=1)
+    cfg["deployment"]["paths"]["generated_include"] = native._OWNED_INCLUDE_PATH
+    cfg["deployment"]["listen"]["bind_address"] = "127.0.0.1"
+    cfg["repositories"][0]["desired_state"] = "disabled"
+    raw = _canon(snapshot(generation=1, previous=None, doc=cfg))
+    main, include, catalog = native._render_owned_managed_candidate(cfg, 1, "almalinux", {})
+    resources = {V2_STATE: raw, native._OWNED_MAIN: main, native._INCLUDE: include,
+                 native._CATALOG: catalog,
+                 native._OWNED_MANIFEST: native._owned_manifest_for(raw, main, include, catalog)}
+    paths = _owned_fixture_paths(filesystem, resources)
+    plan = native._owned_boot_egress_plan(resources, distribution="almalinux", worker_uid=987)
+    old_boot = "11111111-1111-1111-1111-111111111111"
+    current_boot = "22222222-2222-2222-2222-222222222222"
+    old_record = dict(schema_version=1, boot_id=old_boot, namespace_device=1,
+                      namespace_inode=2, generation=plan["generation"],
+                      generation_manifest_sha256=plan["generation_manifest_sha256"],
+                      profile_receipt_sha256="a"*64, executable_receipt_sha256="b"*64,
+                      ruleset_sha256=hashlib.sha256(egress._canonical_ruleset(
+                          plan["nft_candidate"]).encode("ascii")).hexdigest(),
+                      authorizes_nginx_activation=False)
+    now_record = dict(old_record, boot_id=current_boot, namespace_device=7, namespace_inode=8)
+    history_path = state / (egress._BOOT_EGRESS_HISTORY_PREFIX + old_boot)
+    receipt_path = state / egress._BOOT_EGRESS_RECEIPT
+    if fault == "foreign-history":
+        old_record["executable_receipt_sha256"] = "0"*64
+    if fault == "wrong-current":
+        now_record["namespace_inode"] = 9
+
+    def place(path, data):
+        path.write_bytes(data)
+        path.chmod(0o600)
+
+    if fault != "missing-history":
+        place(history_path, _canonical(old_record, limit=4096))
+    place(receipt_path, _canonical(now_record, limit=4096))
+    if fault == "wal":
+        place(state / native._OWNED_WAL, b"untrusted")
+    if fault == "orphan":
+        place(state / native._OWNED_WAL_TMP, b"untrusted")
+    before = {p.name: p.read_bytes() for p in state.iterdir()}
+    monkeypatch.setattr(native, "_verify_current_root_fd", lambda fd: None)
+    monkeypatch.setattr(native.pwd, "getpwnam", lambda name: SimpleNamespace(pw_uid=987))
+    monkeypatch.setattr(egress, "_current_boot_id", lambda: current_boot)
+
+    @contextmanager
+    def namespace():
+        yield 17, (7, 8), lambda: None
+    monkeypatch.setattr(egress, "_fixed_namespace_scope", namespace)
+    observed = []
+    def rules(fd):
+        assert fd == 17
+        observed.append(fd)
+        if fault == "drift":
+            paths[native._OWNED_MAIN].write_bytes(b"foreign")
+        elif fault == "history-drift":
+            place(history_path, b"foreign")
+        return "" if fault == "rules" else plan["nft_candidate"]
+    monkeypatch.setattr(egress, "_read_namespace_rules", rules)
+    with native._locked(rootfd, 0) as statefd:
+        def invoke():
+            return native._retained_rolled_committed_dedicated_pins_locked(rootfd, statefd)
+        if fault == "none":
+            assert invoke() == {
+                "profile_receipt_sha256": "a"*64, "executable_receipt_sha256": "b"*64,
+                "boot_receipt_sha256": hashlib.sha256(receipt_path.read_bytes()).hexdigest(),
+                "generation_manifest_sha256": plan["generation_manifest_sha256"]}
+            assert observed == [17, 17]
+        else:
+            with pytest.raises((native.NativeV2TransactionError, egress.NativeEgressCandidateError)):
+                invoke()
+    assert not events
+    if fault != "drift":
+        assert _fixture_resource_bytes(paths) == resources
+    if fault != "history-drift":
+        assert {p.name: p.read_bytes() for p in state.iterdir()} == before
+
+
+@pytest.mark.parametrize("fault", ["fresh", "repeat", "partial", "foreign-label",
+                                   "symlink", "unsafe-run", "unsafe-parent", "xattr",
+                                   "mount", "permissive", "label-failure", "drift",
+                                   "readback", "foreign-content", "bad-child",
+                                   "partial-child", "child-content"])
+def test_prepare_owned_dedicated_runtime_parent_is_fresh_only(tmp_path, monkeypatch, fault):
+    """Real descriptors and scratch creation; mock only labels and host observations."""
+    from types import SimpleNamespace
+
+    run = tmp_path / "run"
+    run.mkdir(mode=0o755)
+    runtime = run / "repocache-nginx"
+    pid_context = b"system_u:object_r:repocache_nginx_pid_t:s0"
+    rw_context = b"system_u:object_r:repocache_nginx_rw_t:s0"
+    legacy = b"system_u:object_r:var_run_t:s0"
+    names = sorted(name for _, name in native._OWNED_RUNTIME_TEMP_NAMES)
+    existing = fault in ("repeat", "partial", "foreign-label", "unsafe-parent",
+                         "xattr", "mount", "foreign-content", "bad-child",
+                         "partial-child", "child-content")
+    if existing:
+        runtime.mkdir(mode=0o755)
+        runtime.chmod(0o700 if fault == "partial" else 0o775 if fault == "unsafe-parent" else 0o755)
+    if fault == "symlink":
+        runtime.symlink_to(tmp_path, target_is_directory=True)
+    if fault == "unsafe-run":
+        run.chmod(0o777)
+    if fault == "foreign-content":
+        (runtime / "retain").write_bytes(b"foreign")
+    values = {runtime.stat().st_ino: legacy if fault == "foreign-label" else pid_context} if existing else {}
+    if fault in ("repeat", "bad-child", "partial-child", "child-content"):
+        for name in names:
+            leaf = runtime / name
+            leaf.mkdir(mode=0o700)
+            os.chown(leaf, 33, 0)
+            values[leaf.stat().st_ino] = rw_context
+        if fault == "bad-child":
+            values[(runtime / names[-1]).stat().st_ino] = legacy
+        elif fault == "partial-child":
+            os.chown(runtime / names[-1], 0, 0)
+        elif fault == "child-content":
+            (runtime / names[-1] / "retain").write_bytes(b"foreign")
+        if fault != "repeat":
+            (runtime / names[0]).rmdir()
+    writes = []
+
+    def labels(distribution, *, dedicated):
+        assert distribution == "almalinux" and dedicated is True
+        if fault == "permissive":
+            raise native.InstalledStorageError("SELINUX_NOT_ENFORCING")
+        return SimpleNamespace(check=lambda fd: None, finish=lambda: None)
+
+    def inode(fd):
+        return os.fstat(fd).st_ino
+
+    def listxattr(fd):
+        return ["security.selinux", "user.foreign"] if (
+            fault == "xattr" and inode(fd) == runtime.stat().st_ino) else ["security.selinux"]
+
+    def setxattr(fd, key, value):
+        assert key == "security.selinux" and value.rstrip(b"\x00") in (pid_context, rw_context)
+        assert os.fstat(fd).st_uid == 0
+        writes.append(inode(fd))
+        if fault == "label-failure":
+            raise OSError("fixture label failure")
+        values[inode(fd)] = value
+
+    real_mount = native._mount
+    real_scratch = native._owned_alma_runtime_temps
+
+    def mount(fd):
+        return "foreign" if fault == "mount" and inode(fd) == runtime.stat().st_ino else real_mount(fd)
+
+    def owner():
+        if fault == "drift" and writes:
+            native._deny("OWNED_LIVE_RESOURCE_DRIFT")
+
+    def scratch(*a, **kw):
+        result = real_scratch(*a, **kw)
+        if fault == "readback" and not kw.get("allow_create"):
+            return (result[0], {})
+        return result
+
+    monkeypatch.setattr(native, "_Labels", labels)
+    monkeypatch.setattr(native.pwd, "getpwnam", lambda name: SimpleNamespace(pw_uid=33))
+    monkeypatch.setattr(native.os, "listxattr", listxattr)
+    monkeypatch.setattr(native.os, "getxattr", lambda fd, key: values.get(inode(fd), legacy))
+    monkeypatch.setattr(native.os, "setxattr", setxattr)
+    monkeypatch.setattr(native, "_mount", mount)
+    monkeypatch.setattr(native, "_owned_alma_runtime_temps", scratch)
+    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        if fault in ("fresh", "repeat"):
+            first = native._prepare_owned_dedicated_runtime_locked(fd, recheck_owned=owner)
+            assert set(first[1]) == set(names)
+            assert native._prepare_owned_dedicated_runtime_locked(fd, recheck_owned=owner) == first
+            assert len(writes) == (6 if fault == "fresh" else 0)
+            assert stat.S_IMODE(runtime.stat().st_mode) == 0o755
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                native._prepare_owned_dedicated_runtime_locked(fd, recheck_owned=owner)
+            assert len(writes) == (6 if fault == "readback" else 1 if fault in (
+                "label-failure", "drift") else 0)
+            if fault == "foreign-content":
+                assert (runtime / "retain").read_bytes() == b"foreign"
+            if fault == "partial":
+                assert stat.S_IMODE(runtime.stat().st_mode) == 0o700
+            if fault in ("bad-child", "partial-child", "child-content"):
+                assert not (runtime / names[0]).exists()
+            if fault == "child-content":
+                assert (runtime / names[-1] / "retain").read_bytes() == b"foreign"
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("fault", [
+    "none", "withdrawn", "foreign-parent", "foreign-file", "acl", "symlink",
+    "hardlink", "mode", "catalog-present", "catalog-missing", "foreign-mount",
+    "label-drift", "inode-drift", "invalid-flag",
+])
+def test_dedicated_readonly_config_label_proof(tmp_path, monkeypatch, fault):
+    """Real descriptors and metadata with a synthetic SELinux xattr seam."""
+    nginx = tmp_path / "nginx"
+    nginx.mkdir(mode=0o755)
+    public = tmp_path / "public"
+    public.mkdir(mode=0o755)
+    main = nginx / native._OWNED_MAIN
+    include = nginx / native._INCLUDE
+    catalog = public / native._CATALOG
+    for path in (main, include, catalog):
+        path.write_bytes(b"fixed bytes")
+        path.chmod(0o644)
+    if fault in ("withdrawn", "catalog-missing"):
+        catalog.unlink()
+    if fault == "symlink":
+        include.unlink()
+        include.symlink_to(main)
+    if fault == "hardlink":
+        os.link(main, tmp_path / "alias")
+    if fault == "mode":
+        main.chmod(0o666)
+    ctx = native._DEDICATED_PUBLIC_CONTEXT
+    main_inode = main.stat().st_ino
+    nginx_inode = nginx.stat().st_ino
+    reads = 0
+
+    def getxattr(fd, name):
+        nonlocal reads
+        assert name == "security.selinux"
+        ino = os.fstat(fd).st_ino
+        if ino == main_inode:
+            reads += 1
+            if fault == "inode-drift" and reads == 1:
+                replacement = nginx / "replacement"
+                replacement.write_bytes(b"fixed bytes")
+                replacement.chmod(0o644)
+                os.replace(replacement, main)
+        if ((fault == "foreign-parent" and ino == nginx_inode)
+                or (fault == "foreign-file" and ino == main_inode)
+                or (fault == "label-drift" and ino == main_inode and reads > 1)):
+            return b"system_u:object_r:httpd_config_t:s0\0"
+        return ctx + b"\0"
+
+    real_mount = native._mount
+    monkeypatch.setattr(native, "_mount", lambda fd: (
+        "foreign" if fault == "foreign-mount" and os.fstat(fd).st_ino == main_inode
+        else real_mount(fd)))
+    monkeypatch.setattr(os, "getxattr", getxattr)
+    monkeypatch.setattr(os, "listxattr", lambda fd: (
+        ["security.selinux", "system.posix_acl_access"]
+        if fault == "acl" and os.fstat(fd).st_ino == main_inode else ["security.selinux"]))
+    monkeypatch.setattr(os, "setxattr", lambda *a: pytest.fail("read-only operation attempted relabel"))
+    nfd = os.open(nginx, os.O_RDONLY | os.O_DIRECTORY)
+    pfd = os.open(public, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        flag = False if fault in ("withdrawn", "catalog-present") else 1 if fault == "invalid-flag" else True
+        if fault in ("none", "withdrawn"):
+            result = native._dedicated_readonly_config_labels(nfd, pfd, catalog_present=flag)
+            assert native._dedicated_readonly_config_labels(nfd, pfd, catalog_present=flag) == result
+            assert len(result[2]) == (2 if fault == "withdrawn" else 3)
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                native._dedicated_readonly_config_labels(nfd, pfd, catalog_present=flag)
+        assert main.read_bytes() == b"fixed bytes"
+    finally:
+        os.close(nfd)
+        os.close(pfd)
+
+
+@pytest.mark.parametrize("fault", [
+    "none", "parent-label", "cert-label", "key-label", "key-mode", "cert-mode",
+    "symlink", "hardlink", "ancestor-acl", "key-acl", "foreign-mount",
+    "label-drift", "inode-drift", "missing", "traversal", "same-path",
+])
+def test_dedicated_readonly_tls_label_proof(tmp_path, monkeypatch, fault):
+    """Real filesystem identity checks; only SELinux labels and mounts simulated."""
+    parent = tmp_path / "etc/repocache/tls"
+    parent.mkdir(parents=True, mode=0o700)
+    cert, key = parent / "chain.pem", parent / "key.pem"
+    cert.write_bytes(b"certificate fixture")
+    cert.chmod(0o644)
+    key.write_bytes(b"key fixture")
+    key.chmod(0o600)
+    if fault == "key-mode":
+        key.chmod(0o644)
+    if fault == "cert-mode":
+        cert.chmod(0o666)
+    if fault == "symlink":
+        key.unlink()
+        key.symlink_to(cert)
+    if fault == "hardlink":
+        os.link(key, tmp_path / "alias")
+    if fault == "missing":
+        key.unlink()
+    doc = {"deployment": {"tls": {
+        "certificate_file": "/etc/repocache/tls/chain.pem",
+        "private_key_file": ("/etc/repocache/tls/../key.pem" if fault == "traversal"
+                             else "/etc/repocache/tls/chain.pem" if fault == "same-path"
+                             else "/etc/repocache/tls/key.pem")}}}
+    target = key.stat().st_ino if key.exists() else -1
+    cert_inode = cert.stat().st_ino
+    parent_inode = parent.stat().st_ino
+    ancestor_inode = parent.parent.stat().st_ino
+    reads = 0
+    real_mount = native._mount
+
+    def getxattr(fd, name):
+        nonlocal reads
+        assert name == "security.selinux"
+        ino = os.fstat(fd).st_ino
+        if ino == target:
+            reads += 1
+            if fault == "inode-drift" and reads == 1:
+                replacement = parent / "replacement"
+                replacement.write_bytes(b"key fixture")
+                replacement.chmod(0o600)
+                os.replace(replacement, key)
+        if ((fault == "parent-label" and ino == parent_inode)
+                or (fault == "cert-label" and ino == cert_inode)
+                or (fault == "key-label" and ino == target)
+                or (fault == "label-drift" and ino == target and reads > 1)):
+            return b"system_u:object_r:httpd_config_t:s0\0"
+        return native._DEDICATED_PUBLIC_CONTEXT + b"\0"
+
+    def listxattr(fd):
+        ino = os.fstat(fd).st_ino
+        if ((fault == "ancestor-acl" and ino == ancestor_inode)
+                or (fault == "key-acl" and ino == target)):
+            return ["security.selinux", "system.posix_acl_access"]
+        return ["security.selinux"]
+
+    monkeypatch.setattr(os, "listxattr", listxattr)
+    monkeypatch.setattr(os, "getxattr", getxattr)
+    monkeypatch.setattr(os, "setxattr", lambda *a: pytest.fail("read-only operation attempted relabel"))
+    monkeypatch.setattr(native, "_mount", lambda fd: (
+        "foreign" if fault == "foreign-mount" and os.fstat(fd).st_ino == target
+        else real_mount(fd)))
+    root = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        if fault == "none":
+            result = native._dedicated_readonly_tls_labels(root, doc)
+            assert native._dedicated_readonly_tls_labels(root, doc) == result
+            assert len(result) == 2
+        else:
+            with pytest.raises((native.NativeV2TransactionError, ValueError)):
+                native._dedicated_readonly_tls_labels(root, doc)
+        assert cert.read_bytes() == b"certificate fixture"
+    finally:
+        os.close(root)
+
+
+@pytest.mark.parametrize("fault", ["none", "bad-config-label", "bad-catalog-label",
+                                   "config-replacement", "public-mode", "wrong-presence"])
+def test_dedicated_recovery_config_identity_across_catalog_phases(tmp_path, monkeypatch, fault):
+    nginx, public = tmp_path / "nginx", tmp_path / "public"
+    for parent in (nginx, public):
+        parent.mkdir(mode=0o755)
+    main, include = nginx / native._OWNED_MAIN, nginx / native._INCLUDE
+    catalog = public / native._CATALOG
+    for path in (main, include):
+        path.write_bytes(b"configuration")
+        path.chmod(0o644)
+    wrong = set()
+    monkeypatch.setattr(os, "listxattr", lambda fd: ["security.selinux"])
+    monkeypatch.setattr(os, "getxattr", lambda fd, name: (
+        b"system_u:object_r:httpd_config_t:s0\0"
+        if os.fstat(fd).st_ino in wrong else native._DEDICATED_PUBLIC_CONTEXT + b"\0"))
+    monkeypatch.setattr(os, "setxattr", lambda *a: pytest.fail("read-only proof attempted relabel"))
+    nfd = os.open(nginx, os.O_RDONLY | os.O_DIRECTORY)
+    pfd = os.open(public, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        baseline = native._dedicated_recovery_config_identity(nfd, pfd, catalog_present=False)
+        catalog.write_bytes(b"catalog")
+        catalog.chmod(0o644)
+        if fault == "bad-config-label":
+            wrong.add(main.stat().st_ino)
+        if fault == "bad-catalog-label":
+            wrong.add(catalog.stat().st_ino)
+        if fault == "public-mode":
+            public.chmod(0o777)
+        if fault == "config-replacement":
+            replacement = nginx / "replacement"
+            replacement.write_bytes(include.read_bytes())
+            replacement.chmod(0o644)
+            os.replace(replacement, include)
+        if fault in ("none", "config-replacement"):
+            after = native._dedicated_recovery_config_identity(nfd, pfd, catalog_present=True)
+            if fault == "none":
+                assert after == baseline
+                catalog.unlink()
+                assert native._dedicated_recovery_config_identity(
+                    nfd, pfd, catalog_present=False) == baseline
+            else:
+                assert after != baseline
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                native._dedicated_recovery_config_identity(
+                    nfd, pfd, catalog_present=fault != "wrong-presence")
+    finally:
+        os.close(nfd)
+        os.close(pfd)
+
+
+@pytest.mark.parametrize("name", [native._OWNED_MAIN, native._CATALOG])
+@pytest.mark.parametrize("fault", ["none", "foreign-target", "foreign-stage", "parent-label",
+                                   "stage-label-write", "target-race", "stage-drift"])
+def test_dedicated_fresh_public_noreplace_and_label(tmp_path, monkeypatch, name, fault):
+    parent = tmp_path / "public"
+    parent.mkdir(mode=0o755)
+    target, staged = parent / name, parent / native._OWNED_STAGES[name]
+    raw = native._OWNED_BOOTSTRAP_CONFIG if name == native._OWNED_MAIN else b"catalog fixture"
+    root_label = native._DEDICATED_PUBLIC_CONTEXT + b"\0"
+    labels = {parent.stat().st_ino: root_label}
+    writes = []
+    if fault == "parent-label":
+        labels[parent.stat().st_ino] = b"system_u:object_r:var_lib_t:s0\0"
+    if fault == "foreign-target":
+        target.write_bytes(raw)
+        target.chmod(0o644)
+    if fault == "foreign-stage":
+        staged.write_bytes(b"foreign")
+        staged.chmod(0o600)
+    monkeypatch.setattr(os, "listxattr", lambda fd: ["security.selinux"])
+    monkeypatch.setattr(os, "getxattr", lambda fd, name: labels.get(
+        os.fstat(fd).st_ino, b"system_u:object_r:var_lib_t:s0\0"))
+
+    def set_label(fd, name, value):
+        assert stat.S_IMODE(os.fstat(fd).st_mode) == 0o600
+        assert os.fstat(fd).st_ino == staged.stat().st_ino
+        assert not target.exists()
+        writes.append(os.fstat(fd).st_ino)
+        if fault == "stage-label-write":
+            raise OSError("simulated label assignment refusal")
+        labels[os.fstat(fd).st_ino] = value
+        if fault == "stage-drift":
+            replacement = parent / "replacement"
+            replacement.write_bytes(b"foreign")
+            replacement.chmod(0o600)
+            os.replace(replacement, staged)
+
+    monkeypatch.setattr(os, "setxattr", set_label)
+    actual_rename = native._rename_directory_noreplace
+
+    def publish(*args):
+        if fault == "target-race":
+            target.write_bytes(b"foreign target")
+            target.chmod(0o644)
+        return actual_rename(*args)
+
+    monkeypatch.setattr(native, "_rename_directory_noreplace", publish)
+    fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        if fault == "none":
+            native._write_dedicated_fresh_public(fd, name, raw)
+            assert target.read_bytes() == raw and not staged.exists()
+            assert target.stat().st_nlink == 1 and stat.S_IMODE(target.stat().st_mode) == 0o644
+            assert writes == [target.stat().st_ino]
+            before = target.stat()
+            with pytest.raises(native.NativeV2TransactionError):
+                native._write_dedicated_fresh_public(fd, name, raw)
+            assert target.stat().st_ino == before.st_ino and writes == [before.st_ino]
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                native._write_dedicated_fresh_public(fd, name, raw)
+            if fault == "foreign-target":
+                assert target.read_bytes() == raw and not writes and not staged.exists()
+            elif fault == "foreign-stage":
+                assert staged.read_bytes() == b"foreign" and not writes and not target.exists()
+            elif fault == "target-race":
+                assert target.read_bytes() == b"foreign target" and staged.read_bytes() == raw
+            elif fault == "stage-drift":
+                assert staged.read_bytes() == b"foreign" and not target.exists()
+            elif fault == "parent-label":
+                assert not staged.exists() and not target.exists() and not writes
+            else:
+                assert staged.exists() and not target.exists()
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("fault", ["none", "foreign-directory", "legacy", "partial-claim",
+                                   "foreign-public-label", "foreign-main-label", "orphan-stage"])
+def test_prepare_dedicated_bootstrap_fresh_only(tmp_path, monkeypatch, fault):
+    from repocache import server_protected_namespace_bootstrap_v1 as bootstrap
+    root = tmp_path / "fresh"
+    root.mkdir(mode=0o700)
+    for path in ("etc/nginx/conf.d", "var/lib"):
+        (root / path).mkdir(parents=True, mode=0o755)
+    context = native._DEDICATED_PUBLIC_CONTEXT + b"\0"
+    foreign = b"system_u:object_r:var_lib_t:s0\0"
+    labels = {}
+    writes = []
+    monkeypatch.setattr(os, "listxattr", lambda fd: ["security.selinux"])
+    monkeypatch.setattr(os, "getxattr", lambda fd, name: labels.get(os.fstat(fd).st_ino, foreign))
+    def set_label(fd, name, value):
+        assert value == context and stat.S_IMODE(os.fstat(fd).st_mode) in (0o700, 0o600)
+        labels[os.fstat(fd).st_ino] = value
+        writes.append(os.fstat(fd).st_ino)
+    monkeypatch.setattr(os, "setxattr", set_label)
+    monkeypatch.setattr(native._Labels, "_command", staticmethod(lambda *a: b"Enforcing"))
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        bootstrap.bootstrap_protected_namespace_under_root(fd, owner_uid=0, public_catalog=True,
+                                                            _dedicated_public=True)
+        public = root / "var/lib/repocache/public"
+        state = public.parent / "server"
+        shared = root / "etc/nginx"
+        config = shared / "repocache.d"
+        main = config / native._OWNED_MAIN
+        if fault == "foreign-directory":
+            config.mkdir(mode=0o755)
+            labels[config.stat().st_ino] = context
+        if fault == "legacy":
+            (shared / native._OWNED_MAIN).write_bytes(native._OWNED_BOOTSTRAP_CONFIG)
+        if fault == "partial-claim":
+            (state / installer._CONFIG_MARKER).touch(mode=0o600)
+        if fault == "foreign-public-label":
+            labels[public.stat().st_ino] = foreign
+        def invoke():
+            with native._locked(fd, 0) as state_fd:
+                return native._prepare_owned_dedicated_bootstrap_locked(
+                    fd, state_fd, recheck_owned=lambda: None)
+        if fault in ("none", "foreign-main-label", "orphan-stage"):
+            first = invoke()
+            assert first == invoke()
+            assert first["status"] == "OWNED_DEDICATED_BOOTSTRAP_PREPARED"
+            assert main.read_bytes() == native._OWNED_BOOTSTRAP_CONFIG
+            assert labels[main.stat().st_ino] == labels[config.stat().st_ino] == context
+            assert writes == [public.stat().st_ino, config.stat().st_ino, main.stat().st_ino]
+            original = main.stat().st_ino
+            if fault == "foreign-main-label":
+                labels[original] = foreign
+            if fault == "orphan-stage":
+                (config / native._OWNED_STAGES[native._OWNED_MAIN]).touch(mode=0o600)
+            if fault != "none":
+                with pytest.raises(native.NativeV2TransactionError):
+                    invoke()
+                assert main.stat().st_ino == original and len(writes) == 3
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                invoke()
+            assert not main.exists() and writes == [public.stat().st_ino]
+        assert not list(public.iterdir())
+        assert not list((shared / "conf.d").iterdir())
+        assert not (state / V2_STATE).exists()
+        assert not (state / native._OWNED_WAL).exists()
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("fault", ["none", "wrong-pin", "legacy-public", "label-drift",
+                                   "no-namespace", "mid-placement-label-drift", "host-root"])
+def test_dedicated_worker_placement_pins_fresh_public(tmp_path, monkeypatch, fault):
+    import io
+    import zipfile
+    from repocache.server_native_nginx_executable_v1 import _POLICY_MEMBER
+    from repocache.server_protected_namespace_bootstrap_v1 import _DEDICATED_PUBLIC_CONTEXT
+    from scripts import stage_native_root_worker as stage
+    from scripts import install_native_root_worker as install
+    root = tmp_path / "dedicated-worker"
+    root.mkdir(mode=0o700)
+    for path in ("var/lib", "usr", "etc/systemd/system"):
+        (root / path).mkdir(parents=True)
+    state = root / "var/lib/repocache/server"
+    raw = b"policy_module(repocache_nginx, 1.0.0)\n"
+    data = io.BytesIO()
+    with zipfile.ZipFile(data, "w") as archive:
+        archive.writestr(_POLICY_MEMBER, raw)
+    payloads = {name: b"fixed signed payload" for name in stage.UNITS}
+    payloads[stage.WORKER] = data.getvalue()
+    receipt = {"source_sha": "a" * 40}
+    context = _DEDICATED_PUBLIC_CONTEXT + b"\0"
+    foreign = b"system_u:object_r:var_lib_t:s0\0"
+    labels, writes = {}, []
+    public = state.parent / "public"
+    monkeypatch.setattr(install._Labels, "_command", staticmethod(lambda *a: b"Enforcing"))
+    monkeypatch.setattr(os, "listxattr", lambda fd: ["security.selinux"])
+    monkeypatch.setattr(os, "getxattr", lambda fd, name: labels.get(os.fstat(fd).st_ino, foreign))
+    def set_label(fd, name, value):
+        stages = list((root / "var/lib").glob(".repocache-worker-namespace.stage-*"))
+        assert len(stages) == 1 and not public.exists()
+        assert os.fstat(fd).st_ino == (stages[0] / "public").stat().st_ino and value == context
+        assert stat.S_IMODE(os.fstat(fd).st_mode) == 0o700
+        labels[os.fstat(fd).st_ino] = value
+        writes.append(os.fstat(fd).st_ino)
+    monkeypatch.setattr(os, "setxattr", set_label)
+    options = dict(unit_paths=("/etc/systemd/system", "/usr/lib/systemd/system"),
+                   prepare_namespace=fault != "no-namespace",
+                   _dedicated_policy_sha256="0"*64 if fault == "wrong-pin" else hashlib.sha256(raw).hexdigest())
+    if fault == "legacy-public":
+        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            install.bootstrap_protected_namespace_under_root(fd, owner_uid=0, public_catalog=True)
+        finally:
+            os.close(fd)
+    if fault == "host-root":
+        # Refuse the actual-root identity before opening any target.
+        actual_open = os.open
+        with monkeypatch.context() as point:
+            point.setattr(os, "open", lambda path, *a, **kw: (
+                actual_open("/", *a, **kw) if path == root else
+                pytest.fail("actual-root target lookup reached")))
+            with pytest.raises(stage.WorkerStageError, match="HOST_PLACEMENT_REFUSED"):
+                install._place_worker_files(root, payloads, receipt, **options)
+        assert not public.exists() and not writes
+        return
+    if fault == "mid-placement-label-drift":
+        original = install._place_file
+        def drift(directory, name, content, mode):
+            original(directory, name, content, mode)
+            assert name == stage.WORKER
+            labels[public.stat().st_ino] = foreign
+        monkeypatch.setattr(install, "_place_file", drift)
+        with pytest.raises(ValueError):
+            install._place_worker_files(root, payloads, receipt, **options)
+        assert list(state.glob(".native-worker-placement.pending-*"))
+        assert not list(state.glob(".native-worker-placement.complete-*"))
+        assert not (state / install._RUNTIME_RECEIPT).exists()
+        assert not list((root / "etc/systemd/system").iterdir())
+        assert writes == [public.stat().st_ino]
+        return
+    if fault in ("none", "label-drift"):
+        install._place_worker_files(root, payloads, receipt, **options)
+        worker = root / "usr/libexec/repocache" / stage.WORKER
+        original = worker.stat()
+        assert writes == [public.stat().st_ino]
+        if fault == "label-drift":
+            labels[public.stat().st_ino] = foreign
+            with pytest.raises(ValueError):
+                install._place_worker_files(root, payloads, receipt, **options)
+        else:
+            install._place_worker_files(root, payloads, receipt, **options)
+        assert writes == [public.stat().st_ino]
+        assert worker.stat().st_ino == original.st_ino
+        assert worker.stat().st_mtime_ns == original.st_mtime_ns
+        stage._audit_worker_files(root, payloads)
+    else:
+        with pytest.raises(ValueError):
+            install._place_worker_files(root, payloads, receipt, **options)
+        assert not writes and not (root / "usr/libexec").exists()
+        assert not list((root / "etc/systemd/system").iterdir())
+        assert public.exists() is (fault == "legacy-public")
+
+
+@pytest.mark.parametrize("fault", ["none", "digest", "alternate", "disabled", "absent",
+                                   "inventory-drift", "symlink", "extra-file", "write-mode",
+                                   "inode-drift"])
+def test_fixed_loaded_policy_readback_refuses_unbound_module(tmp_path, monkeypatch, fault):
+    from types import SimpleNamespace
+    from scripts import ci_selinux_nginx_egress_guest as guest
+    from scripts import stage_native_root_worker as stage
+    raw = b"compiled policy fixture"
+    expected = hashlib.sha256(raw).hexdigest()
+    calls = []
+    inventory = {(100, "base", "pp"), (400, guest.FIXED_MODULE, "pp")}
+    if fault == "alternate":
+        inventory.add((100, guest.FIXED_MODULE, "cil"))
+    if fault == "disabled":
+        inventory.remove((400, guest.FIXED_MODULE, "pp"))
+        inventory.add((400, guest.FIXED_MODULE, "pp", "disabled"))
+    def inventory_text():
+        return "\n".join(" ".join(map(str, row)) for row in sorted(inventory))
+    monkeypatch.setattr(guest, "guard", lambda: None)
+    # The guest now delegates to the installer. Simulate only the native
+    # authority/command seams, not the descriptor and digest checks.
+    monkeypatch.setattr(installer, "_native_distro", lambda: "almalinux")
+    monkeypatch.setattr(installer, "require_native_host_preconditions", lambda: None)
+    monkeypatch.setattr(installer, "_Labels", lambda *args, **kw:
+                        SimpleNamespace(finish=lambda: None))
+    original_temp = tempfile.TemporaryDirectory
+    monkeypatch.setattr(installer.tempfile, "TemporaryDirectory",
+                        lambda **kw: original_temp(prefix=kw["prefix"], dir=tmp_path))
+    def command(args, **kwargs):
+        calls.append(args)
+        assert kwargs["timeout"] == 120
+        if args == ("/usr/sbin/semodule", "-lfull"):
+            if fault == "inventory-drift" and calls.count(args) > 1:
+                inventory.add((100, "unexpected", "pp"))
+            return SimpleNamespace(stdout=inventory_text().encode("ascii"), returncode=0)
+        if args == ("/usr/sbin/semodule", "-l"):
+            output = "base\n" if fault == "absent" else f"base\n{guest.FIXED_MODULE}\n"
+            return SimpleNamespace(stdout=output.encode("ascii"), returncode=0)
+        assert args == ("/usr/sbin/semodule", "-X", "400", "--hll", "-E", guest.FIXED_MODULE)
+        root = Path(kwargs["cwd"])
+        leaf = root / (guest.FIXED_MODULE + ".pp")
+        if fault == "symlink":
+            target = tmp_path / "foreign.pp"
+            target.write_bytes(raw)
+            leaf.symlink_to(target)
+        else:
+            leaf.write_bytes(raw if fault != "digest" else b"foreign")
+            leaf.chmod(0o666 if fault == "write-mode" else 0o600)
+        if fault == "extra-file":
+            (root / "extra").touch()
+        return SimpleNamespace(stdout=b"", returncode=0)
+    monkeypatch.setattr(installer.subprocess, "run", command)
+    if fault == "inode-drift":
+        original_read = stage._asset_bytes
+        def replace_after_read(fd, name, *args, **kwargs):
+            data = original_read(fd, name, *args, **kwargs)
+            os.unlink(name, dir_fd=fd)
+            new = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=fd)
+            try:
+                os.write(new, data)
+            finally:
+                os.close(new)
+            return data
+        monkeypatch.setattr(stage, "_asset_bytes", replace_after_read)
+    if fault == "none":
+        assert guest.verify_fixed_loaded_policy(expected) == expected
+    else:
+        with pytest.raises(AssertionError):
+            guest.verify_fixed_loaded_policy(expected)
+    assert len(calls) == (2 if fault in ("alternate", "disabled", "absent") else
+                          5 if fault in ("none", "inventory-drift") else 3)
+    assert not list(tmp_path.glob("repocache-policy-readback-*"))
+
+
+@pytest.mark.parametrize("fault", [
+    "none", "foreign-label", "include", "public-entry", "symlink", "catalog-flag",
+    "invalid-flag",
+])
+def test_initial_dedicated_config_label_proof(tmp_path, monkeypatch, fault):
+    nginx = tmp_path / "nginx"
+    public = tmp_path / "public"
+    nginx.mkdir(mode=0o755)
+    public.mkdir(mode=0o755)
+    main = nginx / native._OWNED_MAIN
+    main.write_bytes(native._OWNED_BOOTSTRAP_CONFIG)
+    main.chmod(0o644)
+    inode = main.stat().st_ino
+    if fault == "include":
+        (nginx / native._INCLUDE).touch(mode=0o644)
+    if fault == "public-entry":
+        (public / "foreign").touch()
+    if fault == "symlink":
+        main.rename(nginx / "target")
+        main.symlink_to("target")
+    monkeypatch.setattr(os, "listxattr", lambda fd: ["security.selinux"])
+    monkeypatch.setattr(os, "getxattr", lambda fd, name: (
+        b"foreign" if fault == "foreign-label" and os.fstat(fd).st_ino == inode
+        else native._DEDICATED_PUBLIC_CONTEXT + b"\0"))
+    monkeypatch.setattr(os, "setxattr", lambda *a: pytest.fail("unexpected relabel"))
+    nfd = os.open(nginx, os.O_RDONLY | os.O_DIRECTORY)
+    pfd = os.open(public, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        def observe():
+            return native._dedicated_readonly_config_labels(
+                nfd, pfd, catalog_present=fault == "catalog-flag",
+                bootstrap=1 if fault == "invalid-flag" else True)
+        if fault == "none":
+            proof = observe()
+            assert len(proof[2]) == 1
+            assert observe() == proof
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                observe()
+        assert main.read_bytes() == native._OWNED_BOOTSTRAP_CONFIG
+    finally:
+        os.close(nfd)
+        os.close(pfd)
+
+
+@pytest.mark.parametrize("fault", [
+    "none", "stale", "active", "config-drift", "tls-drift", "intake-drift",
+    "active-intake-drift", "distro", "non-loopback",
+])
+def test_initial_dedicated_candidate_readonly(filesystem, monkeypatch, fault):
+    old = _owned_bootstrap_resources()
+    candidate = _owned_generation(active=fault == "active",
+                                  bind_address="0.0.0.0" if fault == "non-loopback" else "127.0.0.1")[V2_STATE]
+    paths = _owned_fixture_paths(filesystem, old)
+    root_fd = filesystem[0]
+    report = {"expected_generation": 1 if fault == "stale" else 0,
+              "expected_state_sha256": None}
+    calls = {"intake": 0, "config": 0, "tls": 0, "verify": 0}
+    active_candidate = _owned_generation(active=True)[V2_STATE]
+
+    def intake(*args, **kwargs):
+        calls["intake"] += 1
+        raw = b"changed" if fault == "intake-drift" and calls["intake"] == 4 else candidate
+        if fault == "active-intake-drift" and calls["intake"] == 2:
+            raw = active_candidate
+        return report, raw
+
+    def proof(key):
+        calls[key] += 1
+        return (key, calls[key] if fault == key + "-drift" else 0)
+
+    def verify(*args, **kwargs):
+        calls["verify"] += 1
+        return "a" * 64
+
+    monkeypatch.setattr(native, "_load_private_under_root", intake)
+    monkeypatch.setattr(native, "_dedicated_readonly_config_labels",
+                        lambda *a, **kw: proof("config"))
+    monkeypatch.setattr(native, "_dedicated_readonly_tls_labels",
+                        lambda *a: proof("tls"))
+    monkeypatch.setattr(native._Labels, "_command", staticmethod(lambda *a: b"Enforcing"))
+    monkeypatch.setattr(native, "_verify_tls_pair", verify)
+    monkeypatch.setattr(native, "_resolve_pins", lambda doc: {})
+    with native._owned_fixture_layout(root_fd, recovering=False) as layout:
+        def prepare():
+            return native._prepare_owned_initial_dedicated_candidate_locked(
+                root_fd, *layout, "debian" if fault == "distro" else "almalinux")
+        if fault == "none":
+            previous, new, prepared = prepare()
+            assert previous == old and prepared == report
+            assert new[V2_STATE] == candidate
+            assert new[native._OWNED_MAIN] == native._owned_managed_config("almalinux")
+            assert calls == {"intake": 4, "config": 2, "tls": 2, "verify": 1}
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                prepare()
+            if fault in ("stale", "active", "active-intake-drift", "distro", "non-loopback"):
+                assert calls["verify"] == 0
+    assert _fixture_resource_bytes(paths) == old
+    _assert_owned_fixture_clean(filesystem, paths)
+
+
+@pytest.mark.parametrize("fault", ["none", "foreign-label", "foreign-mount",
+                                   "same-byte-replacement", "guard-drift",
+                                   "late-target", "remove-include", "remove-drift"])
+def test_dedicated_labelled_leaf_replacement(tmp_path, monkeypatch, fault):
+    parent = tmp_path / "owned"
+    parent.mkdir(mode=0o755)
+    include = fault in ("late-target", "remove-include", "remove-drift")
+    name = native._INCLUDE if include else native._OWNED_MAIN
+    target, stage_path = parent / name, parent / native._OWNED_STAGES[name]
+    prior = None if fault == "late-target" else b"previous"
+    after = None if fault.startswith("remove-") else b"next"
+    label = native._DEDICATED_PUBLIC_CONTEXT + b"\0"
+    labels = {parent.stat().st_ino: label}
+    if prior is not None:
+        target.write_bytes(prior)
+        target.chmod(0o644)
+        labels[target.stat().st_ino] = label
+    original = target.stat().st_ino if target.exists() else None
+    calls = []
+    relabelled = []
+    monkeypatch.setattr(os, "listxattr", lambda fd: ["security.selinux"])
+    monkeypatch.setattr(os, "getxattr", lambda fd, name: (
+        b"foreign" if fault == "foreign-label" and os.fstat(fd).st_ino == original
+        else labels.get(os.fstat(fd).st_ino, b"unassigned")))
+    def set_label(fd, name, value):
+        assert stat.S_IMODE(os.fstat(fd).st_mode) == 0o600
+        assert os.fstat(fd).st_ino != original
+        labels[os.fstat(fd).st_ino] = value
+        relabelled.append(os.fstat(fd).st_ino)
+    monkeypatch.setattr(os, "setxattr", set_label)
+    real_mount = native._mount
+    monkeypatch.setattr(native, "_mount", lambda fd: (
+        "foreign" if fault == "foreign-mount" and os.fstat(fd).st_ino == original
+        else real_mount(fd)))
+    def guard():
+        calls.append(1)
+        if len(calls) == 2:
+            if fault in ("same-byte-replacement", "remove-drift"):
+                replacement = parent / "replacement"
+                replacement.write_bytes(prior)
+                replacement.chmod(0o644)
+                labels[replacement.stat().st_ino] = label
+                os.replace(replacement, target)
+            if fault == "guard-drift":
+                raise native.NativeV2TransactionError("guard drift")
+            if fault == "late-target":
+                target.write_bytes(b"foreign")
+                target.chmod(0o644)
+    fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        if fault in ("none", "remove-include"):
+            native._write_dedicated_public_leaf(fd, name, prior, after, recheck=guard)
+            assert not stage_path.exists()
+            if after is None:
+                assert not target.exists() and not relabelled
+            else:
+                assert target.read_bytes() == after and target.stat().st_ino != original
+                assert relabelled == [target.stat().st_ino]
+                assert labels[target.stat().st_ino] == label
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                native._write_dedicated_public_leaf(fd, name, prior, after, recheck=guard)
+            assert target.read_bytes() == (b"foreign" if fault == "late-target" else prior)
+            if fault in ("foreign-label", "foreign-mount", "remove-drift"):
+                assert not stage_path.exists() and not relabelled
+            else:
+                assert stage_path.read_bytes() == after
+        assert original not in relabelled
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("fault", ["none", "wal-drift", "unpublished", "foreign-after",
+                                   "catalog", "actual-root", "main-first",
+                                   "remove-first", "foreign-other-label", "orphan-stage",
+                                   "foreign-public-repeat"])
+def test_initial_dedicated_config_wal_writer(filesystem, monkeypatch, fault):
+    old = _owned_bootstrap_resources()
+    new = _owned_generation(active=False, distribution="almalinux")
+    paths = _owned_fixture_paths(filesystem, old)
+    root_fd, state = filesystem[:2]
+    label = native._DEDICATED_PUBLIC_CONTEXT + b"\0"
+    monkeypatch.setattr(os, "listxattr", lambda fd: ["security.selinux"])
+    main_inode = paths[native._OWNED_MAIN].stat().st_ino
+    monkeypatch.setattr(os, "getxattr", lambda fd, name: (
+        b"foreign" if fault == "foreign-other-label" and os.fstat(fd).st_ino == main_inode
+        else label))
+    monkeypatch.setattr(os, "setxattr", lambda *a: pytest.fail("already labelled"))
+    monkeypatch.setattr(native._Labels, "_command", staticmethod(lambda *a: b"Enforcing"))
+    with native._owned_fixture_layout(root_fd, recovering=False) as layout:
+        sfd, nfd, pfd, check = layout
+        wal = native._publish_owned_wal_locked(*layout[:3], old, new, check, live=True)
+        expected = dict(old)
+        wal_path = state / native._OWNED_WAL
+        if fault == "unpublished":
+            wal_path.rename(state / native._OWNED_WAL_TMP)
+        if fault == "wal-drift":
+            wal_path.write_bytes(b"foreign")
+        if fault == "orphan-stage":
+            (state / native._OWNED_STAGES[V2_STATE]).touch(mode=0o600)
+        if fault == "catalog":
+            paths[native._CATALOG].write_bytes(new[native._CATALOG])
+            paths[native._CATALOG].chmod(0o644)
+            expected[native._CATALOG] = new[native._CATALOG]
+        def write(name, after, root=root_fd):
+            native._write_owned_initial_dedicated_config_locked(
+                root, *layout, wal, expected, name, after)
+        if fault == "none":
+            write(native._INCLUDE, new[native._INCLUDE])
+            write(native._OWNED_MAIN, new[native._OWNED_MAIN])
+            assert expected == {**old, native._INCLUDE: new[native._INCLUDE],
+                                native._OWNED_MAIN: new[native._OWNED_MAIN]}
+            assert _fixture_resource_bytes(paths) == expected
+            write(native._OWNED_MAIN, old[native._OWNED_MAIN])
+            write(native._INCLUDE, None)
+            assert expected == old and _fixture_resource_bytes(paths) == old
+            assert wal_path.read_bytes() == wal
+        elif fault in ("remove-first", "foreign-public-repeat"):
+            write(native._INCLUDE, new[native._INCLUDE])
+            write(native._OWNED_MAIN, new[native._OWNED_MAIN])
+            if fault == "foreign-public-repeat":
+                foreign = paths[native._CATALOG].parent / "foreign"
+                foreign.write_bytes(b"preserve")
+                with pytest.raises(native.NativeV2TransactionError):
+                    write(native._OWNED_MAIN, new[native._OWNED_MAIN])
+                assert foreign.read_bytes() == b"preserve"
+            else:
+                with pytest.raises(native.NativeV2TransactionError):
+                    write(native._INCLUDE, None)
+            assert _fixture_resource_bytes(paths) == expected
+            assert wal_path.read_bytes() == wal
+        else:
+            with pytest.raises((native.NativeV2TransactionError, ValueError)):
+                if fault == "main-first":
+                    write(native._OWNED_MAIN, new[native._OWNED_MAIN])
+                elif fault == "actual-root":
+                    real_root = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+                    try:
+                        write(native._INCLUDE, new[native._INCLUDE], real_root)
+                    finally:
+                        os.close(real_root)
+                else:
+                    write(native._INCLUDE, b"foreign" if fault == "foreign-after"
+                          else new[native._INCLUDE])
+            assert not paths[native._INCLUDE].exists()
+            assert paths[native._OWNED_MAIN].read_bytes() == old[native._OWNED_MAIN]
+        assert not filesystem[-1]
+
+
+@pytest.mark.parametrize("fault", [
+    "clean", "partial-include", "complete-include", "partial-main",
+    "complete-main", "wrong-label", "wrong-bytes", "symlink", "hardlink",
+    "two-stages", "private-stage", "foreign-target", "wal-drift",
+])
+def test_initial_dedicated_config_interrupted_stage_recovery(filesystem, monkeypatch, fault):
+    old = _owned_bootstrap_resources()
+    new = _owned_generation(active=False, distribution="almalinux")
+    paths = _owned_fixture_paths(filesystem, old)
+    root_fd, state = filesystem[:2]
+    label = native._DEDICATED_PUBLIC_CONTEXT + b"\0"
+    bad_inodes = set()
+    monkeypatch.setattr(os, "listxattr", lambda fd: ["security.selinux"])
+    monkeypatch.setattr(os, "getxattr", lambda fd, name: (
+        b"foreign" if os.fstat(fd).st_ino in bad_inodes else label))
+    monkeypatch.setattr(os, "setxattr", lambda *a: pytest.fail("never relabel"))
+    monkeypatch.setattr(native._Labels, "_command", staticmethod(lambda *a: b"Enforcing"))
+    with native._owned_fixture_layout(root_fd, recovering=False) as layout:
+        wal = native._publish_owned_wal_locked(*layout[:3], old, new, layout[3], live=True)
+        expected = dict(old)
+        if fault in ("partial-main", "complete-main", "clean"):
+            native._write_owned_initial_dedicated_config_locked(
+                root_fd, *layout, wal, expected, native._INCLUDE, new[native._INCLUDE])
+        if fault == "clean":
+            native._write_owned_initial_dedicated_config_locked(
+                root_fd, *layout, wal, expected, native._OWNED_MAIN, new[native._OWNED_MAIN])
+    name = native._OWNED_MAIN if fault.endswith("-main") else native._INCLUDE
+    stage_path = paths[name].parent / native._OWNED_STAGES[name]
+    if fault in ("partial-include", "partial-main"):
+        stage_path.write_bytes(new[name][:7])
+        stage_path.chmod(0o600)
+    elif fault in ("complete-include", "complete-main", "wrong-label", "wrong-bytes", "hardlink", "two-stages"):
+        stage_path.write_bytes(b"foreign" if fault == "wrong-bytes" else new[name])
+        stage_path.chmod(0o644)
+        if fault == "wrong-label":
+            bad_inodes.add(stage_path.stat().st_ino)
+        elif fault == "hardlink":
+            os.link(stage_path, state / "foreign-link")
+        elif fault == "two-stages":
+            other = paths[native._OWNED_MAIN].parent / native._OWNED_STAGES[native._OWNED_MAIN]
+            other.touch(mode=0o600)
+    elif fault == "symlink":
+        stage_path.symlink_to(paths[native._OWNED_MAIN])
+    elif fault == "private-stage":
+        stage_path = state / native._OWNED_STAGES[V2_STATE]
+        stage_path.touch(mode=0o600)
+    elif fault == "foreign-target":
+        paths[native._OWNED_MAIN].write_bytes(b"foreign")
+    elif fault == "wal-drift":
+        (state / native._OWNED_WAL).write_bytes(b"foreign")
+    positive = fault in ("clean", "partial-include", "complete-include", "partial-main", "complete-main")
+    before = _fixture_resource_bytes(paths)
+    stage_before = stage_path.lstat() if stage_path.exists() or stage_path.is_symlink() else None
+    with native._owned_fixture_layout(root_fd, recovering=True) as layout:
+        def restore():
+            return native._restore_owned_initial_dedicated_config_fixture_locked(
+                root_fd, *layout, expected_wal=wal)
+        if positive:
+            report = restore()
+            assert report == {"status": "OWNED_INITIAL_CONFIG_FIXTURE_RESTORED",
+                              "fixture_only": True, "authorizes_nginx_activation": False,
+                              "authorizes_catalog_publication": False}
+        else:
+            with pytest.raises((native.NativeV2TransactionError, OSError)):
+                restore()
+    if positive:
+        assert _fixture_resource_bytes(paths) == old
+        _assert_owned_fixture_clean(filesystem, paths)
+    else:
+        assert _fixture_resource_bytes(paths) == before
+        assert (state / native._OWNED_WAL).exists()
+        if stage_before is not None:
+            assert native._identity(stage_path.lstat()) == native._identity(stage_before)
+    assert not filesystem[-1]
+
+
+@pytest.mark.parametrize("fault", [
+    "none", "state", "manifest", "catalog", "include", "active",
+    "wrong-wal", "private-stage", "foreign-public", "tls-drift", "config-drift",
+    "private-inode-drift", "private-mount", "private-xattr", "non-loopback",
+])
+def test_reconstruct_initial_withdrawn_generation(filesystem, monkeypatch, fault):
+    old = _owned_bootstrap_resources()
+    new = _owned_generation(active=fault == "active", distribution="almalinux",
+                            bind_address="0.0.0.0" if fault == "non-loopback" else "127.0.0.1")
+    paths = _owned_fixture_paths(filesystem, old)
+    root_fd, state = filesystem[:2]
+    label = native._DEDICATED_PUBLIC_CONTEXT + b"\0"
+    monkeypatch.setattr(os, "listxattr", lambda fd: ["security.selinux"])
+    monkeypatch.setattr(os, "getxattr", lambda fd, name: label)
+    monkeypatch.setattr(os, "setxattr", lambda *a: pytest.fail("unexpected relabel"))
+    monkeypatch.setattr(native._Labels, "_command", staticmethod(lambda *a: b"Enforcing"))
+    monkeypatch.setattr(native, "_resolve_pins", lambda *a: pytest.fail("unexpected DNS"))
+    monkeypatch.setattr(native, "_load_private_under_root", lambda *a, **kw: pytest.fail("unexpected intake"))
+    tls_calls = []
+    def tls(*args):
+        tls_calls.append(1)
+        if fault == "private-inode-drift" and len(tls_calls) == 1:
+            replacement = state / "replacement"
+            replacement.write_bytes(new[V2_STATE])
+            replacement.chmod(0o600)
+            os.replace(replacement, paths[V2_STATE])
+        return ("tls", len(tls_calls) if fault == "tls-drift" else 1)
+    monkeypatch.setattr(native, "_dedicated_readonly_tls_labels", tls)
+    with native._owned_fixture_layout(root_fd, recovering=False) as layout:
+        wal = native._publish_owned_wal_locked(*layout[:3], old, new, layout[3], live=True)
+    for name in native._OWNED_ORDER:
+        if name != native._CATALOG:
+            paths[name].write_bytes(new[name])
+            paths[name].chmod(0o600 if name in native._OWNED_PRIVATE else 0o644)
+    if fault in ("state", "manifest", "include"):
+        paths[{"state": V2_STATE, "manifest": native._OWNED_MANIFEST,
+               "include": native._INCLUDE}[fault]].write_bytes(b"foreign")
+    elif fault == "catalog":
+        paths[native._CATALOG].write_bytes(new[native._CATALOG])
+        paths[native._CATALOG].chmod(0o644)
+    elif fault == "wrong-wal":
+        (state / native._OWNED_WAL).write_bytes(b"foreign")
+    elif fault == "private-stage":
+        (state / native._OWNED_STAGES[V2_STATE]).touch(mode=0o600)
+    elif fault == "foreign-public":
+        (paths[native._CATALOG].parent / "foreign").touch()
+    elif fault in ("private-mount", "private-xattr"):
+        inode = paths[V2_STATE].stat().st_ino
+        if fault == "private-mount":
+            real_mount = native._mount
+            monkeypatch.setattr(native, "_mount", lambda fd: (
+                "foreign" if os.fstat(fd).st_ino == inode else real_mount(fd)))
+        else:
+            monkeypatch.setattr(os, "listxattr", lambda fd: (
+                ["security.selinux", "user.foreign"] if os.fstat(fd).st_ino == inode
+                else ["security.selinux"]))
+    elif fault == "config-drift":
+        real = native._dedicated_readonly_config_labels
+        calls = []
+        def drift(*args, **kwargs):
+            calls.append(1)
+            result = real(*args, **kwargs)
+            return (*result, len(calls))
+        monkeypatch.setattr(native, "_dedicated_readonly_config_labels", drift)
+    before = _fixture_resource_bytes(paths)
+    with native._owned_fixture_layout(root_fd, recovering=True) as layout:
+        def reconstruct():
+            return native._read_owned_initial_dedicated_prepared_locked(
+                root_fd, *layout, expected_wal=wal)
+        if fault == "none":
+            assert reconstruct() == new
+            assert reconstruct() == new
+            assert len(tls_calls) == 4
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                reconstruct()
+    assert _fixture_resource_bytes(paths) == before
+    assert (state / native._OWNED_WAL).exists()
+    assert not filesystem[-1]
+
+
+@pytest.mark.parametrize("fault", [
+    "none", "foreign-state", "manifest-first", "stage-conflict", "late-target",
+    "changed-intake", "actual-root", "state-inode-drift",
+])
+def test_stage_initial_dedicated_generation_fixture(filesystem, monkeypatch, fault):
+    old = _owned_bootstrap_resources()
+    new = _owned_generation(active=False, distribution="almalinux")
+    paths = _owned_fixture_paths(filesystem, old)
+    root_fd, state = filesystem[:2]
+    report = {"expected_generation": 0, "expected_state_sha256": None}
+    label = native._DEDICATED_PUBLIC_CONTEXT + b"\0"
+    monkeypatch.setattr(os, "listxattr", lambda fd: ["security.selinux"])
+    monkeypatch.setattr(os, "getxattr", lambda fd, name: label)
+    monkeypatch.setattr(os, "setxattr", lambda *a: pytest.fail("unexpected relabel"))
+    monkeypatch.setattr(native._Labels, "_command", staticmethod(lambda *a: b"Enforcing"))
+    monkeypatch.setattr(native, "_dedicated_readonly_tls_labels", lambda *a: ("tls",))
+    monkeypatch.setattr(native, "_verify_tls_pair", lambda *a, **kw: "a" * 64)
+    monkeypatch.setattr(native, "_prepare_owned_initial_dedicated_candidate_locked",
+                        lambda *a: (old, new, report))
+    intake_calls = []
+    drifted = []
+    def intake(*args, **kwargs):
+        intake_calls.append(1)
+        if (fault == "state-inode-drift" and not drifted
+                and (state / native._OWNED_STAGES[native._OWNED_MANIFEST]).exists()):
+            replacement = state / "replacement"
+            replacement.write_bytes(new[V2_STATE])
+            replacement.chmod(0o600)
+            os.replace(replacement, paths[V2_STATE])
+            drifted.append(True)
+        return report, b"foreign" if fault == "changed-intake" and len(intake_calls) == 2 else new[V2_STATE]
+    monkeypatch.setattr(native, "_load_private_under_root", intake)
+    original_rename = native._rename_directory_noreplace
+    def rename(parent, stage, destination, name):
+        if fault == "late-target" and name == V2_STATE:
+            paths[V2_STATE].write_bytes(b"foreign")
+            paths[V2_STATE].chmod(0o600)
+        return original_rename(parent, stage, destination, name)
+    monkeypatch.setattr(native, "_rename_directory_noreplace", rename)
+    with native._owned_fixture_layout(root_fd, recovering=False) as layout:
+        if fault == "none":
+            wal, reconstructed = native._stage_owned_initial_dedicated_generation_fixture_locked(
+                root_fd, *layout)
+            assert reconstructed == new
+            assert _fixture_resource_bytes(paths) == {**new, native._CATALOG: None}
+            assert (state / native._OWNED_WAL).read_bytes() == wal
+            assert all(stat.S_IMODE(paths[name].stat().st_mode) == 0o600
+                       for name in native._OWNED_PRIVATE)
+        elif fault in ("foreign-state", "manifest-first", "stage-conflict"):
+            wal = native._publish_owned_wal_locked(*layout[:3], old, new, layout[3], live=True)
+            expected = dict(old)
+            for name in (native._INCLUDE, native._OWNED_MAIN):
+                native._write_owned_initial_dedicated_config_locked(
+                    root_fd, *layout, wal, expected, name, new[name])
+            if fault == "foreign-state":
+                paths[V2_STATE].write_bytes(b"foreign")
+                paths[V2_STATE].chmod(0o600)
+            if fault == "stage-conflict":
+                (state / native._OWNED_STAGES[V2_STATE]).touch(mode=0o600)
+            name = native._OWNED_MANIFEST if fault == "manifest-first" else V2_STATE
+            with pytest.raises(native.NativeV2TransactionError):
+                native._write_owned_initial_private_fixture_locked(
+                    root_fd, *layout, wal, expected, name, new[name])
+            assert not paths[native._OWNED_MANIFEST].exists()
+        else:
+            with pytest.raises((native.NativeV2TransactionError, ValueError)):
+                if fault == "actual-root":
+                    real = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+                    try:
+                        native._stage_owned_initial_dedicated_generation_fixture_locked(real, *layout)
+                    finally:
+                        os.close(real)
+                else:
+                    native._stage_owned_initial_dedicated_generation_fixture_locked(root_fd, *layout)
+            assert not paths[native._OWNED_MANIFEST].exists()
+            if fault == "late-target":
+                assert paths[V2_STATE].read_bytes() == b"foreign"
+                assert (state / native._OWNED_STAGES[V2_STATE]).read_bytes() == new[V2_STATE]
+            elif fault == "state-inode-drift":
+                assert drifted and paths[V2_STATE].read_bytes() == new[V2_STATE]
+                assert (state / native._OWNED_STAGES[native._OWNED_MANIFEST]).exists()
+            else:
+                assert _fixture_resource_bytes(paths) == old
+    assert not paths[native._CATALOG].exists()
+    assert not filesystem[-1]
+
+
+@pytest.mark.parametrize("fault", [
+    "none", "state-only", "state-stage", "manifest-stage", "manifest-bad-prefix",
+    "manifest-without-state", "foreign-state", "stage-hardlink", "two-stages",
+    "foreign-public", "foreign-catalog", "wal-drift",
+])
+def test_restore_initial_dedicated_generation_fixture(filesystem, monkeypatch, fault):
+    old = _owned_bootstrap_resources()
+    new = _owned_generation(active=False, distribution="almalinux")
+    paths = _owned_fixture_paths(filesystem, old)
+    root_fd, state = filesystem[:2]
+    label = native._DEDICATED_PUBLIC_CONTEXT + b"\0"
+    monkeypatch.setattr(os, "listxattr", lambda fd: ["security.selinux"])
+    monkeypatch.setattr(os, "getxattr", lambda fd, name: label)
+    monkeypatch.setattr(os, "setxattr", lambda *a: pytest.fail("unexpected relabel"))
+    monkeypatch.setattr(native._Labels, "_command", staticmethod(lambda *a: b"Enforcing"))
+    with native._owned_fixture_layout(root_fd, recovering=False) as layout:
+        wal = native._publish_owned_wal_locked(*layout[:3], old, new, layout[3], live=True)
+        expected = dict(old)
+        for name in (native._INCLUDE, native._OWNED_MAIN):
+            native._write_owned_initial_dedicated_config_locked(
+                root_fd, *layout, wal, expected, name, new[name])
+        if fault not in ("state-stage", "manifest-without-state", "two-stages", "stage-hardlink"):
+            native._write_owned_initial_private_fixture_locked(
+                root_fd, *layout, wal, expected, V2_STATE, new[V2_STATE])
+        if fault in ("none", "foreign-state", "foreign-public", "foreign-catalog", "wal-drift"):
+            native._write_owned_initial_private_fixture_locked(
+                root_fd, *layout, wal, expected, native._OWNED_MANIFEST, new[native._OWNED_MANIFEST])
+    stage_paths = []
+    if fault in ("state-stage", "two-stages", "stage-hardlink"):
+        stage = state / native._OWNED_STAGES[V2_STATE]
+        stage.write_bytes(new[V2_STATE][:13])
+        stage.chmod(0o600)
+        stage_paths.append(stage)
+        if fault == "stage-hardlink":
+            os.link(stage, state / "foreign-link")
+    if fault in ("manifest-stage", "manifest-bad-prefix", "two-stages"):
+        stage = state / native._OWNED_STAGES[native._OWNED_MANIFEST]
+        stage.write_bytes(b"foreign" if fault == "manifest-bad-prefix" else new[native._OWNED_MANIFEST][:13])
+        stage.chmod(0o600)
+        stage_paths.append(stage)
+    if fault == "manifest-without-state":
+        paths[native._OWNED_MANIFEST].write_bytes(new[native._OWNED_MANIFEST])
+        paths[native._OWNED_MANIFEST].chmod(0o600)
+    if fault == "foreign-state":
+        paths[V2_STATE].write_bytes(b"foreign")
+    if fault == "foreign-public":
+        (paths[native._CATALOG].parent / "foreign").touch()
+    if fault == "foreign-catalog":
+        paths[native._CATALOG].write_bytes(new[native._CATALOG])
+        paths[native._CATALOG].chmod(0o644)
+    if fault == "wal-drift":
+        (state / native._OWNED_WAL).write_bytes(b"foreign")
+    before = _fixture_resource_bytes(paths)
+    stages_before = [native._identity(path.lstat()) for path in stage_paths]
+    with native._owned_fixture_layout(root_fd, recovering=True) as layout:
+        def restore():
+            return native._restore_owned_initial_dedicated_generation_fixture_locked(
+                root_fd, *layout, expected_wal=wal)
+        if fault in ("none", "state-only", "state-stage", "manifest-stage"):
+            assert restore()["status"] == "OWNED_INITIAL_GENERATION_FIXTURE_RESTORED"
+            assert _fixture_resource_bytes(paths) == old
+            _assert_owned_fixture_clean(filesystem, paths)
+        else:
+            with pytest.raises((native.NativeV2TransactionError, OSError, ValueError)):
+                restore()
+            assert _fixture_resource_bytes(paths) == before
+            assert [native._identity(path.lstat()) for path in stage_paths] == stages_before
+            assert (state / native._OWNED_WAL).exists()
+    assert not filesystem[-1]
+
+
+@pytest.mark.parametrize("fault", ["none", "foreign-tmp", "published-too", "target", "stage"])
+def test_discard_unpublished_initial_generation_fixture(filesystem, monkeypatch, fault):
+    old = _owned_bootstrap_resources()
+    new = _owned_generation(active=False, distribution="almalinux")
+    paths = _owned_fixture_paths(filesystem, old)
+    root_fd, state = filesystem[:2]
+    label = native._DEDICATED_PUBLIC_CONTEXT + b"\0"
+    monkeypatch.setattr(os, "listxattr", lambda fd: ["security.selinux"])
+    monkeypatch.setattr(os, "getxattr", lambda fd, name: label)
+    monkeypatch.setattr(native._Labels, "_command", staticmethod(lambda *a: b"Enforcing"))
+    wal = native._owned_wal_record(old, new, live=True)
+    pending = state / native._OWNED_WAL_TMP
+    pending.write_bytes(b"foreign" if fault == "foreign-tmp" else wal)
+    pending.chmod(0o600)
+    if fault == "published-too":
+        journal = state / native._OWNED_WAL
+        journal.write_bytes(wal)
+        journal.chmod(0o600)
+    elif fault == "target":
+        paths[native._OWNED_MAIN].write_bytes(new[native._OWNED_MAIN])
+    elif fault == "stage":
+        (paths[native._INCLUDE].parent / native._OWNED_STAGES[native._INCLUDE]).touch(mode=0o600)
+    before = _fixture_resource_bytes(paths)
+    with native._owned_fixture_layout(root_fd, recovering=True) as layout:
+        def restore():
+            return native._restore_owned_initial_dedicated_generation_fixture_locked(
+                root_fd, *layout, expected_wal=wal)
+        if fault == "none":
+            assert restore()["status"] == "OWNED_INITIAL_GENERATION_FIXTURE_UNPUBLISHED_DISCARDED"
+            _assert_owned_fixture_clean(filesystem, paths)
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                restore()
+            assert pending.exists()
+        assert _fixture_resource_bytes(paths) == before
+    assert not filesystem[-1]
+
+
+@pytest.mark.parametrize("fault", ["stage", "restore", "proposal", "wal", "active",
+                                   "enabled", "profile", "namespace", "executable", "mixed"])
+def test_installed_initial_generation_retains_stopped_authority(filesystem, monkeypatch, fault):
+    """Actual fixture lock and resources; simulate only installed host identity."""
+    import fcntl
+    import zipimport
+    from types import SimpleNamespace
+    from repocache import server_native_nginx_effective_unit_v1 as unit
+    from repocache import server_native_nginx_executable_v1 as executable
+    from repocache import server_root_control_host_preflight_v1 as host
+    from repocache import server_root_control_worker_v1 as worker
+
+    rootfd, state, _, _, _ = filesystem
+    directory = state.parents[3] / "usr/libexec/repocache"
+    directory.mkdir(parents=True, mode=0o755)
+    placement = {
+        "schema_version": 1, "status": "AUTHENTICATED_WORKER_STAGED", "version": "0.6.0",
+        "source_sha": "a"*40, "archive_sha256": "b"*64, "manifest_sha256": "c"*64,
+        "publisher_key_id": "test-only",
+        "files": {name: "d"*64 for name in worker._RECEIPT_FILES},
+        "authorizes_host_installation": False, "authorizes_service_activation": False,
+    }
+    raw = (json.dumps(placement, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+    placement_sha = hashlib.sha256(raw).hexdigest()
+    complete = worker._PLACEMENT_PREFIX + "complete-" + placement_sha
+    for name, content in ((worker._RUNTIME_RECEIPT, raw), (complete, b"")):
+        path = state / name
+        path.write_bytes(content)
+        path.chmod(0o600)
+    old = _owned_bootstrap_resources()
+    new = _owned_generation(active=False, distribution="almalinux")
+    paths = _owned_fixture_paths(filesystem, old)
+    pins = dict(source_sha="a"*40, archive_sha256="b"*64, worker_sha256="d"*64,
+                placement_sha256=placement_sha, package_identity="nginx-core-0:1.2-3.x86_64",
+                native_payload_sha256="e"*64, binary_sha256="f"*64,
+                executable_receipt_sha256="1"*64)
+    wal = native._owned_wal_record(old, new, live=True)
+    restoring = fault in ("restore", "wal")
+    if restoring:
+        journal = state / native._OWNED_WAL
+        journal.write_bytes(wal)
+        journal.chmod(0o600)
+        pins["wal_sha256"] = "0"*64 if fault == "wal" else native._hash(wal)
+    else:
+        pins["proposal_sha256"] = "0"*64 if fault == "proposal" else native._hash(new[V2_STATE])
+    if fault == "profile":
+        (state / unit._NAMESPACE_PROFILE_RECEIPT).touch()
+    class Loader:
+        archive = worker._WORKER
+    monkeypatch.setattr(zipimport, "zipimporter", Loader)
+    monkeypatch.setattr(native, "__loader__", Loader())
+    monkeypatch.setattr(native, "sys", SimpleNamespace(flags=SimpleNamespace(isolated=True)))
+    monkeypatch.setattr(host, "require_native_host_preconditions", lambda: None)
+    monkeypatch.setattr(dispatcher, "_native_distro", lambda: "almalinux")
+    monkeypatch.setattr(native, "_verify_current_root_fd", lambda *_: None)
+    monkeypatch.setattr(native, "_require_audited_native_package_for_activation", lambda *a, **kw: None)
+    real_locked, real_walk = native._locked, native._walk
+    monkeypatch.setattr(native, "_locked", lambda root, uid: real_locked(rootfd, uid))
+    monkeypatch.setattr(native, "_walk", lambda root, parts, stack, uid: real_walk(rootfd, parts, stack, uid))
+    monkeypatch.setattr(worker, "_placement_file_digest", lambda root, segments, mode, limit:
+                        pins["binary_sha256"] if segments[-1] == "nginx" else placement["files"][segments[-1]])
+    monkeypatch.setattr(executable, "signed_owned_nginx_policy_candidate", lambda: {"policy_sha256": "a"*64})
+    def executable_proof(*args, **kwargs):
+        if fault == "executable":
+            native._deny("EXECUTABLE_REFUSED")
+        return {"executable_identity": (1, 2)}
+    monkeypatch.setattr(executable, "verify_nginx_candidate_receipt", executable_proof)
+    monkeypatch.setattr(unit, "inspect_effective_owned_nginx_unit", lambda **kw: {"main_pid_observed": 0})
+    monkeypatch.setattr(unit, "_safe_native_systemctl", lambda: None)
+    monkeypatch.setattr(os.path, "lexists", lambda path: fault == "namespace" and path == unit._NAMESPACE_PATH)
+    def commands(argv, **kw):
+        if argv[0] == native._SYSTEMCTL:
+            assert argv[1] in ("is-active", "is-enabled")
+            assert argv[2] in (native._UNIT, native._OWNED_WAL_DOMAIN)
+            if argv[1] == "is-active":
+                return SimpleNamespace(returncode=0 if fault == "active" else 3,
+                                       stdout=b"active\n" if fault == "active" else b"inactive\n")
+            return SimpleNamespace(returncode=0 if fault == "enabled" else 1,
+                                   stdout=b"enabled\n" if fault == "enabled" else b"disabled\n")
+        return SimpleNamespace(returncode=0, stderr=b"", stdout=pins["package_identity"].encode())
+    monkeypatch.setattr(native.subprocess, "run", commands)
+    monkeypatch.setattr(native._Labels, "_command", staticmethod(lambda *a: b"Enforcing"))
+    # The actual fixture layout uses rootfd rather than the simulated "/" handle.
+    original_layout = native._owned_layout_locked
+    monkeypatch.setattr(native, "_owned_layout_locked", lambda root, statefd, **kw:
+                        original_layout(rootfd, statefd, **kw))
+    calls = []
+    def staged(root, statefd, nginx, public, boundary, *, expected_proposal_sha256):
+        boundary()
+        if expected_proposal_sha256 != native._hash(new[V2_STATE]):
+            native._deny("CANDIDATE_CHANGED")
+        calls.append("stage")
+        return wal, new
+    def restored(root, statefd, nginx, public, boundary, *, expected_wal):
+        boundary()
+        assert expected_wal == wal
+        calls.append("restore")
+        return {"status": "OWNED_INITIAL_GENERATION_FIXTURE_RESTORED"}
+    monkeypatch.setattr(native, "_stage_owned_initial_dedicated_generation_core_locked", staged)
+    monkeypatch.setattr(native, "_restore_owned_initial_dedicated_generation_core_locked", restored)
+    if fault in ("stage", "restore"):
+        report = (native._restore_installed_initial_dedicated_generation(pins) if restoring else
+                  native._stage_installed_initial_dedicated_generation(pins))
+        assert calls == [fault]
+        assert report["wal_sha256"] == native._hash(wal)
+        assert report["catalog_withdrawn"] is True and report["authorizes_systemctl"] is False
+        assert report["authorizes_nginx_activation"] is False
+        assert report["authorizes_catalog_publication"] is False
+    else:
+        with pytest.raises(native.NativeV2TransactionError):
+            if fault == "mixed":
+                native._installed_dedicated_lifecycle(pins, prepare=True, initial_action="stage")
+            elif restoring:
+                native._restore_installed_initial_dedicated_generation(pins)
+            else:
+                native._stage_installed_initial_dedicated_generation(pins)
+        assert not calls
+    assert _fixture_resource_bytes(paths) == old
+    assert not filesystem[-1]
+
+
+@pytest.mark.parametrize("fault", ["none", "wrong-mode", "foreign-public", "state-inode-drift",
+                                   "manifest-drift", "catalog", "expired"])
+def test_initial_wal_boot_plan_retains_successor(filesystem, monkeypatch, fault):
+    old = _owned_bootstrap_resources()
+    new = _owned_generation(active=False, distribution="almalinux")
+    withdrawn = {**new, native._CATALOG: None}
+    paths = _owned_fixture_paths(filesystem, withdrawn)
+    root, state = filesystem[:2]
+    wal = native._owned_wal_record(old, new, live=True)
+    pending = state / native._OWNED_WAL
+    pending.write_bytes(wal)
+    pending.chmod(0o600)
+    label = native._DEDICATED_PUBLIC_CONTEXT + b"\0"
+    monkeypatch.setattr(os, "listxattr", lambda fd: ["security.selinux"])
+    monkeypatch.setattr(os, "getxattr", lambda fd, name: label)
+    monkeypatch.setattr(native._Labels, "_command", staticmethod(lambda *a: b"Enforcing"))
+    monkeypatch.setattr(native, "_dedicated_readonly_tls_labels", lambda *a: ("tls",))
+    if fault == "catalog":
+        paths[native._CATALOG].write_bytes(new[native._CATALOG])
+        paths[native._CATALOG].chmod(0o644)
+    if fault == "foreign-public":
+        (paths[native._CATALOG].parent / "foreign").touch()
+    with native._locked(root, 0) as state_fd:
+        def scope():
+            return native._owned_prepared_wal_boot_egress_generation_locked(
+                root, state_fd, distribution="almalinux", worker_uid=33,
+                expected_wal=wal, initial_generation=fault != "wrong-mode")
+        if fault in ("none", "expired"):
+            with scope() as (plan, recheck):
+                assert plan["generation"] == 1
+                assert plan["generation_manifest_sha256"] == native._hash(new[native._OWNED_MANIFEST])
+                assert not plan["destinations"]
+                recheck()
+            with pytest.raises(native.NativeV2TransactionError, match="SCOPE_EXPIRED"):
+                recheck()
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                with scope() as (plan, recheck):
+                    if fault == "wrong-mode":
+                        pytest.fail("prior recovery adopted a successor")
+                    if fault == "state-inode-drift":
+                        replacement = state / "replacement"
+                        replacement.write_bytes(new[V2_STATE])
+                        replacement.chmod(0o600)
+                        os.replace(replacement, paths[V2_STATE])
+                    if fault == "manifest-drift":
+                        paths[native._OWNED_MANIFEST].write_bytes(b"foreign")
+                    recheck()
+    assert pending.read_bytes() == wal
+    assert not filesystem[-1]
+
+
+@pytest.mark.parametrize("action", ["profile", "load", "boot", "boot-resume", "boot-rollover",
+                                    "storage", "runtime", "start", "finish"])
+def test_initial_pending_worker_requires_signed_loader(action):
+    with pytest.raises(native.NativeV2TransactionError):
+        native._installed_initial_dedicated_pending({}, action=action)
+
+
+@pytest.mark.parametrize("fault", ["none", "same-bytes", "label", "wrong-identity", "no-identity"])
+def test_initial_dedicated_catalog_withdrawal_requires_exact_owned_inode(tmp_path, monkeypatch, fault):
+    if os.geteuid() != 0:
+        pytest.skip("requires root-owned fixture")
+    raw = b"exact catalog"
+    tmp_path.chmod(0o755)
+    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    label = native._DEDICATED_PUBLIC_CONTEXT + b"\0"
+    bad = set()
+    monkeypatch.setattr(os, "listxattr", lambda fd: ["security.selinux"])
+    monkeypatch.setattr(os, "getxattr", lambda fd, name:
+                        b"foreign" if os.fstat(fd).st_ino in bad else label)
+    monkeypatch.setattr(os, "setxattr", lambda *a: pytest.fail("never relabel"))
+    path = tmp_path / native._CATALOG
+    try:
+        identity = native._write_dedicated_public_leaf(
+            fd, native._CATALOG, None, raw, recheck=lambda: None)
+        assert identity == native._identity(path.stat())
+        if fault == "same-bytes":
+            replacement = tmp_path / "replacement"
+            replacement.write_bytes(raw)
+            replacement.chmod(0o644)
+            os.replace(replacement, path)
+        elif fault == "label":
+            bad.add(path.stat().st_ino)
+        elif fault == "wrong-identity":
+            identity = ()
+        elif fault == "no-identity":
+            identity = None
+        before = path.stat()
+        def withdraw():
+            native._write_dedicated_public_leaf(
+                fd, native._CATALOG, raw, None, recheck=lambda: None,
+                withdraw_identity=identity)
+        if fault == "none":
+            withdraw()
+            assert not path.exists()
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                withdraw()
+            assert path.read_bytes() == raw
+            assert native._identity(path.stat()) == native._identity(before)
+    finally:
+        os.close(fd)

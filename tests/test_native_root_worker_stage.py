@@ -514,7 +514,15 @@ def test_authenticated_placement_recovers_interrupted_atomic_publish(candidate, 
     assert not tuple(state.glob(".native-worker-placement.pending-*"))
     assert len(tuple(state.glob(".native-worker-placement.complete-*"))) == 1
     before = worker.stat()
+    local_receipt = state / install._RUNTIME_RECEIPT
+    raw = stage._json_line(receipt)
+    assert local_receipt.read_bytes() == raw
+    assert stat.S_IMODE(local_receipt.stat().st_mode) == 0o600
+    assert (state / (install._MARKER + "complete-" + hashlib.sha256(raw).hexdigest())).is_file()
+    receipt_before = local_receipt.stat()
     install._place_worker_files(root, payloads, receipt, unit_paths=_UNIT_PATHS)
+    assert local_receipt.stat().st_ino == receipt_before.st_ino
+    assert local_receipt.stat().st_mtime_ns == receipt_before.st_mtime_ns
     assert worker.stat().st_ino == before.st_ino
     assert worker.stat().st_mtime_ns == before.st_mtime_ns
 
@@ -666,7 +674,7 @@ def test_synthetic_signed_candidate_enters_exact_native_journal_once(
     system = None if _combined() else {"ID": "debian", "VERSION_ID": "13"}
     sysroot = tmp_path / "isolated-host"
     sysroot.mkdir(mode=0o700)
-    source_payloads, _ = stage._authenticated_payloads(
+    source_payloads, placement_receipt = stage._authenticated_payloads(
         archive.parent, commit=commit, archive_sha256=digest, system=system,
     )
     for parent, names, mode in (
@@ -687,6 +695,12 @@ def test_synthetic_signed_candidate_enters_exact_native_journal_once(
     (sysroot / "var" / "cache").mkdir(parents=True, mode=0o755)
     (state / LOCK_NAME).write_bytes(b"")
     (state / LOCK_NAME).chmod(0o600)
+    receipt_raw = stage._json_line(placement_receipt)
+    receipt_path = state / install._RUNTIME_RECEIPT
+    receipt_path.write_bytes(receipt_raw)
+    receipt_path.chmod(0o600)
+    marker = state / (install._MARKER + "complete-" + hashlib.sha256(receipt_raw).hexdigest())
+    marker.touch(mode=0o600)
     install_document = tmp_path / "reviewed-native-install.json"
     install_document.write_bytes(
         (json.dumps(document(count=1, generation=0), sort_keys=True, separators=(",", ":")) + "\n").encode()
@@ -759,3 +773,1227 @@ def test_synthetic_signed_candidate_enters_exact_native_journal_once(
         assert (state / NATIVE_COMPLETE_NAME).read_bytes() == receipt
     finally:
         os.close(fake_root)
+
+
+def test_executable_candidate_requires_native_host_before_asset_access(monkeypatch, tmp_path):
+    monkeypatch.setattr(install, "_native_distro", lambda: "debian")
+    def refuse():
+        raise RuntimeError("fixture host refused")
+    monkeypatch.setattr(install, "require_native_host_preconditions", refuse)
+    monkeypatch.setattr(stage, "_authenticated_payloads",
+                        lambda *a, **kw: pytest.fail("asset access before native host proof"))
+    with pytest.raises(RuntimeError, match="fixture host refused"):
+        install._stage_authenticated_native_executable_candidate(
+            tmp_path, commit="a" * 40, archive_sha256="b" * 64)
+
+@pytest.mark.parametrize("distribution", ["debian", "almalinux"])
+def test_executable_candidate_selects_retained_native_effects_lock(
+    monkeypatch, tmp_path, distribution,
+):
+    monkeypatch.setattr(install, "_native_distro", lambda: distribution)
+    monkeypatch.setattr(install, "require_native_host_preconditions", lambda: None)
+    monkeypatch.setattr(stage, "_authenticated_payloads",
+                        lambda *a, **kw: ({}, {"fixture": True}))
+
+    def stop_at_lock(root_fd, owner_uid, *, allow_native_package_parent_changes=False):
+        assert root_fd >= 0 and owner_uid == 0
+        assert allow_native_package_parent_changes is True
+        raise RuntimeError("fixture stopped before host access")
+
+    monkeypatch.setattr(install, "_locked", stop_at_lock)
+    with pytest.raises(RuntimeError, match="fixture stopped before host access"):
+        install._stage_authenticated_native_executable_candidate(
+            tmp_path, commit="a" * 40, archive_sha256="b" * 64)
+
+
+@pytest.mark.parametrize("fault", ["invalid-pin", "debian", "release", "placement",
+                                   "wal", "package", "child", "wrong-report", "none",
+                                   "rolled", "rolled-refusal", "rolled-pins-changed",
+                                   "rolled-pins-match", "prepare", "prepare-wal",
+                                   "prepare-manifest", "prepare-boot", "prepare-report",
+                                   "start", "start-wal", "start-boot", "start-report",
+                                   "rollover", "rollover-wal", "rollover-boot", "rollover-report",
+                                   "pending-rollover", "pending-rollover-missing-wal",
+                                   "pending-rollover-wal", "pending-rollover-report",
+                                   "pending-prepare", "pending-prepare-missing-wal",
+                                   "pending-prepare-wal", "pending-prepare-boot",
+                                   "pending-prepare-report", "pending-resume",
+                                   "pending-resume-wal", "pending-resume-boot",
+                                   "pending-resume-report", "pending-resume-digest",
+                                   "pending-start", "pending-start-wal", "pending-start-boot",
+                                   "pending-start-report", "pending-start-missing-wal",
+                                   "committed-resume", "committed-resume-boot",
+                                   "committed-resume-wal", "committed-resume-digest",
+                                   "rolled-start", "rolled-start-changed", "rolled-start-wal",
+                                   "rolled-start-active", "rolled-start-active-report",
+                                   "profile-stage", "profile-stage-wal", "profile-stage-boot",
+                                   "profile-stage-manifest", "profile-stage-existing",
+                                   "profile-stage-report", "profile-load", "profile-load-repeat",
+                                   "profile-load-wal", "profile-load-boot",
+                                   "profile-load-manifest", "profile-load-report",
+                                   "profile-load-authority", "storage", "storage-wal",
+                                   "storage-boot", "storage-manifest", "storage-report",
+                                   "storage-authority", "storage-int-report",
+                                   "runtime", "runtime-wal", "runtime-boot",
+                                   "runtime-manifest", "runtime-report", "runtime-authority",
+                                   "pending-storage", "pending-storage-wal", "pending-storage-report",
+                                   "pending-runtime", "pending-runtime-wal", "pending-runtime-report"])
+def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, tmp_path, fault):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    wal = b"test WAL"
+    receipt = {"source_sha": "a"*40}
+    expected = stage._json_line(receipt)
+    marker = install._MARKER + "complete-" + hashlib.sha256(expected).hexdigest()
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / marker).touch()
+    calls = []
+    locked = False
+    def auth(*args, **kwargs):
+        calls.append("release")
+        if fault == "release":
+            raise stage.WorkerStageError("UNAUTHENTICATED")
+        return {stage.CONFIG: install._BOOTSTRAP_CONFIG, stage.WORKER: b"worker"}, receipt
+    monkeypatch.setattr(install, "_native_distro", lambda: "debian" if fault == "debian" else "almalinux")
+    monkeypatch.setattr(install, "require_native_host_preconditions", lambda: None)
+    monkeypatch.setattr(stage, "_authenticated_payloads", auth)
+    monkeypatch.setattr(stage, "_audit_worker_files", lambda *a: None)
+    @contextmanager
+    def lock(root, owner, **kw):
+        nonlocal locked
+        assert owner == 0 and kw == {"allow_native_package_parent_changes": True}
+        locked = True
+        fd = os.open(state, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            yield fd
+        finally:
+            os.close(fd)
+            locked = False
+    monkeypatch.setattr(install, "_locked", lock)
+    from repocache import server_native_v2_transaction_v1 as tx
+    from repocache import server_native_egress_candidate_v1 as egress
+    pending_rolling = fault.startswith("pending-rollover")
+    rolling = fault.startswith("rollover") or pending_rolling
+    pending_first = fault.startswith("pending-prepare")
+    committed_resume = fault.startswith("committed-resume")
+    resuming = fault.startswith("pending-resume") or committed_resume
+    pending_start = fault.startswith("pending-start")
+    pending_storage = fault.startswith("pending-storage")
+    pending_runtime = fault.startswith("pending-runtime")
+    pending_placement = pending_storage or pending_runtime
+    pending = pending_first or pending_rolling or (resuming and not committed_resume) or pending_start or pending_placement
+    staging_profile = fault.startswith("profile-stage")
+    loading_profile = fault.startswith("profile-load")
+    preparing = (fault.startswith("prepare") or rolling or pending_first or resuming
+                 or staging_profile or loading_profile)
+    if fault == "profile-stage-existing":
+        from repocache.server_native_nginx_effective_unit_v1 import _NAMESPACE_PROFILE_RECEIPT
+        (state / _NAMESPACE_PROFILE_RECEIPT).touch()
+    rolled_start = fault.startswith("rolled-start")
+    runtime = fault.startswith("runtime") or pending_runtime
+    storage = fault.startswith("storage") or pending_storage or runtime
+    starting = fault.startswith("start") or pending_start or rolled_start or storage
+    manifest = b"committed manifest"
+    boot = b"exact boot"
+    monkeypatch.setattr(egress, "_read_boot_egress_receipt",
+                        lambda *a, **kw: b"existing boot" if fault in ("prepare-boot", "start-boot", "rollover-boot", "pending-prepare-boot", "pending-resume-boot", "pending-start-boot", "committed-resume-boot", "profile-stage-boot", "profile-load-boot", "storage-boot", "runtime-boot")
+                        else boot if starting or rolling or resuming else None)
+    def read(fd, name, uid, limit):
+        assert locked
+        if name == tx._OWNED_MANIFEST:
+            return b"foreign" if fault in ("prepare-manifest", "profile-stage-manifest", "profile-load-manifest", "storage-manifest", "runtime-manifest") else manifest
+        if name == tx._OWNED_WAL_TMP:
+            return None
+        if name == install._RUNTIME_RECEIPT:
+            return b"foreign" if fault == "placement" else expected
+        if name == install._OWNED_WAL:
+            if pending:
+                return (None if fault.endswith("-missing-wal") else
+                        b"foreign WAL" if fault.endswith("-wal") else wal)
+            return None if (fault == "wal" or (preparing and fault not in ("prepare-wal", "rollover-wal", "committed-resume-wal", "profile-stage-wal", "profile-load-wal"))
+                            or (starting and fault not in ("start-wal", "rolled-start-wal", "storage-wal", "runtime-wal"))) else wal
+        assert name == marker
+        return b""
+    monkeypatch.setattr(install, "_read_file", read)
+    monkeypatch.setattr(install, "_require_audited_native_package_for_activation", lambda *a, **kw: None)
+    monkeypatch.setattr(install, "_native_workspace_is_root_owned", lambda path: True)
+    @contextmanager
+    def workspace(**kw):
+        yield str(tmp_path)
+    monkeypatch.setattr(install.tempfile, "TemporaryDirectory", workspace)
+    monkeypatch.setattr(install, "_candidate_native_identity", lambda *a: "nginx-core-0:1.2-3.x86_64")
+    def authenticate(*args):
+        assert locked
+        calls.append("rpm")
+        if fault == "package":
+            raise stage.WorkerStageError("PACKAGE_REFUSED")
+        return "e"*64, "f"*64
+    monkeypatch.setattr(install, "_authenticate_candidate_rpm", authenticate)
+    def child(argv, **kw):
+        assert not locked
+        assert argv == ("/usr/bin/python3", "-IS", "-B", "-c",
+                        install._DEDICATED_PROFILE_CHILD if staging_profile else
+                        install._DEDICATED_PROFILE_LOAD_CHILD if loading_profile else
+                        install._DEDICATED_COMMITTED_RESUME_CHILD if committed_resume else
+                        install._DEDICATED_PENDING_RESUME_CHILD if resuming else
+                        install._DEDICATED_PENDING_ROLLOVER_CHILD if pending_rolling else
+                        install._DEDICATED_PENDING_PREPARE_CHILD if pending_first else
+                        install._DEDICATED_ROLLOVER_CHILD if rolling else
+                        install._DEDICATED_PREPARE_CHILD if preparing else
+                        install._DEDICATED_PENDING_START_CHILD if pending_start else
+                        install._DEDICATED_ROLLED_START_CHILD if rolled_start else
+                        install._DEDICATED_PENDING_RUNTIME_CHILD if pending_runtime else
+                        install._DEDICATED_PENDING_STORAGE_CHILD if pending_storage else
+                        install._DEDICATED_RUNTIME_CHILD if runtime else
+                        install._DEDICATED_STORAGE_CHILD if storage else
+                        install._DEDICATED_START_CHILD if starting else install._DEDICATED_RECOVERY_CHILD)
+        compile(argv[-1], "<fixed-recovery-child>", "exec")
+        assert kw["shell"] is False and kw["close_fds"] is True and "pass_fds" not in kw
+        data = json.loads(kw["input"])
+        assert data["worker_sha256"] == hashlib.sha256(b"worker").hexdigest()
+        assert data["placement_sha256"] == hashlib.sha256(expected).hexdigest()
+        assert data["native_payload_sha256"] == "e"*64 and data["binary_sha256"] == "f"*64
+        assert data["executable_receipt_sha256"] == "c"*64
+        if staging_profile:
+            assert "profile_receipt_sha256" not in data
+        else:
+            assert data["profile_receipt_sha256"] == "d"*64
+        calls.append("child")
+        if staging_profile:
+            report = {"status": "OWNED_DEDICATED_PROFILE_STAGED",
+                      "generation_manifest_sha256": hashlib.sha256(manifest).hexdigest(),
+                      "executable_receipt_sha256": "c"*64, "receipt_sha256": "d"*64,
+                      "receipt_matches_owned_dropin": True, "authorizes_systemctl": False,
+                      "authorizes_nginx_activation": False,
+                      "authorizes_catalog_publication": fault == "profile-stage-report"}
+        elif loading_profile:
+            assert data["generation_manifest_sha256"] == hashlib.sha256(manifest).hexdigest()
+            assert "boot_receipt_sha256" not in data and "wal_sha256" not in data
+            report = {"status": "OWNED_DEDICATED_PROFILE_LOADED",
+                      "generation_manifest_sha256": data["generation_manifest_sha256"],
+                      "executable_receipt_sha256": "c"*64,
+                      "receipt_sha256": "0"*64 if fault == "profile-load-report" else "d"*64,
+                      "profile_loaded": True, "daemon_reloaded": fault != "profile-load-repeat",
+                      "receipt_matches_owned_dropin": True,
+                      "authorizes_systemctl": fault == "profile-load-authority",
+                      "authorizes_nginx_activation": False, "authorizes_catalog_publication": False}
+        elif preparing:
+            assert data["generation_manifest_sha256"] == hashlib.sha256(manifest).hexdigest()
+            if resuming:
+                assert data["boot_receipt_sha256"] == hashlib.sha256(boot).hexdigest()
+            else:
+                assert "boot_receipt_sha256" not in data
+            if pending:
+                assert data["wal_sha256"] == hashlib.sha256(wal).hexdigest()
+            else:
+                assert "wal_sha256" not in data
+            if rolling:
+                assert data["previous_boot_receipt_sha256"] == hashlib.sha256(boot).hexdigest()
+            else:
+                assert "previous_boot_receipt_sha256" not in data
+            report = {"status": "NATIVE_EGRESS_BOOT_RECEIPT_VERIFIED",
+                      "generation_manifest_sha256": data["generation_manifest_sha256"],
+                      "receipt_sha256": hashlib.sha256(boot).hexdigest() if fault == "rollover-report" else "9"*64,
+                      "committed_resources_verified": True,
+                      "authorizes_nginx_activation": fault == "prepare-report",
+                      "authorizes_catalog_publication": False}
+            if pending:
+                del report["committed_resources_verified"]
+                report.update(prior_resources_verified=True, recovery_required=True,
+                              catalog_withdrawn=not fault.endswith("-report"),
+                              wal_sha256=data["wal_sha256"])
+            if resuming and not fault.endswith("-digest"):
+                report["receipt_sha256"] = data["boot_receipt_sha256"]
+        elif storage:
+            assert data["generation_manifest_sha256"] == hashlib.sha256(manifest).hexdigest()
+            assert data["boot_receipt_sha256"] == hashlib.sha256(boot).hexdigest()
+            assert ("wal_sha256" in data) is pending_placement
+            report = {"status": ("OWNED_DEDICATED_PREPARED_WAL_RUNTIME_PREPARED" if runtime
+                                 else "OWNED_DEDICATED_PREPARED_WAL_STORAGE_PREPARED") if pending_placement else (
+                                 "OWNED_DEDICATED_COMMITTED_RUNTIME_PREPARED" if runtime
+                                 else "OWNED_DEDICATED_COMMITTED_STORAGE_PREPARED"),
+                      **({"scratch_count": True if fault == "runtime-report" else 5} if runtime else {}),
+                      **{key: data[key] for key in ("generation_manifest_sha256",
+                            "boot_receipt_sha256", "profile_receipt_sha256", "executable_receipt_sha256")},
+                      "storage": {"repository_cache_roots_verified": [], "metrics_file_verified": False,
+                                  "selinux_enforcing_labels_verified": 1 if fault == "storage-int-report" else True,
+                                  "actual_service_write_verified": fault == "storage-report"},
+                      "authorizes_systemctl": fault in ("storage-authority", "runtime-authority"),
+                      "authorizes_nginx_activation": False, "authorizes_catalog_publication": False}
+            if pending_placement:
+                report.update(wal_sha256=data["wal_sha256"], recovery_required=True,
+                              catalog_withdrawn=not fault.endswith("-report"))
+        elif starting:
+            assert data["generation_manifest_sha256"] == hashlib.sha256(manifest).hexdigest()
+            assert data["boot_receipt_sha256"] == hashlib.sha256(boot).hexdigest()
+            if pending_start:
+                assert data["wal_sha256"] == hashlib.sha256(wal).hexdigest()
+            else:
+                assert "wal_sha256" not in data
+            report = {"status": "OWNED_DEDICATED_COMMITTED_START_OBSERVED",
+                      "generation_manifest_sha256": data["generation_manifest_sha256"],
+                      "boot_receipt_sha256": data["boot_receipt_sha256"],
+                      "catalog_observed": True, "service_storage_mounts_verified": True,
+                      "service_scratch_mounts_verified": True, "enablement_changed": fault == "start-report",
+                      "main_pid": 43, "listener_inode": 47}
+            if fault.startswith("rolled-start-active"):
+                report.update(status="OWNED_DEDICATED_COMMITTED_ACTIVE_VERIFIED",
+                              enablement_changed=fault == "rolled-start-active-report")
+            if pending_start:
+                report.update(status="OWNED_DEDICATED_PREPARED_WAL_START_OBSERVED",
+                              catalog_observed=fault == "pending-start-report",
+                              catalog_withdrawn=True, recovery_required=True,
+                              wal_sha256=data["wal_sha256"])
+        else:
+            assert data["boot_receipt_sha256"] == "9"*64
+            report = {"status": "OWNED_DEDICATED_WAL_ROLLBACK_OBSERVED",
+                      "wal_sha256": hashlib.sha256(wal).hexdigest(),
+                      "recovery_required": False, "catalog_observed": fault != "wrong-report"}
+        return SimpleNamespace(returncode=2 if fault == "child" else 0,
+                               stdout=json.dumps(report).encode(), stderr=b"")
+    monkeypatch.setattr(install.subprocess, "run", child)
+    options = dict(commit="a"*40, archive_sha256="b"*64,
+                   executable_receipt_sha256="invalid" if fault == "invalid-pin" else "c"*64,
+                   profile_receipt_sha256="d"*64, boot_receipt_sha256="9"*64,
+                   wal_sha256=hashlib.sha256(wal).hexdigest())
+    if preparing:
+        boot_pins = {key: value for key, value in options.items()
+                     if key not in ("boot_receipt_sha256", "wal_sha256")}
+        boot_pins["generation_manifest_sha256"] = hashlib.sha256(manifest).hexdigest()
+        if rolling:
+            boot_pins["previous_boot_receipt_sha256"] = hashlib.sha256(boot).hexdigest()
+        if pending:
+            boot_pins["wal_sha256"] = hashlib.sha256(wal).hexdigest()
+        if resuming:
+            boot_pins["boot_receipt_sha256"] = hashlib.sha256(boot).hexdigest()
+        if staging_profile:
+            del boot_pins["profile_receipt_sha256"]
+        invoke = (install._stage_authenticated_committed_dedicated_profile if staging_profile
+                  else install._load_authenticated_committed_dedicated_profile if loading_profile
+                  else install._resume_authenticated_committed_dedicated_nginx if committed_resume
+                  else install._resume_authenticated_prepared_wal_dedicated_nginx if resuming
+                  else install._rollover_authenticated_prepared_wal_dedicated_nginx if pending_rolling
+                  else install._prepare_authenticated_prepared_wal_dedicated_nginx if pending_first
+                  else install._rollover_authenticated_committed_dedicated_nginx if rolling
+                  else install._prepare_authenticated_committed_dedicated_nginx)
+        if fault == "profile-stage":
+            assert invoke(tmp_path, **boot_pins)["receipt_matches_owned_dropin"]
+        elif fault in ("profile-load", "profile-load-repeat"):
+            assert invoke(tmp_path, **boot_pins)["daemon_reloaded"] is (fault == "profile-load")
+        elif fault in ("prepare", "rollover", "pending-rollover", "pending-prepare", "pending-resume",
+                     "committed-resume"):
+            assert invoke(tmp_path, **boot_pins)[
+                "prior_resources_verified" if pending else "committed_resources_verified"]
+        else:
+            with pytest.raises(stage.WorkerStageError):
+                invoke(tmp_path, **boot_pins)
+    elif starting:
+        start_pins = {key: value for key, value in options.items() if key != "wal_sha256"}
+        start_pins["generation_manifest_sha256"] = hashlib.sha256(manifest).hexdigest()
+        start_pins["boot_receipt_sha256"] = hashlib.sha256(boot).hexdigest()
+        if pending_start or pending_placement:
+            start_pins["wal_sha256"] = hashlib.sha256(wal).hexdigest()
+        invoke = (install._start_authenticated_prepared_wal_dedicated_nginx if pending_start
+                  else install._prepare_authenticated_prepared_wal_dedicated_runtime if pending_runtime
+                  else install._prepare_authenticated_prepared_wal_dedicated_storage if pending_storage
+                  else install._prepare_authenticated_committed_dedicated_runtime if runtime
+                  else install._prepare_authenticated_committed_dedicated_storage if storage
+                  else install._start_authenticated_committed_dedicated_nginx)
+        if rolled_start:
+            release = {key: start_pins.pop(key) for key in ("commit", "archive_sha256")}
+            def retain_committed(root, fd):
+                assert locked
+                calls.append("history")
+                return {**start_pins, **({"boot_receipt_sha256": "0"*64}
+                                        if fault == "rolled-start-changed" else {})}
+            monkeypatch.setattr(tx, "_retained_rolled_committed_dedicated_pins_locked", retain_committed)
+            def invoke_rolled():
+                return install._authenticated_prepared_dedicated_bridge(
+                    tmp_path, **release, recovery_pins=None, start=True,
+                    expected_rolled_pins=start_pins)
+            if fault in ("rolled-start", "rolled-start-active"):
+                assert invoke_rolled()["catalog_observed"] is True
+            else:
+                with pytest.raises(stage.WorkerStageError):
+                    invoke_rolled()
+        elif fault in ("storage", "runtime", "pending-storage", "pending-runtime"):
+            report = invoke(tmp_path, **start_pins)
+            if pending_placement:
+                assert report["wal_sha256"] == start_pins["wal_sha256"]
+                assert report["catalog_withdrawn"] and report["recovery_required"]
+            assert report["storage"]["selinux_enforcing_labels_verified"]
+            if runtime:
+                assert report["scratch_count"] == 5
+        elif fault in ("start", "pending-start"):
+            assert invoke(tmp_path, **start_pins)["catalog_observed"] is (not pending_start)
+        else:
+            with pytest.raises(stage.WorkerStageError):
+                invoke(tmp_path, **start_pins)
+    elif fault in ("rolled", "rolled-refusal", "rolled-pins-changed", "rolled-pins-match"):
+        def retained(root, fd):
+            assert locked
+            calls.append("history")
+            if fault == "rolled-refusal":
+                raise stage.WorkerStageError("HISTORY_REFUSED")
+            return {key: value for key, value in options.items()
+                    if key not in ("commit", "archive_sha256")}
+        monkeypatch.setattr(tx, "_retained_rolled_dedicated_recovery_pins_locked", retained)
+        release = {key: options[key] for key in ("commit", "archive_sha256")}
+        if fault.startswith("rolled-pins"):
+            expected_pins = {key: value for key, value in options.items()
+                             if key not in ("commit", "archive_sha256")}
+            if fault == "rolled-pins-changed":
+                expected_pins["wal_sha256"] = "0"*64
+            release["expected_pins"] = expected_pins
+        if fault in ("rolled", "rolled-pins-match"):
+            assert install._recover_authenticated_rolled_dedicated_nginx(
+                tmp_path, **release)["catalog_observed"]
+        else:
+            with pytest.raises(stage.WorkerStageError):
+                install._recover_authenticated_rolled_dedicated_nginx(tmp_path, **release)
+    elif fault == "none":
+        assert install._recover_authenticated_prepared_dedicated_nginx(tmp_path, **options)["catalog_observed"]
+    else:
+        with pytest.raises(stage.WorkerStageError):
+            install._recover_authenticated_prepared_dedicated_nginx(tmp_path, **options)
+    assert calls == ([] if fault in ("invalid-pin", "debian") else
+                     ["release"] if fault in ("release", "placement", "wal",
+                                               "prepare-wal", "prepare-manifest", "prepare-boot",
+                                               "start-wal", "start-boot", "rollover-wal",
+                                               "rollover-boot", "pending-rollover-missing-wal",
+                                               "pending-rollover-wal", "pending-prepare-missing-wal",
+                                               "pending-prepare-wal", "pending-prepare-boot",
+                                               "pending-resume-wal", "pending-resume-boot",
+                                               "pending-start-wal", "pending-start-boot",
+                                               "pending-start-missing-wal",
+                                               "committed-resume-boot", "committed-resume-wal",
+                                               "profile-stage-wal", "profile-stage-boot",
+                                               "profile-stage-manifest", "profile-stage-existing",
+                                               "profile-load-wal", "profile-load-boot",
+                                               "profile-load-manifest", "storage-wal",
+                                               "storage-boot", "storage-manifest",
+                                               "runtime-wal", "runtime-boot", "runtime-manifest",
+                                               "pending-storage-wal", "pending-runtime-wal") else
+                     ["release", "rpm"] if fault == "package" else
+                     ["release", "history"] if fault in ("rolled-refusal", "rolled-pins-changed",
+                                                           "rolled-start-changed", "rolled-start-wal") else
+                     ["release", "history", "rpm", "child"] if fault in (
+                         "rolled", "rolled-pins-match", "rolled-start", "rolled-start-active",
+                         "rolled-start-active-report") else
+                     ["release", "rpm", "child"])
+    assert not locked
+
+
+@pytest.mark.parametrize("fault", ["none", "missing", "duplicate", "oversize", "malformed", "broken"])
+def test_signed_worker_policy_member_is_bounded_and_unique(fault):
+    import io
+    import zipfile
+    from repocache.server_native_nginx_executable_v1 import _POLICY_MEMBER
+    raw = b"policy_module(repocache_nginx, 1.0.0)\n"
+    if fault == "broken":
+        with pytest.raises(stage.WorkerStageError):
+            stage._signed_owned_policy_from_worker(b"not a zip")
+        return
+    data = io.BytesIO()
+    with zipfile.ZipFile(data, "w") as archive:
+        if fault != "missing":
+            value = (b"a" * 16385 if fault == "oversize" else
+                     b"unrelated policy\n" if fault == "malformed" else raw)
+            archive.writestr(_POLICY_MEMBER, value)
+        if fault == "duplicate":
+            with pytest.warns(UserWarning):
+                archive.writestr(_POLICY_MEMBER, raw)
+    if fault == "none":
+        result = stage._signed_owned_policy_from_worker(data.getvalue())
+        assert result["policy_bytes"] == raw
+        assert result["policy_sha256"] == hashlib.sha256(raw).hexdigest()
+        assert result["authorizes_policy_installation"] is False
+        assert result["runtime_selinux_policy_verified"] is False
+    else:
+        with pytest.raises(stage.WorkerStageError):
+            stage._signed_owned_policy_from_worker(data.getvalue())
+
+
+@pytest.mark.parametrize("raw,accepted", [
+    ("100 base pp\n400 repocache_nginx pp\n", True),
+    ("400 repocache_nginx pp disabled\n", True),
+    ("100 repocache_nginx cil\n400 repocache_nginx pp\n", True),
+    ("400 repocache_nginx pp\n400 repocache_nginx pp\n", False),
+    ("unexpected row\n", False),
+    ("", False),
+])
+def test_fixed_policy_full_inventory_preserves_priority_and_disabled_state(monkeypatch, raw, accepted):
+    from types import SimpleNamespace
+    from scripts import ci_selinux_nginx_egress_guest as guest
+    def command(*args, **kwargs):
+        assert args == ("/usr/sbin/semodule", "-lfull") and not kwargs
+        return SimpleNamespace(stdout=raw)
+    monkeypatch.setattr(guest, "command", command)
+    if accepted:
+        assert guest._fixed_policy_inventory() == {tuple(line.split()) for line in raw.splitlines()}
+    else:
+        with pytest.raises(AssertionError):
+            guest._fixed_policy_inventory()
+
+
+@pytest.mark.parametrize("fault", ["stage", "restore", "proposal", "wal", "authority", "child", "mixed"])
+def test_initial_installer_bridge_pins_proposal_and_stopped_result(monkeypatch, tmp_path, fault):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from repocache import server_native_v2_transaction_v1 as tx
+    from repocache import server_root_control_fixed_candidate_v1 as intake
+    receipt = {"source_sha": "a"*40}
+    raw = stage._json_line(receipt)
+    marker = install._MARKER + "complete-" + hashlib.sha256(raw).hexdigest()
+    (tmp_path / marker).touch()
+    wal = b"exact wal"
+    proposal = b"exact proposal"
+    restoring = fault in ("restore", "wal")
+    locked = False
+    calls = []
+    @contextmanager
+    def lock(root, owner, **kw):
+        nonlocal locked
+        assert owner == 0 and kw == {"allow_native_package_parent_changes": True}
+        fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+        locked = True
+        try:
+            yield fd
+        finally:
+            locked = False
+            os.close(fd)
+    monkeypatch.setattr(install, "_locked", lock)
+    monkeypatch.setattr(install, "_native_distro", lambda: "almalinux")
+    monkeypatch.setattr(install, "require_native_host_preconditions", lambda: None)
+    monkeypatch.setattr(stage, "_authenticated_payloads", lambda *a, **kw:
+                        ({stage.CONFIG: install._BOOTSTRAP_CONFIG, stage.WORKER: b"worker"}, receipt))
+    monkeypatch.setattr(stage, "_audit_worker_files", lambda *a: None)
+    def read(fd, name, uid, limit):
+        assert locked
+        if name == install._RUNTIME_RECEIPT:
+            return raw
+        if name == marker:
+            return b""
+        if name == tx._OWNED_WAL:
+            return wal if restoring else None
+        assert name == tx._OWNED_WAL_TMP
+        return None
+    monkeypatch.setattr(install, "_read_file", read)
+    @contextmanager
+    def layout(root, state, *, recovering):
+        assert locked and recovering is restoring
+        yield state, 11, 12, lambda: None
+    monkeypatch.setattr(tx, "_owned_layout_locked", layout)
+    monkeypatch.setattr(tx, "_read_owned_resources", lambda *a: {})
+    monkeypatch.setattr(tx, "_validate_owned_resources", lambda *a, **kw: None)
+    monkeypatch.setattr(intake, "_load_private_under_root", lambda *a, **kw:
+                        ({"expected_generation": 0, "expected_state_sha256": None}, proposal))
+    monkeypatch.setattr(install, "_require_audited_native_package_for_activation", lambda *a, **kw: None)
+    monkeypatch.setattr(install, "_native_workspace_is_root_owned", lambda *a: True)
+    @contextmanager
+    def work(**kw):
+        yield str(tmp_path)
+    monkeypatch.setattr(install.tempfile, "TemporaryDirectory", work)
+    monkeypatch.setattr(install, "_candidate_native_identity", lambda *a: "nginx-core-0:1.2-3.x86_64")
+    monkeypatch.setattr(install, "_authenticate_candidate_rpm", lambda *a: ("e"*64, "f"*64))
+    def child(argv, **kw):
+        assert not locked
+        assert argv[-1] == (install._DEDICATED_INITIAL_RESTORE_CHILD if restoring else
+                            install._DEDICATED_INITIAL_STAGE_CHILD)
+        compile(argv[-1], "<initial-child>", "exec")
+        pins = json.loads(kw["input"])
+        assert pins["worker_sha256"] == hashlib.sha256(b"worker").hexdigest()
+        assert "boot_receipt_sha256" not in pins and "profile_receipt_sha256" not in pins
+        calls.append("child")
+        report = dict(status="OWNED_INITIAL_INSTALLED_BOOTSTRAP_RESTORED" if restoring else
+                      "OWNED_INITIAL_INSTALLED_GENERATION_STAGED",
+                      wal_sha256=hashlib.sha256(wal).hexdigest(), catalog_withdrawn=True,
+                      recovery_required=not restoring, executable_receipt_sha256="c"*64,
+                      authorizes_systemctl=False, authorizes_nginx_activation=False,
+                      authorizes_catalog_publication=fault == "authority")
+        if not restoring:
+            report.update(proposal_sha256=hashlib.sha256(proposal).hexdigest(),
+                          generation_manifest_sha256="d"*64)
+        return SimpleNamespace(returncode=2 if fault == "child" else 0,
+                               stdout=json.dumps(report).encode(), stderr=b"")
+    monkeypatch.setattr(install.subprocess, "run", child)
+    pins = dict(commit="a"*40, archive_sha256="b"*64, executable_receipt_sha256="c"*64)
+    def invoke():
+        if fault == "mixed":
+            return install._authenticated_prepared_dedicated_bridge(
+                tmp_path, commit="a"*40, archive_sha256="b"*64, recovery_pins={},
+                initial_action="stage", prepare=True)
+        if restoring:
+            return install._restore_authenticated_initial_dedicated_generation(
+                tmp_path, **pins, wal_sha256="0"*64 if fault == "wal" else hashlib.sha256(wal).hexdigest())
+        return install._stage_authenticated_initial_dedicated_generation(
+            tmp_path, **pins, proposal_sha256="0"*64 if fault == "proposal" else hashlib.sha256(proposal).hexdigest())
+    if fault in ("stage", "restore"):
+        assert invoke()["catalog_withdrawn"] is True
+    else:
+        with pytest.raises(stage.WorkerStageError):
+            invoke()
+    assert calls == (["child"] if fault in ("stage", "restore", "authority", "child") else [])
+
+
+@pytest.mark.parametrize("action", ["profile", "load", "boot", "boot-resume", "boot-rollover",
+                                    "storage", "runtime", "start", "finish"])
+@pytest.mark.parametrize("fault", ["none", "wal", "manifest", "child-report"])
+def test_initial_pending_installer_pins_phase_and_successor(monkeypatch, tmp_path, action, fault):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from repocache import server_native_v2_transaction_v1 as tx
+    from repocache import server_native_egress_candidate_v1 as egress
+    receipt = {"source_sha": "a"*40}
+    raw = stage._json_line(receipt)
+    marker = install._MARKER + "complete-" + hashlib.sha256(raw).hexdigest()
+    (tmp_path / marker).touch()
+    wal, manifest, boot = b"exact wal", b"exact manifest", b"exact boot"
+    locked = False
+    calls = []
+    @contextmanager
+    def lock(root, owner, **kw):
+        nonlocal locked
+        assert owner == 0 and kw == {"allow_native_package_parent_changes": True}
+        fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+        locked = True
+        try:
+            yield fd
+        finally:
+            locked = False
+            os.close(fd)
+    monkeypatch.setattr(install, "_locked", lock)
+    monkeypatch.setattr(install, "_native_distro", lambda: "almalinux")
+    monkeypatch.setattr(install, "require_native_host_preconditions", lambda: None)
+    monkeypatch.setattr(stage, "_authenticated_payloads", lambda *a, **kw:
+                        ({stage.CONFIG: install._BOOTSTRAP_CONFIG, stage.WORKER: b"worker"}, receipt))
+    monkeypatch.setattr(stage, "_audit_worker_files", lambda *a: None)
+    def read(fd, name, uid, limit):
+        assert locked
+        if name == install._RUNTIME_RECEIPT:
+            return raw
+        if name == marker:
+            return b""
+        if name == tx._OWNED_WAL:
+            return wal
+        if name == tx._OWNED_MANIFEST:
+            return manifest
+        assert name == tx._OWNED_WAL_TMP
+        return None
+    monkeypatch.setattr(install, "_read_file", read)
+    monkeypatch.setattr(egress, "_read_boot_egress_receipt", lambda *a:
+                        None if action in ("profile", "load", "boot") else boot)
+    monkeypatch.setattr(install, "_require_audited_native_package_for_activation", lambda *a, **kw: None)
+    monkeypatch.setattr(install, "_native_workspace_is_root_owned", lambda *a: True)
+    @contextmanager
+    def work(**kw):
+        yield str(tmp_path)
+    monkeypatch.setattr(install.tempfile, "TemporaryDirectory", work)
+    monkeypatch.setattr(install, "_candidate_native_identity", lambda *a: "nginx-core-0:1.2-3.x86_64")
+    monkeypatch.setattr(install, "_authenticate_candidate_rpm", lambda *a: ("e"*64, "f"*64))
+    pins = dict(executable_receipt_sha256="c"*64,
+                generation_manifest_sha256=hashlib.sha256(manifest).hexdigest(),
+                wal_sha256=hashlib.sha256(wal).hexdigest())
+    if action != "profile":
+        pins["profile_receipt_sha256"] = "d"*64
+    if action == "boot-rollover":
+        pins["previous_boot_receipt_sha256"] = hashlib.sha256(boot).hexdigest()
+    elif action in ("boot-resume", "storage", "runtime", "start", "finish"):
+        pins["boot_receipt_sha256"] = hashlib.sha256(boot).hexdigest()
+
+    def child(argv, **kw):
+        assert not locked
+        assert argv[-1] == install._DEDICATED_INITIAL_PENDING_CHILDREN[action]
+        compile(argv[-1], "<initial-pending-child>", "exec")
+        assert "transaction._installed_initial_dedicated_pending(pins, " + repr(action) + ")" in argv[-1]
+        data = json.loads(kw["input"])
+        assert all(data[key] == value for key, value in pins.items())
+        calls.append(action)
+        report = dict(pins, initial_resources_verified=True, catalog_withdrawn=True,
+                      recovery_required=True, authorizes_systemctl=False,
+                      authorizes_nginx_activation=False, authorizes_catalog_publication=False)
+        if action in ("profile", "load"):
+            report.update(status=("OWNED_DEDICATED_PROFILE_STAGED" if action == "profile"
+                                  else "OWNED_DEDICATED_PROFILE_LOADED"),
+                          receipt_sha256="d"*64, receipt_matches_owned_dropin=True,
+                          profile_loaded=True, daemon_reloaded=True)
+        elif action.startswith("boot"):
+            report.update(status="NATIVE_EGRESS_BOOT_RECEIPT_VERIFIED",
+                          receipt_sha256=(pins["boot_receipt_sha256"] if action == "boot-resume" else "1"*64))
+        elif action in ("storage", "runtime"):
+            report.update(status=("OWNED_DEDICATED_INITIAL_WAL_STORAGE_PREPARED" if action == "storage"
+                                  else "OWNED_DEDICATED_INITIAL_WAL_RUNTIME_PREPARED"))
+            report["storage"] = dict(selinux_enforcing_labels_verified=True)
+            if action == "runtime":
+                report["scratch_count"] = 5
+        elif action == "start":
+            report.update(status="OWNED_DEDICATED_INITIAL_WAL_START_OBSERVED",
+                          catalog_observed=False, service_storage_mounts_verified=True,
+                          service_scratch_mounts_verified=True, enablement_changed=False,
+                          main_pid=43, listener_inode=47)
+        else:
+            report.update(status="OWNED_DEDICATED_INITIAL_WAL_COMMIT_OBSERVED",
+                          generation=1, recovery_required=False, catalog_observed=True)
+        if fault == "child-report":
+            report["wal_sha256"] = "0"*64
+        return SimpleNamespace(returncode=0, stdout=json.dumps(report).encode(), stderr=b"")
+    monkeypatch.setattr(install.subprocess, "run", child)
+    monkeypatch.setattr(tx, "_closed_committed_dedicated_storage_report",
+                        lambda report: report == {"selinux_enforcing_labels_verified": True})
+    if fault == "wal":
+        pins["wal_sha256"] = "0"*64
+    elif fault == "manifest":
+        pins["generation_manifest_sha256"] = "0"*64
+    def invoke():
+        return install._authenticated_initial_dedicated_pending(
+            tmp_path, commit="a"*40, archive_sha256="b"*64, action=action, recovery_pins=pins)
+    if fault == "none":
+        assert invoke()["wal_sha256"] == pins["wal_sha256"]
+    else:
+        with pytest.raises(stage.WorkerStageError):
+            invoke()
+    assert calls == ([action] if fault in ("none", "child-report") else [])
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="requires disposable root-owned workspace")
+@pytest.mark.parametrize("fault", [
+    "none", "invalid-digest", "debian", "disabled", "alternate-priority",
+    "missing-enabled", "duplicate", "digest", "extra", "symlink", "writable",
+    "inventory-drift", "failed-command", "timeout", "label-drift", "workspace-drift",
+])
+def test_installer_compiled_policy_observation_is_readonly_and_exact(monkeypatch, fault):
+    from types import SimpleNamespace
+
+    raw = b"compiled module fixture"
+    digest = hashlib.sha256(raw).hexdigest()
+    calls = []
+    hosts = []
+    monkeypatch.setattr(install, "_native_distro",
+                        lambda: "debian" if fault == "debian" else "almalinux")
+    monkeypatch.setattr(install, "require_native_host_preconditions", lambda: hosts.append(True))
+
+    class Labels:
+        def __init__(self, distribution, *, dedicated):
+            assert (distribution, dedicated) == ("almalinux", True)
+
+        def finish(self):
+            if fault == "label-drift":
+                raise stage.WorkerStageError("fixture label drift")
+
+    monkeypatch.setattr(install, "_Labels", Labels)
+
+    def run(argv, **kw):
+        assert argv[0] == "/usr/sbin/semodule"
+        assert kw["timeout"] == 120 and kw["env"]["LC_ALL"] == "C"
+        args = argv[1:]
+        calls.append(args)
+        output = b""
+        if args == ("-lfull",):
+            output = b"100 base pp\n400 repocache_nginx pp\n"
+            if fault == "disabled":
+                output = output.rstrip() + b" disabled\n"
+            elif fault == "alternate-priority":
+                output += b"100 repocache_nginx pp\n"
+            elif fault == "duplicate":
+                output += b"400 repocache_nginx pp\n"
+            elif fault == "inventory-drift" and calls.count(args) > 1:
+                output += b"100 other pp\n"
+        elif args == ("-l",):
+            output = b"base\nrepocache_nginx\n" if fault != "missing-enabled" else b"base\n"
+        else:
+            assert args == ("-X", "400", "--hll", "-E", "repocache_nginx")
+            path = Path(kw["cwd"])
+            assert stat.S_IMODE(path.stat().st_mode) == 0o700 and not list(path.iterdir())
+            leaf = path / "repocache_nginx.pp"
+            if fault == "symlink":
+                leaf.symlink_to("/etc/passwd")
+            else:
+                leaf.write_bytes(b"wrong" if fault == "digest" else raw)
+                leaf.chmod(0o666 if fault == "writable" else 0o600)
+            if fault == "extra":
+                (path / "foreign").touch()
+            if fault == "workspace-drift":
+                path.chmod(0o755)
+        if fault == "timeout":
+            raise subprocess.TimeoutExpired(argv, 120)
+        return SimpleNamespace(stdout=output, returncode=1 if fault == "failed-command" else 0)
+
+    monkeypatch.setattr(install.subprocess, "run", run)
+    if fault == "none":
+        report = install._observe_fixed_dedicated_policy(digest)
+        assert report["stored_hll_verified"] is True
+        assert report["compiled_policy_sha256"] == digest and report["enabled_priority"] == 400
+        assert all(value is False for key, value in report.items()
+                   if key.startswith("authorizes_") or key in (
+                       "signed_source_compilation_verified", "runtime_selinux_policy_verified"))
+        assert hosts == [True, True]
+        assert calls == [("-lfull",), ("-l",),
+                         ("-X", "400", "--hll", "-E", "repocache_nginx"),
+                         ("-lfull",), ("-l",)]
+    else:
+        with pytest.raises(stage.WorkerStageError):
+            install._observe_fixed_dedicated_policy("bad" if fault == "invalid-digest" else digest)
+        if fault in ("invalid-digest", "debian"):
+            assert not calls and not hosts
+        elif fault in ("disabled", "alternate-priority", "missing-enabled", "duplicate"):
+            assert not any("-E" in args for args in calls)
+
+@pytest.mark.parametrize("fault", ["debian", "signature", "wrong-commit", "wrong-worker"])
+def test_compile_authenticated_policy_refuses_before_native_build(monkeypatch, tmp_path, fault):
+    from types import SimpleNamespace
+    calls = []
+    worker = b"exact signed worker fixture"
+    monkeypatch.setattr(install, "_native_distro",
+                        lambda: "debian" if fault == "debian" else "almalinux")
+    monkeypatch.setattr(install, "require_native_host_preconditions", lambda: None)
+    monkeypatch.setattr(install, "_Labels", lambda *args, **kw: SimpleNamespace(finish=lambda: None))
+
+    def authenticate(assets, *, commit, archive_sha256, system):
+        assert (assets, commit, archive_sha256, system) == (tmp_path, "a"*40, "b"*64, None)
+        calls.append("signature")
+        if fault == "signature":
+            raise stage.WorkerStageError("fixture unsigned release")
+        return {stage.WORKER: worker}, {
+            "source_sha": "c"*40 if fault == "wrong-commit" else commit,
+            "archive_sha256": archive_sha256,
+            "files": {stage.WORKER: "0"*64 if fault == "wrong-worker" else hashlib.sha256(worker).hexdigest()},
+        }
+
+    monkeypatch.setattr(stage, "_authenticated_payloads", authenticate)
+    monkeypatch.setattr(stage, "_signed_owned_policy_from_worker",
+                        lambda *args: pytest.fail("policy parser reached without signed identity"))
+    monkeypatch.setattr(install.subprocess, "run", lambda *args, **kw: pytest.fail("native build reached"))
+    with pytest.raises(stage.WorkerStageError):
+        install._compile_authenticated_fixed_dedicated_policy(
+            tmp_path, commit="a"*40, archive_sha256="b"*64)
+    assert calls == ([] if fault == "debian" else ["signature"])
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="requires disposable root-owned workspace")
+@pytest.mark.parametrize("fault", [
+    "none", "missing-tool", "tool-symlink", "tool-writable", "tool-drift",
+    "source-drift", "output-symlink", "output-hardlink", "output-writable",
+    "output-empty", "workspace-drift", "failed-build", "timeout", "label-drift",
+])
+def test_authenticated_policy_compilation_pins_native_inputs_and_output(monkeypatch, tmp_path, fault):
+    from types import SimpleNamespace
+    worker = b"exact signed worker fixture"
+    raw = b"policy_module(repocache_nginx, 1.0.0)\n"
+    compiled = b"exact compiled module fixture"
+    root = tmp_path / "native-root"
+    make = root / "usr/bin/make"
+    makefile = root / "usr/share/selinux/devel/Makefile"
+    for leaf in (make, makefile):
+        leaf.parent.mkdir(parents=True, exist_ok=True)
+        leaf.write_bytes(b"native build input")
+        leaf.chmod(0o644)
+    make.chmod(0o755)
+    if fault == "missing-tool":
+        makefile.unlink()
+    if fault == "tool-symlink":
+        makefile.unlink()
+        makefile.symlink_to(make)
+    if fault == "tool-writable":
+        makefile.chmod(0o666)
+    original_open = os.open
+
+    def open_root(name, flags, mode=0o777, *, dir_fd=None):
+        if name == "/" and dir_fd is None:
+            name = root
+        return original_open(name, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(install.os, "open", open_root)
+    monkeypatch.setattr(install, "_native_distro", lambda: "almalinux")
+    monkeypatch.setattr(install, "require_native_host_preconditions", lambda: None)
+
+    def finish():
+        if fault == "label-drift":
+            raise stage.WorkerStageError("fixture label drift")
+
+    monkeypatch.setattr(install, "_Labels", lambda *args, **kw: SimpleNamespace(finish=finish))
+    monkeypatch.setattr(stage, "_authenticated_payloads", lambda *args, **kw: (
+        {stage.WORKER: worker}, {"source_sha": "a"*40, "archive_sha256": "b"*64,
+                                "files": {stage.WORKER: hashlib.sha256(worker).hexdigest()}}))
+    monkeypatch.setattr(stage, "_signed_owned_policy_from_worker",
+                        lambda value: {"policy_bytes": raw} if value == worker else pytest.fail("wrong worker"))
+    calls = []
+
+    def run(argv, **kw):
+        place = Path(kw["cwd"])
+        assert argv == ("/usr/bin/make", "-C", str(place), "-f",
+                        "/usr/share/selinux/devel/Makefile", "repocache_nginx.pp")
+        assert kw["env"] == {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"}
+        assert kw["timeout"] == 120
+        source = place / "repocache_nginx.te"
+        output = place / "repocache_nginx.pp"
+        assert source.read_bytes() == raw and stat.S_IMODE(source.stat().st_mode) == 0o600
+        assert not output.exists() and stat.S_IMODE(place.stat().st_mode) == 0o700
+        calls.append(place)
+        if fault == "tool-drift":
+            makefile.write_bytes(b"changed")
+        if fault == "source-drift":
+            source.write_bytes(raw + b"\n")
+        if fault == "workspace-drift":
+            place.chmod(0o755)
+        if fault == "output-symlink":
+            output.symlink_to(source)
+        elif fault == "output-hardlink":
+            os.link(source, output)
+        else:
+            output.write_bytes(b"" if fault == "output-empty" else compiled)
+            output.chmod(0o666 if fault == "output-writable" else 0o600)
+        if fault == "timeout":
+            raise subprocess.TimeoutExpired(argv, 120)
+        return SimpleNamespace(returncode=1 if fault == "failed-build" else 0)
+
+    monkeypatch.setattr(install.subprocess, "run", run)
+    if fault == "none":
+        value, report = install._compile_authenticated_fixed_dedicated_policy(
+            tmp_path, commit="a"*40, archive_sha256="b"*64)
+        assert value == compiled
+        assert report["policy_sha256"] == hashlib.sha256(raw).hexdigest()
+        assert report["compiled_policy_sha256"] == hashlib.sha256(compiled).hexdigest()
+        assert report["signed_source_compilation_observed"] is True
+        assert all(value is False for key, value in report.items()
+                   if key.startswith("authorizes_") or key in (
+                       "runtime_selinux_policy_verified", "native_toolchain_provenance_verified"))
+    else:
+        with pytest.raises(stage.WorkerStageError):
+            install._compile_authenticated_fixed_dedicated_policy(
+                tmp_path, commit="a"*40, archive_sha256="b"*64)
+    if fault in ("missing-tool", "tool-symlink", "tool-writable"):
+        assert not calls
+    else:
+        assert len(calls) == 1 and not calls[0].exists()
+
+@pytest.mark.parametrize("package,identity,valid", [
+    ("nginx-core", "nginx-core-0:1.28.0-2.el10.x86_64", True),
+    ("make", "make-1:4.4.1-9.el10.x86_64", True),
+    ("selinux-policy-devel", "selinux-policy-devel-0:42.1-1.el10.noarch", True),
+    ("policycoreutils", "policycoreutils-0:3.8-1.el10.x86_64", True),
+    ("selinux-policy-devel", "selinux-policy-devel-0:42.1-1.el10.x86_64", False),
+    ("make", "make-0:4.4-1.el10.x86_64\nmake-0:4.5-1.el10.x86_64", False),
+    ("make", "--installroot=/tmp", False),
+    ("policycoreutils", "foreign-0:1-1.x86_64", False),
+    ("foreign", "foreign-0:1-1.x86_64", False),
+])
+def test_fixed_native_rpm_identity_and_member_scope(package, identity, valid):
+    if valid:
+        install._fixed_alma_rpm_identity(package, identity)
+        member = install._FIXED_ALMA_RPM_MEMBERS[package][0]
+        assert install._fixed_alma_rpm_member_digest(
+            package, "/foreign\t" + "f"*64 + "\n" + member + "\t" + "a"*64) == "a"*64
+    else:
+        with pytest.raises(stage.WorkerStageError):
+            install._fixed_alma_rpm_identity(package, identity)
+
+
+@pytest.mark.parametrize("fault", ["missing", "duplicate", "bad-digest", "foreign-path", "oversize"])
+def test_fixed_native_rpm_member_refuses_ambiguous_or_foreign_digest(fault):
+    member = "/usr/share/selinux/devel/Makefile\t" + "a"*64
+    rows = {
+        "missing": "", "duplicate": member + "\n" + member,
+        "bad-digest": member[:-1] + "G",
+        "foreign-path": "/tmp" + member, "oversize": member + "\n" + "x"*(4*1024*1024),
+    }[fault]
+    with pytest.raises(stage.WorkerStageError):
+        install._fixed_alma_rpm_member_digest("selinux-policy-devel", rows)
+
+
+@pytest.mark.parametrize("fault", ["partial", "foreign", "invalid-identity"])
+def test_native_rpm_candidate_scope_refuses_before_metadata_refresh(monkeypatch, tmp_path, fault):
+    from repocache import server_native_package_trust_v1 as trust
+    monkeypatch.setattr(trust, "_dnf_commands", lambda *args: pytest.fail("DNF reached"))
+    identities = {"make": "make-0:4.4-1.x86_64"} if fault == "partial" else (
+        {"foreign": "foreign-0:1-1.x86_64"} if fault == "foreign" else
+        {"nginx-core": "nginx-core-0:1-1.noarch"})
+    with pytest.raises(stage.WorkerStageError):
+        install._authenticate_fixed_alma_rpm_members(tmp_path, identities)
+
+
+@pytest.mark.parametrize("fault", ["none", "debian", "owner", "owner-drift", "file-drift",
+                                   "digest", "missing-package", "signature"])
+def test_fixed_policy_native_tool_proof_binds_all_three_members(monkeypatch, tmp_path, fault):
+    from types import SimpleNamespace
+    packages = install._FIXED_POLICY_PACKAGES
+    identities = {package: package + "-0:1.0-1.el10." + install._FIXED_ALMA_RPM_MEMBERS[package][1]
+                  for package in packages}
+    observed = {package: ((1, number), hashlib.sha256(package.encode()).hexdigest())
+                for number, package in enumerate(sorted(packages))}
+    calls = []
+    snapshots = []
+    monkeypatch.setattr(install, "_native_distro", lambda: "debian" if fault == "debian" else "almalinux")
+    monkeypatch.setattr(install, "require_native_host_preconditions", lambda: None)
+    monkeypatch.setattr(install, "_Labels", lambda *args, **kw: SimpleNamespace(finish=lambda: None))
+    monkeypatch.setattr(install, "_native_workspace_is_root_owned", lambda work: True)
+
+    def snapshot():
+        snapshots.append(True)
+        if fault == "file-drift" and len(snapshots) > 1:
+            return {**observed, "make": ((1, 999), observed["make"][1])}
+        return observed.copy()
+
+    monkeypatch.setattr(install, "_fixed_policy_tool_snapshot", snapshot)
+
+    def command(argv, work):
+        assert argv[:2] == ["/usr/bin/rpm", "-qf"] and len(argv) == 4
+        package = next(key for key in packages if install._FIXED_ALMA_RPM_MEMBERS[key][0] == argv[-1])
+        calls.append(package)
+        if fault == "owner" or (fault == "owner-drift" and len(calls) > 3):
+            return "foreign-0:1-1.x86_64"
+        return identities[package]
+
+    monkeypatch.setattr(install, "_native_package_command", command)
+    authenticated = []
+
+    def authenticate(work, pins):
+        assert pins == identities
+        authenticated.append(True)
+        if fault == "signature":
+            raise stage.WorkerStageError("fixture signature refusal")
+        result = {package: ("a"*64, observed[package][1]) for package in packages}
+        if fault == "digest":
+            result["make"] = ("a"*64, "0"*64)
+        if fault == "missing-package":
+            del result["make"]
+        return result
+
+    monkeypatch.setattr(install, "_authenticate_fixed_alma_rpm_members", authenticate)
+    if fault == "none":
+        report = install._authenticate_fixed_policy_tools()
+        assert report["native_fixed_tool_payloads_verified"] is True
+        assert not report["native_toolchain_provenance_verified"]
+        assert all(value is False for key, value in report.items() if key.startswith("authorizes_"))
+        assert set(report["packages"]) == packages
+        assert len(calls) == 6 and len(snapshots) == 2 and authenticated == [True]
+    else:
+        with pytest.raises(stage.WorkerStageError):
+            install._authenticate_fixed_policy_tools()
+        if fault == "debian":
+            assert not calls and not snapshots and not authenticated
+        elif fault == "owner":
+            assert len(calls) == 1 and not authenticated
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="requires disposable root-owned workspace")
+@pytest.mark.parametrize("scope,fault", [
+    ("nginx", "none"), ("policy", "none"), ("policy", "foreign-url"),
+    ("policy", "duplicate-url"), ("policy", "signature"), ("policy", "payload-changed"),
+    ("policy", "identity"), ("policy", "member"), ("policy", "algorithm"),
+    ("policy", "trust-anchor"),
+])
+def test_fixed_signed_rpm_member_verifier_keeps_native_trust_boundary(monkeypatch, tmp_path, scope, fault):
+    from repocache import server_native_package_trust_v1 as trust
+    packages = {"nginx-core"} if scope == "nginx" else install._FIXED_POLICY_PACKAGES
+    identities = {p: p + "-0:1.0-1.el10." + install._FIXED_ALMA_RPM_MEMBERS[p][1] for p in packages}
+    work = tmp_path / "work"
+    work.mkdir(mode=0o700)
+    reference = tmp_path / "native-rpmdb"
+    reference.mkdir(mode=0o700)
+    query = ["dnf", "repoquery", "--available", "--queryformat=%{name}", "nginx"]
+    monkeypatch.setattr(trust, "_dnf_commands", lambda place: (["dnf", "makecache"], query))
+    monkeypatch.setattr(install, "_trusted_key", lambda key: fault != "trust-anchor")
+    original_open = os.open
+    original_temp = install.tempfile.TemporaryDirectory
+
+    def open_reference(name, flags, mode=0o777, *, dir_fd=None):
+        if name == "/usr/lib/sysimage/rpm" and dir_fd is None:
+            name = reference
+        return original_open(name, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(install.os, "open", open_reference)
+    monkeypatch.setattr(install.tempfile, "TemporaryDirectory",
+                        lambda **kw: original_temp(prefix=kw["prefix"], dir=tmp_path))
+    label = b"system_u:object_r:rpm_var_lib_t:s0\0"
+
+    def get_label(fd, name):
+        assert name == "security.selinux" and stat.S_ISDIR(os.fstat(fd).st_mode)
+        return label
+
+    def set_label(fd, name, raw):
+        assert name == "security.selinux" and raw == label
+        assert os.fstat(fd).st_ino != reference.stat().st_ino
+
+    monkeypatch.setattr(install.os, "getxattr", get_label)
+    monkeypatch.setattr(install.os, "setxattr", set_label)
+    calls = []
+    dbs = set()
+
+    def command(argv, place):
+        assert place == work
+        calls.append(tuple(argv))
+        if argv == ["dnf", "makecache"]:
+            return ""
+        if argv[:2] == ["dnf", "-q"]:
+            assert argv[2:5] == ["repoquery", "--available", "--location"]
+            package = next(p for p in packages if identities[p] == argv[-1])
+            url = ("https://repo.almalinux.org/almalinux/10/BaseOS/x86_64/os/Packages/"
+                   + package + "-1.0-1.el10." + install._FIXED_ALMA_RPM_MEMBERS[package][1] + ".rpm")
+            if fault == "foreign-url":
+                return url.replace("repo.almalinux.org", "untrusted.example.invalid")
+            return url + "\n" + url.replace("BaseOS", "AppStream") if fault == "duplicate-url" else url
+        if argv[0] == "/usr/bin/curl":
+            assert argv[1:9] == ["--fail", "--silent", "--show-error", "--proto", "=https", "--tlsv1.2",
+                                  "--max-filesize", "33554432"]
+            assert "--location" not in argv
+            leaf = Path(argv[argv.index("--output") + 1])
+            assert leaf.parent == work and not leaf.exists() and leaf.stem in packages
+            leaf.write_bytes(("fixture RPM " + leaf.stem).encode())
+            leaf.chmod(0o600)
+            return ""
+        assert argv[0] in ("/usr/bin/rpm", "/usr/bin/rpmkeys") and argv[1] == "--dbpath"
+        db = Path(argv[2])
+        assert db.parent == tmp_path and db.name.startswith("repocache-native-executable-rpmdb-")
+        dbs.add(db)
+        if argv[3] == "--initdb":
+            assert argv[0] == "/usr/bin/rpm" and len(argv) == 4
+            return ""
+        if argv[3] == "--import":
+            assert argv[0] == "/usr/bin/rpm" and argv[4] == install._NATIVE["almalinux"][2]
+            return ""
+        payload = Path(argv[-1])
+        package = payload.stem
+        assert payload.parent == work and package in packages
+        if argv[0] == "/usr/bin/rpmkeys":
+            assert argv[3] == "--checksig"
+            if fault == "payload-changed":
+                payload.write_bytes(b"changed after signature")
+            return str(payload) + (": BAD" if fault == "signature" else ": digests signatures OK")
+        assert argv[3] == "-qp"
+        fmt = argv[4]
+        if fmt == "--queryformat=%{NAME}-%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}":
+            return "foreign-0:1-1.x86_64" if fault == "identity" else identities[package]
+        if fmt == "--queryformat=%{FILEDIGESTALGO}":
+            return "1" if fault == "algorithm" else "8"
+        pytest.fail("unexpected general native command")
+
+    def inventory(package, place, db, payload):
+        assert place == work and payload == work / (package + ".rpm")
+        assert db in dbs
+        assert ("/usr/bin/rpmkeys", "--dbpath", str(db), "--checksig", str(payload)) in calls
+        member = install._FIXED_ALMA_RPM_MEMBERS[package][0]
+        return "/foreign\t" + "a"*64 if fault == "member" else member + "\t" + "b"*64
+
+    monkeypatch.setattr(install, "_query_fixed_alma_rpm_file_inventory", inventory)
+    monkeypatch.setattr(install, "_native_package_command", command)
+    if fault == "none":
+        if scope == "nginx":
+            report = {"nginx-core": install._authenticate_candidate_rpm(work, identities["nginx-core"])}
+        else:
+            report = install._authenticate_fixed_alma_rpm_members(work, identities)
+        assert report == {p: (hashlib.sha256(("fixture RPM " + p).encode()).hexdigest(), "b"*64)
+                          for p in packages}
+        assert len(dbs) == 1
+        assert calls.count(("dnf", "makecache")) == 1
+        assert len([call for call in calls if call[0] == "/usr/bin/rpmkeys"]) == len(packages)
+    else:
+        with pytest.raises(stage.WorkerStageError):
+            install._authenticate_fixed_alma_rpm_members(work, identities)
+        if fault in ("foreign-url", "duplicate-url", "trust-anchor"):
+            assert not any(call[0] == "/usr/bin/curl" for call in calls)
+    assert not any(db.exists() for db in dbs)
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="requires disposable root-owned tool files")
+@pytest.mark.parametrize("fault", ["none", "symlink", "hardlink", "mode", "ancestor", "replacement"])
+def test_fixed_policy_tool_snapshot_retains_native_path_identities(monkeypatch, tmp_path, fault):
+    root = tmp_path / "native-root"
+    for package in install._FIXED_POLICY_PACKAGES:
+        name, _, mode = install._FIXED_ALMA_RPM_MEMBERS[package]
+        leaf = root / name.lstrip("/")
+        leaf.parent.mkdir(parents=True, exist_ok=True)
+        leaf.write_bytes(package.encode())
+        leaf.chmod(mode)
+    target = root / "usr/bin/make"
+    other = root / "foreign"
+    other.write_bytes(b"make")
+    other.chmod(0o755)
+    if fault == "symlink":
+        target.unlink()
+        target.symlink_to(other)
+    elif fault == "hardlink":
+        target.unlink()
+        os.link(other, target)
+    elif fault == "mode":
+        target.chmod(0o775)
+    elif fault == "ancestor":
+        target.parent.chmod(0o777)
+    original_open = os.open
+
+    def open_root(name, flags, mode=0o777, *, dir_fd=None):
+        if name == "/" and dir_fd is None:
+            name = root
+        return original_open(name, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(install.os, "open", open_root)
+    if fault == "replacement":
+        original_read = stage._asset_bytes
+
+        def replace(directory, name, *args, **kw):
+            data = original_read(directory, name, *args, **kw)
+            if name == "make":
+                target.rename(target.with_name("old-make"))
+                target.write_bytes(data)
+                target.chmod(0o755)
+            return data
+
+        monkeypatch.setattr(stage, "_asset_bytes", replace)
+    if fault == "none":
+        report = install._fixed_policy_tool_snapshot()
+        assert set(report) == install._FIXED_POLICY_PACKAGES
+        for package, (identity, digest) in report.items():
+            leaf = root / install._FIXED_ALMA_RPM_MEMBERS[package][0].lstrip("/")
+            assert identity[:2] == (leaf.stat().st_dev, leaf.stat().st_ino)
+            assert digest == hashlib.sha256(package.encode()).hexdigest()
+    else:
+        with pytest.raises(stage.WorkerStageError):
+            install._fixed_policy_tool_snapshot()
+
+@pytest.mark.parametrize("package,fault", [
+    ("nginx-core", "none"), ("selinux-policy-devel", "large"),
+    ("make", "large"), ("selinux-policy-devel", "oversize"),
+    ("selinux-policy-devel", "exit"), ("selinux-policy-devel", "stderr"),
+    ("selinux-policy-devel", "encoding"), ("selinux-policy-devel", "timeout"),
+    ("selinux-policy-devel", "path"), ("foreign", "scope"),
+])
+def test_fixed_rpm_file_inventory_bounds_large_signed_development_manifest(monkeypatch, tmp_path, package, fault):
+    from types import SimpleNamespace
+    work = tmp_path / "work"
+    work.mkdir()
+    db = tmp_path / "db"
+    db.mkdir()
+    payload = work / (package + ".rpm")
+    if fault == "path":
+        payload = work / "foreign.rpm"
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append(argv)
+        assert argv == ["/usr/bin/rpm", "--dbpath", str(db), "-qp",
+                        r"--queryformat=[%{FILENAMES}\t%{FILEDIGESTS}\n]", str(payload)]
+        assert kwargs["cwd"] == str(work) and kwargs["timeout"] == 120
+        assert kwargs["stdin"] == subprocess.DEVNULL and kwargs["check"] is False
+        if fault == "timeout":
+            raise subprocess.TimeoutExpired(argv, 120)
+        member = install._FIXED_ALMA_RPM_MEMBERS[package][0]
+        raw = (member + "\t" + "a"*64 + "\n").encode()
+        if fault in ("large", "oversize"):
+            count = 1200 if fault == "large" else 60000
+            raw = b"".join(("/usr/share/selinux/devel/interfaces/fixture-" + str(i)
+                            + ".if\t" + "b"*64 + "\n").encode() for i in range(count)) + raw
+        elif fault == "encoding":
+            raw = b"\xff"
+        kwargs["stdout"].write(raw)
+        if fault == "stderr":
+            kwargs["stderr"].write(b"unexpected RPM diagnostic")
+        return SimpleNamespace(returncode=1 if fault == "exit" else 0)
+
+    monkeypatch.setattr(install.subprocess, "run", run)
+    if fault == "none" or (fault == "large" and package == "selinux-policy-devel"):
+        rows = install._query_fixed_alma_rpm_file_inventory(package, work, db, payload)
+        assert install._fixed_alma_rpm_member_digest(package, rows) == "a"*64
+        assert (len(rows) > 65536) is (fault == "large")
+    else:
+        with pytest.raises(stage.WorkerStageError):
+            install._query_fixed_alma_rpm_file_inventory(package, work, db, payload)
+        if fault in ("path", "scope"):
+            assert not calls
+    assert not list(work.iterdir())

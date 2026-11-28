@@ -29,6 +29,8 @@ on:
       - 'scripts/smoke_server_fixed_nginx_syntax.py'
       - 'scripts/ci_v06_root_worker_target_guard.py'
       - 'scripts/install_native_root_worker.py'
+      - 'src/repocache/server_native_nginx_executable_v1.py'
+      - 'tests/test_server_native_nginx_executable_v1.py'
       - 'src/repocache/server_preflight_v1.py'
       - 'tests/test_server_root_control_units_v1.py'
       - 'docs/examples/systemd/repocache-control.socket'
@@ -49,6 +51,8 @@ on:
       - 'src/repocache/server_root_control_pinned_tls_pair_v1.py'
       - 'scripts/ci_v06_root_worker_target_guard.py'
       - 'scripts/install_native_root_worker.py'
+      - 'src/repocache/server_native_nginx_executable_v1.py'
+      - 'tests/test_server_native_nginx_executable_v1.py'
       - 'src/repocache/server_preflight_v1.py'
       - 'tests/test_server_root_control_protocol_v1.py'
       - 'tests/test_server_root_control_host_preflight_v1.py'
@@ -111,6 +115,15 @@ jobs:
             tests/test_server_native_root_control_entrypoint_v1.py \
             tests/test_server_native_root_control_client_v1.py \
             tests/test_server_root_control_pinned_tls_pair_v1.py
+          # The transaction module is root-only and ordinary Python CI skips
+          # it. Execute the new exact directory/mount/ownership regressions
+          # in both disposable native containers, with no actual host effect.
+          python3 -B -m pytest -q -rs \
+            tests/test_server_native_v2_transaction_v1.py \
+            -k 'debian_managed_context_explicit_private_temp_paths or debian_runtime_scratch_is_fixed_and_safe or owned_context_native_probe_requires_exact_files_and_claim'
+          # Descriptor-bound executable placement and synthetic SELinux
+          # label failures require root; this is not enforcing host evidence.
+          python3 -B -m pytest -q -rs tests/test_server_native_nginx_executable_v1.py
           # Distro native NGINX installed only in this disposable CI image.
           REPOCACHE_NATIVE_TEST_CONTAINER=CONFIRMED_DISPOSABLE_DOCKER_ONLY \
             python3 -B scripts/smoke_server_fixed_nginx_syntax.py

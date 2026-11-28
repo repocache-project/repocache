@@ -27,17 +27,23 @@ MODULES = (
     "server_locked_manifest_reconcile_v1",
     "server_managed_include_fd_v1",
     "server_managed_include_v1",
+    "server_native_egress_candidate_v1",
+    "server_native_installed_storage_v1",
     "server_native_nginx_effective_unit_v1",
+    "server_native_nginx_executable_v1",
     "server_native_nginx_package_journal_v1",
     "server_native_package_effects_observe_v1",
     "server_native_nginx_service_unit_v1",
     "server_native_root_control_entrypoint_v1",
     "server_native_v2_transaction_v1",
+    "server_nginx_metrics_bundle_join_v1",
+    "server_nginx_metrics_candidate_v1",
     "server_nginx_pin_render_v1",
     "server_nginx_repository_bundle_v1",
     "server_nginx_tls_listener_candidate_v1",
     "server_preflight_v1",
     "server_proposed_state_v2_store",
+    "server_protected_namespace_bootstrap_v1",
     "server_protected_state_inspect_v1",
     "server_protected_state_store_v1",
     "server_repository_plan_v1",
@@ -74,6 +80,14 @@ def build(source: Path) -> bytes:
         if not 1 <= len(unit_bytes) <= 16384:
             raise ValueError("Invalid dedicated NGINX unit size")
         archive.writestr(zipfile.ZipInfo("repocache/_signed-owned-nginx.service"), unit_bytes)
+        policy = source / "docs" / "examples" / "selinux" / "repocache-nginx.te"
+        if (any(parent.is_symlink() for parent in (policy, policy.parent,
+                policy.parent.parent, policy.parent.parent.parent)) or not policy.is_file()):
+            raise ValueError("Missing or unsafe dedicated SELinux policy source")
+        policy_bytes = policy.read_bytes()
+        if not 1 <= len(policy_bytes) <= 16384:
+            raise ValueError("Invalid dedicated SELinux policy size")
+        archive.writestr(zipfile.ZipInfo("repocache/_signed-owned-nginx.te"), policy_bytes)
         for module in MODULES:
             filename = module + ".py"
             path = package / filename

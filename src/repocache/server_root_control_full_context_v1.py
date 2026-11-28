@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import select
 import stat
 import subprocess
@@ -23,10 +24,11 @@ from repocache.server_root_control_native_syntax_v1 import (
 )
 
 _COMMAND = (_NGINX, "-T", "-c", _CONF)
-_OWNED_MAIN_PATH = "/etc/nginx/repocache.conf"
-_OWNED_INCLUDE_PATH = "/etc/nginx/repocache-managed.conf"
+_OWNED_MAIN_PATH = "/etc/nginx/repocache.d/repocache.conf"
+_OWNED_INCLUDE_PATH = "/etc/nginx/repocache.d/repocache-managed.conf"
 _OWNED_COMMAND = (_NGINX, "-T", "-c", _OWNED_MAIN_PATH)
 _MAX_DUMP_BYTES = 4 * 1024 * 1024
+_MAX_DIAGNOSTIC_BYTES = 16 * 1024
 _TIMEOUT_SECONDS = 10
 _ENV = {"PATH": "/usr/sbin:/usr/bin:/bin", "LC_ALL": "C"}
 
@@ -43,7 +45,7 @@ def _trusted_owned_fixed_files(managed: bool) -> tuple:
     """Pin fixed private files, never infer their ownership from metadata alone."""
     try:
         parents = []
-        for path in _PARENTS:
+        for path in (*_PARENTS, "/etc/nginx/repocache.d"):
             info = os.lstat(path)
             if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0
                     or info.st_gid != 0 or stat.S_IMODE(info.st_mode) & 0o022):
@@ -75,6 +77,51 @@ def _trusted_owned_fixed_files(managed: bool) -> tuple:
         raise
     except (OSError, ValueError, TypeError, AttributeError):
         _deny("FIXED_FILES_UNVERIFIED")
+
+
+# NGINX -T also initializes compiled-in temporary directories. Keep these
+# observations private and classify only a closed, distro-defined path set.
+# Never emit the child diagnostic, its arguments, TLS paths or arbitrary text.
+_OWNED_PROBE_FAILURE_CODES = frozenset({
+    "OWNED_CONTEXT_VENDOR_TEMP_READ_ONLY",
+    "OWNED_CONTEXT_VENDOR_TEMP_PERMISSION",
+    "OWNED_CONTEXT_VENDOR_TEMP_MISSING",
+    "OWNED_CONTEXT_CHECK_PERMISSION",
+    "OWNED_CONTEXT_CHECK_READ_ONLY",
+    "OWNED_CONTEXT_DIAGNOSTIC_LIMIT",
+})
+_VENDOR_TEMP_PATHS = tuple(
+    b"/var/lib/nginx/" + name for name in
+    (b"body", b"proxy", b"fastcgi", b"scgi", b"uwsgi")
+) + tuple(
+    b"/var/cache/nginx/" + name for name in
+    (b"client_temp", b"proxy_temp", b"fastcgi_temp", b"scgi_temp", b"uwsgi_temp")
+)
+
+
+def _owned_probe_failure(stderr: bytes) -> str:
+    """Reduce bounded native failures to static categories, never raw text."""
+    for line in stderr.splitlines():
+        if any(
+            operation + b' "' + path + b'" failed' in line
+            for operation in (b"mkdir()", b"chown()", b"chmod()")
+            for path in _VENDOR_TEMP_PATHS
+        ) or any(
+            re.search(rb'chown\("' + re.escape(path) + rb'", [0-9]{1,10}\) failed', line)
+            for path in _VENDOR_TEMP_PATHS
+        ):
+            for errno, code in (
+                (b"(30: Read-only file system)", "OWNED_CONTEXT_VENDOR_TEMP_READ_ONLY"),
+                (b"(13: Permission denied)", "OWNED_CONTEXT_VENDOR_TEMP_PERMISSION"),
+                (b"(2: No such file or directory)", "OWNED_CONTEXT_VENDOR_TEMP_MISSING"),
+            ):
+                if errno in line:
+                    return code
+    if b"(13: Permission denied)" in stderr:
+        return "OWNED_CONTEXT_CHECK_PERMISSION"
+    if b"(30: Read-only file system)" in stderr:
+        return "OWNED_CONTEXT_CHECK_READ_ONLY"
+    return "CHECK_FAILED"
 
 
 def _capture_default_nginx_dump_private() -> bytes:
@@ -111,7 +158,7 @@ def _capture_fixed_nginx_dump_private(*, owned: bool, managed: bool) -> bytes:
         proc = subprocess.Popen(
             _OWNED_COMMAND if owned else _COMMAND, shell=False,
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, cwd="/", env=_ENV,
+            stderr=subprocess.PIPE if owned else subprocess.DEVNULL, cwd="/", env=_ENV,
             start_new_session=True, close_fds=True,
         )
     except (OSError, ValueError, TypeError, subprocess.SubprocessError):
@@ -121,33 +168,47 @@ def _capture_fixed_nginx_dump_private(*, owned: bool, managed: bool) -> bytes:
             _deny("OUTPUT_UNAVAILABLE")
         deadline = time.monotonic() + _TIMEOUT_SECONDS
         output: list[bytes] = []
+        diagnostic: list[bytes] = []
         length = 0
-        while True:
+        diagnostic_length = 0
+        streams = [proc.stdout]
+        if owned:
+            if proc.stderr is None:
+                _deny("OUTPUT_UNAVAILABLE")
+            streams.append(proc.stderr)
+        # Drain both pipes under a single deadline and independent byte
+        # limits; a blocked stderr cannot deadlock the stdout reader.
+        while streams:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 _deny("CHECK_TIMEOUT")
             try:
-                ready, _, _ = select.select(
-                    [proc.stdout], [], [], remaining,
-                )
-                if ready:
-                    chunk = os.read(
-                        proc.stdout.fileno(),
-                        min(65536, _MAX_DUMP_BYTES + 1 - length),
-                    )
+                ready, _, _ = select.select(streams, [], [], remaining)
             except (OSError, ValueError, TypeError):
                 _deny("OUTPUT_UNAVAILABLE")
-            # Deny AFTER the OS-only exception boundary: our own
-            # FixedNginxFullContextError subclasses ValueError and must
-            # not be rewritten as a misleading output failure.
             if not ready:
                 _deny("CHECK_TIMEOUT")
-            if not chunk:
-                break
-            length += len(chunk)
-            if length > _MAX_DUMP_BYTES:
-                _deny("OUTPUT_TOO_LARGE")
-            output.append(chunk)
+            for stream in ready:
+                is_output = stream is proc.stdout
+                budget = (_MAX_DUMP_BYTES + 1 - length if is_output else
+                          _MAX_DIAGNOSTIC_BYTES + 1 - diagnostic_length)
+                try:
+                    chunk = os.read(stream.fileno(), min(65536, budget))
+                except (OSError, ValueError, TypeError):
+                    _deny("OUTPUT_UNAVAILABLE")
+                if not chunk:
+                    streams.remove(stream)
+                    continue
+                if is_output:
+                    length += len(chunk)
+                    if length > _MAX_DUMP_BYTES:
+                        _deny("OUTPUT_TOO_LARGE")
+                    output.append(chunk)
+                else:
+                    diagnostic_length += len(chunk)
+                    if diagnostic_length > _MAX_DIAGNOSTIC_BYTES:
+                        _deny("OWNED_CONTEXT_DIAGNOSTIC_LIMIT")
+                    diagnostic.append(chunk)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             _deny("CHECK_TIMEOUT")
@@ -156,7 +217,7 @@ def _capture_fixed_nginx_dump_private(*, owned: bool, managed: bool) -> bytes:
         except subprocess.TimeoutExpired:
             _deny("CHECK_TIMEOUT")
         if type(return_code) is not int or return_code != 0 or not length:
-            _deny("CHECK_FAILED")
+            _deny(_owned_probe_failure(b"".join(diagnostic)) if owned else "CHECK_FAILED")
         try:
             observed_after = observe()
         except (FixedNginxSyntaxError, FixedNginxFullContextError):
@@ -179,6 +240,8 @@ def _capture_fixed_nginx_dump_private(*, owned: bool, managed: bool) -> bytes:
             pass
         if proc.stdout is not None:
             proc.stdout.close()
+        if proc.stderr is not None:
+            proc.stderr.close()
 
 
 def inspect_installed_default_nginx_full_context_only() -> dict[str, Any]:

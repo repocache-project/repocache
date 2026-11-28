@@ -9,10 +9,12 @@ from __future__ import annotations
 import collections
 import copy
 import hashlib
+import http.client
 from contextlib import contextmanager
 import json
 import os
 import shutil
+import socket
 import ssl
 import stat
 import subprocess
@@ -48,6 +50,8 @@ RECOVERY_READY_APT_PATH = "/apt/dists/trixie/RecoveryReadiness"
 READY_APT_BYTES = b"DISPOSABLE-APT-ROUTE-READINESS\n"
 HELD_DNF_PATH = "/dnf/repodata/held-transfer"
 HELD_DNF_BYTES = b"NONROOT-NGINX-INFLIGHT-TRANSFER-SURVIVES-WITHDRAWAL\n"
+LARGE_APT_PATH = "/apt/pool/main/r/repocache-buffer-fixture.deb"
+LARGE_APT_BYTES = (b"REPOCACHE temporary storage regression\n" * 300000)[:10 * 1024 * 1024]
 
 
 @contextmanager
@@ -153,6 +157,7 @@ def trusted_fixture_origin(counts, lock, held_entered=None, held_release=None):
                 READ_ONLY_APT_PATH: READ_ONLY_APT_BYTES,
                 BYPASS_READY_APT_PATH: READY_APT_BYTES,
                 RECOVERY_READY_APT_PATH: READY_APT_BYTES,
+                LARGE_APT_PATH: LARGE_APT_BYTES,
             }
             if path == HELD_DNF_PATH:
                 # Explicit barrier: test a genuine request accepted by the
@@ -194,6 +199,26 @@ def trusted_fixture_origin(counts, lock, held_entered=None, held_release=None):
             return
 
     return Origin
+
+
+def slow_large_apt_request(port: int, context: ssl.SSLContext, *, cookie=False):
+    """Bounded loopback slow reader; require exact bytes rather than timing."""
+    conn = http.client.HTTPSConnection("127.0.0.1", port, timeout=30,
+                                       context=context)
+    try:
+        conn.connect()
+        conn.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 32768)
+        conn.request("GET", "/__repocache/repos/debian-trixie-main/"
+                     "pool/main/r/repocache-buffer-fixture.deb",
+                     headers={"Cookie": "fixture=1"} if cookie else {})
+        response = conn.getresponse()
+        time.sleep(1.5)
+        payload = response.read(len(LARGE_APT_BYTES) + 1)
+        require(response.status == 200 and payload == LARGE_APT_BYTES,
+                "slow-reader exact large package bytes")
+        return response.getheader("X-RepoCache-Smoke", "")
+    finally:
+        conn.close()
 
 
 def self_signed(openssl: str, cert: Path, key: Path, name: str) -> None:
@@ -418,6 +443,29 @@ def main() -> None:
                         "retains exact body, length and one upstream GET",
                     )
 
+            # Debian's dedicated service places transient proxy scratch in
+            # /run; cache-off and bypass responses must not spool there.
+            # Deny writes to the actual proxy temp directory in this rootless
+            # fixture. Large cached objects must still use their cache root.
+            with deny_cache_directory_writes(root / "proxy_temp"):
+                require(not os.access(root / "proxy_temp", os.W_OK),
+                        "actual proxy scratch denies writes")
+                require(slow_large_apt_request(frontend_port, client_tls, cookie=True)
+                        == "BYPASS", "large cookie bypass streams without scratch")
+                require(slow_large_apt_request(frontend_port, client_tls) == "MISS",
+                        "large object still writes to disk-backed native cache")
+                require(slow_large_apt_request(frontend_port, client_tls) == "HIT",
+                        "large cached object exact HIT without scratch")
+                with lock:
+                    require(counts[LARGE_APT_PATH] == 2,
+                            "one bypass and one cache fill origin request")
+                require(any(path.is_file() and path.stat().st_size >= len(LARGE_APT_BYTES)
+                            for path in (root / "cache" / "debian-trixie-main").rglob("*")),
+                        "actual large persistent cache object exists")
+            require("buffered to a temporary file" not in
+                    (root / "error.log").read_text(encoding="utf-8"),
+                    "no uncached proxy temporary spill")
+
             # The baseline cache-active route may close connections under
             # EACCES (observed on the first CI attempt). Do not claim that
             # read-only storage is safe with proxy_cache still enabled.
@@ -483,6 +531,15 @@ def main() -> None:
             )
             await_worker_generation_drained(process, original_workers)
             require(True, "old cache-enabled NGINX worker generation has drained")
+            with deny_cache_directory_writes(root / "proxy_temp"):
+                require(slow_large_apt_request(frontend_port, client_tls) == "",
+                        "large cache-off recovery streams without proxy scratch")
+                with lock:
+                    require(counts[LARGE_APT_PATH] == 3,
+                            "cache-off request fetches original upstream")
+            require("buffered to a temporary file" not in
+                    (root / "error.log").read_text(encoding="utf-8"),
+                    "no cache-off proxy temporary spill")
 
             apt_cache = root / "cache" / "debian-trixie-main"
             probe_url = base + "debian-trixie-main/dists/trixie/Packages.gz"

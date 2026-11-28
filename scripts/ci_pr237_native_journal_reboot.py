@@ -21,7 +21,7 @@ if __name__ == "__main__":
 from repocache.server_protected_namespace_bootstrap_v1 import bootstrap_protected_namespace_under_root
 from repocache.server_native_nginx_package_journal_v1 import (
     NativePackageJournalError, NATIVE_PENDING_NAME, NATIVE_TMP_NAME,
-    _prepare_native_journal_under_root,
+    _prepare_native_journal_under_root, _retain_native_package_journal_lock_under_root,
 )
 from repocache.server_protected_state_store_v1 import LOCK_NAME
 
@@ -56,20 +56,61 @@ def marker_bytes() -> bytes:
     return raw
 
 
+def authenticated_fixture_receipt() -> bytes:
+    """Re-derive the installed receipt from the signed disposable candidate."""
+    pins_file = Path("/root/pr237-synthetic-fixture/pins.json")
+    assert pins_file.stat().st_uid == 0 and stat.S_IMODE(pins_file.stat().st_mode) == 0o600
+    pins = json.loads(pins_file.read_bytes())
+    assert set(pins) == {"commit", "archive_sha256"}
+    check = subprocess.run(
+        ["/usr/bin/python3", "-I", "-B",
+         "/home/pr237ci/combined/scripts/stage_native_root_worker.py",
+         "--assets", "/root/pr237-synthetic-fixture/assets",
+         "--verify-installed", "--commit", pins["commit"],
+         "--archive-sha256", pins["archive_sha256"]],
+        check=False, capture_output=True, text=True, timeout=60,
+        env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+    )
+    assert check.returncode == 0 and not check.stderr, "Signed synthetic worker readback refused"
+    receipt = json.loads(check.stdout)
+    assert receipt["status"] == "AUTHENTICATED_WORKER_FILES_MATCH"
+    assert receipt["source_sha"] == pins["commit"]
+    assert receipt["archive_sha256"] == pins["archive_sha256"]
+    assert receipt["authorizes_host_installation"] is False
+    assert receipt["authorizes_service_activation"] is False
+    receipt["status"] = "AUTHENTICATED_WORKER_STAGED"
+    return (json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+
+
 def prepare(distribution: str) -> None:
     assert Path("/var/lib/repocache/server").exists()
     root = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         bootstrap = bootstrap_protected_namespace_under_root(root, owner_uid=0, public_catalog=True)
         assert bootstrap["status"] == "EXISTING_PROTECTED_LOCK_VALIDATED"
-        result = _prepare_native_journal_under_root(
+        expected_receipt = authenticated_fixture_receipt()
+        # A persisted receipt alone is not authority to prepare the journal.
+        try:
+            _prepare_native_journal_under_root(
+                root, owner_uid=0, distribution=distribution,
+            )
+        except NativePackageJournalError as exc:
+            assert str(exc) == "NATIVE_FOREIGN_PROTECTED_STATE", str(exc)
+        else:
+            raise AssertionError("Unauthenticated receipt unexpectedly accepted")
+        assert not (ROOT / NATIVE_PENDING_NAME).exists()
+        assert not (ROOT / NATIVE_TMP_NAME).exists()
+        # Match the authenticated installer's receipt-bound lock contract,
+        # but never execute the native package manager or finish a transaction.
+        with _retain_native_package_journal_lock_under_root(
             root, owner_uid=0, distribution=distribution,
-        )
-        assert result["status"] == "NATIVE_PACKAGE_EFFECTS_JOURNAL_DURABLE"
-        assert result["package_transaction_executed"] is False
-        assert result["native_package_effects_reconciled"] is False
-        assert result["authorizes_package_installation"] is False
-        assert result["authorizes_nginx_reload"] is False
+            expected_worker_receipt=expected_receipt,
+        ) as result:
+            assert result["status"] == "NATIVE_PACKAGE_EFFECTS_JOURNAL_DURABLE"
+            assert result["package_transaction_executed"] is False
+            assert result["native_package_effects_reconciled"] is False
+            assert result["authorizes_package_installation"] is False
+            assert result["authorizes_nginx_reload"] is False
     finally:
         os.close(root)
     raw = marker_bytes()
@@ -122,24 +163,7 @@ def after_reboot(distribution: str) -> None:
     # A second, freshly launched Python process re-authenticates the
     # synthetic candidate against the installed root files after reboot.
     # This is NOT real publisher acceptance or service activation.
-    pins_file = Path("/root/pr237-synthetic-fixture/pins.json")
-    assert pins_file.stat().st_uid == 0 and stat.S_IMODE(pins_file.stat().st_mode) == 0o600
-    pins = json.loads(pins_file.read_bytes())
-    assert set(pins) == {"commit", "archive_sha256"}
-    check = subprocess.run(
-        ["/usr/bin/python3", "-I", "-B",
-         "/home/pr237ci/combined/scripts/stage_native_root_worker.py",
-         "--assets", "/root/pr237-synthetic-fixture/assets",
-         "--verify-installed", "--commit", pins["commit"],
-         "--archive-sha256", pins["archive_sha256"]],
-        check=False, capture_output=True, text=True, timeout=60,
-        env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
-    )
-    assert check.returncode == 0 and not check.stderr, "Signed synthetic worker reboot readback refused"
-    receipt = json.loads(check.stdout)
-    assert receipt["status"] == "AUTHENTICATED_WORKER_FILES_MATCH"
-    assert receipt["authorizes_host_installation"] is False
-    assert receipt["authorizes_service_activation"] is False
+    authenticated_fixture_receipt()
     for unit_name in ("repocache-control.service", "repocache-control.socket"):
         assert subprocess.run(
             ["/usr/bin/systemctl", "is-active", "--quiet", unit_name],
@@ -168,3 +192,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

@@ -109,13 +109,38 @@ def test_fixed_worker_archive_is_reproducible_from_closed_release_sources(tmp_pa
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
         assert archive.namelist() == [
             "__main__.py", "repocache/_signed-owned-nginx.service",
+            "repocache/_signed-owned-nginx.te",
             *(f"repocache/{module}.py" for module in build_native_root_worker.MODULES),
         ]
         assert archive.read("repocache/_signed-owned-nginx.service") == (
             source / "docs/examples/systemd/repocache-nginx.service"
         ).read_bytes()
+        assert archive.read("repocache/_signed-owned-nginx.te") == (
+            source / "docs/examples/selinux/repocache-nginx.te"
+        ).read_bytes()
     target = tmp_path / "server-control-worker"
     target.write_bytes(payload)
+    # Exercise the exact archive in an isolated interpreter, not the checkout.
+    imports = """
+import sys, zipimport
+sys.path.insert(0, sys.argv[1])
+from repocache import server_nginx_metrics_bundle_join_v1 as joined
+from repocache import server_nginx_metrics_candidate_v1 as metrics
+from repocache import server_protected_namespace_bootstrap_v1 as bootstrap
+from repocache import server_native_v2_transaction_v1 as transaction
+for module in (joined, metrics, bootstrap, transaction):
+    assert isinstance(module.__loader__, zipimport.zipimporter)
+    assert module.__loader__.archive == sys.argv[1]
+assert joined.render_nginx_metrics_candidate is metrics.render_nginx_metrics_candidate
+assert transaction._dedicated_public_directory is bootstrap._dedicated_public_directory
+assert transaction._DEDICATED_PUBLIC_CONTEXT == bootstrap._DEDICATED_PUBLIC_CONTEXT
+"""
+    result = subprocess.run(
+        [sys.executable, "-IS", "-B", "-c", imports, str(target)],
+        cwd=tmp_path, check=False, capture_output=True, timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == result.stderr == b""
     unrelated = tmp_path / "repocache"
     unrelated.mkdir()
     (unrelated / "__init__.py").write_text("raise RuntimeError('wrong import')\n")
@@ -195,3 +220,21 @@ def test_extractor_rejects_extra_or_incomplete_members(tmp_path, name):
             {"version": "0.0.0"},
             system={"ID": "debian", "VERSION_ID": "13"},
         )
+
+
+
+@pytest.mark.parametrize("fault", ["absent", "symlink", "oversized"])
+def test_worker_builder_refuses_untrusted_policy_member(tmp_path, fault):
+    source = _candidate_source(tmp_path)
+    policy = source / "docs/examples/selinux/repocache-nginx.te"
+    raw = policy.read_bytes()
+    if fault == "oversized":
+        policy.write_bytes(b"x" * 16385)
+    else:
+        policy.unlink()
+        if fault == "symlink":
+            foreign = tmp_path / "foreign.te"
+            foreign.write_bytes(raw)
+            policy.symlink_to(foreign)
+    with pytest.raises(ValueError, match="dedicated SELinux policy"):
+        build_native_root_worker.build(source)

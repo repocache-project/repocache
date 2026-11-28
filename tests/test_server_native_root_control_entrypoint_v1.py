@@ -157,7 +157,7 @@ def test_kernel_refusal_has_no_reply_or_effects(monkeypatch):
         assert client.recv(1024) == b""
 
 
-def test_transaction_failure_is_single_redacted_non_success_packet(monkeypatch):
+def test_transaction_failure_is_single_redacted_non_success_packet(monkeypatch, capsys):
     client, accepted = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
     with client, accepted:
         monkeypatch.setattr(worker, "_systemd_listener", lambda: Server(accepted))
@@ -181,6 +181,33 @@ def test_transaction_failure_is_single_redacted_non_success_packet(monkeypatch):
             "transaction_completed": False,
         }
         assert b"PRIVATE" not in raw
+        assert capsys.readouterr().err == (
+            "REPOCACHE_FIXED_TRANSACTION_REFUSAL: NATIVE_V2_OTHER_REFUSAL\n")
+
+
+@pytest.mark.parametrize("error, expected", [
+    (transaction.NativeV2TransactionError("NATIVE_V2_OWNED_CONTEXT_PROBE_REFUSED"),
+     "NATIVE_V2_OWNED_CONTEXT_PROBE_REFUSED"),
+    (transaction.NativeV2TransactionError("NATIVE_V2_PRIVATE_DATA"),
+     "NATIVE_V2_OTHER_REFUSAL"),
+    (transaction.NativeV2TransactionError("NATIVE_V2_OWNED_CONTEXT_PROBE_REFUSED\nsecret"),
+     "NATIVE_V2_OTHER_REFUSAL"),
+    (ValueError("NATIVE_V2_OWNED_CONTEXT_PROBE_REFUSED"),
+     "NATIVE_V2_OTHER_REFUSAL"),
+])
+def test_local_transaction_audit_uses_closed_codes_only(error, expected, capsys):
+    transaction._audit_native_failure(error)
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "REPOCACHE_FIXED_TRANSACTION_REFUSAL: " + expected + "\n"
+
+
+def test_local_audit_sink_failure_does_not_change_transaction(monkeypatch):
+    class Unavailable:
+        def write(self, _value):
+            raise OSError("unavailable")
+    monkeypatch.setattr(transaction.sys, "stderr", Unavailable())
+    transaction._audit_native_failure(ValueError("private"))
 
 
 @pytest.mark.parametrize("bad", [

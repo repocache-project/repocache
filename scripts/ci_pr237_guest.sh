@@ -22,12 +22,21 @@ esac
 echo "PASS: actual OS=$ID version=$VERSION_ID kernel=$(uname -r) PID1=$(cat /proc/1/comm) manager=$manager"
 if test "$platform" = almalinux10; then echo 'PASS: kernel SELinux enforcing'; fi
 case "$phase" in
-  prepare-installer)
+  prepare-installer|prepare-installer-activation)
+    if test "$phase" = prepare-installer-activation; then
+      test "$platform" = almalinux10
+    fi
     if test "$platform" = debian13; then
       apt-get update -qq
       DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends python3-cryptography python3-pytest openssl curl
     else
-      dnf -y -q install python3-cryptography python3-pytest openssl curl
+      prerequisites=(python3-cryptography python3-pytest openssl curl)
+      # Diagnostic tooling only for the disposable AlmaLinux activation VM.
+      # Keep it separate from the authenticated product package transaction.
+      if test "$phase" = prepare-installer-activation; then
+        prerequisites+=(python3-setools selinux-policy-devel make nftables iproute)
+      fi
+      dnf -y -q install "${prerequisites[@]}"
     fi
     test ! -e /usr/sbin/nginx
     test ! -e /etc/nginx
