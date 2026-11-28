@@ -2053,3 +2053,10 @@ bootstrap is unchanged and every stage is absent. Foreign or conflicting
 records, changed targets and stages are retained. Revalidate TLS identity
 and trust at the fresh staging boundary, before WAL publication; recovery
 of inert bytes does not require usable operator TLS material.
+
+The prepared-generation readback also pins the exact private state and
+manifest inode, mount, root-only mode, ownership, xattr boundary and
+bytes; a same-byte replacement is not continuity. The fresh manifest
+writer retains the preceding state identity across its own staging and
+publication. New foreign mount, xattr and same-byte replacement tests
+exercise these refusal paths without enabling host writes.

@@ -5416,6 +5416,57 @@ def _restore_owned_initial_dedicated_config_fixture_locked(
             "authorizes_catalog_publication": False}
 
 
+def _owned_initial_private_targets_proof(state_fd: int, expected: dict, labels) -> tuple:
+    """Pin both private target identities and exact bytes, including absence."""
+    code = "OWNED_INITIAL_PRIVATE_IDENTITY_REFUSED"
+    try:
+        parent = _metadata_no_acl(state_fd, directory=True)
+        identity = _identity(parent)
+        mount = _mount(state_fd)
+        if stat.S_IMODE(parent.st_mode) != 0o700:
+            _deny(code)
+        labels.check(state_fd)
+        with ExitStack() as stack:
+            held = {}
+            for name in _OWNED_PRIVATE:
+                raw = expected[name]
+                if raw is None:
+                    _owned_require_absent(state_fd, name)
+                    continue
+                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                             | os.O_CLOEXEC, dir_fd=state_fd)
+                stack.callback(os.close, fd)
+                info = _metadata_no_acl(fd)
+                before = _identity(info)
+                if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                        or stat.S_IMODE(info.st_mode) != 0o600
+                        or info.st_size != len(raw) or _mount(fd) != mount
+                        or _identity(os.stat(name, dir_fd=state_fd,
+                                             follow_symlinks=False)) != before
+                        or os.pread(fd, len(raw) + 1, 0) != raw):
+                    _deny(code)
+                labels.check(fd)
+                held[name] = (fd, before)
+            for name in _OWNED_PRIVATE:
+                if name not in held:
+                    _owned_require_absent(state_fd, name)
+                    continue
+                fd, before = held[name]
+                labels.check(fd)
+                if (_identity(os.fstat(fd)) != before or _mount(fd) != mount
+                        or _identity(os.stat(name, dir_fd=state_fd,
+                                             follow_symlinks=False)) != before):
+                    _deny(code)
+            labels.check(state_fd)
+            if _identity(os.fstat(state_fd)) != identity or _mount(state_fd) != mount:
+                _deny(code)
+            return (identity, mount, {name: before for name, (_, before) in held.items()})
+    except NativeV2TransactionError:
+        raise
+    except (OSError, ValueError, TypeError, InstalledStorageError):
+        _deny(code)
+
+
 def _read_owned_initial_dedicated_prepared_locked(
         root_fd: int, state_fd: int, nginx_fd: int, public_fd: int,
         check_layout, *, expected_wal: bytes) -> dict:
@@ -5444,9 +5495,11 @@ def _read_owned_initial_dedicated_prepared_locked(
                           expected_wal, current)
         _owned_check_stages_absent(state_fd, nginx_fd, public_fd)
         labels.finish()
-        return _dedicated_readonly_config_labels(
+        config = _dedicated_readonly_config_labels(
             nginx_fd, public_fd, catalog_present=False,
             allowed_stage=_OWNED_STAGES[_OWNED_MAIN])
+        private = _owned_initial_private_targets_proof(state_fd, current, labels)
+        return config, private
 
     before = proof()
     try:
@@ -5517,9 +5570,14 @@ def _write_owned_initial_private_fixture_locked(
             if resource != name or not stage_allowed:
                 directory = _owned_resource_parent(resource, state_fd, nginx_fd, public_fd)
                 _owned_require_absent(directory, _OWNED_STAGES[resource])
-        return _dedicated_readonly_config_labels(
+        config = _dedicated_readonly_config_labels(
             nginx_fd, public_fd, catalog_present=False,
             allowed_stage=_OWNED_STAGES[_OWNED_MAIN])
+        private = _owned_initial_private_targets_proof(state_fd, expected, labels)
+        # The state directory may change timestamps only when we create or
+        # rename our private stage. The unaffected target identities cannot.
+        return config, (private[0][:6], private[1],
+                        {key: value for key, value in private[2].items() if key != name})
 
     before = guard()
     try:

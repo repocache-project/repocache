@@ -6203,6 +6203,7 @@ def test_initial_dedicated_config_interrupted_stage_recovery(filesystem, monkeyp
 @pytest.mark.parametrize("fault", [
     "none", "state", "manifest", "catalog", "include", "active",
     "wrong-wal", "private-stage", "foreign-public", "tls-drift", "config-drift",
+    "private-inode-drift", "private-mount", "private-xattr",
 ])
 def test_reconstruct_initial_withdrawn_generation(filesystem, monkeypatch, fault):
     old = _owned_bootstrap_resources()
@@ -6219,6 +6220,11 @@ def test_reconstruct_initial_withdrawn_generation(filesystem, monkeypatch, fault
     tls_calls = []
     def tls(*args):
         tls_calls.append(1)
+        if fault == "private-inode-drift" and len(tls_calls) == 1:
+            replacement = state / "replacement"
+            replacement.write_bytes(new[V2_STATE])
+            replacement.chmod(0o600)
+            os.replace(replacement, paths[V2_STATE])
         return ("tls", len(tls_calls) if fault == "tls-drift" else 1)
     monkeypatch.setattr(native, "_dedicated_readonly_tls_labels", tls)
     with native._owned_fixture_layout(root_fd, recovering=False) as layout:
@@ -6239,6 +6245,16 @@ def test_reconstruct_initial_withdrawn_generation(filesystem, monkeypatch, fault
         (state / native._OWNED_STAGES[V2_STATE]).touch(mode=0o600)
     elif fault == "foreign-public":
         (paths[native._CATALOG].parent / "foreign").touch()
+    elif fault in ("private-mount", "private-xattr"):
+        inode = paths[V2_STATE].stat().st_ino
+        if fault == "private-mount":
+            real_mount = native._mount
+            monkeypatch.setattr(native, "_mount", lambda fd: (
+                "foreign" if os.fstat(fd).st_ino == inode else real_mount(fd)))
+        else:
+            monkeypatch.setattr(os, "listxattr", lambda fd: (
+                ["security.selinux", "user.foreign"] if os.fstat(fd).st_ino == inode
+                else ["security.selinux"]))
     elif fault == "config-drift":
         real = native._dedicated_readonly_config_labels
         calls = []
@@ -6266,7 +6282,7 @@ def test_reconstruct_initial_withdrawn_generation(filesystem, monkeypatch, fault
 
 @pytest.mark.parametrize("fault", [
     "none", "foreign-state", "manifest-first", "stage-conflict", "late-target",
-    "changed-intake", "actual-root",
+    "changed-intake", "actual-root", "state-inode-drift",
 ])
 def test_stage_initial_dedicated_generation_fixture(filesystem, monkeypatch, fault):
     old = _owned_bootstrap_resources()
@@ -6284,8 +6300,16 @@ def test_stage_initial_dedicated_generation_fixture(filesystem, monkeypatch, fau
     monkeypatch.setattr(native, "_prepare_owned_initial_dedicated_candidate_locked",
                         lambda *a: (old, new, report))
     intake_calls = []
+    drifted = []
     def intake(*args, **kwargs):
         intake_calls.append(1)
+        if (fault == "state-inode-drift" and not drifted
+                and (state / native._OWNED_STAGES[native._OWNED_MANIFEST]).exists()):
+            replacement = state / "replacement"
+            replacement.write_bytes(new[V2_STATE])
+            replacement.chmod(0o600)
+            os.replace(replacement, paths[V2_STATE])
+            drifted.append(True)
         return report, b"foreign" if fault == "changed-intake" and len(intake_calls) == 2 else new[V2_STATE]
     monkeypatch.setattr(native, "_load_private_under_root", intake)
     original_rename = native._rename_directory_noreplace
@@ -6334,6 +6358,9 @@ def test_stage_initial_dedicated_generation_fixture(filesystem, monkeypatch, fau
             if fault == "late-target":
                 assert paths[V2_STATE].read_bytes() == b"foreign"
                 assert (state / native._OWNED_STAGES[V2_STATE]).read_bytes() == new[V2_STATE]
+            elif fault == "state-inode-drift":
+                assert drifted and paths[V2_STATE].read_bytes() == new[V2_STATE]
+                assert (state / native._OWNED_STAGES[native._OWNED_MANIFEST]).exists()
             else:
                 assert _fixture_resource_bytes(paths) == old
     assert not paths[native._CATALOG].exists()
