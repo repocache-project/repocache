@@ -4596,6 +4596,10 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
         @contextmanager
         def layout(root, state, *, recovering):
             assert recovering is pending
+            if not recovering:
+                # Retain the production layout's no-WAL gate even though
+                # resource enumeration below uses a simulated layout.
+                native._no_conflicting_owned_wal_pending(state)
             yield state, 11, 12, lambda: None
         monkeypatch.setattr(native, "_owned_layout_locked", layout)
         if pending:
