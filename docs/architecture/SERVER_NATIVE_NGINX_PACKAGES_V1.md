@@ -2088,3 +2088,15 @@ dedicated host placement, subsequent profile/boot/storage/start and
 health-gated finalization still require authenticated composition and
 booted native acceptance. No legacy namespace relabeling or takeover is
 permitted by the new bridge.
+
+The existing boot-policy, fixed start, and health-gated WAL finalizer
+have an explicit initial-generation selection, distinct from prior-generation
+rollback. It reconstructs only a generation-one successor of the inert
+predecessor from exact v3 WAL hashes and durable bytes. Boot preparation
+and start require the catalog absent; finalization may re-observe an exact
+already-published catalog after interruption, but must withdraw it and
+repeat the 404/200 health gate before clearing the WAL. Reports distinguish
+initial commit from restoration of a prior managed generation. Private
+state/manifest and configuration identities remain pinned across the
+operations. The signed lifecycle still has to select these paths with
+explicit initial-generation pins; ordinary recovery retains prior semantics.

@@ -2640,7 +2640,7 @@ def _create_owned_committed_boot_egress_locked(
 @contextmanager
 def _owned_prepared_wal_boot_egress_generation_locked(
     root_fd: int, state_fd: int, *, distribution: str, worker_uid: int,
-    expected_wal: bytes,
+    expected_wal: bytes, initial_generation: bool = False,
 ):
     """Retain prepared prior bytes and withdrawn catalog under the exact v3 WAL.
 
@@ -2648,7 +2648,9 @@ def _owned_prepared_wal_boot_egress_generation_locked(
     service activation. A trusted stopped-service caller must first complete
     the existing prior-byte preparation and independently prove ownership.
     """
-    if (type(distribution) is not str or distribution not in _CA
+    if (type(initial_generation) is not bool
+            or (initial_generation and distribution != "almalinux")
+            or type(distribution) is not str or distribution not in _CA
             or type(expected_wal) is not bytes
             or not 1 <= len(expected_wal) <= _MAX_WAL):
         _deny("OWNED_BOOT_EGRESS_INPUT_INVALID")
@@ -2658,10 +2660,19 @@ def _owned_prepared_wal_boot_egress_generation_locked(
         old, _ = _decode_owned_wal(expected_wal, distribution=distribution)
         if _json(expected_wal, limit=_MAX_WAL)["version"] != 3:
             _deny("OWNED_LIVE_WAL_REQUIRED")
+        if initial_generation:
+            old = _read_owned_initial_dedicated_prepared_locked(
+                root_fd, state, nginx, public, check_layout, expected_wal=expected_wal)
         snapshot = _validate_owned_resources(old, distribution=distribution)
         _owned_socket_require_inactive_routes(snapshot)
         withdrawn = {**old, _CATALOG: None}
         active = True
+        initial_identity = None
+        if initial_generation:
+            labels = _Labels("almalinux", dedicated=True)
+            initial_identity = (
+                _dedicated_readonly_config_labels(nginx, public, catalog_present=False),
+                _owned_initial_private_targets_proof(state, withdrawn, labels))
 
         def recheck():
             if not active:
@@ -2669,6 +2680,17 @@ def _owned_prepared_wal_boot_egress_generation_locked(
             _owned_live_guard(state, nginx, public, check_layout,
                               expected_wal, withdrawn)
             _owned_check_stages_absent(state, nginx, public)
+            if initial_generation:
+                # Reconstruct again, without mutable intake or DNS; pin
+                # config and private targets across boot receipt creation.
+                if (_read_owned_initial_dedicated_prepared_locked(
+                        root_fd, state, nginx, public, check_layout,
+                        expected_wal=expected_wal) != old
+                        or (_dedicated_readonly_config_labels(
+                            nginx, public, catalog_present=False),
+                            _owned_initial_private_targets_proof(state, withdrawn, labels)[1:]) !=
+                           (initial_identity[0], initial_identity[1][1:])):
+                    _deny("OWNED_BOOT_EGRESS_GENERATION_CHANGED")
             _owned_live_guard(state, nginx, public, check_layout,
                               expected_wal, withdrawn)
 
@@ -2687,22 +2709,25 @@ def _verify_owned_prepared_wal_boot_egress_locked(
     root_fd: int, state_fd: int, *, distribution: str, worker_uid: int,
     expected_wal: bytes, namespace_identity: tuple[int, int],
     profile_receipt_sha256: str, executable_receipt_sha256: str,
-    recheck_stopped_owner,
+    recheck_stopped_owner, initial_generation: bool = False,
 ) -> dict:
     """Read back the exact prepared prior policy; never create or replace it."""
+    if type(initial_generation) is not bool:
+        _deny("OWNED_BOOT_EGRESS_INPUT_INVALID")
     return _check_owned_prepared_wal_boot_egress_locked(
         root_fd, state_fd, distribution=distribution, worker_uid=worker_uid,
         expected_wal=expected_wal, namespace_identity=namespace_identity,
         profile_receipt_sha256=profile_receipt_sha256,
         executable_receipt_sha256=executable_receipt_sha256,
-        recheck_stopped_owner=recheck_stopped_owner, resume=False)
+        recheck_stopped_owner=recheck_stopped_owner, resume=False,
+        **({"initial_generation": True} if initial_generation else {}))
 
 
 def _resume_owned_prepared_wal_boot_egress_locked(
     root_fd: int, state_fd: int, *, distribution: str, worker_uid: int,
     expected_wal: bytes, namespace_identity: tuple[int, int],
     profile_receipt_sha256: str, executable_receipt_sha256: str,
-    recheck_stopped_owner,
+    recheck_stopped_owner, initial_generation: bool = False,
 ) -> dict:
     """Resume only an existing exact same-boot receipt under the pending WAL.
 
@@ -2710,27 +2735,31 @@ def _resume_owned_prepared_wal_boot_egress_locked(
     The independently authenticated owner must prove service exclusion;
     an empty table alone is never enough to claim ownership.
     """
+    if type(initial_generation) is not bool:
+        _deny("OWNED_BOOT_EGRESS_INPUT_INVALID")
     return _check_owned_prepared_wal_boot_egress_locked(
         root_fd, state_fd, distribution=distribution, worker_uid=worker_uid,
         expected_wal=expected_wal, namespace_identity=namespace_identity,
         profile_receipt_sha256=profile_receipt_sha256,
         executable_receipt_sha256=executable_receipt_sha256,
-        recheck_stopped_owner=recheck_stopped_owner, resume=True)
+        recheck_stopped_owner=recheck_stopped_owner, resume=True,
+        **({"initial_generation": True} if initial_generation else {}))
 
 
 def _check_owned_prepared_wal_boot_egress_locked(
     root_fd: int, state_fd: int, *, distribution: str, worker_uid: int,
     expected_wal: bytes, namespace_identity: tuple[int, int],
     profile_receipt_sha256: str, executable_receipt_sha256: str,
-    recheck_stopped_owner, resume: bool,
+    recheck_stopped_owner, resume: bool, initial_generation: bool = False,
 ) -> dict:
-    if (type(resume) is not bool or not callable(recheck_stopped_owner)
+    if (type(initial_generation) is not bool or type(resume) is not bool or not callable(recheck_stopped_owner)
             or not _valid_sha(profile_receipt_sha256)
             or not _valid_sha(executable_receipt_sha256)):
         _deny("OWNED_BOOT_EGRESS_INPUT_INVALID")
     with _owned_prepared_wal_boot_egress_generation_locked(
             root_fd, state_fd, distribution=distribution, worker_uid=worker_uid,
             expected_wal=expected_wal,
+            **({"initial_generation": True} if initial_generation else {}),
     ) as (plan, recheck):
         if plan["destinations"]:
             _deny("OWNED_BOOT_EGRESS_ACTIVE_ROUTES_REFUSED")
@@ -2761,7 +2790,7 @@ def _check_owned_prepared_wal_boot_egress_locked(
             **options)
         owned()
         return {**result, "generation_manifest_sha256": plan["generation_manifest_sha256"],
-                "prior_resources_verified": True, "recovery_required": True,
+                ("initial_resources_verified" if initial_generation else "prior_resources_verified"): True, "recovery_required": True,
                 "catalog_withdrawn": True,
                 "wal_sha256": hashlib.sha256(expected_wal).hexdigest(),
                 "authorizes_nginx_activation": False,
@@ -2774,6 +2803,7 @@ def _create_owned_prepared_wal_boot_egress_locked(
     executable_receipt_sha256: str, recheck_stopped_owner,
     allow_boot_rollover: bool = False,
     expected_previous_receipt_sha256: str | None = None,
+    initial_generation: bool = False,
 ) -> dict:
     """Candidate-only fresh namespace from the WAL's prepared prior generation.
 
@@ -2782,13 +2812,14 @@ def _create_owned_prepared_wal_boot_egress_locked(
     pending proposed policy, same-boot adoption or active-route authority.
     The journal and withdrawn resources remain intact on every outcome.
     """
-    if (not callable(recheck_stopped_owner) or type(allow_boot_rollover) is not bool
+    if (type(initial_generation) is not bool or not callable(recheck_stopped_owner) or type(allow_boot_rollover) is not bool
             or not _valid_sha(profile_receipt_sha256)
             or not _valid_sha(executable_receipt_sha256)):
         _deny("OWNED_BOOT_EGRESS_INPUT_INVALID")
     with _owned_prepared_wal_boot_egress_generation_locked(
             root_fd, state_fd, distribution=distribution, worker_uid=worker_uid,
             expected_wal=expected_wal,
+            **({"initial_generation": True} if initial_generation else {}),
     ) as (plan, recheck):
         result = _create_owned_boot_egress_from_plan_locked(
             root_fd, state_fd, plan, recheck,
@@ -2797,7 +2828,7 @@ def _create_owned_prepared_wal_boot_egress_locked(
             recheck_stopped_owner=recheck_stopped_owner,
             allow_boot_rollover=allow_boot_rollover,
             expected_previous_receipt_sha256=expected_previous_receipt_sha256)
-        return {**result, "prior_resources_verified": True,
+        return {**result, ("initial_resources_verified" if initial_generation else "prior_resources_verified"): True,
                 "recovery_required": True, "catalog_withdrawn": True,
                 "wal_sha256": hashlib.sha256(expected_wal).hexdigest()}
 
@@ -3771,6 +3802,7 @@ def _start_owned_prepared_wal_dedicated_locked(
     executable_identity: tuple[int, int], profile_receipt_sha256: str,
     executable_receipt_sha256: str, expected_wal: bytes,
     recheck_authenticated_owner, expected_stopped: dict | None = None,
+    initial_generation: bool = False,
 ) -> dict:
     """Start exact prepared prior bytes while retaining WAL and withdrawal.
 
@@ -3779,7 +3811,7 @@ def _start_owned_prepared_wal_dedicated_locked(
     lock may invoke this; a subsequent phase must independently prove and
     finalize recovery. Bootstrap and active-route predecessors are refused.
     """
-    if type(expected_wal) is not bytes or not 1 <= len(expected_wal) <= _MAX_WAL:
+    if type(initial_generation) is not bool or type(expected_wal) is not bytes or not 1 <= len(expected_wal) <= _MAX_WAL:
         _deny("OWNED_DEDICATED_START_INPUT_INVALID")
     return _start_owned_dedicated_generation_locked(
         root_fd, state_fd, namespace_identity=namespace_identity,
@@ -3787,7 +3819,8 @@ def _start_owned_prepared_wal_dedicated_locked(
         profile_receipt_sha256=profile_receipt_sha256,
         executable_receipt_sha256=executable_receipt_sha256,
         recheck_authenticated_owner=recheck_authenticated_owner,
-        expected_wal=expected_wal, expected_stopped=expected_stopped)
+        expected_wal=expected_wal, expected_stopped=expected_stopped,
+        **({"initial_generation": True} if initial_generation else {}))
 
 
 def _start_owned_dedicated_generation_locked(
@@ -3795,7 +3828,7 @@ def _start_owned_dedicated_generation_locked(
     executable_identity: tuple[int, int], profile_receipt_sha256: str,
     executable_receipt_sha256: str, recheck_authenticated_owner,
     expected_wal: bytes | None, expected_stopped: dict | None = None,
-    allow_active_repeat: bool = False,
+    allow_active_repeat: bool = False, initial_generation: bool = False,
 ) -> dict:
     """Explicit isolated-candidate start of an already prepared profile.
 
@@ -3819,6 +3852,8 @@ def _start_owned_dedicated_generation_locked(
     from repocache.server_root_control_host_preflight_v1 import require_native_host_preconditions
 
     if (not callable(recheck_authenticated_owner)
+            or type(initial_generation) is not bool
+            or (initial_generation and (expected_wal is None or allow_active_repeat))
             or type(allow_active_repeat) is not bool
             or (allow_active_repeat and (expected_wal is not None or expected_stopped is not None))
             or (expected_stopped is not None and type(expected_stopped) is not dict)
@@ -3869,6 +3904,9 @@ def _start_owned_dedicated_generation_locked(
                 prior, _ = _decode_owned_wal(expected_wal, distribution="almalinux")
                 if _json(expected_wal, limit=_MAX_WAL)["version"] != 3:
                     _deny("OWNED_LIVE_WAL_REQUIRED")
+                if initial_generation:
+                    prior = _read_owned_initial_dedicated_prepared_locked(
+                        root_fd, state, nginx, public, check_layout, expected_wal=expected_wal)
                 if resources != {**prior, _CATALOG: None}:
                     _deny("OWNED_DEDICATED_START_PRIOR_NOT_PREPARED")
                 _owned_check_stages_absent(state, nginx, public)
@@ -3901,6 +3939,9 @@ def _start_owned_dedicated_generation_locked(
             config_labels = _dedicated_readonly_config_labels(
                 nginx, public, catalog_present=not recovering)
             context = (document, snapshot["state_generation"], leaf)
+            if initial_generation:
+                initial_labels = _Labels("almalinux", dedicated=True)
+                initial_private = _owned_initial_private_targets_proof(state, resources, initial_labels)
 
             def exact():
                 check_layout()
@@ -3916,6 +3957,10 @@ def _start_owned_dedicated_generation_locked(
                     _deny("OWNED_DEDICATED_READONLY_LABEL_CHANGED")
                 if _dedicated_readonly_tls_labels(root_fd, document) != tls_labels:
                     _deny("OWNED_DEDICATED_TLS_LABEL_CHANGED")
+                if initial_generation and (
+                        _owned_initial_private_targets_proof(state, resources, initial_labels) != initial_private
+                        or os.listdir(public)):
+                    _deny("OWNED_DEDICATED_START_GENERATION_CHANGED")
                 recheck_authenticated_owner()
 
             def owner(active):
@@ -4039,7 +4084,8 @@ def _start_owned_dedicated_generation_locked(
                           "enablement_changed": False}
                 if recovering:
                     result.update(
-                        status="OWNED_DEDICATED_PREPARED_WAL_START_OBSERVED",
+                        status=("OWNED_DEDICATED_INITIAL_WAL_START_OBSERVED" if initial_generation
+                                else "OWNED_DEDICATED_PREPARED_WAL_START_OBSERVED"),
                         wal_sha256=hashlib.sha256(expected_wal).hexdigest(),
                         catalog_withdrawn=True, recovery_required=True)
                 return result
@@ -4084,7 +4130,7 @@ def _finish_owned_prepared_wal_dedicated_locked(
     executable_identity: tuple[int, int], profile_receipt_sha256: str,
     executable_receipt_sha256: str, expected_wal: bytes,
     recheck_authenticated_owner, expected_runtime: dict | None = None,
-    expected_listener: int | None = None,
+    expected_listener: int | None = None, initial_generation: bool = False,
 ) -> dict:
     """Finalize an already running, authenticated disabled-route candidate.
 
@@ -4099,7 +4145,7 @@ def _finish_owned_prepared_wal_dedicated_locked(
     from repocache.server_native_installed_storage_v1 import prepare_dedicated_candidate_storage
     from repocache.server_root_control_host_preflight_v1 import require_native_host_preconditions
 
-    if (not callable(recheck_authenticated_owner)
+    if (type(initial_generation) is not bool or not callable(recheck_authenticated_owner)
             or type(expected_wal) is not bytes or not 1 <= len(expected_wal) <= _MAX_WAL
             or (expected_runtime is not None and type(expected_runtime) is not dict)
             or (expected_listener is not None
@@ -4118,6 +4164,10 @@ def _finish_owned_prepared_wal_dedicated_locked(
         old, _ = _decode_owned_wal(expected_wal, distribution="almalinux")
         if _json(expected_wal, limit=_MAX_WAL)["version"] != 3:
             _deny("OWNED_LIVE_WAL_REQUIRED")
+        if initial_generation:
+            old = _read_owned_initial_dedicated_prepared_locked(
+                root_fd, state, nginx, public, check_layout, expected_wal=expected_wal,
+                allow_published=True)
         snapshot = _validate_owned_resources(old, distribution="almalinux")
         if snapshot is None:
             _deny("OWNED_DEDICATED_FINISH_MANAGED_REQUIRED")
@@ -4143,11 +4193,19 @@ def _finish_owned_prepared_wal_dedicated_locked(
         config_identity = _dedicated_recovery_config_identity(
             nginx, public, catalog_present=published_before_retry)
 
+        if initial_generation:
+            initial_labels = _Labels("almalinux", dedicated=True)
+            initial_private = _owned_initial_private_targets_proof(state, expected, initial_labels)
+
         def exact():
             _owned_live_guard(state, nginx, public, check_layout, expected_wal, expected)
             _owned_check_stages_absent(state, nginx, public)
             if _dedicated_recovery_config_identity(
                     nginx, public, catalog_present=expected[_CATALOG] is not None) != config_identity:
+                _deny("OWNED_DEDICATED_FINISH_CONFIG_CHANGED")
+            if initial_generation and (
+                    _owned_initial_private_targets_proof(state, expected, initial_labels) != initial_private
+                    or set(os.listdir(public)) != ({_CATALOG} if expected[_CATALOG] is not None else set())):
                 _deny("OWNED_DEDICATED_FINISH_CONFIG_CHANGED")
 
         exact()
@@ -4242,7 +4300,8 @@ def _finish_owned_prepared_wal_dedicated_locked(
                 _owned_live_write(state, nginx, public, check_layout, expected_wal,
                                   dict(old), _CATALOG, None)
             raise
-        return {**after, "status": "OWNED_DEDICATED_WAL_ROLLBACK_OBSERVED",
+        return {**after, "status": ("OWNED_DEDICATED_INITIAL_WAL_COMMIT_OBSERVED" if initial_generation
+                                   else "OWNED_DEDICATED_WAL_ROLLBACK_OBSERVED"),
                 "wal_sha256": hashlib.sha256(expected_wal).hexdigest(),
                 "recovery_required": False, "storage": storage}
 
@@ -4251,7 +4310,7 @@ def _recover_owned_prepared_dedicated_locked(
     root_fd: int, state_fd: int, *, namespace_identity: tuple[int, int],
     executable_identity: tuple[int, int], profile_receipt_sha256: str,
     executable_receipt_sha256: str, expected_wal: bytes,
-    recheck_authenticated_owner,
+    recheck_authenticated_owner, initial_generation: bool = False,
 ) -> dict:
     """Compose prepared-profile start and recovery under the original lock.
 
@@ -4269,7 +4328,7 @@ def _recover_owned_prepared_dedicated_locked(
     )
     from repocache.server_root_control_host_preflight_v1 import require_native_host_preconditions
 
-    if (not callable(recheck_authenticated_owner)
+    if (type(initial_generation) is not bool or not callable(recheck_authenticated_owner)
             or type(expected_wal) is not bytes or not 1 <= len(expected_wal) <= _MAX_WAL
             or not _valid_sha(profile_receipt_sha256)
             or not _valid_sha(executable_receipt_sha256)
@@ -4307,6 +4366,10 @@ def _recover_owned_prepared_dedicated_locked(
         old, _ = _decode_owned_wal(expected_wal, distribution="almalinux")
         if _json(expected_wal, limit=_MAX_WAL)["version"] != 3:
             _deny("OWNED_LIVE_WAL_REQUIRED")
+        if initial_generation:
+            old = _read_owned_initial_dedicated_prepared_locked(
+                root_fd, state, nginx, public, check_layout, expected_wal=expected_wal,
+                allow_published=True)
         snapshot = _validate_owned_resources(old, distribution="almalinux")
         if snapshot is None:
             _deny("OWNED_DEDICATED_FINISH_MANAGED_REQUIRED")
@@ -4346,12 +4409,14 @@ def _recover_owned_prepared_dedicated_locked(
                    executable_identity=executable_identity,
                    profile_receipt_sha256=profile_receipt_sha256,
                    executable_receipt_sha256=executable_receipt_sha256,
-                   expected_wal=expected_wal, recheck_authenticated_owner=guard)
+                   expected_wal=expected_wal, recheck_authenticated_owner=guard,
+                   **({"initial_generation": True} if initial_generation else {}))
     listener = None
     if not active:
         started = _start_owned_prepared_wal_dedicated_locked(
             root_fd, state_fd, **options, expected_stopped=selected)
-        if (started.get("status") != "OWNED_DEDICATED_PREPARED_WAL_START_OBSERVED"
+        if (started.get("status") != ("OWNED_DEDICATED_INITIAL_WAL_START_OBSERVED" if initial_generation
+                                      else "OWNED_DEDICATED_PREPARED_WAL_START_OBSERVED")
                 or started.get("wal_sha256") != hashlib.sha256(expected_wal).hexdigest()
                 or started.get("catalog_withdrawn") is not True
                 or started.get("recovery_required") is not True
@@ -5589,7 +5654,7 @@ def _owned_initial_private_targets_proof(state_fd: int, expected: dict, labels) 
 
 def _read_owned_initial_dedicated_prepared_locked(
         root_fd: int, state_fd: int, nginx_fd: int, public_fd: int,
-        check_layout, *, expected_wal: bytes) -> dict:
+        check_layout, *, expected_wal: bytes, allow_published: bool = False) -> dict:
     """Reconstruct a withdrawn initial generation from its durable WAL.
 
     This is read-only, not start, boot-policy or publication authority.
@@ -5597,6 +5662,8 @@ def _read_owned_initial_dedicated_prepared_locked(
     no DNS or proposal re-intake is permitted during reconstruction.
     """
     code = "OWNED_INITIAL_DEDICATED_PREPARED_REFUSED"
+    if type(allow_published) is not bool:
+        _deny(code)
     labels = _Labels("almalinux", dedicated=True)
     check_layout()
     _owned_require_exact_wal(state_fd, expected_wal)
@@ -5605,7 +5672,8 @@ def _read_owned_initial_dedicated_prepared_locked(
             or _validate_owned_resources(old, distribution="almalinux") is not None):
         _deny(code)
     current = _read_owned_resources(state_fd, nginx_fd, public_fd)
-    if (current[_CATALOG] is not None
+    published = current[_CATALOG] is not None
+    if ((published and (not allow_published or _hash(current[_CATALOG]) != hashes[_CATALOG]))
             or any(current[name] is None or _hash(current[name]) != hashes[name]
                    for name in _OWNED_ORDER if name != _CATALOG)):
         _deny(code)
@@ -5615,9 +5683,11 @@ def _read_owned_initial_dedicated_prepared_locked(
                           expected_wal, current)
         _owned_check_stages_absent(state_fd, nginx_fd, public_fd)
         labels.finish()
+        if (set(os.listdir(nginx_fd)) != {_OWNED_MAIN, _INCLUDE}
+                or set(os.listdir(public_fd)) != ({_CATALOG} if published else set())):
+            _deny(code)
         config = _dedicated_readonly_config_labels(
-            nginx_fd, public_fd, catalog_present=False,
-            allowed_stage=_OWNED_STAGES[_OWNED_MAIN])
+            nginx_fd, public_fd, catalog_present=published)
         private = _owned_initial_private_targets_proof(state_fd, current, labels)
         return config, private
 
@@ -5640,7 +5710,7 @@ def _read_owned_initial_dedicated_prepared_locked(
             _INCLUDE: include, _CATALOG: catalog,
             _OWNED_MANIFEST: _owned_manifest_for(current[V2_STATE], main, include, catalog),
         }
-        if ({**reconstructed, _CATALOG: None} != current
+        if ((reconstructed if published else {**reconstructed, _CATALOG: None}) != current
                 or _owned_wal_record(old, reconstructed, live=True) != expected_wal
                 or _validate_owned_resources(reconstructed, distribution="almalinux") != snapshot
                 or proof() != before
