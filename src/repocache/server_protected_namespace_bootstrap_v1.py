@@ -256,8 +256,8 @@ def bootstrap_protected_namespace_under_root(
     except (OSError, ValueError, TypeError):
         _deny("UNVERIFIED_STATE")
 
-# Private signed-worker placement composition. The ordinary bootstrap above
-# remains unchanged: neither helper authenticates a release or a host.
+# Private signed-worker placement composition. Neither namespace helper
+# authenticates a release or a host.
 _DEDICATED_WORKER_CLAIM = ".native-worker-dedicated-namespace-v1.json"
 _DEDICATED_WORKER_STAGE = ".repocache-worker-namespace.stage-"
 _WORKER_PLACEMENT_PREFIX = ".native-worker-placement."
@@ -280,7 +280,7 @@ def _dedicated_worker_claim_bytes(root, anchor, state, public, receipt_sha256):
 
 
 def _require_dedicated_worker_claim(root, anchor, state, public, receipt_sha256, *, staged=False):
-    """Require the exact durable claim and placement marker, never infer ownership."""
+    """Require the exact durable claim, and any placement marker that exists."""
     if (type(receipt_sha256) is not str or re.fullmatch(r"[0-9a-f]{64}", receipt_sha256) is None
             or type(staged) is not bool):
         _deny("DEDICATED_WORKER_CLAIM_INVALID")
@@ -302,20 +302,22 @@ def _require_dedicated_worker_claim(root, anchor, state, public, receipt_sha256,
     complete = _WORKER_PLACEMENT_PREFIX + "complete-" + receipt_sha256
     names = set(os.listdir(state))
     markers = {name for name in names if name.startswith(_WORKER_PLACEMENT_PREFIX)}
-    if not markers or markers - {pending, complete}:
+    if markers - {pending, complete} or (staged and markers):
         _deny("DEDICATED_WORKER_MARKER_REFUSED")
     for marker in markers:
         if (_read_file(state, marker, 0, 0) != b""
                 or os.stat(marker, dir_fd=state, follow_symlinks=False).st_gid != 0):
             _deny("DEDICATED_WORKER_MARKER_REFUSED")
     if staged or complete not in markers:
-        allowed = {LOCK_NAME, _DEDICATED_WORKER_CLAIM, pending}
-        if not staged:
-            allowed |= {".native-worker-receipt-v1.json",
+        # The namespace claim is deliberately distinct from the placement
+        # pending marker. A retry before worker placement still has to prove
+        # that all worker/unit destinations are absent under the lock.
+        allowed = {LOCK_NAME, _DEDICATED_WORKER_CLAIM}
+        if markers == {pending}:
+            allowed |= {pending, ".native-worker-receipt-v1.json",
                         ".repocache-worker-part-.native-worker-receipt-v1.json"}
         if (names - allowed or os.listdir(public)
-                or set(os.listdir(anchor)) != {_STATE_NAME, _PUBLIC_NAME}
-                or markers != {pending}):
+                or set(os.listdir(anchor)) != {_STATE_NAME, _PUBLIC_NAME}):
             _deny("DEDICATED_WORKER_FOREIGN_NAMESPACE")
 
 
@@ -333,8 +335,6 @@ def _prepare_dedicated_worker_namespace_under_root(root_fd, *, receipt_sha256, i
             or (inject_fault is not None and not callable(inject_fault))):
         _deny("ARGUMENT_INVALID")
     stage = _DEDICATED_WORKER_STAGE + receipt_sha256
-    pending = _WORKER_PLACEMENT_PREFIX + "pending-" + receipt_sha256
-
     def point(step):
         if inject_fault is not None:
             inject_fault(step)
@@ -386,7 +386,6 @@ def _prepare_dedicated_worker_namespace_under_root(root_fd, *, receipt_sha256, i
                                         mode=0o755, dedicated_public=True)
                 public, _ = _verified_directory(anchor, _PUBLIC_NAME, 0, stack, mode=0o755)
                 write_private(state, LOCK_NAME, b"")
-                write_private(state, pending, b"")
                 write_private(state, _DEDICATED_WORKER_CLAIM, _dedicated_worker_claim_bytes(
                     root_fd, anchor, state, public, receipt_sha256))
                 os.fsync(anchor)

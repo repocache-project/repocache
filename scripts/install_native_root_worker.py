@@ -355,16 +355,6 @@ def _place_worker_files(
             targets = [(units, unit) for unit in stage.UNITS]
             if worker is not None:
                 targets.append((worker, stage.WORKER))
-            if (dedicated and complete not in markers
-                    and namespace["status"] == "FRESH_DEDICATED_WORKER_NAMESPACE_DURABLE"
-                    and (any(_named(directory, name) is not None
-                             or _named(directory, _TEMP + name) is not None
-                             for directory, name in targets)
-                         or _named(state, _RUNTIME_RECEIPT) is not None
-                         or _named(state, _TEMP + _RUNTIME_RECEIPT) is not None)):
-                # The newly published receipt claim is not permission to
-                # adopt a target that appeared during namespace preparation.
-                _reject("FOREIGN_EXISTING_DESTINATION")
             if complete in markers:
                 if worker is None:
                     _reject("MISSING_WORKER_DIRECTORY")

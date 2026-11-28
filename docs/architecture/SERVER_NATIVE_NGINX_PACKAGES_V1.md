@@ -2151,8 +2151,10 @@ authority to install/activate on a real host.
 Dedicated worker placement now builds the protected namespace as a private
 sibling stage. The root-owned claim binds the exact authenticated placement
 receipt digest to the root, namespace, private state, public directory and
-lock inodes. The state lock and pending placement marker are durable before
-atomic no-replace publication. A fully claimed staged namespace can resume
+lock inodes. The state lock and namespace claim are durable before atomic
+no-replace publication. The distinct worker placement pending marker is
+created only after the locked absence check of worker and unit destinations;
+the namespace claim alone never authorizes adopting an existing file. A fully claimed staged namespace can resume
 publication at the same inodes after interruption; an incomplete stage,
 unclaimed legacy namespace, changed identity, conflicting stage or foreign
 public entry is refused without relabelling or deletion. The signed worker

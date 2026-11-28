@@ -337,8 +337,8 @@ def test_dedicated_claim_atomic_publication_and_exact_repeat(dedicated_claim_roo
     state = final / "server"
     pending = state / (bootstrap._WORKER_PLACEMENT_PREFIX + "pending-" + digest)
     claim = state / bootstrap._DEDICATED_WORKER_CLAIM
-    assert pending.read_bytes() == b"" and claim.stat().st_mode & 0o777 == 0o600
-    tracked = (final, state, final / "public", state / LOCK_NAME, pending, claim)
+    assert not pending.exists() and claim.stat().st_mode & 0o777 == 0o600
+    tracked = (final, state, final / "public", state / LOCK_NAME, claim)
     before = [(path.stat().st_ino, path.stat().st_mtime_ns, path.stat().st_ctime_ns)
               for path in tracked]
     second = prepare()
@@ -420,7 +420,9 @@ def test_dedicated_claim_refuses_unowned_or_changed_namespace(dedicated_claim_ro
         elif fault == "stage-and-final":
             staged.mkdir(mode=0o700)
         else:
-            (state / (bootstrap._WORKER_PLACEMENT_PREFIX + "pending-" + digest)).write_bytes(b"foreign")
+            marker = state / (bootstrap._WORKER_PLACEMENT_PREFIX + "pending-" + digest)
+            marker.write_bytes(b"foreign")
+            marker.chmod(0o600)
     before = list(writes)
     present = final.exists()
     snapshot = {str(path.relative_to(final.parent)): (path.lstat().st_ino, path.lstat().st_mode,
