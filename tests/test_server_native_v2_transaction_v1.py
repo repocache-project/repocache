@@ -4727,8 +4727,7 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
             with pytest.raises(native.NativeV2TransactionError):
                 invoke(pins)
         assert calls == (["start"] if fault in ("start", "start-resource-drift", "start-result",
-                                                "pending-start", "pending-start-drift", "pending-start-result",
-                                                "pending-start-catalog") else [])
+                                                "pending-start", "pending-start-drift", "pending-start-result") else [])
         if pending_start:
             assert (state_path / native._OWNED_WAL).read_bytes() == wal
         else:
