@@ -2564,9 +2564,9 @@ try:
                     archive=egress._BOOT_EGRESS_HISTORY_PREFIX+prior["policy"]["boot_id"]
                     assert egress._read_boot_egress_receipt(state,0,0,name=archive)==saved
                     assert egress._read_boot_egress_receipt(state,0,0,name=egress._BOOT_EGRESS_ROLLOVER) is None
-                elif pending:
-                    # Real interruption after the WAL-bound boot intent is
-                    # durable but before any nftables initialization.
+                elif action=="prepare":
+                    # Real interruption after the committed or WAL-bound
+                    # boot intent is durable, before nftables initialization.
                     import signal
                     pid=os.fork()
                     if pid==0:
@@ -2585,7 +2585,7 @@ try:
                     except egress.NativeEgressCandidateError as exc:
                         assert "BOOT_POLICY_PENDING" in str(exc)
                     else:
-                        raise AssertionError("Verify-only initialized pending WAL policy")
+                        raise AssertionError("Verify-only initialized interrupted boot policy")
                     assert egress._read_boot_egress_receipt(state,0,0)==saved
                     # Return only the interruption witness; release this fixture
                     # lock before invoking the actual authenticated installer.
@@ -2596,7 +2596,7 @@ try:
                     result=fresh()
                 net_identity=namespace_identity()
                 assert (result["namespace_device"],result["namespace_inode"])==net_identity
-                if not (action=="prepare" and pending):
+                if action!="prepare":
                     assert result==policy(False)
                     assert result==policy(False if pending else True)
                     assert result["boot_id"]==egress._current_boot_id()
@@ -2917,12 +2917,36 @@ finally:
                 raise AssertionError("Existing first-boot namespace adopted")
             assert signed("verify") == policy
             print("PASS: authenticated installer first-boot namespace preparation; wrong generation and repeat refused", flush=True)
-            # Read-only repeat through the distinct committed resume selector.
-            # The pending-WAL scenario independently retains real SIGKILL
-            # evidence for the shared boot policy initializer.
+            # The positive signed first-boot preparation above remains a
+            # separate witness. Reset only the exact disposable fixture
+            # namespace and receipt, with both services disabled/stopped.
+            # No installed recovery/cleanup authority is added.
+            require_status(OWN, False, False)
+            require_status(VENDOR, False, False)
+            require_prior_resources()
+            assert signed("verify") == policy
+            assert digest(profile_receipt) == profile["receipt_sha256"]
+            assert digest(boot_receipt) == policy["receipt_sha256"]
+            assert (ns.stat().st_dev, ns.stat().st_ino) == (
+                policy["namespace_device"], policy["namespace_inode"])
+            assert not os.path.lexists(rollover)
+            assert not any(p.name.startswith(history_prefix) for p in STATE.iterdir())
+            require("/usr/sbin/ip", "netns", "delete", "repocache-nginx")
+            assert not os.path.lexists(ns)
+            assert digest(boot_receipt) == policy["receipt_sha256"]
+            boot_receipt.unlink()
+            sync_dir(STATE)
+            assert not os.path.lexists(boot_receipt)
+            require_prior_resources()
+            assert isolated.command("/usr/sbin/nft", "--stateless", "--numeric-priority",
+                                    "list", "ruleset").stdout == host_rules
+            interrupted = signed("prepare")
             retained = boot_receipt.read_bytes()
             identity = ns.stat()
-            resume_pins = dict(**boot_pins, boot_receipt_sha256=policy["receipt_sha256"])
+            assert digest(boot_receipt) == interrupted["receipt_sha256"]
+            assert (identity.st_dev, identity.st_ino) == (
+                interrupted["namespace_device"], interrupted["namespace_inode"])
+            resume_pins = dict(**boot_pins, boot_receipt_sha256=interrupted["receipt_sha256"])
             for field in ("boot_receipt_sha256", "generation_manifest_sha256"):
                 try:
                     native._resume_authenticated_committed_dedicated_nginx(
@@ -2932,11 +2956,24 @@ finally:
                 else:
                     raise AssertionError("Foreign committed resume pin accepted")
                 assert boot_receipt.read_bytes() == retained
-                assert signed("verify") == policy
+                assert (ns.stat().st_dev, ns.stat().st_ino) == (identity.st_dev, identity.st_ino)
+                require_prior_resources()
+                require_status(OWN, False, False)
+                try:
+                    signed("verify")
+                except AssertionError as exc:
+                    assert "BOOT_POLICY_PENDING" in str(exc), str(exc)
+                else:
+                    raise AssertionError("Foreign pin initialized committed boot policy")
+            policy = native._resume_authenticated_committed_dedicated_nginx(assets, **resume_pins)
+            assert signed("verify") == policy
             assert native._resume_authenticated_committed_dedicated_nginx(assets, **resume_pins) == policy
             assert boot_receipt.read_bytes() == retained
             assert (ns.stat().st_dev, ns.stat().st_ino) == (identity.st_dev, identity.st_ino)
-            print("PASS: authenticated committed same-boot intent repeat preserves exact receipt and namespace; foreign pins refused", flush=True)
+            require_status(OWN, False, False)
+            require_status(VENDOR, False, False)
+            require_prior_resources()
+            print("PASS: committed boot intent survives SIGKILL; signed same-boot resume preserves exact receipt and namespace, foreign pins refused", flush=True)
         assert policy["boot_id"] == boot
         assert policy["generation"] == current["state_generation"]
         assert policy["generation_manifest_sha256"] == state_before[

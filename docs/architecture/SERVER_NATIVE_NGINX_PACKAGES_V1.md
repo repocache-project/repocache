@@ -1700,9 +1700,14 @@ its fresh state lock and supplies the retained bytes as a compare-and-swap
 input to the shared closed-policy initializer. Verify-only readback must
 match the result; the same receipt and inode are retained. No unit start,
 enablement or catalog mutation is authorized. The native committed boot
-scenario checks repeat and foreign pins against the actual installer;
-interrupted initialization on this committed-specific path still requires
-separate native evidence before full lifecycle acceptance.
+scenario retains the successful signed first-boot preparation and then
+resets only the verified disposable fixture namespace and receipt while
+both services are stopped and disabled. It injects a real SIGKILL after
+durable committed boot intent but before nftables initialization. Verify-only
+and foreign pins must refuse, then authenticated same-boot resume must
+preserve receipt bytes, namespace identity, committed resources and disabled
+service state. Repeated verification must be read-only. This fixture cleanup
+is not an installed cleanup or recovery capability.
 
 ### Explicit rolled committed activation dispatch
 
