@@ -1773,3 +1773,22 @@ result, then repeat with no reload. The connection closes on all paths;
 no service is started, enabled or changed by the fixture reference. This
 is test-only, not an additional installed authority. The installed worker's
 exact-state refusals and authentication requirements are unchanged.
+
+
+### Authenticated committed dedicated storage placement
+
+The private installer may prepare only the fixed fresh storage for an
+exact stopped, disabled committed loopback generation with no active
+repositories. Independent release, executable, profile, generation and
+current boot receipt pins are rechecked under a fresh installed-worker
+lock. Verify the existing closed namespace policy without modifying it,
+both services' inactive/disabled state, the loaded signed unit and exact
+committed files before and after invoking the existing dedicated storage
+primitive. Re-read the storage using allow_create=False. Refuse legacy
+roots, drift, pending WAL, foreign pins and incomplete ownership; no
+migration, deletion, relabeling of existing objects, systemctl effect,
+catalog publication or service write proof. Existing valid dedicated
+roots are read-only on repeat. Partial effects remain governed by the
+existing storage ownership and refusal contract; no speculative cleanup.
+The disposable committed VM still explicitly archives its empty legacy
+fixture roots; this does not implement a production storage migration.

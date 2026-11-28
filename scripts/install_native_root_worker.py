@@ -1729,6 +1729,26 @@ _DEDICATED_START_CHILD = _DEDICATED_RECOVERY_CHILD.replace(
     "transaction._start_installed_committed_dedicated(pins)")
 
 
+_DEDICATED_STORAGE_CHILD = _DEDICATED_RECOVERY_CHILD.replace(
+    "transaction._recover_installed_prepared_dedicated(pins)",
+    "transaction._prepare_installed_committed_dedicated_storage(pins)")
+
+
+def _prepare_authenticated_committed_dedicated_storage(
+    assets: Path, *, commit: str, archive_sha256: str,
+    executable_receipt_sha256: str, profile_receipt_sha256: str,
+    generation_manifest_sha256: str, boot_receipt_sha256: str,
+) -> dict:
+    """Private stopped committed storage placement, never migration or start."""
+    return _authenticated_prepared_dedicated_bridge(
+        assets, commit=commit, archive_sha256=archive_sha256,
+        prepare_storage=True,
+        recovery_pins=dict(executable_receipt_sha256=executable_receipt_sha256,
+                           profile_receipt_sha256=profile_receipt_sha256,
+                           generation_manifest_sha256=generation_manifest_sha256,
+                           boot_receipt_sha256=boot_receipt_sha256))
+
+
 def _start_authenticated_committed_dedicated_nginx(
     assets: Path, *, commit: str, archive_sha256: str,
     executable_receipt_sha256: str, profile_receipt_sha256: str,
@@ -1774,6 +1794,7 @@ def _authenticated_prepared_dedicated_bridge(
     pending_prepare: bool = False, resume_boot: bool = False,
     pending_start: bool = False, expected_rolled_pins: dict | None = None,
     stage_profile: bool = False, load_profile: bool = False,
+    prepare_storage: bool = False,
 ) -> dict:
     if (expected_rolled_pins is not None and recovery_pins is not None
             or type(prepare) is not bool or type(start) is not bool or type(rollover) is not bool
@@ -1784,6 +1805,8 @@ def _authenticated_prepared_dedicated_bridge(
                 not prepare or rollover or pending_prepare or resume_boot))
             or type(load_profile) is not bool or (load_profile and (
                 not prepare or rollover or pending_prepare or resume_boot or stage_profile))
+            or type(prepare_storage) is not bool or (prepare_storage and (
+                prepare or start or recovery_pins is None or expected_rolled_pins is not None))
             or (prepare and start) or (rollover and not prepare)
             or (prepare and recovery_pins is None)
             or (start and recovery_pins is None and
@@ -1792,7 +1815,7 @@ def _authenticated_prepared_dedicated_bridge(
     rolled_start = start and recovery_pins is None
     fields = {"executable_receipt_sha256", "profile_receipt_sha256"} | (
         {"generation_manifest_sha256"} if prepare else
-        {"generation_manifest_sha256", "boot_receipt_sha256"} if start else
+        {"generation_manifest_sha256", "boot_receipt_sha256"} if start or prepare_storage else
         {"boot_receipt_sha256", "wal_sha256"})
     if stage_profile:
         fields.remove("profile_receipt_sha256")
@@ -1844,7 +1867,7 @@ def _authenticated_prepared_dedicated_bridge(
                 if expected_rolled_pins is not None and recovery_pins != expected_rolled_pins:
                     _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
             validate_pins(recovery_pins)
-            if prepare or start:
+            if prepare or start or prepare_storage:
                 from repocache.server_native_v2_transaction_v1 import (
                     _OWNED_MANIFEST, _OWNED_LIMIT, _OWNED_WAL_TMP,
                 )
@@ -1921,6 +1944,7 @@ def _authenticated_prepared_dedicated_bridge(
              _DEDICATED_PREPARE_CHILD if prepare else
              _DEDICATED_PENDING_START_CHILD if pending_start else
              _DEDICATED_ROLLED_START_CHILD if rolled_start else
+             _DEDICATED_STORAGE_CHILD if prepare_storage else
              _DEDICATED_START_CHILD if start else _DEDICATED_RECOVERY_CHILD),
             input=json.dumps(pins, sort_keys=True).encode("ascii"),
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd="/",
@@ -1984,6 +2008,17 @@ def _authenticated_prepared_dedicated_bridge(
                     or (rollover and report["receipt_sha256"] ==
                         recovery_pins["previous_boot_receipt_sha256"])
                     or (resume_boot and report["receipt_sha256"] != recovery_pins["boot_receipt_sha256"])):
+                _reject("NATIVE_DEDICATED_RECOVERY_CHILD_REFUSED")
+        elif prepare_storage:
+            if (report.get("status") != "OWNED_DEDICATED_COMMITTED_STORAGE_PREPARED"
+                    or any(report.get(key) != recovery_pins[key] for key in fields)
+                    or report.get("storage") != {
+                        "repository_cache_roots_verified": [], "metrics_file_verified": False,
+                        "selinux_enforcing_labels_verified": True,
+                        "actual_service_write_verified": False}
+                    or report.get("authorizes_systemctl") is not False
+                    or report.get("authorizes_nginx_activation") is not False
+                    or report.get("authorizes_catalog_publication") is not False):
                 _reject("NATIVE_DEDICATED_RECOVERY_CHILD_REFUSED")
         elif start:
             accepted_status = ({"OWNED_DEDICATED_PREPARED_WAL_START_OBSERVED"} if pending_start

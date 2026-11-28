@@ -4474,7 +4474,10 @@ def test_installed_dedicated_recovery_refuses_source_loader_before_host_access(m
                                    "profile-load", "profile-load-repeat", "profile-load-wrong-pin",
                                    "profile-load-service", "profile-load-drift", "profile-load-failure",
                                    "profile-load-readback", "profile-load-timeout",
-                                   "profile-load-observation-drift"])
+                                   "profile-load-observation-drift",
+                                   "storage", "storage-wal", "storage-boot", "storage-service",
+                                   "storage-policy", "storage-drift", "storage-result",
+                                   "storage-readback"])
 def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, monkeypatch, fault):
     """Actual protected files and flock; loader/host/package/runtime observations simulated."""
     import fcntl
@@ -4532,7 +4535,8 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
     preparing = (fault.startswith("prepare") or rolling or pending_first or resuming
                  or staging_profile or loading_profile)
     loaded = fault == "profile-load-repeat"
-    starting = fault.startswith("start") or pending_start
+    storage_prep = fault.startswith("storage")
+    starting = fault.startswith("start") or pending_start or storage_prep
     active_repeat = fault.startswith("start-repeat")
     manifest = b"exact committed manifest"
     resources = {native._OWNED_MANIFEST: manifest, native._CATALOG: b"catalog"}
@@ -4567,7 +4571,7 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
             pins["boot_receipt_sha256"] = ("0"*64 if fault in ("pending-resume-boot", "committed-resume-boot")
                                             else hashlib.sha256(boot).hexdigest())
     if starting:
-        if not pending_start and fault != "start-repeat-wal":
+        if not pending_start and fault not in ("start-repeat-wal", "storage-wal"):
             (state_path / native._OWNED_WAL).unlink()
         pins["generation_manifest_sha256"] = ("0"*64 if fault == "start-manifest"
                                                else hashlib.sha256(manifest).hexdigest())
@@ -4576,7 +4580,7 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
                 pins["wal_sha256"] = "0"*64
         elif fault != "start-mixed":
             del pins["wal_sha256"]
-        if fault in ("start-boot", "pending-start-boot", "start-repeat-boot"):
+        if fault in ("start-boot", "pending-start-boot", "start-repeat-boot", "storage-boot"):
             pins["boot_receipt_sha256"] = "0"*64
     class Loader:
         archive = worker._WORKER
@@ -4611,7 +4615,7 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
             assert (preparing or starting) and argv[2] in (native._UNIT, native._OWNED_WAL_DOMAIN)
             assert argv[1] in ("is-active", "is-enabled")
             if argv[1] == "is-active":
-                active = fault in ("prepare-service", "start-service", "profile-stage-service", "profile-load-service")
+                active = fault in ("prepare-service", "start-service", "profile-stage-service", "profile-load-service", "storage-service")
                 return SimpleNamespace(returncode=0 if active else 3,
                                        stdout=b"active\n" if active else b"inactive\n")
             return SimpleNamespace(returncode=1, stdout=b"disabled\n")
@@ -4735,6 +4739,51 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
     def namespace():
         yield 11, (31, 41), lambda: None
     monkeypatch.setattr(egress, "_fixed_namespace_scope", namespace)
+    if storage_prep:
+        from repocache import server_native_installed_storage_v1 as storage
+        monkeypatch.setattr(native, "_owned_check_stages_absent", lambda *a: None)
+        def verify_policy(root, state, **kw):
+            assert kw["allow_prepare"] is False and kw["namespace_identity"] == (31, 41)
+            kw["recheck_namespace_owner"]()
+            calls.append("policy")
+            return {"receipt_sha256": "0"*64 if fault == "storage-policy" else pins["boot_receipt_sha256"],
+                    "generation_manifest_sha256": pins["generation_manifest_sha256"],
+                    "committed_resources_verified": True, "authorizes_nginx_activation": False,
+                    "authorizes_catalog_publication": False}
+        monkeypatch.setattr(native, "_prepare_owned_committed_boot_egress_locked", verify_policy)
+        def prepare_storage(dist, document, *, allow_create):
+            assert dist == "almalinux"
+            calls.append("create" if allow_create else "read")
+            contender = os.open(state_path / LOCK_NAME, os.O_RDONLY)
+            try:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                os.close(contender)
+            if fault == "storage-drift":
+                resources[native._CATALOG] = b"changed"
+            return {"repository_cache_roots_verified": [], "metrics_file_verified": False,
+                    "selinux_enforcing_labels_verified": not (fault == "storage-readback" and not allow_create),
+                    "actual_service_write_verified": fault == "storage-result"}
+        monkeypatch.setattr(storage, "prepare_dedicated_candidate_storage", prepare_storage)
+        if fault == "storage":
+            result = native._prepare_installed_committed_dedicated_storage(pins)
+            assert result["status"] == "OWNED_DEDICATED_COMMITTED_STORAGE_PREPARED"
+            assert result["storage"]["selinux_enforcing_labels_verified"]
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                native._prepare_installed_committed_dedicated_storage(pins)
+        assert calls == {
+            "storage": ["policy", "create", "read", "policy"],
+            "storage-wal": [], "storage-boot": [], "storage-service": [],
+            "storage-policy": ["policy"], "storage-drift": ["policy", "create"],
+            "storage-result": ["policy", "create"],
+            "storage-readback": ["policy", "create", "read"],
+        }[fault]
+        assert (state_path / egress._BOOT_EGRESS_RECEIPT).read_bytes() == boot
+        with real_locked(rootfd, 0):
+            pass
+        return
     if fault == "boot":
         pins["boot_receipt_sha256"] = "0"*64
     def recover(root, state, **kw):

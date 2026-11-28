@@ -3273,9 +3273,55 @@ finally:
                 assert (opened.st_dev, opened.st_ino) == ident
                 assert set(os.listxattr(fd)) == {"security.selinux"}
                 labels.append((path, fd, ident, os.getxattr(fd, "security.selinux")))
+            if not pending:
+                storage_pins = dict(
+                    **pins, executable_receipt_sha256=executable_proof["receipt_sha256"],
+                    profile_receipt_sha256=prior["profile"]["receipt_sha256"],
+                    generation_manifest_sha256=result["generation_manifest_sha256"],
+                    boot_receipt_sha256=result["receipt_sha256"])
+                # The authenticated storage path must not reinterpret legacy
+                # roots as dedicated, even with otherwise valid pins.
+                try:
+                    native._prepare_authenticated_committed_dedicated_storage(assets, **storage_pins)
+                except native.stage.WorkerStageError:
+                    pass
+                else:
+                    raise AssertionError("Legacy storage adopted as dedicated")
+                assert tuple(file_identity(p) for p in fixed) == identities
+                require_prior_resources()
+                require_status(OWN, False, False)
             for source, backup in zip(fixed, backups):
                 fixture_move_same_parent_noreplace(source, backup)
-            prepared_storage = signed("prepare-committed-storage")["storage"]
+            if pending:
+                prepared_storage = signed("prepare-committed-storage")["storage"]
+            else:
+                for field in ("executable_receipt_sha256", "profile_receipt_sha256",
+                              "generation_manifest_sha256", "boot_receipt_sha256"):
+                    try:
+                        native._prepare_authenticated_committed_dedicated_storage(
+                            assets, **{**storage_pins, field: "0"*64})
+                    except native.stage.WorkerStageError:
+                        pass
+                    else:
+                        raise AssertionError("Foreign storage pin accepted")
+                    assert not any(os.path.lexists(p) for p in fixed)
+                    require_prior_resources()
+                    require_status(OWN, False, False)
+                storage_report = native._prepare_authenticated_committed_dedicated_storage(
+                    assets, **storage_pins)
+                assert storage_report["status"] == "OWNED_DEDICATED_COMMITTED_STORAGE_PREPARED"
+                prepared_storage = storage_report["storage"]
+                assert prepared_storage["selinux_enforcing_labels_verified"]
+                assert prepared_storage["actual_service_write_verified"] is False
+                dedicated_identities = tuple(file_identity(p) for p in fixed)
+                assert native._prepare_authenticated_committed_dedicated_storage(
+                    assets, **storage_pins) == storage_report
+                assert tuple(file_identity(p) for p in fixed) == dedicated_identities
+                assert tuple(file_identity(p) for p in backups) == identities
+                require_status(OWN, False, False)
+                require_status(VENDOR, False, False)
+                require_prior_resources()
+                print("PASS: authenticated committed storage placement and repeat; legacy roots and foreign pins refused", flush=True)
             for path, fd, ident, _ in labels:
                 assert file_identity(path) == ident
                 os.setxattr(fd, "security.selinux", b"system_u:object_r:repocache_nginx_ro_t:s0\0")

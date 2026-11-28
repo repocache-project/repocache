@@ -3963,6 +3963,11 @@ def _rollover_installed_prepared_wal_dedicated(pins: dict) -> dict:
                                           pending_prepare=True)
 
 
+def _prepare_installed_committed_dedicated_storage(pins: dict) -> dict:
+    """Private authenticated storage preparation; no migration or activation."""
+    return _installed_dedicated_lifecycle(pins, prepare=False, prepare_storage=True)
+
+
 def _start_installed_committed_dedicated(pins: dict) -> dict:
     """Private signed-installer start of an independently prepared profile."""
     return _installed_dedicated_lifecycle(pins, prepare=False, start=True)
@@ -3984,7 +3989,8 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
                                    resume_boot: bool = False,
                                    pending_start: bool = False, active_repeat: bool = False,
                                    stage_profile: bool = False,
-                                   load_profile: bool = False) -> dict:
+                                   load_profile: bool = False,
+                                   prepare_storage: bool = False) -> dict:
     import zipimport
     from repocache.server_native_nginx_executable_v1 import (
         signed_owned_nginx_policy_candidate, verify_nginx_candidate_receipt,
@@ -4004,7 +4010,7 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
                "native_payload_sha256", "binary_sha256", "executable_receipt_sha256",
                "profile_receipt_sha256"} | (
         {"generation_manifest_sha256"} if prepare else
-        {"generation_manifest_sha256", "boot_receipt_sha256"} if start else
+        {"generation_manifest_sha256", "boot_receipt_sha256"} if start or prepare_storage else
         {"boot_receipt_sha256", "wal_sha256"})
     if stage_profile:
         digests.remove("profile_receipt_sha256")
@@ -4023,6 +4029,7 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
                 not prepare or rollover or pending_prepare or resume_boot))
             or type(load_profile) is not bool or (load_profile and (
                 not prepare or rollover or pending_prepare or resume_boot or stage_profile))
+            or type(prepare_storage) is not bool or (prepare_storage and (prepare or start))
             or (prepare and start) or (rollover and not prepare)
             or not isinstance(__loader__, zipimport.zipimporter)
             or __loader__.archive != worker or not sys.flags.isolated
@@ -4108,7 +4115,7 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
             if (manifest is None or hashlib.sha256(manifest).hexdigest() !=
                     pins["generation_manifest_sha256"]):
                 _deny("OWNED_DEDICATED_INSTALLER_PIN_REFUSED")
-        elif prepare or start:
+        elif prepare or start or prepare_storage:
             with _owned_layout_locked(root, state, recovering=False) as layout:
                 old = _read_owned_resources(*layout[:3])
                 manifest = old[_OWNED_MANIFEST]
@@ -4413,6 +4420,75 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
             if executable() != executable_before or profile() != profile_before:
                 _deny("OWNED_DEDICATED_INSTALLER_PROFILE_REFUSED")
             recheck_namespace()
+
+        if prepare_storage:
+            from repocache.server_native_nginx_effective_unit_v1 import (
+                inspect_signed_owned_namespace_unit,
+            )
+            from repocache.server_native_installed_storage_v1 import (
+                prepare_dedicated_candidate_storage,
+            )
+            if doc["deployment"]["listen"]["bind_address"] != "127.0.0.1":
+                _deny("OWNED_DEDICATED_INSTALLER_PIN_REFUSED")
+
+            def stopped_storage_owner():
+                guard()
+                package()
+                require_disabled_unit(_UNIT, inactive=True)
+                require_disabled_unit(_OWNED_WAL_DOMAIN, inactive=True)
+                with _owned_layout_locked(root, state, recovering=False) as layout:
+                    state_dir, nginx, public, check_layout = layout
+                    check_layout()
+                    _no_conflicting_owned_wal_pending(state_dir)
+                    _owned_check_stages_absent(state_dir, nginx, public)
+                    if _read_owned_resources(state_dir, nginx, public) != old:
+                        _deny("OWNED_LIVE_RESOURCE_DRIFT")
+                    check_layout()
+                guard()
+
+            stopped_storage_owner()
+            stopped = inspect_signed_owned_namespace_unit(https_port=port, active=False)
+            if stopped.get("main_pid_observed") != 0:
+                _deny("OWNED_DEDICATED_RECOVERY_SERVICE_REFUSED")
+
+            def storage_owner():
+                stopped_storage_owner()
+                if inspect_signed_owned_namespace_unit(https_port=port, active=False) != stopped:
+                    _deny("OWNED_DEDICATED_RECOVERY_SERVICE_REFUSED")
+                stopped_storage_owner()
+
+            def policy():
+                result = _prepare_owned_committed_boot_egress_locked(
+                    root, state, distribution="almalinux", worker_uid=pwd.getpwnam("nginx").pw_uid,
+                    namespace_identity=namespace_identity,
+                    profile_receipt_sha256=pins["profile_receipt_sha256"],
+                    executable_receipt_sha256=pins["executable_receipt_sha256"],
+                    recheck_namespace_owner=storage_owner, allow_prepare=False)
+                if (result.get("receipt_sha256") != pins["boot_receipt_sha256"]
+                        or result.get("generation_manifest_sha256") != pins["generation_manifest_sha256"]
+                        or result.get("committed_resources_verified") is not True
+                        or result.get("authorizes_nginx_activation") is not False
+                        or result.get("authorizes_catalog_publication") is not False):
+                    _deny("OWNED_DEDICATED_INSTALLER_BOOT_REFUSED")
+                return result
+
+            before = policy()
+            storage_owner()
+            created = prepare_dedicated_candidate_storage("almalinux", doc, allow_create=True)
+            storage_owner()
+            if (created != {"repository_cache_roots_verified": [], "metrics_file_verified": False,
+                            "selinux_enforcing_labels_verified": True,
+                            "actual_service_write_verified": False}
+                    or prepare_dedicated_candidate_storage("almalinux", doc, allow_create=False) != created
+                    or policy() != before):
+                _deny("OWNED_DEDICATED_INSTALLER_RESULT_REFUSED")
+            storage_owner()
+            return {"status": "OWNED_DEDICATED_COMMITTED_STORAGE_PREPARED", "storage": created,
+                    **{key: pins[key] for key in (
+                        "generation_manifest_sha256", "boot_receipt_sha256",
+                        "profile_receipt_sha256", "executable_receipt_sha256")},
+                    "authorizes_systemctl": False, "authorizes_nginx_activation": False,
+                    "authorizes_catalog_publication": False}
 
         if start:
             def committed_owner():
