@@ -4606,6 +4606,12 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
         {"generation_manifest_sha256"} if prepare else
         {"generation_manifest_sha256", "boot_receipt_sha256"} if start or prepare_storage or prepare_runtime else
         {"boot_receipt_sha256", "wal_sha256"})
+    if initial_action not in (None, "stage", "restore") or (
+            initial_action is not None and any((
+                prepare, start, rollover, pending_prepare, resume_boot, pending_start,
+                active_repeat, stage_profile, load_profile, prepare_storage, prepare_runtime,
+                pending_placement))):
+        _deny("OWNED_DEDICATED_INSTALLER_PIN_REFUSED")
     if initial_action in ("stage", "restore"):
         digests = {"worker_sha256", "placement_sha256", "archive_sha256",
                    "native_payload_sha256", "binary_sha256", "executable_receipt_sha256",
@@ -4618,12 +4624,7 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
         digests.add("wal_sha256")
     if resume_boot:
         digests.add("boot_receipt_sha256")
-    if (initial_action not in (None, "stage", "restore")
-            or (initial_action is not None and any((
-                prepare, start, rollover, pending_prepare, resume_boot, pending_start,
-                active_repeat, stage_profile, load_profile, prepare_storage, prepare_runtime,
-                pending_placement)))
-            or type(prepare) is not bool or type(start) is not bool or type(rollover) is not bool
+    if (type(prepare) is not bool or type(start) is not bool or type(rollover) is not bool
             or type(pending_prepare) is not bool or (pending_prepare and not prepare)
             or type(resume_boot) is not bool or (resume_boot and (not prepare or rollover))
             or type(pending_start) is not bool or (pending_start and not start)
@@ -5771,6 +5772,7 @@ def _stage_owned_initial_dedicated_generation_core_locked(
         root_fd: int, state_fd: int, nginx_fd: int, public_fd: int,
         check_layout, *, expected_proposal_sha256: str | None = None) -> tuple[bytes, dict]:
     """Internal initial transaction primitive; caller retains exact ownership and lock."""
+    check_layout()
     old, new, report = _prepare_owned_initial_dedicated_candidate_locked(
         root_fd, state_fd, nginx_fd, public_fd, check_layout, "almalinux")
     if expected_proposal_sha256 is not None and _hash(new[V2_STATE]) != expected_proposal_sha256:

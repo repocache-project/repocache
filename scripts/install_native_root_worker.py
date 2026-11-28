@@ -2008,8 +2008,8 @@ def _authenticated_prepared_dedicated_bridge(
             validate_pins(recovery_pins)
             if initial_action is not None:
                 from repocache.server_native_v2_transaction_v1 import (
-                    _OWNED_WAL_TMP, _OWNED_MANIFEST, _OWNED_LIMIT,
-                    _owned_layout_locked, _read_owned_resources, _validate_owned_resources,
+                    _OWNED_WAL_TMP, _owned_layout_locked, _read_owned_resources,
+                    _validate_owned_resources,
                 )
                 from repocache.server_root_control_fixed_candidate_v1 import _load_private_under_root
                 with _owned_layout_locked(root, state, recovering=initial_action == "restore") as layout:

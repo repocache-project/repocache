@@ -4501,6 +4501,10 @@ def test_installed_dedicated_recovery_refuses_source_loader_before_host_access(m
         native._stage_installed_committed_dedicated_profile({})
     with pytest.raises(native.NativeV2TransactionError, match="INSTALLER_PIN_REFUSED"):
         native._load_installed_committed_dedicated_profile({})
+    with pytest.raises(native.NativeV2TransactionError, match="INSTALLER_PIN_REFUSED"):
+        native._stage_installed_initial_dedicated_generation({})
+    with pytest.raises(native.NativeV2TransactionError, match="INSTALLER_PIN_REFUSED"):
+        native._restore_installed_initial_dedicated_generation({})
 
 
 @pytest.mark.parametrize("fault", ["none", "lock-held", "placement", "worker-drift",
@@ -6477,4 +6481,125 @@ def test_discard_unpublished_initial_generation_fixture(filesystem, monkeypatch,
                 restore()
             assert pending.exists()
         assert _fixture_resource_bytes(paths) == before
+    assert not filesystem[-1]
+
+
+@pytest.mark.parametrize("fault", ["stage", "restore", "proposal", "wal", "active",
+                                   "enabled", "profile", "namespace", "executable", "mixed"])
+def test_installed_initial_generation_retains_stopped_authority(filesystem, monkeypatch, fault):
+    """Actual fixture lock and resources; simulate only installed host identity."""
+    import fcntl
+    import zipimport
+    from types import SimpleNamespace
+    from repocache import server_native_nginx_effective_unit_v1 as unit
+    from repocache import server_native_nginx_executable_v1 as executable
+    from repocache import server_root_control_host_preflight_v1 as host
+    from repocache import server_root_control_worker_v1 as worker
+
+    rootfd, state, _, _, _ = filesystem
+    directory = state.parents[3] / "usr/libexec/repocache"
+    directory.mkdir(parents=True, mode=0o755)
+    placement = {
+        "schema_version": 1, "status": "AUTHENTICATED_WORKER_STAGED", "version": "0.6.0",
+        "source_sha": "a"*40, "archive_sha256": "b"*64, "manifest_sha256": "c"*64,
+        "publisher_key_id": "test-only",
+        "files": {name: "d"*64 for name in worker._RECEIPT_FILES},
+        "authorizes_host_installation": False, "authorizes_service_activation": False,
+    }
+    raw = (json.dumps(placement, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+    placement_sha = hashlib.sha256(raw).hexdigest()
+    complete = worker._PLACEMENT_PREFIX + "complete-" + placement_sha
+    for name, content in ((worker._RUNTIME_RECEIPT, raw), (complete, b"")):
+        path = state / name
+        path.write_bytes(content)
+        path.chmod(0o600)
+    old = _owned_bootstrap_resources()
+    new = _owned_generation(active=False, distribution="almalinux")
+    paths = _owned_fixture_paths(filesystem, old)
+    pins = dict(source_sha="a"*40, archive_sha256="b"*64, worker_sha256="d"*64,
+                placement_sha256=placement_sha, package_identity="nginx-core-0:1.2-3.x86_64",
+                native_payload_sha256="e"*64, binary_sha256="f"*64,
+                executable_receipt_sha256="1"*64)
+    wal = native._owned_wal_record(old, new, live=True)
+    restoring = fault in ("restore", "wal")
+    if restoring:
+        journal = state / native._OWNED_WAL
+        journal.write_bytes(wal)
+        journal.chmod(0o600)
+        pins["wal_sha256"] = "0"*64 if fault == "wal" else native._hash(wal)
+    else:
+        pins["proposal_sha256"] = "0"*64 if fault == "proposal" else native._hash(new[V2_STATE])
+    if fault == "profile":
+        (state / unit._NAMESPACE_PROFILE_RECEIPT).touch()
+    class Loader:
+        archive = worker._WORKER
+    monkeypatch.setattr(zipimport, "zipimporter", Loader)
+    monkeypatch.setattr(native, "__loader__", Loader())
+    monkeypatch.setattr(native, "sys", SimpleNamespace(flags=SimpleNamespace(isolated=True)))
+    monkeypatch.setattr(host, "require_native_host_preconditions", lambda: None)
+    monkeypatch.setattr(dispatcher, "_native_distro", lambda: "almalinux")
+    monkeypatch.setattr(native, "_verify_current_root_fd", lambda *_: None)
+    monkeypatch.setattr(native, "_require_audited_native_package_for_activation", lambda *a, **kw: None)
+    real_locked, real_walk = native._locked, native._walk
+    monkeypatch.setattr(native, "_locked", lambda root, uid: real_locked(rootfd, uid))
+    monkeypatch.setattr(native, "_walk", lambda root, parts, stack, uid: real_walk(rootfd, parts, stack, uid))
+    monkeypatch.setattr(worker, "_placement_file_digest", lambda root, segments, mode, limit:
+                        pins["binary_sha256"] if segments[-1] == "nginx" else placement["files"][segments[-1]])
+    monkeypatch.setattr(executable, "signed_owned_nginx_policy_candidate", lambda: {"policy_sha256": "a"*64})
+    def executable_proof(*args, **kwargs):
+        if fault == "executable":
+            native._deny("EXECUTABLE_REFUSED")
+        return {"executable_identity": (1, 2)}
+    monkeypatch.setattr(executable, "verify_nginx_candidate_receipt", executable_proof)
+    monkeypatch.setattr(unit, "inspect_effective_owned_nginx_unit", lambda **kw: {"main_pid_observed": 0})
+    monkeypatch.setattr(unit, "_safe_native_systemctl", lambda: None)
+    monkeypatch.setattr(os.path, "lexists", lambda path: fault == "namespace" and path == unit._NAMESPACE_PATH)
+    def commands(argv, **kw):
+        if argv[0] == native._SYSTEMCTL:
+            assert argv[1] in ("is-active", "is-enabled")
+            assert argv[2] in (native._UNIT, native._OWNED_WAL_DOMAIN)
+            if argv[1] == "is-active":
+                return SimpleNamespace(returncode=0 if fault == "active" else 3,
+                                       stdout=b"active\n" if fault == "active" else b"inactive\n")
+            return SimpleNamespace(returncode=0 if fault == "enabled" else 1,
+                                   stdout=b"enabled\n" if fault == "enabled" else b"disabled\n")
+        return SimpleNamespace(returncode=0, stderr=b"", stdout=pins["package_identity"].encode())
+    monkeypatch.setattr(native.subprocess, "run", commands)
+    monkeypatch.setattr(native._Labels, "_command", staticmethod(lambda *a: b"Enforcing"))
+    # The actual fixture layout uses rootfd rather than the simulated "/" handle.
+    original_layout = native._owned_layout_locked
+    monkeypatch.setattr(native, "_owned_layout_locked", lambda root, statefd, **kw:
+                        original_layout(rootfd, statefd, **kw))
+    calls = []
+    def staged(root, statefd, nginx, public, boundary, *, expected_proposal_sha256):
+        boundary()
+        if expected_proposal_sha256 != native._hash(new[V2_STATE]):
+            native._deny("CANDIDATE_CHANGED")
+        calls.append("stage")
+        return wal, new
+    def restored(root, statefd, nginx, public, boundary, *, expected_wal):
+        boundary()
+        assert expected_wal == wal
+        calls.append("restore")
+        return {"status": "OWNED_INITIAL_GENERATION_FIXTURE_RESTORED"}
+    monkeypatch.setattr(native, "_stage_owned_initial_dedicated_generation_core_locked", staged)
+    monkeypatch.setattr(native, "_restore_owned_initial_dedicated_generation_core_locked", restored)
+    if fault in ("stage", "restore"):
+        report = (native._restore_installed_initial_dedicated_generation(pins) if restoring else
+                  native._stage_installed_initial_dedicated_generation(pins))
+        assert calls == [fault]
+        assert report["wal_sha256"] == native._hash(wal)
+        assert report["catalog_withdrawn"] is True and report["authorizes_systemctl"] is False
+        assert report["authorizes_nginx_activation"] is False
+        assert report["authorizes_catalog_publication"] is False
+    else:
+        with pytest.raises(native.NativeV2TransactionError):
+            if fault == "mixed":
+                native._installed_dedicated_lifecycle(pins, prepare=True, initial_action="stage")
+            elif restoring:
+                native._restore_installed_initial_dedicated_generation(pins)
+            else:
+                native._stage_installed_initial_dedicated_generation(pins)
+        assert not calls
+    assert _fixture_resource_bytes(paths) == old
     assert not filesystem[-1]

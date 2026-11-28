@@ -1235,3 +1235,103 @@ def test_fixed_policy_full_inventory_preserves_priority_and_disabled_state(monke
     else:
         with pytest.raises(AssertionError):
             guest._fixed_policy_inventory()
+
+
+@pytest.mark.parametrize("fault", ["stage", "restore", "proposal", "wal", "authority", "child", "mixed"])
+def test_initial_installer_bridge_pins_proposal_and_stopped_result(monkeypatch, tmp_path, fault):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from repocache import server_native_v2_transaction_v1 as tx
+    from repocache import server_root_control_fixed_candidate_v1 as intake
+    receipt = {"source_sha": "a"*40}
+    raw = stage._json_line(receipt)
+    marker = install._MARKER + "complete-" + hashlib.sha256(raw).hexdigest()
+    (tmp_path / marker).touch()
+    wal = b"exact wal"
+    proposal = b"exact proposal"
+    restoring = fault in ("restore", "wal")
+    locked = False
+    calls = []
+    @contextmanager
+    def lock(root, owner, **kw):
+        nonlocal locked
+        assert owner == 0 and kw == {"allow_native_package_parent_changes": True}
+        fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+        locked = True
+        try:
+            yield fd
+        finally:
+            locked = False
+            os.close(fd)
+    monkeypatch.setattr(install, "_locked", lock)
+    monkeypatch.setattr(install, "_native_distro", lambda: "almalinux")
+    monkeypatch.setattr(install, "require_native_host_preconditions", lambda: None)
+    monkeypatch.setattr(stage, "_authenticated_payloads", lambda *a, **kw:
+                        ({stage.CONFIG: install._BOOTSTRAP_CONFIG, stage.WORKER: b"worker"}, receipt))
+    monkeypatch.setattr(stage, "_audit_worker_files", lambda *a: None)
+    def read(fd, name, uid, limit):
+        assert locked
+        if name == install._RUNTIME_RECEIPT:
+            return raw
+        if name == marker:
+            return b""
+        if name == tx._OWNED_WAL:
+            return wal if restoring else None
+        assert name == tx._OWNED_WAL_TMP
+        return None
+    monkeypatch.setattr(install, "_read_file", read)
+    @contextmanager
+    def layout(root, state, *, recovering):
+        assert locked and recovering is restoring
+        yield state, 11, 12, lambda: None
+    monkeypatch.setattr(tx, "_owned_layout_locked", layout)
+    monkeypatch.setattr(tx, "_read_owned_resources", lambda *a: {})
+    monkeypatch.setattr(tx, "_validate_owned_resources", lambda *a, **kw: None)
+    monkeypatch.setattr(intake, "_load_private_under_root", lambda *a, **kw:
+                        ({"expected_generation": 0, "expected_state_sha256": None}, proposal))
+    monkeypatch.setattr(install, "_require_audited_native_package_for_activation", lambda *a, **kw: None)
+    monkeypatch.setattr(install, "_native_workspace_is_root_owned", lambda *a: True)
+    @contextmanager
+    def work(**kw):
+        yield str(tmp_path)
+    monkeypatch.setattr(install.tempfile, "TemporaryDirectory", work)
+    monkeypatch.setattr(install, "_candidate_native_identity", lambda *a: "nginx-core-0:1.2-3.x86_64")
+    monkeypatch.setattr(install, "_authenticate_candidate_rpm", lambda *a: ("e"*64, "f"*64))
+    def child(argv, **kw):
+        assert not locked
+        assert argv[-1] == (install._DEDICATED_INITIAL_RESTORE_CHILD if restoring else
+                            install._DEDICATED_INITIAL_STAGE_CHILD)
+        compile(argv[-1], "<initial-child>", "exec")
+        pins = json.loads(kw["input"])
+        assert pins["worker_sha256"] == hashlib.sha256(b"worker").hexdigest()
+        assert "boot_receipt_sha256" not in pins and "profile_receipt_sha256" not in pins
+        calls.append("child")
+        report = dict(status="OWNED_INITIAL_INSTALLED_BOOTSTRAP_RESTORED" if restoring else
+                      "OWNED_INITIAL_INSTALLED_GENERATION_STAGED",
+                      wal_sha256=hashlib.sha256(wal).hexdigest(), catalog_withdrawn=True,
+                      recovery_required=not restoring, executable_receipt_sha256="c"*64,
+                      authorizes_systemctl=False, authorizes_nginx_activation=False,
+                      authorizes_catalog_publication=fault == "authority")
+        if not restoring:
+            report.update(proposal_sha256=hashlib.sha256(proposal).hexdigest(),
+                          generation_manifest_sha256="d"*64)
+        return SimpleNamespace(returncode=2 if fault == "child" else 0,
+                               stdout=json.dumps(report).encode(), stderr=b"")
+    monkeypatch.setattr(install.subprocess, "run", child)
+    pins = dict(commit="a"*40, archive_sha256="b"*64, executable_receipt_sha256="c"*64)
+    def invoke():
+        if fault == "mixed":
+            return install._authenticated_prepared_dedicated_bridge(
+                tmp_path, commit="a"*40, archive_sha256="b"*64, recovery_pins={},
+                initial_action="stage", prepare=True)
+        if restoring:
+            return install._restore_authenticated_initial_dedicated_generation(
+                tmp_path, **pins, wal_sha256="0"*64 if fault == "wal" else hashlib.sha256(wal).hexdigest())
+        return install._stage_authenticated_initial_dedicated_generation(
+            tmp_path, **pins, proposal_sha256="0"*64 if fault == "proposal" else hashlib.sha256(proposal).hexdigest())
+    if fault in ("stage", "restore"):
+        assert invoke()["catalog_withdrawn"] is True
+    else:
+        with pytest.raises(stage.WorkerStageError):
+            invoke()
+    assert calls == (["child"] if fault in ("stage", "restore", "authority", "child") else [])

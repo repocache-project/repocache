@@ -2066,3 +2066,25 @@ initial candidate preparation, before TLS or DNS, and again on reconstruction,
 staging and private rollback. Do not stage a candidate that the authenticated
 loopback-only start would necessarily refuse. This does not change the public
 listener specification or authorize actual network exposure.
+
+### Authenticated stopped initial transaction
+
+The detached entrypoints retain their actual-root refusal. Their internal
+transaction algorithms are shared by a separate signed installer-only
+bridge, never socket or public CLI dispatch. The parent authenticates
+release bytes, native RPM and the placement receipt under the existing
+lock, binds the proposal (or recovery WAL) digest, and invokes the fixed
+isolated installed worker. The worker reacquires its own lock, rechecks
+placement/package/executable and the stopped, disabled vendor and owned
+units, enforcing state and absence of any namespace, profile or boot
+intent before and throughout the initial WAL operation. No start, reload,
+enablement or catalog publication is authorized. Before profile placement,
+a matching initial WAL can restore the inert bootstrap, including an
+unpublished record. Once profile or boot intent exists, refuse this
+pre-profile rollback rather than guessing at runtime authority.
+
+This is not yet the complete installed first-generation flow. The fresh
+dedicated host placement, subsequent profile/boot/storage/start and
+health-gated finalization still require authenticated composition and
+booted native acceptance. No legacy namespace relabeling or takeover is
+permitted by the new bridge.
