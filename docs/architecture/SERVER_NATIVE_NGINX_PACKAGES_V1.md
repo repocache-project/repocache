@@ -1827,3 +1827,18 @@ disposable guest intentionally substitutes the fixture's old main-file
 label, requires signed start refusal, and restores the label before the
 positive start. TLS label preparation, fresh configuration placement and
 installed lifecycle acceptance remain separate gates.
+
+### Dedicated TLS read-only label and path proof
+
+The isolated dedicated start, active repeat and prepared-WAL finalizer
+also retain a read-only identity proof for the certificate/key paths
+from the authenticated generation. Require the exact dedicated read-only
+context on their direct parents and leaves, safe root-owned ancestry,
+no extra ACLs/xattrs, same-mount traversal, distinct single-link regular
+files and unchanged metadata. Retain the existing certificate chain,
+hostname, expiry and pair validation; the new label proof does not
+replace OpenSSL. Recheck the proof during the existing ownership guards.
+Do not copy, log, relabel or repair any operator-owned TLS material.
+The native fixture tests a foreign private-key label before real start,
+restoring only its own disposable label. Fresh label placement, production
+policy installation and complete installed activation remain separate gates.

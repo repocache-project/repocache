@@ -3722,7 +3722,7 @@ def test_dedicated_health_child_timeout_and_preflight_do_not_signal_foreign_pid(
 @pytest.mark.parametrize("prepared", [False, True, "repeat"])
 @pytest.mark.parametrize("fault", ["none", "active-route", "nonloopback", "pending",
                                     "policy", "policy-drift", "storage-drift", "scratch-drift", "scratch-service",
-                                    "config-label", "config-label-drift", "enabled", "start", "health",
+                                    "config-label", "config-label-drift", "tls-label", "tls-label-drift", "enabled", "start", "health",
                                     "foreign-master", "generation-drift", "selected-drift"])
 def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
         filesystem, monkeypatch, fault, prepared):
@@ -3774,6 +3774,7 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
     storage_reads = 0
     scratch_reads = 0
     label_reads = 0
+    tls_label_reads = 0
     ns, exe = (17, 29), (31, 41)
 
     # Retain the real layout before replacing its public test seam, so
@@ -3886,6 +3887,15 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
         return ("changed",) if fault == "config-label-drift" and label_reads > 1 else ("exact",)
 
     monkeypatch.setattr(native, "_dedicated_readonly_config_labels", config_labels)
+
+    def tls_labels(root, document):
+        nonlocal tls_label_reads
+        tls_label_reads += 1
+        if fault == "tls-label":
+            raise native.NativeV2TransactionError("TLS_LABEL_REFUSED")
+        return ("changed",) if fault == "tls-label-drift" and tls_label_reads > 1 else ("exact",)
+
+    monkeypatch.setattr(native, "_dedicated_readonly_tls_labels", tls_labels)
     def service_scratch(pid, expected):
         assert running and pid == 123 and expected == ((1,), {"scratch": (2,)})
         if fault == "scratch-service":
@@ -3926,7 +3936,7 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
         with pytest.raises(native.NativeV2TransactionError):
             invoke()
         assert calls == ([] if fault in ("active-route", "nonloopback", "pending", "policy", "enabled",
-                                                    "config-label", "config-label-drift")
+                                                    "config-label", "config-label-drift", "tls-label", "tls-label-drift")
                          else ["health"])
         assert running  # A pre-existing process is never stopped on failure.
     else:
@@ -3935,6 +3945,7 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
         assert calls == {"active-route": [], "nonloopback": [], "pending": [],
                          "policy": [], "policy-drift": [], "storage-drift": [], "scratch-drift": [],
                          "config-label": [], "config-label-drift": [],
+                         "tls-label": [], "tls-label-drift": [],
                          "enabled": [], "selected-drift": [],
                          "start": ["start", "stop"], "health": ["start", "health", "stop"],
                          "scratch-service": ["start", "health", "stop"],
@@ -4163,6 +4174,7 @@ def test_dedicated_wal_finalization_publishes_only_verified_prior(
     monkeypatch.setattr(native, "_verify_current_root_fd", lambda *a: None)
     monkeypatch.setattr(native, "_require_audited_native_package_for_activation", lambda *a, **kw: None)
     monkeypatch.setattr(native, "_verify_tls_pair", lambda *a, **kw: "c"*64)
+    monkeypatch.setattr(native, "_dedicated_readonly_tls_labels", lambda *a: ("exact",))
     monkeypatch.setattr(native, "_prepare_boot_egress_locked", policy)
     monkeypatch.setattr(native, "_owned_dedicated_live_health_bound", health)
     monkeypatch.setattr(unit, "_inspect_signed_owned_namespace_runtime", runtime)
@@ -5352,3 +5364,85 @@ def test_dedicated_readonly_config_label_proof(tmp_path, monkeypatch, fault):
     finally:
         os.close(nfd)
         os.close(pfd)
+
+
+@pytest.mark.parametrize("fault", [
+    "none", "parent-label", "cert-label", "key-label", "key-mode", "cert-mode",
+    "symlink", "hardlink", "ancestor-acl", "key-acl", "foreign-mount",
+    "label-drift", "inode-drift", "missing", "traversal", "same-path",
+])
+def test_dedicated_readonly_tls_label_proof(tmp_path, monkeypatch, fault):
+    """Real filesystem identity checks; only SELinux labels and mounts simulated."""
+    parent = tmp_path / "etc/repocache/tls"
+    parent.mkdir(parents=True, mode=0o700)
+    cert, key = parent / "chain.pem", parent / "key.pem"
+    cert.write_bytes(b"certificate fixture")
+    cert.chmod(0o644)
+    key.write_bytes(b"key fixture")
+    key.chmod(0o600)
+    if fault == "key-mode":
+        key.chmod(0o644)
+    if fault == "cert-mode":
+        cert.chmod(0o666)
+    if fault == "symlink":
+        key.unlink()
+        key.symlink_to(cert)
+    if fault == "hardlink":
+        os.link(key, tmp_path / "alias")
+    if fault == "missing":
+        key.unlink()
+    doc = {"deployment": {"tls": {
+        "certificate_file": "/etc/repocache/tls/chain.pem",
+        "private_key_file": ("/etc/repocache/tls/../key.pem" if fault == "traversal"
+                             else "/etc/repocache/tls/chain.pem" if fault == "same-path"
+                             else "/etc/repocache/tls/key.pem")}}}
+    target = key.stat().st_ino if key.exists() else -1
+    cert_inode = cert.stat().st_ino
+    parent_inode = parent.stat().st_ino
+    ancestor_inode = parent.parent.stat().st_ino
+    reads = 0
+    real_mount = native._mount
+
+    def getxattr(fd, name):
+        nonlocal reads
+        assert name == "security.selinux"
+        ino = os.fstat(fd).st_ino
+        if ino == target:
+            reads += 1
+            if fault == "inode-drift" and reads == 1:
+                replacement = parent / "replacement"
+                replacement.write_bytes(b"key fixture")
+                replacement.chmod(0o600)
+                os.replace(replacement, key)
+        if ((fault == "parent-label" and ino == parent_inode)
+                or (fault == "cert-label" and ino == cert_inode)
+                or (fault == "key-label" and ino == target)
+                or (fault == "label-drift" and ino == target and reads > 1)):
+            return b"system_u:object_r:httpd_config_t:s0\0"
+        return native._DEDICATED_PUBLIC_CONTEXT + b"\0"
+
+    def listxattr(fd):
+        ino = os.fstat(fd).st_ino
+        if ((fault == "ancestor-acl" and ino == ancestor_inode)
+                or (fault == "key-acl" and ino == target)):
+            return ["security.selinux", "system.posix_acl_access"]
+        return ["security.selinux"]
+
+    monkeypatch.setattr(os, "listxattr", listxattr)
+    monkeypatch.setattr(os, "getxattr", getxattr)
+    monkeypatch.setattr(os, "setxattr", lambda *a: pytest.fail("read-only operation attempted relabel"))
+    monkeypatch.setattr(native, "_mount", lambda fd: (
+        "foreign" if fault == "foreign-mount" and os.fstat(fd).st_ino == target
+        else real_mount(fd)))
+    root = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        if fault == "none":
+            result = native._dedicated_readonly_tls_labels(root, doc)
+            assert native._dedicated_readonly_tls_labels(root, doc) == result
+            assert len(result) == 2
+        else:
+            with pytest.raises((native.NativeV2TransactionError, ValueError)):
+                native._dedicated_readonly_tls_labels(root, doc)
+        assert cert.read_bytes() == b"certificate fixture"
+    finally:
+        os.close(root)

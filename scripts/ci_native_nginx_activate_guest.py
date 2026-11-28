@@ -3451,6 +3451,26 @@ finally:
                         assert file_identity(path) == identity
                         os.setxattr(fd, "security.selinux", dedicated_label)
                     print("PASS: signed committed start refuses foreign fixed configuration label", flush=True)
+                    path, fd, identity, legacy_label = next(
+                        item for item in labels
+                        if item[0] == Path(document["deployment"]["tls"]["private_key_file"]))
+                    dedicated_label = os.getxattr(fd, "security.selinux")
+                    assert legacy_label.rstrip(b"\0") != dedicated_label.rstrip(b"\0")
+                    assert file_identity(path) == identity
+                    os.setxattr(fd, "security.selinux", legacy_label)
+                    try:
+                        try:
+                            native._start_authenticated_committed_dedicated_nginx(assets, **start_pins)
+                        except native.stage.WorkerStageError:
+                            pass
+                        else:
+                            raise AssertionError("Foreign dedicated TLS key label accepted")
+                        require_status(OWN, False, False)
+                        require_prior_resources()
+                    finally:
+                        assert file_identity(path) == identity
+                        os.setxattr(fd, "security.selinux", dedicated_label)
+                    print("PASS: signed committed start refuses foreign TLS key label", flush=True)
                     started = native.activate_authenticated_native_nginx(assets, **pins)
                     assert started["nginx_active_verified"] is True
                     assert started["nginx_enabled_verified"] is False

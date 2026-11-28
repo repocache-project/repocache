@@ -1020,6 +1020,68 @@ def _local_https_catalog(document: dict[str, Any], catalog: bytes) -> None:
         _deny("CATALOG_EXPOSURE_UNVERIFIED")
 
 
+def _dedicated_readonly_tls_labels(root_fd: int, document: dict[str, Any]) -> tuple:
+    """Observe the authenticated generation's TLS paths; never change labels."""
+    code = "OWNED_DEDICATED_TLS_LABEL_UNVERIFIED"
+    try:
+        tls = document["deployment"]["tls"]
+        with ExitStack() as stack:
+            held = []
+            for field in ("certificate_file", "private_key_file"):
+                path = tls[field]
+                if (type(path) is not str or not path.startswith("/")
+                        or any(part in ("", ".", "..") for part in path[1:].split("/"))):
+                    _deny(code)
+                segments = path[1:].split("/")
+                if len(segments) < 2:
+                    _deny(code)
+                parent, chain = _walk(root_fd, tuple(segments[:-1]), stack, 0)
+                _metadata_no_acl(root_fd, directory=True)
+                for ancestor, _, child, _ in chain:
+                    _metadata_no_acl(child, directory=True)
+                    if _mount(child) != _mount(ancestor):
+                        _deny(code)
+                _require_dedicated_public_label(parent)
+                fd = os.open(segments[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                             | os.O_CLOEXEC, dir_fd=parent)
+                stack.callback(os.close, fd)
+                info = _metadata_no_acl(fd)
+                identity = _identity(info)
+                forbidden = 0o077 if field == "private_key_file" else 0o022
+                if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                        or stat.S_IMODE(info.st_mode) & forbidden
+                        or not 0 < info.st_size <= 128 * 1024
+                        or _mount(fd) != _mount(parent)
+                        or _identity(os.stat(segments[-1], dir_fd=parent,
+                                             follow_symlinks=False)) != identity):
+                    _deny(code)
+                _require_dedicated_public_label(fd)
+                held.append((parent, segments[-1], fd, identity, chain))
+            if held[0][3][:2] == held[1][3][:2]:
+                _deny(code)
+            proof = []
+            for parent, name, fd, identity, chain in held:
+                _recheck(chain, 0)
+                _metadata_no_acl(root_fd, directory=True)
+                for ancestor, _, child, _ in chain:
+                    _metadata_no_acl(child, directory=True)
+                    if _mount(child) != _mount(ancestor):
+                        _deny(code)
+                _require_dedicated_public_label(parent)
+                _require_dedicated_public_label(fd)
+                if (_identity(_metadata_no_acl(fd)) != identity
+                        or _identity(os.stat(name, dir_fd=parent, follow_symlinks=False)) != identity
+                        or _mount(fd) != _mount(parent)):
+                    _deny(code)
+                proof.append((tuple((snapshot, _mount(child)) for _, _, child, snapshot in chain),
+                              identity, _mount(fd)))
+            return tuple(proof)
+    except NativeV2TransactionError:
+        raise
+    except (OSError, ValueError, TypeError, KeyError, InstalledStorageError, RootControlWorkerError):
+        _deny(code)
+
+
 def _verify_tls_pair(root_fd: int, document: dict[str, Any], *,
                      verify_identity: bool = False) -> str | None:
     """Open real root-owned cert/key without symlinks and verify exact pair.
@@ -3505,6 +3567,7 @@ def _start_owned_dedicated_generation_locked(
             active_repeat = allow_active_repeat and fixed_systemctl("is-active")
             scratch = _owned_alma_runtime_temps(
                 root_fd, dedicated=True, inactive=not active_repeat)
+            tls_labels = _dedicated_readonly_tls_labels(root_fd, document)
             leaf = _verify_tls_pair(root_fd, document, verify_identity=True)
             config_labels = _dedicated_readonly_config_labels(
                 nginx, public, catalog_present=not recovering)
@@ -3522,6 +3585,8 @@ def _start_owned_dedicated_generation_locked(
                 if _dedicated_readonly_config_labels(
                         nginx, public, catalog_present=not recovering) != config_labels:
                     _deny("OWNED_DEDICATED_READONLY_LABEL_CHANGED")
+                if _dedicated_readonly_tls_labels(root_fd, document) != tls_labels:
+                    _deny("OWNED_DEDICATED_TLS_LABEL_CHANGED")
                 recheck_authenticated_owner()
 
             def owner(active):
@@ -3759,6 +3824,7 @@ def _finish_owned_prepared_wal_dedicated_locked(
         _require_audited_native_package_for_activation(state, distribution="almalinux")
         storage = prepare_dedicated_candidate_storage("almalinux", document, allow_create=False)
         scratch = _owned_alma_runtime_temps(root_fd, dedicated=True)
+        tls_labels = _dedicated_readonly_tls_labels(root_fd, document)
         leaf = _verify_tls_pair(root_fd, document, verify_identity=True)
         context = (document, snapshot["state_generation"], leaf)
 
@@ -3776,6 +3842,7 @@ def _finish_owned_prepared_wal_dedicated_locked(
             recheck_authenticated_owner()
             _require_audited_native_package_for_activation(state, distribution="almalinux")
             if (runtime() != master
+                    or _dedicated_readonly_tls_labels(root_fd, document) != tls_labels
                     or _verify_tls_pair(root_fd, document, verify_identity=True) != leaf
                     or prepare_dedicated_candidate_storage(
                         "almalinux", document, allow_create=False) != storage
