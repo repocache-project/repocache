@@ -4373,6 +4373,8 @@ def test_installed_dedicated_recovery_refuses_source_loader_before_host_access(m
         native._rollover_installed_committed_dedicated({})
     with pytest.raises(native.NativeV2TransactionError, match="INSTALLER_PIN_REFUSED"):
         native._rollover_installed_prepared_wal_dedicated({})
+    with pytest.raises(native.NativeV2TransactionError, match="INSTALLER_PIN_REFUSED"):
+        native._prepare_installed_prepared_wal_dedicated({})
 
 
 @pytest.mark.parametrize("fault", ["none", "lock-held", "placement", "worker-drift",
@@ -4385,7 +4387,9 @@ def test_installed_dedicated_recovery_refuses_source_loader_before_host_access(m
                                    "rollover", "rollover-pin", "rollover-same-boot",
                                    "rollover-archive", "rollover-resource-drift",
                                    "pending-rollover", "pending-rollover-wal",
-                                   "pending-rollover-catalog", "pending-rollover-drift"])
+                                   "pending-rollover-catalog", "pending-rollover-drift",
+                                   "pending-prepare", "pending-prepare-wal",
+                                   "pending-prepare-catalog", "pending-prepare-drift"])
 def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, monkeypatch, fault):
     """Actual protected files and flock; loader/host/package/runtime observations simulated."""
     import fcntl
@@ -4405,6 +4409,8 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
     wal = b"exact test WAL"
     pending_rolling = fault.startswith("pending-rollover")
     rolling = fault.startswith("rollover") or pending_rolling
+    pending_first = fault.startswith("pending-prepare")
+    pending = pending_first or pending_rolling
     prior_boot_id = "11111111-1111-1111-1111-111111111111"
     new_boot_id = "22222222-2222-2222-2222-222222222222"
     boot = (_canonical({"boot_id": prior_boot_id}, limit=8192)
@@ -4432,12 +4438,12 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
                 boot_receipt_sha256=hashlib.sha256(boot).hexdigest(),
                 wal_sha256="3"*64 if fault == "wal" else hashlib.sha256(wal).hexdigest())
     calls = []
-    preparing = fault.startswith("prepare") or rolling
+    preparing = fault.startswith("prepare") or rolling or pending_first
     starting = fault.startswith("start")
     manifest = b"exact committed manifest"
     resources = {native._OWNED_MANIFEST: manifest, native._CATALOG: b"catalog"}
     if preparing:
-        if not pending_rolling:
+        if not pending:
             (state_path / native._OWNED_WAL).unlink()
         if not rolling:
             (state_path / egress._BOOT_EGRESS_RECEIPT).unlink()
@@ -4450,9 +4456,9 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
                                                     else hashlib.sha256(boot).hexdigest())
             monkeypatch.setattr(egress, "_current_boot_id",
                                 lambda: prior_boot_id if fault == "rollover-same-boot" else new_boot_id)
-            if pending_rolling:
-                pins["wal_sha256"] = ("0"*64 if fault == "pending-rollover-wal"
-                                      else hashlib.sha256(wal).hexdigest())
+        if pending:
+            pins["wal_sha256"] = ("0"*64 if fault.endswith("-wal")
+                                  else hashlib.sha256(wal).hexdigest())
     if starting:
         (state_path / native._OWNED_WAL).unlink()
         pins["generation_manifest_sha256"] = ("0"*64 if fault == "start-manifest"
@@ -4503,13 +4509,13 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
     if preparing or starting:
         @contextmanager
         def layout(root, state, *, recovering):
-            assert recovering is pending_rolling
+            assert recovering is pending
             yield state, 11, 12, lambda: None
         monkeypatch.setattr(native, "_owned_layout_locked", layout)
-        if pending_rolling:
+        if pending:
             prior_resources = dict(resources)
             monkeypatch.setattr(native, "_decode_owned_wal", lambda *a, **kw: (prior_resources, {}))
-            resources[native._CATALOG] = b"foreign" if fault == "pending-rollover-catalog" else None
+            resources[native._CATALOG] = b"foreign" if fault.endswith("-catalog") else None
             def live_guard(state, nginx, public, check, expected_wal, expected_resources):
                 check()
                 if ((state_path / native._OWNED_WAL).read_bytes() != expected_wal
@@ -4577,10 +4583,10 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
             assert kw["allow_boot_rollover"] is rolling
             if rolling:
                 assert kw["expected_previous_receipt_sha256"] == hashlib.sha256(boot).hexdigest()
-            if pending_rolling:
+            if pending:
                 assert kw["expected_wal"] == wal
             kw["recheck_stopped_owner"]()
-            if fault in ("prepare-resource-drift", "rollover-resource-drift", "pending-rollover-drift"):
+            if fault in ("prepare-resource-drift", "rollover-resource-drift", "pending-rollover-drift", "pending-prepare-drift"):
                 resources[native._CATALOG] = b"changed"
                 kw["recheck_stopped_owner"]()
             if rolling and fault != "rollover-archive":
@@ -4597,7 +4603,7 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
         def verify_boot(root, state, **kw):
             calls.append("verify")
             assert kw["namespace_identity"] == (31, 41)
-            if pending_rolling:
+            if pending:
                 assert kw["expected_wal"] == wal
                 kw["recheck_stopped_owner"]()
             else:
@@ -4614,23 +4620,27 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
         monkeypatch.setattr(native, "_create_owned_prepared_wal_boot_egress_locked", create)
         monkeypatch.setattr(native, "_verify_owned_prepared_wal_boot_egress_locked", verify_boot)
         invoke = (native._rollover_installed_prepared_wal_dedicated if pending_rolling
+                  else native._prepare_installed_prepared_wal_dedicated if pending_first
                   else native._rollover_installed_committed_dedicated if rolling
                   else native._prepare_installed_committed_dedicated)
-        if fault in ("prepare", "rollover", "pending-rollover"):
+        if fault in ("prepare", "rollover", "pending-rollover", "pending-prepare"):
             assert invoke(pins)["namespace_inode"] == 41
         else:
             with pytest.raises(native.NativeV2TransactionError):
                 invoke(pins)
         assert calls == (["prepare", "verify"] if fault in (
                              "prepare", "prepare-result", "rollover", "rollover-archive",
-                             "pending-rollover") else
+                             "pending-rollover", "pending-prepare") else
                          ["prepare"] if fault in ("prepare-resource-drift", "rollover-resource-drift",
-                                                  "pending-rollover-drift") else [])
+                                                  "pending-rollover-drift", "pending-prepare-drift") else [])
         if rolling and fault in ("rollover-pin", "rollover-same-boot", "rollover-resource-drift",
                                  "pending-rollover-wal", "pending-rollover-catalog", "pending-rollover-drift"):
             assert (state_path / egress._BOOT_EGRESS_RECEIPT).read_bytes() == boot
             assert not list(state_path.glob(egress._BOOT_EGRESS_HISTORY_PREFIX + "*"))
-        if pending_rolling:
+        if pending_first and fault != "pending-prepare":
+            assert not (state_path / egress._BOOT_EGRESS_RECEIPT).exists()
+            assert not list(state_path.glob(egress._BOOT_EGRESS_HISTORY_PREFIX + "*"))
+        if pending:
             assert (state_path / native._OWNED_WAL).read_bytes() == wal
         else:
             assert not (state_path / native._OWNED_WAL).exists()

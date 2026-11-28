@@ -1625,3 +1625,17 @@ publication, WAL removal, source repair, service start or new authority
 is implied. The native reboot fixture uses the authenticated pending
 selector and refuses wrong WAL/boot pins and completed rollover replay.
 This does not replace automatic boot or complete installed recovery.
+
+### Authenticated first-boot preparation of a pending WAL
+
+The same private signed installer now has a distinct first-boot pending
+selector, with exact WAL and prior-manifest pins and no previous boot pin.
+It refuses existing boot intent or history, leaves both services disabled
+and stopped, preserves the withdrawn catalog and WAL, and verifies the
+new closed namespace without activation or catalog publication. The
+committed and rollover selectors retain their distinct refusal conditions.
+One native pending scenario exercises the actual first-boot installer
+bridge, including foreign pins and repeated invocation refusal; the
+separate finalization scenario retains the existing SIGKILL and same-boot
+resume witness. No public command, automated boot dispatch or active route
+authority is introduced.

@@ -1604,6 +1604,26 @@ def _rollover_authenticated_committed_dedicated_nginx(
                            previous_boot_receipt_sha256=previous_boot_receipt_sha256))
 
 
+_DEDICATED_PENDING_PREPARE_CHILD = _DEDICATED_RECOVERY_CHILD.replace(
+    "transaction._recover_installed_prepared_dedicated(pins)",
+    "transaction._prepare_installed_prepared_wal_dedicated(pins)")
+
+
+def _prepare_authenticated_prepared_wal_dedicated_nginx(
+    assets: Path, *, commit: str, archive_sha256: str,
+    executable_receipt_sha256: str, profile_receipt_sha256: str,
+    generation_manifest_sha256: str, wal_sha256: str,
+) -> dict:
+    """Prepare an absent first-boot namespace for the exact withdrawn prior WAL."""
+    return _authenticated_prepared_dedicated_bridge(
+        assets, commit=commit, archive_sha256=archive_sha256,
+        prepare=True, pending_prepare=True,
+        recovery_pins=dict(executable_receipt_sha256=executable_receipt_sha256,
+                           profile_receipt_sha256=profile_receipt_sha256,
+                           generation_manifest_sha256=generation_manifest_sha256,
+                           wal_sha256=wal_sha256))
+
+
 _DEDICATED_PENDING_ROLLOVER_CHILD = _DEDICATED_RECOVERY_CHILD.replace(
     "transaction._recover_installed_prepared_dedicated(pins)",
     "transaction._rollover_installed_prepared_wal_dedicated(pins)")
@@ -1618,7 +1638,7 @@ def _rollover_authenticated_prepared_wal_dedicated_nginx(
     """Recreate only the exact withdrawn prior generation under a retained WAL."""
     return _authenticated_prepared_dedicated_bridge(
         assets, commit=commit, archive_sha256=archive_sha256,
-        prepare=True, rollover=True, pending_rollover=True,
+        prepare=True, rollover=True, pending_prepare=True,
         recovery_pins=dict(executable_receipt_sha256=executable_receipt_sha256,
                            profile_receipt_sha256=profile_receipt_sha256,
                            generation_manifest_sha256=generation_manifest_sha256,
@@ -1648,10 +1668,10 @@ def _start_authenticated_committed_dedicated_nginx(
 def _authenticated_prepared_dedicated_bridge(
     assets: Path, *, commit: str, archive_sha256: str, recovery_pins: dict | None,
     prepare: bool = False, start: bool = False, rollover: bool = False,
-    pending_rollover: bool = False,
+    pending_prepare: bool = False,
 ) -> dict:
     if (type(prepare) is not bool or type(start) is not bool or type(rollover) is not bool
-            or type(pending_rollover) is not bool or (pending_rollover and not rollover)
+            or type(pending_prepare) is not bool or (pending_prepare and not prepare)
             or (prepare and start) or (rollover and not prepare)
             or ((prepare or start) and recovery_pins is None)):
         _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
@@ -1661,7 +1681,7 @@ def _authenticated_prepared_dedicated_bridge(
         {"boot_receipt_sha256", "wal_sha256"})
     if rollover:
         fields.add("previous_boot_receipt_sha256")
-    if pending_rollover:
+    if pending_prepare:
         fields.add("wal_sha256")
 
     def validate_pins(pins):
@@ -1707,7 +1727,7 @@ def _authenticated_prepared_dedicated_bridge(
                 )
                 manifest = _read_file(state, _OWNED_MANIFEST, 0, _OWNED_LIMIT[_OWNED_MANIFEST])
                 wal = _read_file(state, _OWNED_WAL, 0, _MAX_WAL)
-                if pending_rollover:
+                if pending_prepare:
                     if wal is None or hashlib.sha256(wal).hexdigest() != recovery_pins["wal_sha256"]:
                         _reject("NATIVE_DEDICATED_RECOVERY_WAL_REFUSED")
                 elif wal is not None:
@@ -1755,7 +1775,8 @@ def _authenticated_prepared_dedicated_bridge(
     try:
         result = subprocess.run(
             ("/usr/bin/python3", "-IS", "-B", "-c",
-             _DEDICATED_PENDING_ROLLOVER_CHILD if pending_rollover else
+             _DEDICATED_PENDING_ROLLOVER_CHILD if pending_prepare and rollover else
+             _DEDICATED_PENDING_PREPARE_CHILD if pending_prepare else
              _DEDICATED_ROLLOVER_CHILD if rollover else
              _DEDICATED_PREPARE_CHILD if prepare else
              _DEDICATED_START_CHILD if start else _DEDICATED_RECOVERY_CHILD),
@@ -1780,8 +1801,8 @@ def _authenticated_prepared_dedicated_bridge(
             if (report.get("status") != "NATIVE_EGRESS_BOOT_RECEIPT_VERIFIED"
                     or report.get("generation_manifest_sha256") !=
                     recovery_pins["generation_manifest_sha256"]
-                    or (not pending_rollover and report.get("committed_resources_verified") is not True)
-                    or (pending_rollover and (
+                    or (not pending_prepare and report.get("committed_resources_verified") is not True)
+                    or (pending_prepare and (
                         report.get("prior_resources_verified") is not True
                         or report.get("recovery_required") is not True
                         or report.get("catalog_withdrawn") is not True

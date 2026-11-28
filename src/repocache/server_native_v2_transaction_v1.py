@@ -3834,10 +3834,15 @@ def _rollover_installed_committed_dedicated(pins: dict) -> dict:
     return _installed_dedicated_lifecycle(pins, prepare=True, rollover=True)
 
 
+def _prepare_installed_prepared_wal_dedicated(pins: dict) -> dict:
+    """Private first-boot preparation; retain WAL and withdrawn catalog."""
+    return _installed_dedicated_lifecycle(pins, prepare=True, pending_prepare=True)
+
+
 def _rollover_installed_prepared_wal_dedicated(pins: dict) -> dict:
     """Recreate the pinned prior namespace without recovering or publishing WAL."""
     return _installed_dedicated_lifecycle(pins, prepare=True, rollover=True,
-                                          pending_rollover=True)
+                                          pending_prepare=True)
 
 
 def _start_installed_committed_dedicated(pins: dict) -> dict:
@@ -3846,7 +3851,7 @@ def _start_installed_committed_dedicated(pins: dict) -> dict:
 
 
 def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = False,
-                                   rollover: bool = False, pending_rollover: bool = False) -> dict:
+                                   rollover: bool = False, pending_prepare: bool = False) -> dict:
     import zipimport
     from repocache.server_native_nginx_executable_v1 import (
         signed_owned_nginx_policy_candidate, verify_nginx_candidate_receipt,
@@ -3870,10 +3875,10 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
         {"boot_receipt_sha256", "wal_sha256"})
     if rollover:
         digests.add("previous_boot_receipt_sha256")
-    if pending_rollover:
+    if pending_prepare:
         digests.add("wal_sha256")
     if (type(prepare) is not bool or type(start) is not bool or type(rollover) is not bool
-            or type(pending_rollover) is not bool or (pending_rollover and not rollover)
+            or type(pending_prepare) is not bool or (pending_prepare and not prepare)
             or (prepare and start) or (rollover and not prepare)
             or not isinstance(__loader__, zipimport.zipimporter)
             or __loader__.archive != worker or not sys.flags.isolated
@@ -3950,7 +3955,7 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
 
         placement()
         package()
-        if pending_rollover:
+        if pending_prepare:
             wal = _read_file(state, _OWNED_WAL, 0, _MAX_WAL)
             if wal is None or hashlib.sha256(wal).hexdigest() != pins["wal_sha256"]:
                 _deny("OWNED_WAL_CHANGED")
@@ -4016,8 +4021,8 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
                     _deny("OWNED_DEDICATED_RECOVERY_SERVICE_REFUSED")
 
         def prepared_resources():
-            with _owned_layout_locked(root, state, recovering=pending_rollover) as layout:
-                if pending_rollover:
+            with _owned_layout_locked(root, state, recovering=pending_prepare) as layout:
+                if pending_prepare:
                     state_dir, nginx, public, check_layout = layout
                     _owned_live_guard(state_dir, nginx, public, check_layout,
                                       wal, {**old, _CATALOG: None})
@@ -4064,10 +4069,10 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
             stopped_owner()
             previous_pin = ({"expected_previous_receipt_sha256": pins["previous_boot_receipt_sha256"]}
                             if rollover else {})
-            if pending_rollover:
+            if pending_prepare:
                 result = _create_owned_prepared_wal_boot_egress_locked(
                     root, state, **options, expected_wal=wal, recheck_stopped_owner=stopped_owner,
-                    allow_boot_rollover=True, **previous_pin)
+                    allow_boot_rollover=rollover, **previous_pin)
             else:
                 result = _create_owned_committed_boot_egress_locked(
                     root, state, **options, recheck_stopped_owner=stopped_owner,
@@ -4075,7 +4080,7 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
             stopped_owner()
             package()
             identity = (result["namespace_device"], result["namespace_inode"])
-            if pending_rollover:
+            if pending_prepare:
                 observed = _verify_owned_prepared_wal_boot_egress_locked(
                     root, state, **options, namespace_identity=identity,
                     expected_wal=wal, recheck_stopped_owner=stopped_owner)

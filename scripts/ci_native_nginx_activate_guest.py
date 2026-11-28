@@ -2831,8 +2831,35 @@ finally:
             require_prior_resources()
         profile = signed("place")
         require("/usr/bin/systemctl", "daemon-reload")
-        if pending:
+        if pending and finalize:
+            # Preserve the real SIGKILL/verify-only/same-boot resume witness.
             policy = signed("prepare")
+        elif pending:
+            boot_pins = dict(
+                **pins, executable_receipt_sha256=executable_proof["receipt_sha256"],
+                profile_receipt_sha256=profile["receipt_sha256"],
+                generation_manifest_sha256=state_before[str(STATE / ".state-v2-owned-nginx.manifest")],
+                wal_sha256=wal_hash)
+            for field in ("wal_sha256", "generation_manifest_sha256"):
+                try:
+                    native._prepare_authenticated_prepared_wal_dedicated_nginx(
+                        assets, **{**boot_pins, field: "0"*64})
+                except native.stage.WorkerStageError:
+                    pass
+                else:
+                    raise AssertionError("Foreign pending preparation pin accepted")
+                assert not os.path.lexists(ns) and not os.path.lexists(boot_receipt)
+                require_prior_resources()
+            policy = native._prepare_authenticated_prepared_wal_dedicated_nginx(assets, **boot_pins)
+            assert signed("verify") == policy
+            try:
+                native._prepare_authenticated_prepared_wal_dedicated_nginx(assets, **boot_pins)
+            except native.stage.WorkerStageError:
+                pass
+            else:
+                raise AssertionError("Existing pending first-boot namespace adopted")
+            assert signed("verify") == policy
+            print("PASS: authenticated installer first-boot pending-WAL preparation; foreign pins and replay refused", flush=True)
         else:
             boot_pins = dict(
                 **pins, executable_receipt_sha256=executable_proof["receipt_sha256"],
@@ -2889,7 +2916,7 @@ finally:
         require_prior_resources()
         assert isolated.command("/usr/sbin/nft", "--stateless", "--numeric-priority",
                                 "list", "ruleset").stdout == host_rules
-        if pending:
+        if pending and finalize:
             print("PASS: pending-WAL boot intent survives SIGKILL; verify-only refuses and exact same-boot resume preserves receipt", flush=True)
         print("PASS: exact " + ("prepared pending WAL" if pending else "committed generation") +
               " and boot intent durable, dedicated profile staged, service disabled before real reboot", flush=True)

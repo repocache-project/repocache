@@ -813,7 +813,10 @@ def test_executable_candidate_selects_retained_native_effects_lock(
                                    "start", "start-wal", "start-boot", "start-report",
                                    "rollover", "rollover-wal", "rollover-boot", "rollover-report",
                                    "pending-rollover", "pending-rollover-missing-wal",
-                                   "pending-rollover-wal", "pending-rollover-report"])
+                                   "pending-rollover-wal", "pending-rollover-report",
+                                   "pending-prepare", "pending-prepare-missing-wal",
+                                   "pending-prepare-wal", "pending-prepare-boot",
+                                   "pending-prepare-report"])
 def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, tmp_path, fault):
     from contextlib import contextmanager
     from types import SimpleNamespace
@@ -851,12 +854,14 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
     from repocache import server_native_egress_candidate_v1 as egress
     pending_rolling = fault.startswith("pending-rollover")
     rolling = fault.startswith("rollover") or pending_rolling
-    preparing = fault.startswith("prepare") or rolling
+    pending_first = fault.startswith("pending-prepare")
+    pending = pending_first or pending_rolling
+    preparing = fault.startswith("prepare") or rolling or pending_first
     starting = fault.startswith("start")
     manifest = b"committed manifest"
     boot = b"exact boot"
     monkeypatch.setattr(egress, "_read_boot_egress_receipt",
-                        lambda *a, **kw: b"existing boot" if fault in ("prepare-boot", "start-boot", "rollover-boot")
+                        lambda *a, **kw: b"existing boot" if fault in ("prepare-boot", "start-boot", "rollover-boot", "pending-prepare-boot")
                         else boot if starting or rolling else None)
     def read(fd, name, uid, limit):
         assert locked
@@ -867,9 +872,9 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
         if name == install._RUNTIME_RECEIPT:
             return b"foreign" if fault == "placement" else expected
         if name == install._OWNED_WAL:
-            if pending_rolling:
-                return (None if fault == "pending-rollover-missing-wal" else
-                        b"foreign WAL" if fault == "pending-rollover-wal" else wal)
+            if pending:
+                return (None if fault.endswith("-missing-wal") else
+                        b"foreign WAL" if fault.endswith("-wal") else wal)
             return None if (fault == "wal" or (preparing and fault not in ("prepare-wal", "rollover-wal"))
                             or (starting and fault != "start-wal")) else wal
         assert name == marker
@@ -893,6 +898,7 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
         assert not locked
         assert argv == ("/usr/bin/python3", "-IS", "-B", "-c",
                         install._DEDICATED_PENDING_ROLLOVER_CHILD if pending_rolling else
+                        install._DEDICATED_PENDING_PREPARE_CHILD if pending_first else
                         install._DEDICATED_ROLLOVER_CHILD if rolling else
                         install._DEDICATED_PREPARE_CHILD if preparing else
                         install._DEDICATED_START_CHILD if starting else install._DEDICATED_RECOVERY_CHILD)
@@ -908,7 +914,7 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
         if preparing:
             assert data["generation_manifest_sha256"] == hashlib.sha256(manifest).hexdigest()
             assert "boot_receipt_sha256" not in data
-            if pending_rolling:
+            if pending:
                 assert data["wal_sha256"] == hashlib.sha256(wal).hexdigest()
             else:
                 assert "wal_sha256" not in data
@@ -922,10 +928,10 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
                       "committed_resources_verified": True,
                       "authorizes_nginx_activation": fault == "prepare-report",
                       "authorizes_catalog_publication": False}
-            if pending_rolling:
+            if pending:
                 del report["committed_resources_verified"]
                 report.update(prior_resources_verified=True, recovery_required=True,
-                              catalog_withdrawn=fault != "pending-rollover-report",
+                              catalog_withdrawn=not fault.endswith("-report"),
                               wal_sha256=data["wal_sha256"])
         elif starting:
             assert data["generation_manifest_sha256"] == hashlib.sha256(manifest).hexdigest()
@@ -955,14 +961,15 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
         boot_pins["generation_manifest_sha256"] = hashlib.sha256(manifest).hexdigest()
         if rolling:
             boot_pins["previous_boot_receipt_sha256"] = hashlib.sha256(boot).hexdigest()
-        if pending_rolling:
+        if pending:
             boot_pins["wal_sha256"] = hashlib.sha256(wal).hexdigest()
         invoke = (install._rollover_authenticated_prepared_wal_dedicated_nginx if pending_rolling
+                  else install._prepare_authenticated_prepared_wal_dedicated_nginx if pending_first
                   else install._rollover_authenticated_committed_dedicated_nginx if rolling
                   else install._prepare_authenticated_committed_dedicated_nginx)
-        if fault in ("prepare", "rollover", "pending-rollover"):
+        if fault in ("prepare", "rollover", "pending-rollover", "pending-prepare"):
             assert invoke(tmp_path, **boot_pins)[
-                "prior_resources_verified" if pending_rolling else "committed_resources_verified"]
+                "prior_resources_verified" if pending else "committed_resources_verified"]
         else:
             with pytest.raises(stage.WorkerStageError):
                 invoke(tmp_path, **boot_pins)
@@ -1002,7 +1009,8 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
                                                "prepare-wal", "prepare-manifest", "prepare-boot",
                                                "start-wal", "start-boot", "rollover-wal",
                                                "rollover-boot", "pending-rollover-missing-wal",
-                                               "pending-rollover-wal") else
+                                               "pending-rollover-wal", "pending-prepare-missing-wal",
+                                               "pending-prepare-wal", "pending-prepare-boot") else
                      ["release", "rpm"] if fault == "package" else
                      ["release", "history"] if fault == "rolled-refusal" else
                      ["release", "history", "rpm", "child"] if fault == "rolled" else
