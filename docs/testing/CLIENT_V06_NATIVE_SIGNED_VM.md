@@ -103,3 +103,11 @@ for fixture review; the native test restores only its own disposable
 permissions and removes its verified claim. The mechanism remains
 fixture-only: it does not exclude earlier readers or authorize installed
 source mutation.
+
+The scope also pins each ancestor's device, inode, owner, group and mode
+from the private root to both lock directories. A new safe-looking
+ancestor cannot inherit the original scope by retaining the same lock
+directory inode. The native fixture reparents its own RPMDB directory
+while holding the lock, restores the original ancestor, and requires
+the failed scope to retain its claim until explicit fixture cleanup.
+This does not establish exclusion of already parsed DNF readers.

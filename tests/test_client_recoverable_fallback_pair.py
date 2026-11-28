@@ -267,12 +267,56 @@ def test_dnf4_rewalk_checks_private_directory_and_retained_identity(tmp_path, mo
         elif fault == "replacement":
             directory.rename(parent / "previous")
             directory.mkdir(mode=0o755)
+        real_stat = os.stat
+
+        def fixture_stat(path, *args, **kwargs):
+            info = real_stat(path, *args, **kwargs)
+            values = list(info)
+            values[4] = 0
+            values[5] = 0
+            return os.stat_result(values)
+
         with monkeypatch.context() as patch:
             patch.setattr(lab.os, "fstat", fixture_fstat)
+            patch.setattr(lab.os, "stat", fixture_stat)
             if fault == "none":
                 lab._dnf4_check_lock_directory(root, directory, pinned=fd)
             else:
                 with pytest.raises((lab.locks.LockInspectionRefused, OSError)):
                     lab._dnf4_check_lock_directory(root, directory, pinned=fd)
+    finally:
+        os.close(fd)
+
+@pytest.mark.parametrize("fault", ["none", "ancestor-replaced", "root-replaced"])
+def test_dnf4_rewalk_pins_every_ancestor(tmp_path, fault):
+    if os.geteuid() != 0 or os.getegid() != 0:
+        pytest.skip("root-owned private fixture")
+    root = tmp_path / "private"
+    root.mkdir(mode=0o700)
+    ancestor = root / "usr"
+    ancestor.mkdir(mode=0o755)
+    leaf = ancestor / "rpm"
+    leaf.mkdir(mode=0o755)
+    fd = os.open(leaf, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        chain = lab._dnf4_check_lock_directory(root, leaf, pinned=fd)
+        if fault == "ancestor-replaced":
+            previous = root / "previous"
+            ancestor.rename(previous)
+            ancestor.mkdir(mode=0o755)
+            (previous / "rpm").rename(leaf)
+        elif fault == "root-replaced":
+            previous = tmp_path / "previous"
+            root.rename(previous)
+            root.mkdir(mode=0o700)
+            (previous / "usr").rename(ancestor)
+        assert leaf.stat().st_ino == os.fstat(fd).st_ino
+        if fault == "none":
+            assert lab._dnf4_check_lock_directory(
+                root, leaf, pinned=fd, expected_chain=chain) == chain
+        else:
+            with pytest.raises(lab.locks.LockInspectionRefused):
+                lab._dnf4_check_lock_directory(
+                    root, leaf, pinned=fd, expected_chain=chain)
     finally:
         os.close(fd)
