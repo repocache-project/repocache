@@ -4098,7 +4098,8 @@ def test_dedicated_withdrawn_catalog_requires_fresh_pinned_tls_404(monkeypatch, 
                                    "wal-lost", "policy-drift", "active-route",
                                    "published-retry", "published-bad-label",
                                    "published-owner-drift", "published-wal-lost",
-                                   "published-pre-health", "initial-foreign-catalog"])
+                                   "published-pre-health", "initial-foreign-catalog",
+                                   "tls-label", "tls-label-drift"])
 def test_dedicated_wal_finalization_publishes_only_verified_prior(
         filesystem, monkeypatch, fault):
     """Real owned WAL/resource filesystem; mocked runtime and policy only."""
@@ -4174,7 +4175,16 @@ def test_dedicated_wal_finalization_publishes_only_verified_prior(
     monkeypatch.setattr(native, "_verify_current_root_fd", lambda *a: None)
     monkeypatch.setattr(native, "_require_audited_native_package_for_activation", lambda *a, **kw: None)
     monkeypatch.setattr(native, "_verify_tls_pair", lambda *a, **kw: "c"*64)
-    monkeypatch.setattr(native, "_dedicated_readonly_tls_labels", lambda *a: ("exact",))
+    tls_reads = 0
+
+    def tls_labels(*args):
+        nonlocal tls_reads
+        tls_reads += 1
+        if fault == "tls-label":
+            raise native.NativeV2TransactionError("TLS_LABEL_REFUSED")
+        return ("changed",) if fault == "tls-label-drift" and tls_reads > 1 else ("exact",)
+
+    monkeypatch.setattr(native, "_dedicated_readonly_tls_labels", tls_labels)
     monkeypatch.setattr(native, "_prepare_boot_egress_locked", policy)
     monkeypatch.setattr(native, "_owned_dedicated_live_health_bound", health)
     monkeypatch.setattr(unit, "_inspect_signed_owned_namespace_runtime", runtime)
@@ -4233,7 +4243,8 @@ def test_dedicated_wal_finalization_publishes_only_verified_prior(
         else:
             assert pending.read_bytes() == (b"foreign WAL" if fault == "wrong-wal" else wal)
         if fault in ("wrong-wal", "active-route", "initial-foreign-catalog",
-                     "published-bad-label", "published-owner-drift", "published-wal-lost"):
+                     "published-bad-label", "published-owner-drift", "published-wal-lost",
+                     "tls-label", "tls-label-drift"):
             assert not calls
         assert not any((path.parent / native._OWNED_STAGES[name]).exists()
                        for name, path in paths.items())
