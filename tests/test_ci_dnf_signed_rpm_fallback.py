@@ -249,3 +249,56 @@ def test_private_dnf4_claim_refuses_dnf5_before_open(monkeypatch):
     with pytest.raises(AssertionError):
         with rpm_probe._private_dnf4_claim(Path("/var/lib/repocache-ci-dnf-root-fixture")):
             pytest.fail("DNF5 misidentified as DNF4")
+
+def test_withdrawn_fixture_route_refuses_unexpected_path(tmp_path):
+    from pathlib import Path
+    with pytest.raises(RuntimeError, match="Unexpected disposable"):
+        with rpm_probe._withdrawn_fixture_route(tmp_path, Path("/"), "https://invalid/", tmp_path / "ca"):
+            pytest.fail("non-fixture path accepted")
+
+
+def test_withdrawn_fixture_route_restores_after_verified_404(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from urllib.error import HTTPError
+    mapped = tmp_path / "www/__repocache/repos/approved"
+    mapped.mkdir(parents=True)
+    marker = mapped / "marker"
+    marker.write_bytes(b"retained")
+    inode = mapped.stat().st_ino
+    calls = []
+
+    def request(url, *, timeout):
+        calls.append(url)
+        assert timeout == 10 and not mapped.exists()
+        raise HTTPError(url, 404, "withdrawn", {}, None)
+
+    monkeypatch.setattr(rpm_probe.ssl, "create_default_context", lambda **kw: None)
+    monkeypatch.setattr(rpm_probe.urllib.request, "HTTPSHandler", lambda **kw: None)
+    monkeypatch.setattr(rpm_probe.urllib.request, "build_opener",
+                        lambda *_: SimpleNamespace(open=request))
+    with rpm_probe._withdrawn_fixture_route(tmp_path, mapped, "https://example.invalid/approved/", tmp_path / "ca"):
+        assert not mapped.exists()
+        assert (tmp_path / ".repocache-ci-withdrawn-route/marker").read_bytes() == b"retained"
+    assert marker.read_bytes() == b"retained" and mapped.stat().st_ino == inode
+    assert calls == ["https://example.invalid/approved/repodata/repomd.xml"]
+
+
+@pytest.mark.parametrize("status", [403, 503])
+def test_withdrawn_fixture_route_refuses_non_404_and_restores(tmp_path, monkeypatch, status):
+    from types import SimpleNamespace
+    from urllib.error import HTTPError
+    mapped = tmp_path / "www/__repocache/repos/approved"
+    mapped.mkdir(parents=True)
+    inode = mapped.stat().st_ino
+
+    def request(url, **kw):
+        raise HTTPError(url, status, "unexpected", {}, None)
+
+    monkeypatch.setattr(rpm_probe.ssl, "create_default_context", lambda **kw: None)
+    monkeypatch.setattr(rpm_probe.urllib.request, "HTTPSHandler", lambda **kw: None)
+    monkeypatch.setattr(rpm_probe.urllib.request, "build_opener",
+                        lambda *_: SimpleNamespace(open=request))
+    with pytest.raises(HTTPError):
+        with rpm_probe._withdrawn_fixture_route(tmp_path, mapped, "https://example.invalid/", tmp_path / "ca"):
+            pytest.fail("non-404 accepted")
+    assert mapped.stat().st_ino == inode

@@ -111,3 +111,18 @@ directory inode. The native fixture reparents its own RPMDB directory
 while holding the lock, restores the original ancestor, and requires
 the failed scope to retain its claim until explicit fixture cleanup.
 This does not establish exclusion of already parsed DNF readers.
+
+## Previously parsed DNF4 reader after route withdrawal (#24)
+
+In the disposable enforcing guest, a third DNF4 library reader parses
+the exact journal-published entry before SIGKILL recovery. Unlike the
+existing whole-endpoint HTTP 503 and still-healthy former-cache cases,
+the HTTPS origin stays healthy while the exact private route directory
+is moved out of its document root and its catalog mapping is withdrawn.
+A fresh verified TLS metadata request must return HTTP 404; the earlier
+reader must request the withdrawn path but retrieve the exact RPM only
+from upstream, with SHA-256 and native trusted RPM signature verification.
+The fixture restores its own directory and catalog afterward; host source
+and installed-package inventories must remain unchanged. This is evidence
+of client fallback against a controlled route-level 404, not proof of
+authenticated live REPOCACHE route revocation or installed source writes.
