@@ -3182,14 +3182,24 @@ finally:
                     started = native.activate_authenticated_native_nginx(assets, **pins)
                     assert started["nginx_active_verified"] is True
                     assert started["nginx_enabled_verified"] is False
+                    repeated = native.activate_authenticated_native_nginx(assets, **pins)
+                    assert repeated["status"] == "OWNED_DEDICATED_COMMITTED_ACTIVE_VERIFIED"
+                    assert repeated["nginx_active_verified"] and not repeated["nginx_enabled_verified"]
+                    assert not repeated["enablement_changed"]
+                    for key in ("main_pid", "listener_inode", "storage", "generation",
+                                "generation_manifest_sha256", "boot_receipt_sha256",
+                                "service_storage_mounts_verified", "service_scratch_mounts_verified"):
+                        assert repeated[key] == started[key]
+                    require_prior_resources()
+                    assert signed("verify-committed-active")["main_pid"] == started["main_pid"]
+                    # The private start-only selector must still refuse an active master.
                     try:
-                        native.activate_authenticated_native_nginx(assets, **pins)
+                        native._start_authenticated_committed_dedicated_nginx(assets, **start_pins)
                     except native.stage.WorkerStageError:
                         pass
                     else:
-                        raise AssertionError("Running committed dedicated service adopted")
-                    assert signed("verify-committed-active")["main_pid"] == started["main_pid"]
-                    print("PASS: explicit authenticated installer dispatches exact rolled committed dedicated start; foreign pins and active replay refused", flush=True)
+                        raise AssertionError("Start-only selector adopted an active master")
+                    print("PASS: explicit authenticated installer starts rolled committed profile and verifies active repeat without restart; foreign pins and start-only replay refused", flush=True)
             except Exception:
                 print(run("/usr/bin/journalctl", "-u", OWN, "-n", "20", "--no-pager").stdout[-4000:], flush=True)
                 raise
@@ -3261,7 +3271,10 @@ finally:
                     require_prior_resources()
                     response = fresh_catalog()
                     assert response.startswith(b"HTTP/1.1 200 ") and response.endswith(catalog.read_bytes())
-                    witnessed = signed("verify-committed-active", pending_mode=False)
+                    witnessed = native.activate_authenticated_native_nginx(assets, **pins)
+                    assert witnessed["status"] == "OWNED_DEDICATED_COMMITTED_ACTIVE_VERIFIED"
+                    assert witnessed["nginx_active_verified"] and not witnessed["nginx_enabled_verified"]
+                    assert not witnessed["enablement_changed"]
                     assert witnessed["main_pid"] == finished["main_pid"]
                     assert witnessed["listener_inode"] == finished["listener_inode"]
                     # Retain the newly published leaf for exact label restoration.

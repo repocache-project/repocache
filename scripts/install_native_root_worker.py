@@ -1707,6 +1707,11 @@ def _start_authenticated_committed_dedicated_nginx(
                            boot_receipt_sha256=boot_receipt_sha256))
 
 
+_DEDICATED_ROLLED_START_CHILD = _DEDICATED_RECOVERY_CHILD.replace(
+    "transaction._recover_installed_prepared_dedicated(pins)",
+    "transaction._start_or_verify_installed_committed_dedicated(pins)")
+
+
 _DEDICATED_PENDING_START_CHILD = _DEDICATED_RECOVERY_CHILD.replace(
     "transaction._recover_installed_prepared_dedicated(pins)",
     "transaction._start_installed_prepared_wal_dedicated(pins)")
@@ -1743,6 +1748,7 @@ def _authenticated_prepared_dedicated_bridge(
             or (start and recovery_pins is None and
                 (pending_start or expected_rolled_pins is None))):
         _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
+    rolled_start = start and recovery_pins is None
     fields = {"executable_receipt_sha256", "profile_receipt_sha256"} | (
         {"generation_manifest_sha256"} if prepare else
         {"generation_manifest_sha256", "boot_receipt_sha256"} if start else
@@ -1862,6 +1868,7 @@ def _authenticated_prepared_dedicated_bridge(
              _DEDICATED_ROLLOVER_CHILD if rollover else
              _DEDICATED_PREPARE_CHILD if prepare else
              _DEDICATED_PENDING_START_CHILD if pending_start else
+             _DEDICATED_ROLLED_START_CHILD if rolled_start else
              _DEDICATED_START_CHILD if start else _DEDICATED_RECOVERY_CHILD),
             input=json.dumps(pins, sort_keys=True).encode("ascii"),
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd="/",
@@ -1900,9 +1907,11 @@ def _authenticated_prepared_dedicated_bridge(
                     or (resume_boot and report["receipt_sha256"] != recovery_pins["boot_receipt_sha256"])):
                 _reject("NATIVE_DEDICATED_RECOVERY_CHILD_REFUSED")
         elif start:
-            if (report.get("status") != (
-                    "OWNED_DEDICATED_PREPARED_WAL_START_OBSERVED" if pending_start else
-                    "OWNED_DEDICATED_COMMITTED_START_OBSERVED")
+            accepted_status = ({"OWNED_DEDICATED_PREPARED_WAL_START_OBSERVED"} if pending_start
+                               else {"OWNED_DEDICATED_COMMITTED_START_OBSERVED"})
+            if rolled_start:
+                accepted_status.add("OWNED_DEDICATED_COMMITTED_ACTIVE_VERIFIED")
+            if (report.get("status") not in accepted_status
                     or report.get("generation_manifest_sha256") != recovery_pins["generation_manifest_sha256"]
                     or report.get("boot_receipt_sha256") != recovery_pins["boot_receipt_sha256"]
                     or report.get("catalog_observed") is not (not pending_start)

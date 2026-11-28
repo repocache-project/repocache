@@ -824,7 +824,8 @@ def test_executable_candidate_selects_retained_native_effects_lock(
                                    "pending-start-report", "pending-start-missing-wal",
                                    "committed-resume", "committed-resume-boot",
                                    "committed-resume-wal", "committed-resume-digest",
-                                   "rolled-start", "rolled-start-changed", "rolled-start-wal"])
+                                   "rolled-start", "rolled-start-changed", "rolled-start-wal",
+                                   "rolled-start-active", "rolled-start-active-report"])
 def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, tmp_path, fault):
     from contextlib import contextmanager
     from types import SimpleNamespace
@@ -916,6 +917,7 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
                         install._DEDICATED_ROLLOVER_CHILD if rolling else
                         install._DEDICATED_PREPARE_CHILD if preparing else
                         install._DEDICATED_PENDING_START_CHILD if pending_start else
+                        install._DEDICATED_ROLLED_START_CHILD if rolled_start else
                         install._DEDICATED_START_CHILD if starting else install._DEDICATED_RECOVERY_CHILD)
         compile(argv[-1], "<fixed-recovery-child>", "exec")
         assert kw["shell"] is False and kw["close_fds"] is True and "pass_fds" not in kw
@@ -966,6 +968,9 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
                       "catalog_observed": True, "service_storage_mounts_verified": True,
                       "service_scratch_mounts_verified": True, "enablement_changed": fault == "start-report",
                       "main_pid": 43, "listener_inode": 47}
+            if fault.startswith("rolled-start-active"):
+                report.update(status="OWNED_DEDICATED_COMMITTED_ACTIVE_VERIFIED",
+                              enablement_changed=fault == "rolled-start-active-report")
             if pending_start:
                 report.update(status="OWNED_DEDICATED_PREPARED_WAL_START_OBSERVED",
                               catalog_observed=fault == "pending-start-report",
@@ -1026,7 +1031,7 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
                 return install._authenticated_prepared_dedicated_bridge(
                     tmp_path, **release, recovery_pins=None, start=True,
                     expected_rolled_pins=start_pins)
-            if fault == "rolled-start":
+            if fault in ("rolled-start", "rolled-start-active"):
                 assert invoke_rolled()["catalog_observed"] is True
             else:
                 with pytest.raises(stage.WorkerStageError):
@@ -1077,6 +1082,8 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
                      ["release", "rpm"] if fault == "package" else
                      ["release", "history"] if fault in ("rolled-refusal", "rolled-pins-changed",
                                                            "rolled-start-changed", "rolled-start-wal") else
-                     ["release", "history", "rpm", "child"] if fault in ("rolled", "rolled-pins-match", "rolled-start") else
+                     ["release", "history", "rpm", "child"] if fault in (
+                         "rolled", "rolled-pins-match", "rolled-start", "rolled-start-active",
+                         "rolled-start-active-report") else
                      ["release", "rpm", "child"])
     assert not locked

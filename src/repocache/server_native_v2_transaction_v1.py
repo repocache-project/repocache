@@ -3211,6 +3211,21 @@ def _start_owned_committed_dedicated_locked(
         expected_wal=None)
 
 
+def _start_or_verify_owned_committed_dedicated_locked(
+    root_fd: int, state_fd: int, *, namespace_identity: tuple[int, int],
+    executable_identity: tuple[int, int], profile_receipt_sha256: str,
+    executable_receipt_sha256: str, recheck_authenticated_owner,
+) -> dict:
+    """Authenticated activation repeat; observe an existing master, never stop it."""
+    return _start_owned_dedicated_generation_locked(
+        root_fd, state_fd, namespace_identity=namespace_identity,
+        executable_identity=executable_identity,
+        profile_receipt_sha256=profile_receipt_sha256,
+        executable_receipt_sha256=executable_receipt_sha256,
+        recheck_authenticated_owner=recheck_authenticated_owner,
+        expected_wal=None, allow_active_repeat=True)
+
+
 def _start_owned_prepared_wal_dedicated_locked(
     root_fd: int, state_fd: int, *, namespace_identity: tuple[int, int],
     executable_identity: tuple[int, int], profile_receipt_sha256: str,
@@ -3240,6 +3255,7 @@ def _start_owned_dedicated_generation_locked(
     executable_identity: tuple[int, int], profile_receipt_sha256: str,
     executable_receipt_sha256: str, recheck_authenticated_owner,
     expected_wal: bytes | None, expected_stopped: dict | None = None,
+    allow_active_repeat: bool = False,
 ) -> dict:
     """Explicit isolated-candidate start of an already prepared profile.
 
@@ -3252,7 +3268,9 @@ def _start_owned_dedicated_generation_locked(
     generation with no active routes is accepted. A pending WAL must be
     explicitly supplied and bind exact prepared prior bytes and withdrawal.
     Neither enablement nor configuration, receipts, policy, WAL or catalog
-    may change. On failure stop only the exact, still-owned active master.
+    may change. On start failure stop only the exact, still-owned master
+    spawned by this operation. An authenticated committed active repeat
+    is observation-only and must never enter the start compensation path.
     """
     from repocache.server_native_nginx_effective_unit_v1 import (
         inspect_signed_owned_namespace_unit, _inspect_signed_owned_namespace_runtime,
@@ -3261,6 +3279,8 @@ def _start_owned_dedicated_generation_locked(
     from repocache.server_root_control_host_preflight_v1 import require_native_host_preconditions
 
     if (not callable(recheck_authenticated_owner)
+            or type(allow_active_repeat) is not bool
+            or (allow_active_repeat and (expected_wal is not None or expected_stopped is not None))
             or (expected_stopped is not None and type(expected_stopped) is not dict)
             or not _valid_sha(profile_receipt_sha256)
             or not _valid_sha(executable_receipt_sha256)
@@ -3273,19 +3293,26 @@ def _start_owned_dedicated_generation_locked(
     _require_audited_native_package_for_activation(state_fd, distribution="almalinux")
 
     def fixed_systemctl(action):
-        if action not in ("is-enabled", "start", "stop"):
+        if (action not in ("is-enabled", "start", "stop", "is-active")
+                or (action == "is-active" and not allow_active_repeat)):
             _deny("OWNED_DEDICATED_START_COMMAND_REFUSED")
         _safe_native_systemctl()
         result = subprocess.run(
             (_SYSTEMCTL, action, _OWNED_WAL_DOMAIN), shell=False,
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE if action == "is-enabled" else subprocess.DEVNULL,
+            stdout=subprocess.PIPE if action in ("is-enabled", "is-active") else subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, cwd="/", env=_ENV,
-            timeout=40 if action != "is-enabled" else 5,
+            timeout=5 if action in ("is-enabled", "is-active") else 40,
             close_fds=True, start_new_session=True, check=False)
         if action == "is-enabled":
             if result.returncode != 1 or result.stdout != b"disabled\n":
                 _deny("OWNED_DEDICATED_START_ENABLEMENT_REFUSED")
+        elif action == "is-active":
+            if (result.returncode, result.stdout) == (0, b"active\n"):
+                return True
+            if (result.returncode, result.stdout) == (3, b"inactive\n"):
+                return False
+            _deny("OWNED_DEDICATED_START_OWNER_REFUSED")
         elif type(result.returncode) is not int or result.returncode != 0:
             _deny("OWNED_DEDICATED_START_COMMAND_FAILED")
 
@@ -3326,8 +3353,9 @@ def _start_owned_dedicated_generation_locked(
             recheck_authenticated_owner()
             storage = prepare_dedicated_candidate_storage(
                 "almalinux", document, allow_create=False)
+            active_repeat = allow_active_repeat and fixed_systemctl("is-active")
             scratch = _owned_alma_runtime_temps(
-                root_fd, dedicated=True, inactive=True)
+                root_fd, dedicated=True, inactive=not active_repeat)
             leaf = _verify_tls_pair(root_fd, document, verify_identity=True)
             context = (document, snapshot["state_generation"], leaf)
 
@@ -3359,6 +3387,48 @@ def _start_owned_dedicated_generation_locked(
                     allow_boot_rollover=False)
 
             fixed_systemctl("is-enabled")
+            if active_repeat:
+                # This master predates our invocation. Even failed health or
+                # authority checks must not stop, reload or compensate it.
+                observed = owner(True)
+                runtime = _inspect_signed_owned_namespace_runtime(
+                    https_port=port, namespace_identity=namespace_identity,
+                    executable_identity=executable_identity)
+                if (runtime["main_pid_observed"] <= 0
+                        or any(runtime[key] != observed[key] for key in (
+                            "main_pid_observed", "private_unit_identity", "private_dropin_identity"))):
+                    _deny("OWNED_DEDICATED_START_OWNER_CHANGED")
+                before_policy = policy(True)
+                witness = _owned_dedicated_live_health_bound(
+                    root_fd, context, resources[_CATALOG], publish=True,
+                    namespace_identity=namespace_identity,
+                    executable_identity=executable_identity, recheck_owned=exact)
+                if (witness["main_pid"] != runtime["main_pid_observed"]
+                        or witness["catalog_observed"] is not True
+                        or witness["generation"] != snapshot["state_generation"]
+                        or owner(True) != observed
+                        or _verify_tls_pair(root_fd, document, verify_identity=True) != leaf
+                        or prepare_dedicated_candidate_storage(
+                            "almalinux", document, allow_create=False) != storage
+                        or _owned_alma_runtime_temps(root_fd, dedicated=True) != scratch
+                        or policy(True) != before_policy):
+                    _deny("OWNED_DEDICATED_START_POSTCHECK_FAILED")
+                verify_service_storage_mounts(runtime["main_pid_observed"])
+                _verify_owned_alma_runtime_service_view(runtime["main_pid_observed"], scratch)
+                _require_audited_native_package_for_activation(state, distribution="almalinux")
+                fixed_systemctl("is-enabled")
+                exact()
+                if (not fixed_systemctl("is-active") or owner(True) != observed
+                        or _inspect_signed_owned_namespace_runtime(
+                            https_port=port, namespace_identity=namespace_identity,
+                            executable_identity=executable_identity) != runtime
+                        or _owned_alma_runtime_temps(root_fd, dedicated=True) != scratch
+                        or policy(True) != before_policy):
+                    _deny("OWNED_DEDICATED_START_POSTCHECK_FAILED")
+                return {**witness, "status": "OWNED_DEDICATED_COMMITTED_ACTIVE_VERIFIED",
+                        "storage": storage, "service_storage_mounts_verified": True,
+                        "service_scratch_mounts_verified": True, "enablement_changed": False}
+
             stopped = owner(False)
             if (expected_stopped is not None and stopped != expected_stopped):
                 _deny("OWNED_DEDICATED_RECOVERY_MASTER_CHANGED")
@@ -3888,6 +3958,11 @@ def _start_installed_committed_dedicated(pins: dict) -> dict:
     return _installed_dedicated_lifecycle(pins, prepare=False, start=True)
 
 
+def _start_or_verify_installed_committed_dedicated(pins: dict) -> dict:
+    """Private authenticated rolled activation; repeat is observation-only."""
+    return _installed_dedicated_lifecycle(pins, prepare=False, start=True, active_repeat=True)
+
+
 def _start_installed_prepared_wal_dedicated(pins: dict) -> dict:
     """Private authenticated start of prior bytes with the catalog withdrawn."""
     return _installed_dedicated_lifecycle(pins, prepare=False, start=True,
@@ -3897,7 +3972,7 @@ def _start_installed_prepared_wal_dedicated(pins: dict) -> dict:
 def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = False,
                                    rollover: bool = False, pending_prepare: bool = False,
                                    resume_boot: bool = False,
-                                   pending_start: bool = False) -> dict:
+                                   pending_start: bool = False, active_repeat: bool = False) -> dict:
     import zipimport
     from repocache.server_native_nginx_executable_v1 import (
         signed_owned_nginx_policy_candidate, verify_nginx_candidate_receipt,
@@ -3929,6 +4004,7 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
             or type(pending_prepare) is not bool or (pending_prepare and not prepare)
             or type(resume_boot) is not bool or (resume_boot and (not prepare or rollover))
             or type(pending_start) is not bool or (pending_start and not start)
+            or type(active_repeat) is not bool or (active_repeat and (not start or pending_start))
             or (prepare and start) or (rollover and not prepare)
             or not isinstance(__loader__, zipimport.zipimporter)
             or __loader__.archive != worker or not sys.flags.isolated
@@ -4213,6 +4289,7 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
 
             committed_owner()
             entry = (_start_owned_prepared_wal_dedicated_locked if pending_start else
+                     _start_or_verify_owned_committed_dedicated_locked if active_repeat else
                      _start_owned_committed_dedicated_locked)
             result = entry(
                 root, state, namespace_identity=namespace_identity,
@@ -4224,9 +4301,11 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
             committed_owner()
             package()
             committed_owner()
-            if (result.get("status") != (
-                    "OWNED_DEDICATED_PREPARED_WAL_START_OBSERVED" if pending_start else
-                    "OWNED_DEDICATED_COMMITTED_START_OBSERVED")
+            accepted_status = ({"OWNED_DEDICATED_PREPARED_WAL_START_OBSERVED"} if pending_start
+                               else {"OWNED_DEDICATED_COMMITTED_START_OBSERVED"})
+            if active_repeat:
+                accepted_status.add("OWNED_DEDICATED_COMMITTED_ACTIVE_VERIFIED")
+            if (result.get("status") not in accepted_status
                     or result.get("generation") != snapshot["state_generation"]
                     or result.get("catalog_observed") is not (not pending_start)
                     or (pending_start and (result.get("wal_sha256") != pins["wal_sha256"]

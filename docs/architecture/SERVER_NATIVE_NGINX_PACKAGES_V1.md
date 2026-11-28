@@ -1714,6 +1714,12 @@ start child. Missing or changed history, boot intent, generation, pending
 WAL or any unverified service state refuses; no legacy fallback or unit
 enablement is permitted. The booted committed scenario uses the existing
 signed activation entry and observes exact TLS catalog, storage and scratch
-mounts; active replay remains refused until authenticated read-only active
-verification is wired. First-boot and automatic namespace provisioning remain
-separate prerequisites.
+mounts. An authenticated repeat uses the same reconstructed pins, verifies
+the pre-existing master and fresh pinned TLS catalog, exact namespace policy,
+storage and scratch identities, and never starts, stops, reloads, enables or
+compensates that pre-existing master. The private start-only selector still
+refuses active replay. Native tests repeat after committed start and after
+successful WAL finalization and compare exact process/listener identity,
+resources and enablement. Negative tests exercise failed observations without
+stopping the pre-existing process. First-boot and automatic namespace
+provisioning remain separate prerequisites.

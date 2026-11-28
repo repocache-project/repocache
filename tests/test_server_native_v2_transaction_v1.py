@@ -3719,7 +3719,7 @@ def test_dedicated_health_child_timeout_and_preflight_do_not_signal_foreign_pid(
         assert not calls
 
 
-@pytest.mark.parametrize("prepared", [False, True])
+@pytest.mark.parametrize("prepared", [False, True, "repeat"])
 @pytest.mark.parametrize("fault", ["none", "active-route", "nonloopback", "pending",
                                     "policy", "policy-drift", "storage-drift", "scratch-drift", "scratch-service",
                                     "enabled", "start", "health",
@@ -3732,6 +3732,10 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
     from repocache import server_native_installed_storage_v1 as storage
     from repocache import server_root_control_host_preflight_v1 as host
 
+    repeat = prepared == "repeat"
+    prepared = prepared is True
+    if repeat and fault in ("start", "selected-drift"):
+        pytest.skip("Start failure and stopped identity do not apply to observation")
     rootfd, state, _, _, _ = filesystem
     cfg = document(1, generation=1)
     cfg["deployment"]["paths"]["generated_include"] = native._OWNED_INCLUDE_PATH
@@ -3764,7 +3768,7 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
         pending.write_bytes(b"existing pending evidence" if fault == "pending" else wal)
         pending.chmod(0o600)
     calls = []
-    running = False
+    running = repeat
     foreign = False
     policy_reads = 0
     storage_reads = 0
@@ -3804,6 +3808,10 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
         if argv[1] == "is-enabled":
             return SimpleNamespace(returncode=0 if fault == "enabled" else 1,
                                    stdout=b"enabled\n" if fault == "enabled" else b"disabled\n")
+        if argv[1] == "is-active":
+            assert repeat
+            return SimpleNamespace(returncode=0 if running else 3,
+                                   stdout=b"active\n" if running else b"inactive\n")
         calls.append(argv[1])
         if argv[1] == "start":
             running = True
@@ -3878,6 +3886,7 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
     # existing descriptor-only fixture and no real systemctl runs.
     def invoke():
         entry = (native._start_owned_prepared_wal_dedicated_locked if prepared else
+                 native._start_or_verify_owned_committed_dedicated_locked if repeat else
                  native._start_owned_committed_dedicated_locked)
         return entry(
             rootfd, 0, namespace_identity=ns, executable_identity=exe,
@@ -3892,6 +3901,7 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
     if fault == "none":
         result = invoke()
         assert result["status"] == ("OWNED_DEDICATED_PREPARED_WAL_START_OBSERVED" if prepared
+                                    else "OWNED_DEDICATED_COMMITTED_ACTIVE_VERIFIED" if repeat
                                     else "OWNED_DEDICATED_COMMITTED_START_OBSERVED")
         if prepared:
             assert result["catalog_withdrawn"] and result["recovery_required"]
@@ -3900,7 +3910,13 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
         assert result["service_storage_mounts_verified"]
         assert result["service_scratch_mounts_verified"]
         assert not result["enablement_changed"]
-        assert calls == ["start", "health"] and running
+        assert calls == (["health"] if repeat else ["start", "health"]) and running
+    elif repeat:
+        with pytest.raises(native.NativeV2TransactionError):
+            invoke()
+        assert calls == ([] if fault in ("active-route", "nonloopback", "pending", "policy", "enabled")
+                         else ["health"])
+        assert running  # A pre-existing process is never stopped on failure.
     else:
         with pytest.raises(native.NativeV2TransactionError):
             invoke()
@@ -4423,6 +4439,8 @@ def test_installed_dedicated_recovery_refuses_source_loader_before_host_access(m
         native._resume_installed_committed_dedicated({})
     with pytest.raises(native.NativeV2TransactionError, match="INSTALLER_PIN_REFUSED"):
         native._start_installed_prepared_wal_dedicated({})
+    with pytest.raises(native.NativeV2TransactionError, match="INSTALLER_PIN_REFUSED"):
+        native._start_or_verify_installed_committed_dedicated({})
 
 
 @pytest.mark.parametrize("fault", ["none", "lock-held", "placement", "worker-drift",
@@ -4444,7 +4462,9 @@ def test_installed_dedicated_recovery_refuses_source_loader_before_host_access(m
                                    "pending-start", "pending-start-wal", "pending-start-boot",
                                    "pending-start-catalog", "pending-start-drift", "pending-start-result",
                                    "committed-resume", "committed-resume-boot",
-                                   "committed-resume-drift", "committed-resume-result"])
+                                   "committed-resume-drift", "committed-resume-result",
+                                   "start-repeat", "start-repeat-wal", "start-repeat-boot",
+                                   "start-repeat-result"])
 def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, monkeypatch, fault):
     """Actual protected files and flock; loader/host/package/runtime observations simulated."""
     import fcntl
@@ -4498,6 +4518,7 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
     calls = []
     preparing = fault.startswith("prepare") or rolling or pending_first or resuming
     starting = fault.startswith("start") or pending_start
+    active_repeat = fault.startswith("start-repeat")
     manifest = b"exact committed manifest"
     resources = {native._OWNED_MANIFEST: manifest, native._CATALOG: b"catalog"}
     if preparing:
@@ -4521,7 +4542,7 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
             pins["boot_receipt_sha256"] = ("0"*64 if fault in ("pending-resume-boot", "committed-resume-boot")
                                             else hashlib.sha256(boot).hexdigest())
     if starting:
-        if not pending_start:
+        if not pending_start and fault != "start-repeat-wal":
             (state_path / native._OWNED_WAL).unlink()
         pins["generation_manifest_sha256"] = ("0"*64 if fault == "start-manifest"
                                                else hashlib.sha256(manifest).hexdigest())
@@ -4530,7 +4551,7 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
                 pins["wal_sha256"] = "0"*64
         elif fault != "start-mixed":
             del pins["wal_sha256"]
-        if fault in ("start-boot", "pending-start-boot"):
+        if fault in ("start-boot", "pending-start-boot", "start-repeat-boot"):
             pins["boot_receipt_sha256"] = "0"*64
     class Loader:
         archive = worker._WORKER
@@ -4779,6 +4800,9 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
                       "service_storage_mounts_verified": True,
                       "service_scratch_mounts_verified": True,
                       "enablement_changed": fault == "start-result"}
+            if active_repeat:
+                result.update(status="OWNED_DEDICATED_COMMITTED_ACTIVE_VERIFIED",
+                              enablement_changed=fault == "start-repeat-result")
             if pending_start:
                 result.update(status="OWNED_DEDICATED_PREPARED_WAL_START_OBSERVED",
                               catalog_observed=fault == "pending-start-result",
@@ -4786,17 +4810,20 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
                               wal_sha256=hashlib.sha256(wal).hexdigest())
             return result
         monkeypatch.setattr(native, "_start_owned_committed_dedicated_locked", start)
+        monkeypatch.setattr(native, "_start_or_verify_owned_committed_dedicated_locked", start)
         monkeypatch.setattr(native, "_start_owned_prepared_wal_dedicated_locked", start)
         invoke = (native._start_installed_prepared_wal_dedicated if pending_start
+                  else native._start_or_verify_installed_committed_dedicated if active_repeat
                   else native._start_installed_committed_dedicated)
-        if fault in ("start", "pending-start"):
+        if fault in ("start", "pending-start", "start-repeat"):
             assert invoke(pins)["catalog_observed"] is (not pending_start)
         else:
             with pytest.raises(native.NativeV2TransactionError):
                 invoke(pins)
         assert calls == (["start"] if fault in ("start", "start-resource-drift", "start-result",
-                                                "pending-start", "pending-start-drift", "pending-start-result") else [])
-        if pending_start:
+                                                "pending-start", "pending-start-drift", "pending-start-result",
+                                                "start-repeat", "start-repeat-result") else [])
+        if pending_start or fault == "start-repeat-wal":
             assert (state_path / native._OWNED_WAL).read_bytes() == wal
         else:
             assert not (state_path / native._OWNED_WAL).exists()
