@@ -23,6 +23,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.request
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ci_client_native_fallback as native
@@ -706,7 +708,7 @@ def _stale_dnf4_reader(root, label, ca, urls):
     import recoverable_fallback_pair_lab as pair
     guarded_native_guest("almalinux10")
     assert pair._is_dnf4_pair_root(root)
-    assert label in ("stale-offline", "stale-online", "fresh")
+    assert label in ("stale-offline", "stale-online", "stale-withdrawn", "fresh")
     work = root / label
     work.mkdir(mode=0o700)
     for name in ("cache", "persist", "logs", "downloads"):
@@ -744,6 +746,46 @@ def _complete_stale_dnf4_reader(reader, expected_bytes, rpmdb):
     payload = work / "verified-transfer.rpm"
     assert hashlib.sha256(payload.read_bytes()).digest() == hashlib.sha256(expected_bytes).digest()
     assert _rpm_signature_verified(_run(["/usr/bin/rpm", "--dbpath", str(rpmdb), "-Kv", str(payload)]))
+
+
+@contextlib.contextmanager
+def _withdrawn_fixture_route(base: Path, mapped: Path, route: str, certificate: Path):
+    """Withdraw only the disposable route, keeping its origin and upstream live."""
+    expected = base / "www" / "__repocache" / "repos" / "approved"
+    retained = base / ".repocache-ci-withdrawn-route"
+    if (mapped != expected or mapped.resolve(strict=True) != mapped
+            or not mapped.is_dir() or os.path.lexists(retained)):
+        raise RuntimeError("Unexpected disposable withdrawal fixture")
+    mapped.rename(retained)
+    try:
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}),
+            urllib.request.HTTPSHandler(context=ssl.create_default_context(cafile=str(certificate))))
+        try:
+            with opener.open(route + "repodata/repomd.xml", timeout=10):
+                raise AssertionError("Withdrawn fixture route still served metadata")
+        except urllib.error.HTTPError as exc:
+            if exc.code != 404:
+                raise
+            exc.close()
+        yield
+    finally:
+        # Only restore this private fixture's directory; never overwrite an
+        # unexpected replacement or delete ambiguous evidence.
+        if os.path.lexists(mapped) or not retained.is_dir() or retained.is_symlink():
+            raise RuntimeError("Disposable withdrawal fixture changed")
+        retained.rename(mapped)
+
+
+def _require_withdrawn_dnf4_transfer(primary, upstream):
+    """Distinguish failed mirror attempts from successful package responses."""
+    route = "/__repocache/repos/approved/"
+    assert ("GET", route + "repodata/repomd.xml", 404) in primary.responses
+    assert all(path.startswith(route) and code == 404
+               for _, path, code in primary.responses), primary.responses
+    assert any(method == "GET" and path.startswith("/repo/")
+               and path.endswith("/" + _RPM_NAME) and code == 200
+               for method, path, code in upstream.responses), upstream.responses
 
 
 def _probe_dnf4_catalog_stale_reader(base, key, certificate, foreign, primary,
@@ -903,10 +945,13 @@ def _probe_dnf4_catalog_stale_reader(base, key, certificate, foreign, primary,
                     assert changed[0] != baseline[0] and changed[-1] == baseline[-1]
                     primary.hits.clear()
                     upstream.hits.clear()
-                    # Both children parse the actual published managed entry
-                    # before recovery. Neither reads metadata at the barrier.
+                    # All children parse the published managed entry before
+                    # recovery. None reads metadata before the barrier.
                     with _stale_dnf4_reader(root, "stale-offline", certificate, [route, upstream.origin]) as offline:
-                        with _stale_dnf4_reader(root, "stale-online", certificate, [route, upstream.origin]) as online:
+                        with (
+                            _stale_dnf4_reader(root, "stale-online", certificate, [route, upstream.origin]) as online,
+                            _stale_dnf4_reader(root, "stale-withdrawn", certificate, [route, upstream.origin]) as withdrawn,
+                        ):
                             assert not primary.hits and not upstream.hits
                             stale = root / "var/lib/dnf/rpmdb_lock.pid"
                             proof = stale.lstat()
@@ -948,6 +993,27 @@ def _probe_dnf4_catalog_stale_reader(base, key, certificate, foreign, primary,
                             _complete_stale_dnf4_reader(online, expected_bytes, rpmdb)
                             assert any(_RPM_NAME in hit for hit in primary.hits) and not upstream.hits
                             print("OBSERVED: pre-parsed DNF4 reader still uses healthy former cache after source recovery; reader revocation NOT VERIFIED", flush=True)
+                            # Keep the HTTPS endpoint healthy; remove only the
+                            # former route and withdraw its catalog mapping.
+                            # A reader holding the earlier URL must receive a
+                            # route-level 404 and authenticate upstream bytes.
+                            publish([])
+                            try:
+                                with _withdrawn_fixture_route(base, mapped, route, certificate):
+                                    primary.hits.clear()
+                                    upstream.hits.clear()
+                                    primary.responses.clear()
+                                    upstream.responses.clear()
+                                    _complete_stale_dnf4_reader(withdrawn, expected_bytes, rpmdb)
+                                    _require_withdrawn_dnf4_transfer(primary, upstream)
+                                    print("Observed withdrawn route response codes:",
+                                          sorted(set(code for _, _, code in primary.responses)),
+                                          "RPM requests to withdrawn route:",
+                                          sum(_RPM_NAME in hit for hit in primary.hits), flush=True)
+                                    assert _snapshot(source) == restored
+                            finally:
+                                publish(active)
+                            print("PASS: pre-parsed DNF4 reader receives withdrawn route HTTP 404 and downloads exact signed upstream RPM; private fixture only", flush=True)
                     primary.hits.clear()
                     upstream.hits.clear()
                     with _stale_dnf4_reader(root, "fresh", certificate, [upstream.origin]) as fresh:
