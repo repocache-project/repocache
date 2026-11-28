@@ -4379,7 +4379,9 @@ def test_installed_dedicated_recovery_refuses_source_loader_before_host_access(m
                                    "prepare", "prepare-manifest", "prepare-service",
                                    "prepare-resource-drift", "prepare-result", "prepare-mixed",
                                    "start", "start-manifest", "start-boot", "start-service",
-                                   "start-resource-drift", "start-result", "start-mixed"])
+                                   "start-resource-drift", "start-result", "start-mixed",
+                                   "rollover", "rollover-pin", "rollover-same-boot",
+                                   "rollover-archive", "rollover-resource-drift"])
 def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, monkeypatch, fault):
     """Actual protected files and flock; loader/host/package/runtime observations simulated."""
     import fcntl
@@ -4397,7 +4399,11 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
     directory = state_path.parents[3] / "usr/libexec/repocache"
     directory.mkdir(parents=True, mode=0o755)
     wal = b"exact test WAL"
-    boot = b"exact boot intent"
+    rolling = fault.startswith("rollover")
+    prior_boot_id = "11111111-1111-1111-1111-111111111111"
+    new_boot_id = "22222222-2222-2222-2222-222222222222"
+    boot = ((json.dumps({"boot_id": prior_boot_id}, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+            if rolling else b"exact boot intent")
     placement = {
         "schema_version": 1, "status": "AUTHENTICATED_WORKER_STAGED", "version": "0.6.0",
         "source_sha": "a"*40, "archive_sha256": "b"*64, "manifest_sha256": "c"*64,
@@ -4421,17 +4427,23 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
                 boot_receipt_sha256=hashlib.sha256(boot).hexdigest(),
                 wal_sha256="3"*64 if fault == "wal" else hashlib.sha256(wal).hexdigest())
     calls = []
-    preparing = fault.startswith("prepare")
+    preparing = fault.startswith("prepare") or rolling
     starting = fault.startswith("start")
     manifest = b"exact committed manifest"
     resources = {native._OWNED_MANIFEST: manifest, native._CATALOG: b"catalog"}
     if preparing:
         (state_path / native._OWNED_WAL).unlink()
-        (state_path / egress._BOOT_EGRESS_RECEIPT).unlink()
+        if not rolling:
+            (state_path / egress._BOOT_EGRESS_RECEIPT).unlink()
         pins["generation_manifest_sha256"] = ("0"*64 if fault == "prepare-manifest"
                                                else hashlib.sha256(manifest).hexdigest())
         if fault != "prepare-mixed":
             del pins["wal_sha256"], pins["boot_receipt_sha256"]
+        if rolling:
+            pins["previous_boot_receipt_sha256"] = ("0"*64 if fault == "rollover-pin"
+                                                    else hashlib.sha256(boot).hexdigest())
+            monkeypatch.setattr(egress, "_current_boot_id",
+                                lambda: prior_boot_id if fault == "rollover-same-boot" else new_boot_id)
     if starting:
         (state_path / native._OWNED_WAL).unlink()
         pins["generation_manifest_sha256"] = ("0"*64 if fault == "start-manifest"
@@ -4542,13 +4554,23 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
                     fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
             finally:
                 os.close(contender)
-            assert kw["allow_boot_rollover"] is False
+            assert kw["allow_boot_rollover"] is rolling
+            if rolling:
+                assert kw["expected_previous_receipt_sha256"] == hashlib.sha256(boot).hexdigest()
             kw["recheck_stopped_owner"]()
-            if fault == "prepare-resource-drift":
+            if fault in ("prepare-resource-drift", "rollover-resource-drift"):
                 resources[native._CATALOG] = b"changed"
                 kw["recheck_stopped_owner"]()
+            if rolling and fault != "rollover-archive":
+                archive = state_path / (egress._BOOT_EGRESS_HISTORY_PREFIX + prior_boot_id)
+                archive.write_bytes(boot)
+                archive.chmod(0o600)
+            if rolling:
+                (state_path / egress._BOOT_EGRESS_RECEIPT).write_bytes(b"new boot intent")
             return {"namespace_device": 31, "namespace_inode": 41,
-                    "generation_manifest_sha256": hashlib.sha256(manifest).hexdigest()}
+                    "generation_manifest_sha256": hashlib.sha256(manifest).hexdigest(),
+                    **({"boot_id": new_boot_id, "receipt_sha256": hashlib.sha256(b"new boot intent").hexdigest()}
+                       if rolling else {})}
 
         def verify_boot(root, state, **kw):
             calls.append("verify")
@@ -4556,17 +4578,25 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
             kw["recheck_namespace_owner"]()
             return {"namespace_device": 31, "namespace_inode": 41,
                     "generation_manifest_sha256": "0"*64 if fault == "prepare-result"
-                    else hashlib.sha256(manifest).hexdigest()}
+                    else hashlib.sha256(manifest).hexdigest(),
+                    **({"boot_id": new_boot_id, "receipt_sha256": hashlib.sha256(b"new boot intent").hexdigest()}
+                       if rolling else {})}
 
         monkeypatch.setattr(native, "_create_owned_committed_boot_egress_locked", create)
         monkeypatch.setattr(native, "_prepare_owned_committed_boot_egress_locked", verify_boot)
-        if fault == "prepare":
-            assert native._prepare_installed_committed_dedicated(pins)["namespace_inode"] == 41
+        invoke = (native._rollover_installed_committed_dedicated if rolling
+                  else native._prepare_installed_committed_dedicated)
+        if fault in ("prepare", "rollover"):
+            assert invoke(pins)["namespace_inode"] == 41
         else:
             with pytest.raises(native.NativeV2TransactionError):
-                native._prepare_installed_committed_dedicated(pins)
-        assert calls == (["prepare", "verify"] if fault in ("prepare", "prepare-result") else
-                         ["prepare"] if fault == "prepare-resource-drift" else [])
+                invoke(pins)
+        assert calls == (["prepare", "verify"] if fault in (
+                             "prepare", "prepare-result", "rollover", "rollover-archive") else
+                         ["prepare"] if fault in ("prepare-resource-drift", "rollover-resource-drift") else [])
+        if rolling and fault in ("rollover-pin", "rollover-same-boot", "rollover-resource-drift"):
+            assert (state_path / egress._BOOT_EGRESS_RECEIPT).read_bytes() == boot
+            assert not list(state_path.glob(egress._BOOT_EGRESS_HISTORY_PREFIX + "*"))
         assert not (state_path / native._OWNED_WAL).exists()
         return
     if starting:
