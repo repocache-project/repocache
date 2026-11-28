@@ -1081,10 +1081,9 @@ def test_fixture_preserves_only_exact_stopped_runtime(tmp_path, monkeypatch, fau
         os.close(fd)
 
 
-
 @pytest.mark.parametrize("fault", ["legacy", "rolled", "partial", "foreign",
                                     "rollover", "no-wal", "debian", "selection",
-                                    "bridge", "symlink"])
+                                    "bridge", "symlink", "bad-selection"])
 def test_authenticated_activation_selects_dedicated_only_from_retained_evidence(
         monkeypatch, tmp_path, fault):
     import os
@@ -1145,9 +1144,9 @@ def test_authenticated_activation_selects_dedicated_only_from_retained_evidence(
     def retain(root, state):
         assert locked
         calls.append("select")
-        if fault in ("selection", "symlink"):
+        if fault == "selection":
             raise tx.NativeV2TransactionError("OWNED_BOOT_REFUSED")
-        return selected
+        return None if fault == "bad-selection" else selected
     monkeypatch.setattr(tx, "_retained_rolled_dedicated_recovery_pins_locked", retain)
     def legacy(*a, **kw):
         assert locked and fault == "legacy"
@@ -1174,6 +1173,6 @@ def test_authenticated_activation_selects_dedicated_only_from_retained_evidence(
         with pytest.raises((stage.WorkerStageError, tx.NativeV2TransactionError)):
             host.activate_authenticated_native_nginx(tmp_path, **release)
         assert calls == (["audit", "select", "audit", "recover"] if fault == "bridge"
-                         else ["audit", "select"] if fault in ("selection", "symlink")
+                         else ["audit", "select"] if fault in ("selection", "bad-selection")
                          else ["audit"])
     assert not locked and sorted(os.listdir(tmp_path)) == before

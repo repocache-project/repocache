@@ -1926,8 +1926,21 @@ def _select_rolled_activation_recovery_locked(root: int, state: int, distributio
                    (_NAMESPACE_PROFILE_RECEIPT, _BOOT_EGRESS_RECEIPT)
                    and not name.startswith(_BOOT_EGRESS_HISTORY_PREFIX) for name in names)):
         _reject("NATIVE_DEDICATED_ACTIVATION_RECOVERY_REFUSED")
+    # No following symlinks, including dangling dedicated markers. Full
+    # ownership, byte and label verification is still required downstream.
+    for name in (_NAMESPACE_PROFILE_RECEIPT, _BOOT_EGRESS_RECEIPT, _OWNED_WAL):
+        info = _named(state, name)
+        if info is None or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            _reject("NATIVE_DEDICATED_ACTIVATION_RECOVERY_REFUSED")
     _require_audited_native_package_for_activation(state, distribution=distribution)
-    return _retained_rolled_dedicated_recovery_pins_locked(root, state)
+    selected = _retained_rolled_dedicated_recovery_pins_locked(root, state)
+    if (type(selected) is not dict
+            or set(selected) != {"executable_receipt_sha256", "profile_receipt_sha256",
+                                 "boot_receipt_sha256", "wal_sha256"}
+            or any(type(value) is not str or signatures.HEX64.fullmatch(value) is None
+                   for value in selected.values())):
+        _reject("NATIVE_DEDICATED_ACTIVATION_RECOVERY_REFUSED")
+    return selected
 
 
 def activate_authenticated_native_nginx(
