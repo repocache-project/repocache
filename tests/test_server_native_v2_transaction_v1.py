@@ -3722,7 +3722,7 @@ def test_dedicated_health_child_timeout_and_preflight_do_not_signal_foreign_pid(
 @pytest.mark.parametrize("prepared", [False, True, "repeat"])
 @pytest.mark.parametrize("fault", ["none", "active-route", "nonloopback", "pending",
                                     "policy", "policy-drift", "storage-drift", "scratch-drift", "scratch-service",
-                                    "enabled", "start", "health",
+                                    "config-label", "config-label-drift", "enabled", "start", "health",
                                     "foreign-master", "generation-drift", "selected-drift"])
 def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
         filesystem, monkeypatch, fault, prepared):
@@ -3773,6 +3773,7 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
     policy_reads = 0
     storage_reads = 0
     scratch_reads = 0
+    label_reads = 0
     ns, exe = (17, 29), (31, 41)
 
     # Retain the real layout before replacing its public test seam, so
@@ -3875,6 +3876,16 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
         inode = 3 if fault == "scratch-drift" and scratch_reads >= 2 else 2
         return ((1,), {"scratch": (inode,)})
     monkeypatch.setattr(native, "_owned_alma_runtime_temps", inspect_scratch)
+
+    def config_labels(nginx, public, *, catalog_present):
+        nonlocal label_reads
+        label_reads += 1
+        assert catalog_present is (not prepared)
+        if fault == "config-label":
+            raise native.NativeV2TransactionError("LABEL_REFUSED")
+        return ("changed",) if fault == "config-label-drift" and label_reads > 1 else ("exact",)
+
+    monkeypatch.setattr(native, "_dedicated_readonly_config_labels", config_labels)
     def service_scratch(pid, expected):
         assert running and pid == 123 and expected == ((1,), {"scratch": (2,)})
         if fault == "scratch-service":
@@ -3914,7 +3925,8 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
     elif repeat:
         with pytest.raises(native.NativeV2TransactionError):
             invoke()
-        assert calls == ([] if fault in ("active-route", "nonloopback", "pending", "policy", "enabled")
+        assert calls == ([] if fault in ("active-route", "nonloopback", "pending", "policy", "enabled",
+                                                    "config-label", "config-label-drift")
                          else ["health"])
         assert running  # A pre-existing process is never stopped on failure.
     else:
@@ -3922,6 +3934,7 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
             invoke()
         assert calls == {"active-route": [], "nonloopback": [], "pending": [],
                          "policy": [], "policy-drift": [], "storage-drift": [], "scratch-drift": [],
+                         "config-label": [], "config-label-drift": [],
                          "enabled": [], "selected-drift": [],
                          "start": ["start", "stop"], "health": ["start", "health", "stop"],
                          "scratch-service": ["start", "health", "stop"],
@@ -5265,3 +5278,77 @@ def test_prepare_owned_dedicated_runtime_parent_is_fresh_only(tmp_path, monkeypa
                 assert (runtime / names[-1] / "retain").read_bytes() == b"foreign"
     finally:
         os.close(fd)
+
+
+@pytest.mark.parametrize("fault", [
+    "none", "withdrawn", "foreign-parent", "foreign-file", "acl", "symlink",
+    "hardlink", "mode", "catalog-present", "catalog-missing", "foreign-mount",
+    "label-drift", "inode-drift", "invalid-flag",
+])
+def test_dedicated_readonly_config_label_proof(tmp_path, monkeypatch, fault):
+    """Real descriptors and metadata with a synthetic SELinux xattr seam."""
+    nginx = tmp_path / "nginx"
+    nginx.mkdir(mode=0o755)
+    public = tmp_path / "public"
+    public.mkdir(mode=0o755)
+    main = nginx / native._OWNED_MAIN
+    include = nginx / native._INCLUDE
+    catalog = public / native._CATALOG
+    for path in (main, include, catalog):
+        path.write_bytes(b"fixed bytes")
+        path.chmod(0o644)
+    if fault in ("withdrawn", "catalog-missing"):
+        catalog.unlink()
+    if fault == "symlink":
+        include.unlink()
+        include.symlink_to(main)
+    if fault == "hardlink":
+        os.link(main, tmp_path / "alias")
+    if fault == "mode":
+        main.chmod(0o666)
+    ctx = native._DEDICATED_PUBLIC_CONTEXT
+    main_inode = main.stat().st_ino
+    nginx_inode = nginx.stat().st_ino
+    reads = 0
+
+    def getxattr(fd, name):
+        nonlocal reads
+        assert name == "security.selinux"
+        ino = os.fstat(fd).st_ino
+        if ino == main_inode:
+            reads += 1
+            if fault == "inode-drift" and reads == 1:
+                replacement = nginx / "replacement"
+                replacement.write_bytes(b"fixed bytes")
+                replacement.chmod(0o644)
+                os.replace(replacement, main)
+        if ((fault == "foreign-parent" and ino == nginx_inode)
+                or (fault == "foreign-file" and ino == main_inode)
+                or (fault == "label-drift" and ino == main_inode and reads > 1)):
+            return b"system_u:object_r:httpd_config_t:s0\0"
+        return ctx + b"\0"
+
+    real_mount = native._mount
+    monkeypatch.setattr(native, "_mount", lambda fd: (
+        "foreign" if fault == "foreign-mount" and os.fstat(fd).st_ino == main_inode
+        else real_mount(fd)))
+    monkeypatch.setattr(os, "getxattr", getxattr)
+    monkeypatch.setattr(os, "listxattr", lambda fd: (
+        ["security.selinux", "system.posix_acl_access"]
+        if fault == "acl" and os.fstat(fd).st_ino == main_inode else ["security.selinux"]))
+    monkeypatch.setattr(os, "setxattr", lambda *a: pytest.fail("read-only operation attempted relabel"))
+    nfd = os.open(nginx, os.O_RDONLY | os.O_DIRECTORY)
+    pfd = os.open(public, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        flag = False if fault in ("withdrawn", "catalog-present") else 1 if fault == "invalid-flag" else True
+        if fault in ("none", "withdrawn"):
+            result = native._dedicated_readonly_config_labels(nfd, pfd, catalog_present=flag)
+            assert native._dedicated_readonly_config_labels(nfd, pfd, catalog_present=flag) == result
+            assert len(result[2]) == (2 if fault == "withdrawn" else 3)
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                native._dedicated_readonly_config_labels(nfd, pfd, catalog_present=flag)
+        assert main.read_bytes() == b"fixed bytes"
+    finally:
+        os.close(nfd)
+        os.close(pfd)

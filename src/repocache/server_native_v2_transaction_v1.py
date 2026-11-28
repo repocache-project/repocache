@@ -477,6 +477,64 @@ def _require_dedicated_public_label(fd: int) -> None:
         _deny("OWNED_DEDICATED_CATALOG_LABEL_UNVERIFIED")
 
 
+def _dedicated_readonly_config_labels(nginx: int, public: int, *, catalog_present: bool) -> tuple:
+    """Read-only exact label/identity proof for the retained owned layout."""
+    code = "OWNED_DEDICATED_READONLY_LABEL_UNVERIFIED"
+    if type(catalog_present) is not bool:
+        _deny(code)
+    try:
+        with ExitStack() as stack:
+            parents = (nginx, public)
+            before = tuple(_identity(os.fstat(fd)) for fd in parents)
+            mounts = tuple(_mount(fd) for fd in parents)
+            held = []
+            for parent in parents:
+                info = os.fstat(parent)
+                if (not stat.S_ISDIR(info.st_mode) or
+                        (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) != (0, 0, 0o755)):
+                    _deny(code)
+                _require_dedicated_public_label(parent)
+            names = [(nginx, _OWNED_MAIN), (nginx, _INCLUDE)]
+            if catalog_present:
+                names.append((public, _CATALOG))
+            for parent, name in names:
+                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                             dir_fd=parent)
+                stack.callback(os.close, fd)
+                info = os.fstat(fd)
+                identity = _identity(info)
+                if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                        or (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) != (0, 0, 0o644)
+                        or _mount(fd) != _mount(parent)
+                        or _identity(os.stat(name, dir_fd=parent, follow_symlinks=False)) != identity):
+                    _deny(code)
+                _require_dedicated_public_label(fd)
+                held.append((parent, name, fd, identity))
+            for parent, name, fd, identity in held:
+                _require_dedicated_public_label(fd)
+                if (_identity(os.fstat(fd)) != identity
+                        or _identity(os.stat(name, dir_fd=parent, follow_symlinks=False)) != identity
+                        or _mount(fd) != _mount(parent)):
+                    _deny(code)
+            if not catalog_present:
+                try:
+                    os.stat(_CATALOG, dir_fd=public, follow_symlinks=False)
+                except FileNotFoundError:
+                    pass
+                else:
+                    _deny(code)
+            for parent in parents:
+                _require_dedicated_public_label(parent)
+            if (tuple(_identity(os.fstat(fd)) for fd in parents) != before
+                    or tuple(_mount(fd) for fd in parents) != mounts):
+                _deny(code)
+            return (before, mounts, tuple(identity for _, _, _, identity in held))
+    except NativeV2TransactionError:
+        raise
+    except (OSError, InstalledStorageError, ValueError, TypeError):
+        _deny(code)
+
+
 def _require_dedicated_catalog_label(parent: int) -> None:
     _require_dedicated_public_label(parent)
     fd = os.open(_CATALOG, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
@@ -3448,6 +3506,8 @@ def _start_owned_dedicated_generation_locked(
             scratch = _owned_alma_runtime_temps(
                 root_fd, dedicated=True, inactive=not active_repeat)
             leaf = _verify_tls_pair(root_fd, document, verify_identity=True)
+            config_labels = _dedicated_readonly_config_labels(
+                nginx, public, catalog_present=not recovering)
             context = (document, snapshot["state_generation"], leaf)
 
             def exact():
@@ -3459,6 +3519,9 @@ def _start_owned_dedicated_generation_locked(
                 _owned_check_stages_absent(state, nginx, public)
                 if _read_owned_resources(state, nginx, public) != resources:
                     _deny("OWNED_DEDICATED_START_GENERATION_CHANGED")
+                if _dedicated_readonly_config_labels(
+                        nginx, public, catalog_present=not recovering) != config_labels:
+                    _deny("OWNED_DEDICATED_READONLY_LABEL_CHANGED")
                 recheck_authenticated_owner()
 
             def owner(active):

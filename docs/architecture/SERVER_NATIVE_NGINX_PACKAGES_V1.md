@@ -1811,3 +1811,19 @@ enablement, migration, catalog publication or arbitrary path authority.
 The committed VM exercises the authenticated path; pending recovery still
 uses the isolated fixture. A partial parent is retained for explicit
 diagnosis; no automatic destructive cleanup or production repair authority.
+
+### Dedicated read-only configuration preflight
+
+Before starting an authenticated prepared or committed dedicated profile,
+and throughout same-lock ownership rechecks, require the exact dedicated
+read-only SELinux context on the retained configuration and public
+directories, main configuration, managed include and committed catalog.
+For pending recovery require catalog absence. Open fixed file names
+without following links, verify root ownership, exact modes, one link,
+mount continuity and stable inode metadata, and refuse extra xattrs.
+The proof is read-only: no existing label is changed, no repair or new
+privilege is authorized. Active repeat remains observation-only. A
+disposable guest intentionally substitutes the fixture's old main-file
+label, requires signed start refusal, and restores the label before the
+positive start. TLS label preparation, fresh configuration placement and
+installed lifecycle acceptance remain separate gates.
