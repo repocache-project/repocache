@@ -1511,3 +1511,23 @@ namespace/label migration. The enforcing guest exercises the composed
 stopped path with an injected boundary refusal after real start, then
 retains all existing compensation and SIGKILL assertions and resumes
 the active service through the same composed operation.
+
+### Authenticated installer-to-worker recovery handoff
+
+The private installer bridge re-authenticates the signed source and native
+RPM payload before invoking the fixed installed worker in an isolated
+root Python process. The trusted lifecycle caller supplies independent
+executable, profile, boot and WAL pins, not digests read from the receipts
+being verified. The first phase holds the native-package-effects lock
+while using private scratch, and makes no protected resource change.
+The child acquires its own exclusive state lock and rechecks exact signed
+placement, worker/unit bytes, native executable and package identity,
+executable receipt, profile, boot intent and WAL. It retains that lock
+through composed recovery; no directory fd is treated as a transferable
+lock capability. Drift across the read-only authentication handoff refuses.
+The booted enforcing fixture calls the actual installer bridge for the
+SIGKILL retry and repeats the old WAL pin to prove refusal. This remains
+private prepared-profile recovery, not a public installer selector,
+automatic boot, ingress, provisioning or pre-existing storage migration.
+A failed or lost child reply does not imply rollback; inspect retained
+authoritative state and WAL before any retry.

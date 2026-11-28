@@ -288,6 +288,12 @@ _AUDIT_FAILURE_CODES = frozenset({
     "NATIVE_V2_OWNED_DEDICATED_RECOVERY_INPUT_INVALID",
     "NATIVE_V2_OWNED_DEDICATED_RECOVERY_SERVICE_REFUSED",
     "NATIVE_V2_OWNED_DEDICATED_RECOVERY_MASTER_CHANGED",
+    "NATIVE_V2_OWNED_DEDICATED_INSTALLER_PIN_REFUSED",
+    "NATIVE_V2_OWNED_DEDICATED_INSTALLER_PLACEMENT_REFUSED",
+    "NATIVE_V2_OWNED_DEDICATED_INSTALLER_PACKAGE_REFUSED",
+    "NATIVE_V2_OWNED_DEDICATED_INSTALLER_PROFILE_REFUSED",
+    "NATIVE_V2_OWNED_DEDICATED_INSTALLER_BOOT_REFUSED",
+    "NATIVE_V2_OWNED_DEDICATED_INSTALLER_RESULT_REFUSED",
     "NATIVE_V2_OWNED_LIVE_APPLY_RECOVERY_REQUIRED",
     "NATIVE_V2_OWNED_LIVE_APPLY_ROLLED_BACK",
     "NATIVE_V2_OWNED_LIVE_BOOTSTRAP_DRIFT",
@@ -3728,6 +3734,169 @@ def _recover_owned_prepared_dedicated_locked(
     return _finish_owned_prepared_wal_dedicated_locked(
         root_fd, state_fd, **options, expected_runtime=runtime,
         expected_listener=listener)
+
+
+def _recover_installed_prepared_dedicated(pins: dict) -> dict:
+    """Private root installer handoff, not the socket dispatcher.
+
+    All pins come from the independently authenticated installer. Acquire
+    our own exclusive lock and recheck the exact prepared profile before
+    any mutation. Never derive a receipt's expected digest from itself.
+    """
+    import zipimport
+    from repocache.server_native_nginx_executable_v1 import (
+        signed_owned_nginx_policy_candidate, verify_nginx_candidate_receipt,
+    )
+    from repocache.server_native_nginx_effective_unit_v1 import (
+        _signed_owned_unit_bytes, _stage_namespace_dropin_under_lock,
+    )
+    from repocache.server_native_egress_candidate_v1 import _fixed_namespace_scope
+    from repocache.server_root_control_host_preflight_v1 import require_native_host_preconditions
+    from repocache.server_root_control_worker_v1 import (
+        _placement_receipt, _placement_file_digest, _UNIT_NAMES,
+    )
+    from repocache.server_native_root_control_entrypoint_v1 import _native_distro
+
+    worker = "/usr/libexec/repocache/server-control-worker"
+    digests = {"worker_sha256", "placement_sha256", "archive_sha256",
+               "native_payload_sha256", "binary_sha256", "executable_receipt_sha256",
+               "profile_receipt_sha256", "boot_receipt_sha256", "wal_sha256"}
+    if (not isinstance(__loader__, zipimport.zipimporter)
+            or __loader__.archive != worker or not sys.flags.isolated
+            or os.getresuid() != (0, 0, 0) or os.getresgid() != (0, 0, 0)
+            or type(pins) is not dict
+            or set(pins) != digests | {"source_sha", "package_identity"}
+            or any(not _valid_sha(pins[key]) for key in digests)
+            or type(pins["source_sha"]) is not str
+            or re.fullmatch(r"[0-9a-f]{40}", pins["source_sha"]) is None
+            or type(pins["package_identity"]) is not str
+            or re.fullmatch(r"nginx-core-[0-9]+:[A-Za-z0-9._+~-]+-[A-Za-z0-9._+~-]+\.x86_64",
+                            pins["package_identity"]) is None):
+        _deny("OWNED_DEDICATED_INSTALLER_PIN_REFUSED")
+    require_native_host_preconditions()
+    if _native_distro() != "almalinux":
+        _deny("OWNED_DEDICATED_INSTALLER_PIN_REFUSED")
+    with ExitStack() as stack:
+        root = os.open("/", _DIRECTORY_FLAGS)
+        stack.callback(os.close, root)
+        state = stack.enter_context(_locked(root, 0))
+        _verify_current_root_fd(root)
+        directory, chain = _walk(root, ("usr", "libexec", "repocache"), stack, 0)
+        receipt_name = ".native-worker-receipt-v1.json"
+        prefix = ".native-worker-placement."
+        complete = prefix + "complete-" + pins["placement_sha256"]
+        raw = _read_file(state, receipt_name, 0, 8192)
+        if raw is None or hashlib.sha256(raw).hexdigest() != pins["placement_sha256"]:
+            _deny("OWNED_DEDICATED_INSTALLER_PLACEMENT_REFUSED")
+        receipt = _placement_receipt(raw)
+        if (receipt["source_sha"] != pins["source_sha"]
+                or receipt["archive_sha256"] != pins["archive_sha256"]
+                or receipt["files"]["server-control-worker"] != pins["worker_sha256"]):
+            _deny("OWNED_DEDICATED_INSTALLER_PLACEMENT_REFUSED")
+
+        def placement():
+            _recheck(chain, 0)
+            if (_read_file(state, receipt_name, 0, 8192) != raw
+                    or {name for name in os.listdir(state) if name.startswith(prefix)} != {complete}
+                    or _read_file(state, complete, 0, 0) != b""):
+                _deny("OWNED_DEDICATED_INSTALLER_PLACEMENT_REFUSED")
+            for name in (receipt_name, complete):
+                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK |
+                             os.O_CLOEXEC, dir_fd=state)
+                try:
+                    info = _metadata_no_acl(fd)
+                    if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                            or stat.S_IMODE(info.st_mode) != 0o600):
+                        _deny("OWNED_DEDICATED_INSTALLER_PLACEMENT_REFUSED")
+                finally:
+                    os.close(fd)
+            files = [(("usr", "libexec", "repocache", "server-control-worker"),
+                      0o755, 16 * 1024 * 1024)]
+            files += [(("etc", "systemd", "system", name), 0o644, 16384)
+                      for name in _UNIT_NAMES]
+            for segments, mode, limit in files:
+                if _placement_file_digest(root, segments, mode, limit) != receipt["files"][segments[-1]]:
+                    _deny("OWNED_DEDICATED_INSTALLER_PLACEMENT_REFUSED")
+            if _placement_file_digest(root, ("usr", "sbin", "nginx"), 0o755,
+                                      32 * 1024 * 1024) != pins["binary_sha256"]:
+                _deny("OWNED_DEDICATED_INSTALLER_PACKAGE_REFUSED")
+            _recheck(chain, 0)
+
+        def package():
+            result = subprocess.run(
+                ("/usr/bin/rpm", "-q",
+                 "--queryformat=%{NAME}-%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}",
+                 "nginx-core"), shell=False, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd="/", env=_ENV,
+                timeout=12, close_fds=True, check=False)
+            if (result.returncode != 0 or result.stderr != b""
+                    or result.stdout != pins["package_identity"].encode("ascii")):
+                _deny("OWNED_DEDICATED_INSTALLER_PACKAGE_REFUSED")
+            _require_audited_native_package_for_activation(state, distribution="almalinux")
+
+        placement()
+        package()
+        wal = _read_file(state, _OWNED_WAL, 0, _MAX_WAL)
+        if wal is None or hashlib.sha256(wal).hexdigest() != pins["wal_sha256"]:
+            _deny("OWNED_WAL_CHANGED")
+        old, _ = _decode_owned_wal(wal, distribution="almalinux")
+        snapshot = _validate_owned_resources(old, distribution="almalinux")
+        if snapshot is None:
+            _deny("OWNED_DEDICATED_FINISH_MANAGED_REQUIRED")
+        _owned_socket_require_inactive_routes(snapshot)
+        doc = parse_install_bytes(base64.b64decode(
+            snapshot["configuration_base64"], validate=True), for_apply=True)
+        port = doc["deployment"]["listen"]["https_port"]
+        signed_unit = _signed_owned_unit_bytes()
+        policy = signed_owned_nginx_policy_candidate()["policy_sha256"]
+
+        def executable():
+            return verify_nginx_candidate_receipt(
+                directory, expected_receipt_sha256=pins["executable_receipt_sha256"],
+                distribution="almalinux", package_identity=pins["package_identity"],
+                native_payload_sha256=pins["native_payload_sha256"],
+                authenticated_sha256=pins["binary_sha256"],
+                release_source_sha=pins["source_sha"], release_archive_sha256=pins["archive_sha256"],
+                dedicated_policy_sha256=policy)
+
+        def profile():
+            report = _stage_namespace_dropin_under_lock(
+                root, state, signed_unit, https_port=port, owner_uid=0,
+                owner_gid=0, allow_create=False)
+            if report["receipt_sha256"] != pins["profile_receipt_sha256"]:
+                _deny("OWNED_DEDICATED_INSTALLER_PROFILE_REFUSED")
+            return report
+
+        executable_before = executable()
+        profile_before = profile()
+        _, namespace_identity, recheck_namespace = stack.enter_context(_fixed_namespace_scope())
+
+        def guard():
+            placement()
+            recheck_namespace()
+            boot = _read_boot_egress_receipt(state, 0, 0)
+            if boot is None or hashlib.sha256(boot).hexdigest() != pins["boot_receipt_sha256"]:
+                _deny("OWNED_DEDICATED_INSTALLER_BOOT_REFUSED")
+            if executable() != executable_before or profile() != profile_before:
+                _deny("OWNED_DEDICATED_INSTALLER_PROFILE_REFUSED")
+            recheck_namespace()
+
+        guard()
+        result = _recover_owned_prepared_dedicated_locked(
+            root, state, namespace_identity=namespace_identity,
+            executable_identity=executable_before["executable_identity"][:2],
+            profile_receipt_sha256=pins["profile_receipt_sha256"],
+            executable_receipt_sha256=pins["executable_receipt_sha256"],
+            expected_wal=wal, recheck_authenticated_owner=guard)
+        guard()
+        package()
+        if (_read_file(state, _OWNED_WAL, 0, _MAX_WAL) is not None
+                or result.get("status") != "OWNED_DEDICATED_WAL_ROLLBACK_OBSERVED"
+                or result.get("wal_sha256") != pins["wal_sha256"]
+                or result.get("recovery_required") is not False
+                or result.get("catalog_observed") is not True):
+            _deny("OWNED_DEDICATED_INSTALLER_RESULT_REFUSED")
+        return result
 
 
 def _owned_live_wait_generation(root_fd: int, identity: tuple, context: tuple) -> None:

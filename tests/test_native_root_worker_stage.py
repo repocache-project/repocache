@@ -804,3 +804,95 @@ def test_executable_candidate_selects_retained_native_effects_lock(
     with pytest.raises(RuntimeError, match="fixture stopped before host access"):
         install._stage_authenticated_native_executable_candidate(
             tmp_path, commit="a" * 40, archive_sha256="b" * 64)
+
+
+@pytest.mark.parametrize("fault", ["invalid-pin", "debian", "release", "placement",
+                                   "wal", "package", "child", "wrong-report", "none"])
+def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, tmp_path, fault):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    wal = b"test WAL"
+    receipt = {"source_sha": "a"*40}
+    expected = stage._json_line(receipt)
+    marker = install._MARKER + "complete-" + hashlib.sha256(expected).hexdigest()
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / marker).touch()
+    calls = []
+    locked = False
+    def auth(*args, **kwargs):
+        calls.append("release")
+        if fault == "release":
+            raise stage.WorkerStageError("UNAUTHENTICATED")
+        return {stage.CONFIG: install._BOOTSTRAP_CONFIG, stage.WORKER: b"worker"}, receipt
+    monkeypatch.setattr(install, "_native_distro", lambda: "debian" if fault == "debian" else "almalinux")
+    monkeypatch.setattr(install, "require_native_host_preconditions", lambda: None)
+    monkeypatch.setattr(stage, "_authenticated_payloads", auth)
+    monkeypatch.setattr(stage, "_audit_worker_files", lambda *a: None)
+    @contextmanager
+    def lock(root, owner, **kw):
+        nonlocal locked
+        assert owner == 0 and kw == {"allow_native_package_parent_changes": True}
+        locked = True
+        fd = os.open(state, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            yield fd
+        finally:
+            os.close(fd)
+            locked = False
+    monkeypatch.setattr(install, "_locked", lock)
+    def read(fd, name, uid, limit):
+        assert locked
+        if name == install._RUNTIME_RECEIPT:
+            return b"foreign" if fault == "placement" else expected
+        if name == install._OWNED_WAL:
+            return None if fault == "wal" else wal
+        assert name == marker
+        return b""
+    monkeypatch.setattr(install, "_read_file", read)
+    monkeypatch.setattr(install, "_require_audited_native_package_for_activation", lambda *a, **kw: None)
+    monkeypatch.setattr(install, "_native_workspace_is_root_owned", lambda path: True)
+    @contextmanager
+    def workspace(**kw):
+        yield str(tmp_path)
+    monkeypatch.setattr(install.tempfile, "TemporaryDirectory", workspace)
+    monkeypatch.setattr(install, "_candidate_native_identity", lambda *a: "nginx-core-0:1.2-3.x86_64")
+    def authenticate(*args):
+        assert locked
+        calls.append("rpm")
+        if fault == "package":
+            raise stage.WorkerStageError("PACKAGE_REFUSED")
+        return "e"*64, "f"*64
+    monkeypatch.setattr(install, "_authenticate_candidate_rpm", authenticate)
+    def child(argv, **kw):
+        assert not locked
+        assert argv == ("/usr/bin/python3", "-IS", "-B", "-c", install._DEDICATED_RECOVERY_CHILD)
+        compile(argv[-1], "<fixed-recovery-child>", "exec")
+        assert kw["shell"] is False and kw["close_fds"] is True and "pass_fds" not in kw
+        data = json.loads(kw["input"])
+        assert data["worker_sha256"] == hashlib.sha256(b"worker").hexdigest()
+        assert data["placement_sha256"] == hashlib.sha256(expected).hexdigest()
+        assert data["native_payload_sha256"] == "e"*64 and data["binary_sha256"] == "f"*64
+        assert data["executable_receipt_sha256"] == "c"*64
+        assert data["profile_receipt_sha256"] == "d"*64 and data["boot_receipt_sha256"] == "9"*64
+        calls.append("child")
+        report = {"status": "OWNED_DEDICATED_WAL_ROLLBACK_OBSERVED",
+                  "wal_sha256": hashlib.sha256(wal).hexdigest(),
+                  "recovery_required": False, "catalog_observed": fault != "wrong-report"}
+        return SimpleNamespace(returncode=2 if fault == "child" else 0,
+                               stdout=json.dumps(report).encode(), stderr=b"")
+    monkeypatch.setattr(install.subprocess, "run", child)
+    options = dict(commit="a"*40, archive_sha256="b"*64,
+                   executable_receipt_sha256="invalid" if fault == "invalid-pin" else "c"*64,
+                   profile_receipt_sha256="d"*64, boot_receipt_sha256="9"*64,
+                   wal_sha256=hashlib.sha256(wal).hexdigest())
+    if fault == "none":
+        assert install._recover_authenticated_prepared_dedicated_nginx(tmp_path, **options)["catalog_observed"]
+    else:
+        with pytest.raises(stage.WorkerStageError):
+            install._recover_authenticated_prepared_dedicated_nginx(tmp_path, **options)
+    assert calls == ([] if fault in ("invalid-pin", "debian") else
+                     ["release"] if fault in ("release", "placement", "wal") else
+                     ["release", "rpm"] if fault == "package" else
+                     ["release", "rpm", "child"])
+    assert not locked

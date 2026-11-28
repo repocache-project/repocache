@@ -3010,8 +3010,23 @@ finally:
                     assert response.startswith(b"HTTP/1.1 200 ") and response.endswith(catalog.read_bytes())
                     require_status(OWN, True, False)
                     print("PASS: actual dedicated finalizer killed after pinned catalog publication; exact WAL remains", flush=True)
-                    finished = signed("finish-dedicated")
+                    recovery_pins = dict(
+                        **pins, executable_receipt_sha256=executable_proof["receipt_sha256"],
+                        profile_receipt_sha256=prior["profile"]["receipt_sha256"],
+                        boot_receipt_sha256=result["receipt_sha256"], wal_sha256=wal_hash)
+                    # Exercise the actual installer handoff, not a fixture
+                    # dispatcher. The parent authenticates source/RPM; the
+                    # fixed installed child independently holds the lock.
+                    finished = native._recover_authenticated_prepared_dedicated_nginx(
+                        assets, **recovery_pins)
                     assert finished["status"] == "OWNED_DEDICATED_WAL_ROLLBACK_OBSERVED"
+                    try:
+                        native._recover_authenticated_prepared_dedicated_nginx(
+                            assets, **recovery_pins)
+                    except native.stage.WorkerStageError as exc:
+                        assert str(exc) == "WORKER_PLACEMENT_NATIVE_DEDICATED_RECOVERY_WAL_REFUSED"
+                    else:
+                        raise AssertionError("Completed WAL was adopted again")
                     assert finished["wal_sha256"] == wal_hash
                     assert not finished["recovery_required"] and finished["catalog_observed"]
                     assert finished["main_pid"] == started["main_pid"]
@@ -3037,7 +3052,7 @@ finally:
                     assert os.getxattr(fd, "security.selinux").rstrip(b"\0") == b"system_u:object_r:repocache_nginx_ro_t:s0"
                     assert legacy_catalog_label
                     labels.append((catalog, fd, ident, legacy_catalog_label))
-                    print("PASS: actual dedicated WAL publication fault compensates to HTTP 404; SIGKILL retry through composed recovery republishes exact prior TLS catalog, removes WAL and refuses replay", flush=True)
+                    print("PASS: actual dedicated WAL publication fault compensates to HTTP 404; SIGKILL retry through authenticated installer bridge republishes exact prior TLS catalog, removes WAL and refuses replay", flush=True)
             else:
                 witnessed = signed("verify-committed-active")
                 assert witnessed["main_pid"] == started["main_pid"]

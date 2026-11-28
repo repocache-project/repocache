@@ -4356,3 +4356,148 @@ def test_composed_prepared_dedicated_recovery_selects_exact_service(monkeypatch,
             invoke()
         assert calls == (["start", "finish"] if scenario == "finish-refusal" else
                          ["start"] if scenario in ("changed-master", "changed-unit", "bad-start") else [])
+
+
+def test_installed_dedicated_recovery_refuses_source_loader_before_host_access(monkeypatch):
+    from repocache import server_root_control_host_preflight_v1 as host
+    def forbidden():
+        pytest.fail("source checkout must not authorize installed recovery")
+    monkeypatch.setattr(host, "require_native_host_preconditions", forbidden)
+    with pytest.raises(native.NativeV2TransactionError, match="INSTALLER_PIN_REFUSED"):
+        native._recover_installed_prepared_dedicated({})
+
+
+@pytest.mark.parametrize("fault", ["none", "lock-held", "placement", "worker-drift",
+                                   "package", "vendor-drift", "wal", "executable",
+                                   "profile", "boot", "boot-drift", "result"])
+def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, monkeypatch, fault):
+    """Actual protected files and flock; loader/host/package/runtime observations simulated."""
+    import fcntl
+    import zipimport
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from repocache import server_native_nginx_effective_unit_v1 as unit
+    from repocache import server_native_nginx_executable_v1 as executable
+    from repocache import server_native_egress_candidate_v1 as egress
+    from repocache import server_root_control_host_preflight_v1 as host
+    from repocache import server_root_control_worker_v1 as worker
+    from repocache.server_protected_state_store_v1 import ProtectedStateStoreError
+
+    rootfd, state_path, _, _, _ = filesystem
+    directory = state_path.parents[3] / "usr/libexec/repocache"
+    directory.mkdir(parents=True, mode=0o755)
+    wal = b"exact test WAL"
+    boot = b"exact boot intent"
+    placement = {
+        "schema_version": 1, "status": "AUTHENTICATED_WORKER_STAGED", "version": "0.6.0",
+        "source_sha": "a"*40, "archive_sha256": "b"*64, "manifest_sha256": "c"*64,
+        "publisher_key_id": "test-only",
+        "files": {name: "d"*64 for name in worker._RECEIPT_FILES},
+        "authorizes_host_installation": False, "authorizes_service_activation": False,
+    }
+    raw = (json.dumps(placement, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+    placement_sha = hashlib.sha256(raw).hexdigest()
+    complete = worker._PLACEMENT_PREFIX + "complete-" + placement_sha
+    for name, content in ((worker._RUNTIME_RECEIPT, b"foreign" if fault == "placement" else raw),
+                          (complete, b""), (native._OWNED_WAL, wal),
+                          (egress._BOOT_EGRESS_RECEIPT, boot)):
+        path = state_path / name
+        path.write_bytes(content)
+        path.chmod(0o600)
+    pins = dict(source_sha="a"*40, archive_sha256="b"*64, worker_sha256="d"*64,
+                placement_sha256=placement_sha, package_identity="nginx-core-0:1.2-3.x86_64",
+                native_payload_sha256="e"*64, binary_sha256="f"*64,
+                executable_receipt_sha256="1"*64, profile_receipt_sha256="2"*64,
+                boot_receipt_sha256=hashlib.sha256(boot).hexdigest(),
+                wal_sha256="3"*64 if fault == "wal" else hashlib.sha256(wal).hexdigest())
+    calls = []
+    class Loader:
+        archive = worker._WORKER
+    monkeypatch.setattr(zipimport, "zipimporter", Loader)
+    monkeypatch.setattr(native, "__loader__", Loader())
+    monkeypatch.setattr(native, "sys", SimpleNamespace(flags=SimpleNamespace(isolated=True)))
+    monkeypatch.setattr(host, "require_native_host_preconditions", lambda: None)
+    monkeypatch.setattr(dispatcher, "_native_distro", lambda: "almalinux")
+    monkeypatch.setattr(native, "_verify_current_root_fd", lambda *_: None)
+    monkeypatch.setattr(native, "_require_audited_native_package_for_activation", lambda *a, **kw: None)
+    real_locked, real_walk = native._locked, native._walk
+    monkeypatch.setattr(native, "_locked", lambda root, uid: real_locked(rootfd, uid))
+    monkeypatch.setattr(native, "_walk", lambda root, parts, stack, uid: real_walk(rootfd, parts, stack, uid))
+    def digest(root, segments, mode, limit):
+        if segments[-1] == "nginx":
+            return "0"*64 if fault == "vendor-drift" else pins["binary_sha256"]
+        return "0"*64 if fault == "worker-drift" else placement["files"][segments[-1]]
+    monkeypatch.setattr(worker, "_placement_file_digest", digest)
+    def rpm(argv, **kw):
+        assert argv == ("/usr/bin/rpm", "-q",
+                        "--queryformat=%{NAME}-%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}",
+                        "nginx-core")
+        return SimpleNamespace(returncode=0, stderr=b"",
+                               stdout=(b"wrong" if fault == "package" else pins["package_identity"].encode()))
+    monkeypatch.setattr(native.subprocess, "run", rpm)
+    monkeypatch.setattr(native, "_decode_owned_wal", lambda *a, **kw: ({}, {}))
+    monkeypatch.setattr(native, "_validate_owned_resources", lambda *a, **kw: {
+        "configuration_base64": "e30=", "state_generation": 1})
+    monkeypatch.setattr(native, "_owned_socket_require_inactive_routes", lambda *a: None)
+    monkeypatch.setattr(native, "parse_install_bytes", lambda *a, **kw: {
+        "deployment": {"listen": {"https_port": 443}}})
+    monkeypatch.setattr(unit, "_signed_owned_unit_bytes", lambda: b"signed unit")
+    monkeypatch.setattr(executable, "signed_owned_nginx_policy_candidate",
+                        lambda: {"policy_sha256": "4"*64})
+    def verify(directory_fd, **kw):
+        assert kw["expected_receipt_sha256"] == pins["executable_receipt_sha256"]
+        assert kw["native_payload_sha256"] == pins["native_payload_sha256"]
+        assert kw["authenticated_sha256"] == pins["binary_sha256"]
+        assert kw["dedicated_policy_sha256"] == "4"*64
+        if fault == "executable":
+            native._deny("EXECUTABLE_REFUSED")
+        return {"executable_identity": (17, 29)}
+    monkeypatch.setattr(executable, "verify_nginx_candidate_receipt", verify)
+    def profile(*a, **kw):
+        assert kw["allow_create"] is False
+        return {"receipt_sha256": "0"*64 if fault == "profile" else pins["profile_receipt_sha256"]}
+    monkeypatch.setattr(unit, "_stage_namespace_dropin_under_lock", profile)
+    @contextmanager
+    def namespace():
+        yield 11, (31, 41), lambda: None
+    monkeypatch.setattr(egress, "_fixed_namespace_scope", namespace)
+    if fault == "boot":
+        pins["boot_receipt_sha256"] = "0"*64
+    def recover(root, state, **kw):
+        calls.append("recover")
+        # A separate open file description must be excluded even in this
+        # process; a directory descriptor alone cannot establish this.
+        contender = os.open(state_path / LOCK_NAME, os.O_RDONLY)
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(contender)
+        assert kw["expected_wal"] == wal and kw["namespace_identity"] == (31, 41)
+        assert kw["executable_identity"] == (17, 29)
+        kw["recheck_authenticated_owner"]()
+        if fault == "boot-drift":
+            (state_path / egress._BOOT_EGRESS_RECEIPT).write_bytes(b"changed")
+            kw["recheck_authenticated_owner"]()
+        if fault != "result":
+            os.unlink(native._OWNED_WAL, dir_fd=state)
+        return {"status": "OWNED_DEDICATED_WAL_ROLLBACK_OBSERVED",
+                "wal_sha256": pins["wal_sha256"], "recovery_required": False,
+                "catalog_observed": True}
+    monkeypatch.setattr(native, "_recover_owned_prepared_dedicated_locked", recover)
+    if fault == "none":
+        assert native._recover_installed_prepared_dedicated(pins)["catalog_observed"]
+        assert not (state_path / native._OWNED_WAL).exists()
+    elif fault == "lock-held":
+        with real_locked(rootfd, 0):
+            with pytest.raises(ProtectedStateStoreError, match="LOCK_UNAVAILABLE"):
+                native._recover_installed_prepared_dedicated(pins)
+    else:
+        with pytest.raises(native.NativeV2TransactionError):
+            native._recover_installed_prepared_dedicated(pins)
+    assert calls == (["recover"] if fault in ("none", "boot-drift", "result") else [])
+    if fault != "none":
+        assert (state_path / native._OWNED_WAL).read_bytes() == wal
+    # Whether successful or refused, the worker must release its lock.
+    with real_locked(rootfd, 0):
+        pass

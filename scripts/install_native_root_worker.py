@@ -1472,6 +1472,161 @@ def _activate_audited_native_nginx_under_lock(
         _reject("NATIVE_ACTIVATION_FAILED_ROLLED_BACK")
 
 
+# Fixed installer-only bootstrap, not a new socket or CLI operation.
+_DEDICATED_RECOVERY_CHILD = r"""
+import hashlib,json,os,re,stat,sys
+from contextlib import ExitStack
+if os.getresuid()!=(0,0,0) or os.getresgid()!=(0,0,0) or not sys.flags.isolated:
+    raise SystemExit(2)
+raw=sys.stdin.buffer.read(8193)
+if not 0<len(raw)<=8192:
+    raise SystemExit(2)
+pins=json.loads(raw)
+if (type(pins) is not dict or type(pins.get("worker_sha256")) is not str
+        or re.fullmatch(r"[0-9a-f]{64}",pins["worker_sha256"]) is None):
+    raise SystemExit(2)
+worker="/usr/libexec/repocache/server-control-worker"
+flags=os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC
+with ExitStack() as stack:
+    fd=os.open("/",flags|os.O_DIRECTORY)
+    stack.callback(os.close,fd)
+    chain=[]
+    def protected_directory(directory):
+        info=os.fstat(directory)
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid!=0 or info.st_gid!=0
+                or info.st_mode&0o022 or set(os.listxattr(directory))-{"security.selinux"}):
+            raise SystemExit(2)
+        return (info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_gid)
+    for name in ("usr","libexec","repocache"):
+        protected_directory(fd)
+        parent=fd
+        fd=os.open(name,flags|os.O_DIRECTORY,dir_fd=parent)
+        stack.callback(os.close,fd)
+        chain.append((parent,name,fd,protected_directory(fd)))
+    def recheck():
+        for parent,name,directory,expected in chain:
+            seen=os.stat(name,dir_fd=parent,follow_symlinks=False)
+            if (protected_directory(directory)!=expected or
+                    (seen.st_dev,seen.st_ino,seen.st_mode,seen.st_uid,seen.st_gid)!=expected):
+                raise SystemExit(2)
+    recheck()
+    leaf=os.open("server-control-worker",flags|os.O_NONBLOCK,dir_fd=fd)
+    stack.callback(os.close,leaf)
+    info=os.fstat(leaf)
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid!=0 or info.st_gid!=0
+            or info.st_nlink!=1 or stat.S_IMODE(info.st_mode)!=0o755
+            or not 0<info.st_size<=16*1024*1024
+            or set(os.listxattr(leaf))-{"security.selinux"}):
+        raise SystemExit(2)
+    with os.fdopen(os.dup(leaf),"rb") as stream:
+        data=stream.read(16*1024*1024+1)
+    def identity(value):
+        return (value.st_dev,value.st_ino,value.st_mode,value.st_uid,value.st_gid,
+                value.st_nlink,value.st_size,value.st_mtime_ns,value.st_ctime_ns)
+    if (len(data)!=info.st_size or hashlib.sha256(data).hexdigest()!=pins["worker_sha256"]
+            or identity(os.fstat(leaf))!=identity(info)
+            or identity(os.stat(worker,follow_symlinks=False))!=identity(info)):
+        raise SystemExit(2)
+    recheck()
+    sys.path.insert(0,worker)
+    from repocache import server_native_v2_transaction_v1 as transaction
+    recheck()
+    try:
+        report=transaction._recover_installed_prepared_dedicated(pins)
+    except Exception as exc:
+        transaction._audit_native_failure(exc)
+        raise SystemExit(2) from None
+    sys.stdout.write(json.dumps(report,sort_keys=True,separators=(",",":"))+"\n")
+"""
+
+
+def _recover_authenticated_prepared_dedicated_nginx(
+    assets: Path, *, commit: str, archive_sha256: str,
+    executable_receipt_sha256: str, profile_receipt_sha256: str,
+    boot_receipt_sha256: str, wal_sha256: str,
+) -> dict:
+    """Private authenticated installer bridge for an already prepared profile.
+
+    Receipt pins come from the trusted lifecycle caller, not from the
+    files being verified. No public CLI selector or transferred lock fd.
+    Authenticate in a read-only phase (private package scratch only);
+    the installed child acquires its own lock and rechecks every pin.
+    """
+    if (any(type(value) is not str or signatures.HEX64.fullmatch(value) is None
+            for value in (archive_sha256, executable_receipt_sha256,
+                          profile_receipt_sha256, boot_receipt_sha256, wal_sha256))
+            or type(commit) is not str or signatures.HEX40.fullmatch(commit) is None
+            or _native_distro() != "almalinux"):
+        _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
+    require_native_host_preconditions()
+    payloads, receipt = stage._authenticated_payloads(
+        assets, commit=commit, archive_sha256=archive_sha256, system=None)
+    if payloads.get(stage.CONFIG) != _BOOTSTRAP_CONFIG:
+        _reject("NATIVE_SIGNED_CONFIG_UNEXPECTED")
+    expected = stage._json_line(receipt)
+    placement_sha = hashlib.sha256(expected).hexdigest()
+    root = os.open("/", stage._DIRECTORY)
+    try:
+        with _locked(root, 0, allow_native_package_parent_changes=True) as state:
+            stage._audit_worker_files(Path("/"), payloads)
+            if (_read_file(state, _RUNTIME_RECEIPT, 0, 8192) != expected
+                    or {name for name in os.listdir(state) if name.startswith(_MARKER)}
+                       != {_MARKER + "complete-" + placement_sha}
+                    or _read_file(state, _MARKER + "complete-" + placement_sha, 0, 0) != b""):
+                _reject("NATIVE_DEDICATED_RECOVERY_PLACEMENT_REFUSED")
+            wal = _read_file(state, _OWNED_WAL, 0, _MAX_WAL)
+            if wal is None or hashlib.sha256(wal).hexdigest() != wal_sha256:
+                _reject("NATIVE_DEDICATED_RECOVERY_WAL_REFUSED")
+            _require_audited_native_package_for_activation(state, distribution="almalinux")
+            with tempfile.TemporaryDirectory(prefix="repocache-native-recovery-", dir="/var/lib") as tmp:
+                work = Path(tmp)
+                if not _native_workspace_is_root_owned(work):
+                    _reject("NATIVE_EXECUTABLE_WORKSPACE_REFUSED")
+                package = _candidate_native_identity("almalinux", work)
+                native_digest, binary_digest = _authenticate_candidate_rpm(work, package)
+                if _candidate_native_identity("almalinux", work) != package:
+                    _reject("NATIVE_EXECUTABLE_PACKAGE_CHANGED")
+            stage._audit_worker_files(Path("/"), payloads)
+    finally:
+        os.close(root)
+    # No protected resource changed before releasing the first lock.
+    # A concurrent change must be refused by the child's fresh pin checks.
+    pins = dict(source_sha=commit, archive_sha256=archive_sha256,
+                worker_sha256=hashlib.sha256(payloads[stage.WORKER]).hexdigest(),
+                placement_sha256=placement_sha, package_identity=package,
+                native_payload_sha256=native_digest, binary_sha256=binary_digest,
+                executable_receipt_sha256=executable_receipt_sha256,
+                profile_receipt_sha256=profile_receipt_sha256,
+                boot_receipt_sha256=boot_receipt_sha256, wal_sha256=wal_sha256)
+    try:
+        result = subprocess.run(
+            ("/usr/bin/python3", "-IS", "-B", "-c", _DEDICATED_RECOVERY_CHILD),
+            input=json.dumps(pins, sort_keys=True).encode("ascii"),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd="/",
+            env={"PATH": "/usr/sbin:/usr/bin:/bin", "LC_ALL": "C"},
+            shell=False, close_fds=True, timeout=420, check=False)
+        if result.returncode != 0 or not 0 < len(result.stdout) <= 65536:
+            # Preserve only the worker's closed, non-sensitive audit codes.
+            from repocache.server_native_v2_transaction_v1 import _AUDIT_FAILURE_CODES
+            for line in result.stderr.splitlines():
+                prefix = b"REPOCACHE_FIXED_TRANSACTION_REFUSAL: "
+                if line.startswith(prefix) and line[len(prefix):].isascii():
+                    code = line[len(prefix):].decode("ascii")
+                    if code in _AUDIT_FAILURE_CODES:
+                        print(prefix.decode("ascii") + code, file=sys.stderr)
+            _reject("NATIVE_DEDICATED_RECOVERY_CHILD_REFUSED")
+        report = json.loads(result.stdout)
+        if (type(report) is not dict
+                or report.get("status") != "OWNED_DEDICATED_WAL_ROLLBACK_OBSERVED"
+                or report.get("wal_sha256") != wal_sha256
+                or report.get("recovery_required") is not False
+                or report.get("catalog_observed") is not True):
+            _reject("NATIVE_DEDICATED_RECOVERY_CHILD_REFUSED")
+        return report
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        _reject("NATIVE_DEDICATED_RECOVERY_CHILD_REFUSED")
+
+
 def activate_authenticated_native_nginx(
     assets: Path, *, commit: str, archive_sha256: str,
 ) -> dict:
