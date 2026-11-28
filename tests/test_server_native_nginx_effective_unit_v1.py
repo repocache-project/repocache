@@ -715,3 +715,39 @@ def test_dedicated_runtime_readback_binds_fixed_namespace_and_exact_unit(monkeyp
         with pytest.raises(EffectiveNginxUnitError):
             invoke()
         assert len(samples) == {"namespace": 0, "owner": 1, "master": 2, "scope": 1}[fault]
+
+
+@pytest.mark.parametrize("case", ["pending", "loaded", "foreign", "active", "changing", "ordinary"])
+def test_stopped_profile_load_state_is_closed_and_read_only(monkeypatch, case):
+    monkeypatch.setattr(unit, "_observe_systemd_pid1", lambda: None)
+    monkeypatch.setattr(unit, "_safe_native_systemctl", lambda: None)
+    calls = []
+
+    def run(argv, **kw):
+        assert argv == unit._OWN_SHOW
+        assert kw["shell"] is False and kw["close_fds"] is True
+        calls.append(argv)
+        loaded = case == "loaded" or (case == "changing" and len(calls) == 2)
+        response = _response(
+            Id=unit._OWN_UNIT, Names=unit._OWN_UNIT,
+            FragmentPath="/etc/systemd/system/" + unit._OWN_UNIT,
+            DropInPaths=(unit._NAMESPACE_DROPIN_PATH if loaded else
+                         "/foreign.conf" if case == "foreign" else ""),
+            ActiveState="active" if case == "active" else "inactive",
+            SubState="running" if case == "active" else "dead",
+            MainPID="42" if case == "active" else "0",
+            NeedDaemonReload="no" if loaded else "yes")
+        return SimpleNamespace(returncode=0, stdout=response, stderr="")
+
+    monkeypatch.setattr(unit.subprocess, "run", run)
+    if case in ("pending", "loaded"):
+        result = unit._inspect_effective_owned_nginx_unit(
+            active=False, dedicated=True, loading_profile=True)
+        assert result["profile_loaded"] is (case == "loaded")
+        assert result["main_pid_observed"] == 0
+        assert result["authorizes_systemctl"] is False
+        assert len(calls) == 2
+    else:
+        with pytest.raises(EffectiveNginxUnitError):
+            unit._inspect_effective_owned_nginx_unit(
+                active=False, dedicated=True, loading_profile=case != "ordinary")

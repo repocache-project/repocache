@@ -828,7 +828,9 @@ def test_executable_candidate_selects_retained_native_effects_lock(
                                    "rolled-start-active", "rolled-start-active-report",
                                    "profile-stage", "profile-stage-wal", "profile-stage-boot",
                                    "profile-stage-manifest", "profile-stage-existing",
-                                   "profile-stage-report"])
+                                   "profile-stage-report", "profile-load", "profile-load-repeat",
+                                   "profile-load-wal", "profile-load-boot",
+                                   "profile-load-manifest", "profile-load-report"])
 def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, tmp_path, fault):
     from contextlib import contextmanager
     from types import SimpleNamespace
@@ -872,7 +874,9 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
     pending_start = fault.startswith("pending-start")
     pending = pending_first or pending_rolling or (resuming and not committed_resume) or pending_start
     staging_profile = fault.startswith("profile-stage")
-    preparing = fault.startswith("prepare") or rolling or pending_first or resuming or staging_profile
+    loading_profile = fault.startswith("profile-load")
+    preparing = (fault.startswith("prepare") or rolling or pending_first or resuming
+                 or staging_profile or loading_profile)
     if fault == "profile-stage-existing":
         from repocache.server_native_nginx_effective_unit_v1 import _NAMESPACE_PROFILE_RECEIPT
         (state / _NAMESPACE_PROFILE_RECEIPT).touch()
@@ -881,12 +885,12 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
     manifest = b"committed manifest"
     boot = b"exact boot"
     monkeypatch.setattr(egress, "_read_boot_egress_receipt",
-                        lambda *a, **kw: b"existing boot" if fault in ("prepare-boot", "start-boot", "rollover-boot", "pending-prepare-boot", "pending-resume-boot", "pending-start-boot", "committed-resume-boot", "profile-stage-boot")
+                        lambda *a, **kw: b"existing boot" if fault in ("prepare-boot", "start-boot", "rollover-boot", "pending-prepare-boot", "pending-resume-boot", "pending-start-boot", "committed-resume-boot", "profile-stage-boot", "profile-load-boot")
                         else boot if starting or rolling or resuming else None)
     def read(fd, name, uid, limit):
         assert locked
         if name == tx._OWNED_MANIFEST:
-            return b"foreign" if fault in ("prepare-manifest", "profile-stage-manifest") else manifest
+            return b"foreign" if fault in ("prepare-manifest", "profile-stage-manifest", "profile-load-manifest") else manifest
         if name == tx._OWNED_WAL_TMP:
             return None
         if name == install._RUNTIME_RECEIPT:
@@ -895,7 +899,7 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
             if pending:
                 return (None if fault.endswith("-missing-wal") else
                         b"foreign WAL" if fault.endswith("-wal") else wal)
-            return None if (fault == "wal" or (preparing and fault not in ("prepare-wal", "rollover-wal", "committed-resume-wal", "profile-stage-wal"))
+            return None if (fault == "wal" or (preparing and fault not in ("prepare-wal", "rollover-wal", "committed-resume-wal", "profile-stage-wal", "profile-load-wal"))
                             or (starting and fault not in ("start-wal", "rolled-start-wal"))) else wal
         assert name == marker
         return b""
@@ -918,6 +922,7 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
         assert not locked
         assert argv == ("/usr/bin/python3", "-IS", "-B", "-c",
                         install._DEDICATED_PROFILE_CHILD if staging_profile else
+                        install._DEDICATED_PROFILE_LOAD_CHILD if loading_profile else
                         install._DEDICATED_COMMITTED_RESUME_CHILD if committed_resume else
                         install._DEDICATED_PENDING_RESUME_CHILD if resuming else
                         install._DEDICATED_PENDING_ROLLOVER_CHILD if pending_rolling else
@@ -946,6 +951,15 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
                       "receipt_matches_owned_dropin": True, "authorizes_systemctl": False,
                       "authorizes_nginx_activation": False,
                       "authorizes_catalog_publication": fault == "profile-stage-report"}
+        elif loading_profile:
+            assert data["generation_manifest_sha256"] == hashlib.sha256(manifest).hexdigest()
+            assert "boot_receipt_sha256" not in data and "wal_sha256" not in data
+            report = {"status": "OWNED_DEDICATED_PROFILE_LOADED",
+                      "generation_manifest_sha256": data["generation_manifest_sha256"],
+                      "executable_receipt_sha256": "c"*64,
+                      "receipt_sha256": "0"*64 if fault == "profile-load-report" else "d"*64,
+                      "profile_loaded": True, "daemon_reloaded": fault != "profile-load-repeat",
+                      "authorizes_nginx_activation": False, "authorizes_catalog_publication": False}
         elif preparing:
             assert data["generation_manifest_sha256"] == hashlib.sha256(manifest).hexdigest()
             if resuming:
@@ -1019,6 +1033,7 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
         if staging_profile:
             del boot_pins["profile_receipt_sha256"]
         invoke = (install._stage_authenticated_committed_dedicated_profile if staging_profile
+                  else install._load_authenticated_committed_dedicated_profile if loading_profile
                   else install._resume_authenticated_committed_dedicated_nginx if committed_resume
                   else install._resume_authenticated_prepared_wal_dedicated_nginx if resuming
                   else install._rollover_authenticated_prepared_wal_dedicated_nginx if pending_rolling
@@ -1027,6 +1042,8 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
                   else install._prepare_authenticated_committed_dedicated_nginx)
         if fault == "profile-stage":
             assert invoke(tmp_path, **boot_pins)["receipt_matches_owned_dropin"]
+        elif fault in ("profile-load", "profile-load-repeat"):
+            assert invoke(tmp_path, **boot_pins)["daemon_reloaded"] is (fault == "profile-load")
         elif fault in ("prepare", "rollover", "pending-rollover", "pending-prepare", "pending-resume",
                      "committed-resume"):
             assert invoke(tmp_path, **boot_pins)[
@@ -1103,7 +1120,9 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
                                                "pending-start-missing-wal",
                                                "committed-resume-boot", "committed-resume-wal",
                                                "profile-stage-wal", "profile-stage-boot",
-                                               "profile-stage-manifest", "profile-stage-existing") else
+                                               "profile-stage-manifest", "profile-stage-existing",
+                                               "profile-load-wal", "profile-load-boot",
+                                               "profile-load-manifest") else
                      ["release", "rpm"] if fault == "package" else
                      ["release", "history"] if fault in ("rolled-refusal", "rolled-pins-changed",
                                                            "rolled-start-changed", "rolled-start-wal") else

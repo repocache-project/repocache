@@ -4443,6 +4443,8 @@ def test_installed_dedicated_recovery_refuses_source_loader_before_host_access(m
         native._start_or_verify_installed_committed_dedicated({})
     with pytest.raises(native.NativeV2TransactionError, match="INSTALLER_PIN_REFUSED"):
         native._stage_installed_committed_dedicated_profile({})
+    with pytest.raises(native.NativeV2TransactionError, match="INSTALLER_PIN_REFUSED"):
+        native._load_installed_committed_dedicated_profile({})
 
 
 @pytest.mark.parametrize("fault", ["none", "lock-held", "placement", "worker-drift",
@@ -4468,7 +4470,10 @@ def test_installed_dedicated_recovery_refuses_source_loader_before_host_access(m
                                    "start-repeat", "start-repeat-wal", "start-repeat-boot",
                                    "start-repeat-result", "profile-stage", "profile-stage-manifest",
                                    "profile-stage-existing", "profile-stage-service",
-                                   "profile-stage-drift", "profile-stage-result"])
+                                   "profile-stage-drift", "profile-stage-result",
+                                   "profile-load", "profile-load-repeat", "profile-load-wrong-pin",
+                                   "profile-load-service", "profile-load-drift", "profile-load-failure",
+                                   "profile-load-readback"])
 def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, monkeypatch, fault):
     """Actual protected files and flock; loader/host/package/runtime observations simulated."""
     import fcntl
@@ -4521,7 +4526,10 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
                 wal_sha256="3"*64 if fault == "wal" else hashlib.sha256(wal).hexdigest())
     calls = []
     staging_profile = fault.startswith("profile-stage")
-    preparing = fault.startswith("prepare") or rolling or pending_first or resuming or staging_profile
+    loading_profile = fault.startswith("profile-load")
+    preparing = (fault.startswith("prepare") or rolling or pending_first or resuming
+                 or staging_profile or loading_profile)
+    loaded = fault == "profile-load-repeat"
     starting = fault.startswith("start") or pending_start
     active_repeat = fault.startswith("start-repeat")
     manifest = b"exact committed manifest"
@@ -4541,6 +4549,10 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
                 pins["generation_manifest_sha256"] = "0"*64
             if fault == "profile-stage-existing":
                 (state_path / unit._NAMESPACE_PROFILE_RECEIPT).touch()
+        if loading_profile:
+            (state_path / unit._NAMESPACE_PROFILE_RECEIPT).touch()
+            if fault == "profile-load-wrong-pin":
+                pins["profile_receipt_sha256"] = "0"*64
         if rolling:
             pins["previous_boot_receipt_sha256"] = ("0"*64 if fault == "rollover-pin"
                                                     else hashlib.sha256(boot).hexdigest())
@@ -4582,11 +4594,20 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
         return "0"*64 if fault == "worker-drift" else placement["files"][segments[-1]]
     monkeypatch.setattr(worker, "_placement_file_digest", digest)
     def rpm(argv, **kw):
+        nonlocal loaded
+        if argv == (native._SYSTEMCTL, "daemon-reload"):
+            assert loading_profile
+            assert kw["shell"] is False and kw["close_fds"] is True
+            calls.append("daemon-reload")
+            loaded = fault not in ("profile-load-failure", "profile-load-readback")
+            if fault == "profile-load-drift":
+                resources[native._CATALOG] = b"changed"
+            return SimpleNamespace(returncode=1 if fault == "profile-load-failure" else 0)
         if argv[0] == native._SYSTEMCTL:
             assert (preparing or starting) and argv[2] in (native._UNIT, native._OWNED_WAL_DOMAIN)
             assert argv[1] in ("is-active", "is-enabled")
             if argv[1] == "is-active":
-                active = fault in ("prepare-service", "start-service", "profile-stage-service")
+                active = fault in ("prepare-service", "start-service", "profile-stage-service", "profile-load-service")
                 return SimpleNamespace(returncode=0 if active else 3,
                                        stdout=b"active\n" if active else b"inactive\n")
             return SimpleNamespace(returncode=1, stdout=b"disabled\n")
@@ -4657,8 +4678,31 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
                     "authorizes_systemctl": fault == "profile-stage-result",
                     "authorizes_nginx_activation": False}
         assert kw["allow_create"] is False
+        if loading_profile:
+            return {"receipt_sha256": "2"*64, "receipt_matches_owned_dropin": True,
+                    "authorizes_nginx_activation": False}
         return {"receipt_sha256": "0"*64 if fault == "profile" else pins["profile_receipt_sha256"]}
     monkeypatch.setattr(unit, "_stage_namespace_dropin_under_lock", profile)
+    if loading_profile:
+        monkeypatch.setattr(unit, "_NAMESPACE_PATH", str(state_path / "absent-netns"))
+        monkeypatch.setattr(unit, "_inspect_signed_owned_namespace_load_state",
+                            lambda **kw: {"profile_loaded": loaded, "main_pid_observed": 0})
+        monkeypatch.setattr(native, "_owned_check_stages_absent", lambda *a: None)
+        if fault in ("profile-load", "profile-load-repeat"):
+            assert native._load_installed_committed_dedicated_profile(pins)[
+                "daemon_reloaded"] is (fault == "profile-load")
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                native._load_installed_committed_dedicated_profile(pins)
+        assert calls == (["daemon-reload"] if fault in (
+            "profile-load", "profile-load-drift", "profile-load-failure",
+            "profile-load-readback") else [])
+        assert (state_path / unit._NAMESPACE_PROFILE_RECEIPT).exists()
+        assert not (state_path / native._OWNED_WAL).exists()
+        assert not (state_path / egress._BOOT_EGRESS_RECEIPT).exists()
+        with real_locked(rootfd, 0):
+            pass
+        return
     if staging_profile:
         monkeypatch.setattr(unit, "_NAMESPACE_PATH", str(state_path / "absent-netns"))
         monkeypatch.setattr(unit, "inspect_effective_owned_nginx_unit",

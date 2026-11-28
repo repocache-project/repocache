@@ -1744,3 +1744,20 @@ catalog mutation or public operation is introduced. An uncertain or already
 present profile is refused, not adopted; its subsequent recovery remains a
 separate lifecycle prerequisite. The booted committed fixture uses this
 signed installer path and exercises foreign pins and repeated placement refusal.
+
+### Authenticated load of the stopped committed profile
+
+The private signed installer accepts the independently retained executable,
+profile and generation pins, reacquires the worker lock and verifies the
+exact persistent profile and its stopped/disabled service boundary. Only
+the exact old PID1 unit with no loaded drop-in and NeedDaemonReload=yes,
+or the exact dedicated loaded unit, is accepted. The stale case permits
+one fixed systemctl daemon-reload (a manager-wide unit-definition reload,
+not an NGINX reload). Recheck authenticated resources and the exact loaded
+profile; the already-loaded case is observation-only. Foreign or changing
+observations, pending WAL/boot evidence, active services, incorrect pins and
+failed/uncertain readback refuse without starting, stopping or enabling any
+service. Keep the profile receipt for explicit retry; never clean up an
+ambiguous load. This does not introduce a socket operation, automatic boot
+activation, namespace creation or catalog publication. The committed VM
+fixture now uses the actual signed load and read-only repeat paths.

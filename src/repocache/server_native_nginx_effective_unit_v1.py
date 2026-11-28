@@ -270,8 +270,11 @@ def inspect_effective_owned_nginx_unit(*, active: bool) -> dict[str, Any]:
     return _inspect_effective_owned_nginx_unit(active=active, dedicated=False)
 
 
-def _inspect_effective_owned_nginx_unit(*, active: bool, dedicated: bool) -> dict[str, Any]:
-    if type(active) is not bool or type(dedicated) is not bool:
+def _inspect_effective_owned_nginx_unit(*, active: bool, dedicated: bool,
+                                        loading_profile: bool = False) -> dict[str, Any]:
+    if (type(active) is not bool or type(dedicated) is not bool
+            or type(loading_profile) is not bool
+            or (loading_profile and (active or not dedicated))):
         _deny("OWN_UNIT_UNVERIFIED")
     try:
         _observe_systemd_pid1()
@@ -308,6 +311,11 @@ def _inspect_effective_owned_nginx_unit(*, active: bool, dedicated: bool) -> dic
                 "SubState": "running" if active else "dead",
                 "CanReload": "yes", "NeedDaemonReload": "no",
             }
+            # Only the authenticated stopped-profile transition may observe
+            # the exact old loaded unit with its new on-disk drop-in pending.
+            # All ordinary observers still reject NeedDaemonReload=yes.
+            if loading_profile and fields["NeedDaemonReload"] == "yes":
+                expected.update(DropInPaths="", NeedDaemonReload="yes")
             if any(fields[k] != v for k, v in expected.items()):
                 _deny("OWN_UNIT_UNVERIFIED")
             pid = fields["MainPID"]
@@ -327,6 +335,8 @@ def _inspect_effective_owned_nginx_unit(*, active: bool, dedicated: bool) -> dic
         return {"status": "NATIVE_REPOCACHE_NGINX_SERVICE_VERIFIED",
                 "main_pid_observed": int(observed[0]["MainPID"]),
                 "unit_name": _OWN_UNIT,
+                **({"profile_loaded": observed[0]["NeedDaemonReload"] == "no"}
+                   if loading_profile else {}),
                 "authorizes_systemctl": False,
                 "authorizes_nginx_reload": False,
                 "authorizes_nginx_install": False}
@@ -769,6 +779,19 @@ def _stage_namespace_dropin_under_lock(root_fd: int, state_fd: int, raw: bytes, 
 
 
 def inspect_signed_owned_namespace_unit(*, https_port: int, active: bool) -> dict[str, Any]:
+    """Observe the exact loaded signed base and persistent dedicated drop-in."""
+    return _inspect_signed_owned_namespace_unit(
+        https_port=https_port, active=active, loading_profile=False)
+
+
+def _inspect_signed_owned_namespace_load_state(*, https_port: int) -> dict[str, Any]:
+    """Read-only exact stopped profile transition, never service authority."""
+    return _inspect_signed_owned_namespace_unit(
+        https_port=https_port, active=False, loading_profile=True)
+
+
+def _inspect_signed_owned_namespace_unit(*, https_port: int, active: bool,
+                                         loading_profile: bool) -> dict[str, Any]:
     """Observe signed base, exact persistent drop-in and PID1 twice.
 
     The state/receipt owner must bind the port to the verified generation,
@@ -796,7 +819,8 @@ def inspect_signed_owned_namespace_unit(*, https_port: int, active: bool) -> dic
                 )
 
             before = read()
-            observed = _inspect_effective_owned_nginx_unit(active=active, dedicated=True)
+            observed = _inspect_effective_owned_nginx_unit(
+                active=active, dedicated=True, loading_profile=loading_profile)
             if read() != before:
                 _deny("NAMESPACE_UNIT_CHANGED")
             return {**observed, "signed_worker_unit_bytes_match": True,

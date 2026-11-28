@@ -3926,6 +3926,11 @@ def _stage_installed_committed_dedicated_profile(pins: dict) -> dict:
     return _installed_dedicated_lifecycle(pins, prepare=True, stage_profile=True)
 
 
+def _load_installed_committed_dedicated_profile(pins: dict) -> dict:
+    """Private authenticated fixed profile load; no service start or enablement."""
+    return _installed_dedicated_lifecycle(pins, prepare=True, load_profile=True)
+
+
 def _prepare_installed_committed_dedicated(pins: dict) -> dict:
     """Private signed-installer first-boot namespace preparation; no service start."""
     return _installed_dedicated_lifecycle(pins, prepare=True)
@@ -3978,7 +3983,8 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
                                    rollover: bool = False, pending_prepare: bool = False,
                                    resume_boot: bool = False,
                                    pending_start: bool = False, active_repeat: bool = False,
-                                   stage_profile: bool = False) -> dict:
+                                   stage_profile: bool = False,
+                                   load_profile: bool = False) -> dict:
     import zipimport
     from repocache.server_native_nginx_executable_v1 import (
         signed_owned_nginx_policy_candidate, verify_nginx_candidate_receipt,
@@ -4015,6 +4021,8 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
             or type(active_repeat) is not bool or (active_repeat and (not start or pending_start))
             or type(stage_profile) is not bool or (stage_profile and (
                 not prepare or rollover or pending_prepare or resume_boot))
+            or type(load_profile) is not bool or (load_profile and (
+                not prepare or rollover or pending_prepare or resume_boot or stage_profile))
             or (prepare and start) or (rollover and not prepare)
             or not isinstance(__loader__, zipimport.zipimporter)
             or __loader__.archive != worker or not sys.flags.isolated
@@ -4167,10 +4175,11 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
                 elif _read_owned_resources(*layout[:3]) != old:
                     _deny("OWNED_LIVE_RESOURCE_DRIFT")
 
-        if stage_profile:
+        if stage_profile or load_profile:
             from repocache.server_native_nginx_effective_unit_v1 import (
                 _NAMESPACE_PROFILE_RECEIPT, _NAMESPACE_PATH,
                 inspect_effective_owned_nginx_unit,
+                _inspect_signed_owned_namespace_load_state, _safe_native_systemctl,
             )
             from repocache.server_native_egress_candidate_v1 import (
                 _BOOT_EGRESS_RECEIPT,
@@ -4201,6 +4210,57 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
                     if _read_owned_resources(state_dir, nginx, public) != old:
                         _deny("OWNED_LIVE_RESOURCE_DRIFT")
                     check_layout()
+
+            if load_profile:
+                # Existing receipt and generation pins are independently
+                # authenticated. A reload failure never starts or compensates
+                # a service; retry may observe the exact already-loaded unit.
+                fresh_boundary(placed=True)
+                retained_profile = profile()
+
+                def load_boundary():
+                    fresh_boundary(placed=True)
+                    if profile() != retained_profile:
+                        _deny("OWNED_DEDICATED_INSTALLER_PROFILE_REFUSED")
+
+                load_boundary()
+                before = _inspect_signed_owned_namespace_load_state(https_port=port)
+                load_boundary()
+                if (type(before.get("profile_loaded")) is not bool
+                        or before.get("main_pid_observed") != 0
+                        or _inspect_signed_owned_namespace_load_state(https_port=port) != before):
+                    _deny("OWNED_DEDICATED_RECOVERY_SERVICE_REFUSED")
+                reloaded = not before["profile_loaded"]
+                if reloaded:
+                    _safe_native_systemctl()
+                    load_boundary()
+                    try:
+                        result = subprocess.run(
+                            (_SYSTEMCTL, "daemon-reload"), shell=False,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, cwd="/", env=_ENV,
+                            timeout=30, close_fds=True, start_new_session=True, check=False)
+                    except (OSError, subprocess.SubprocessError):
+                        _deny("OWNED_DEDICATED_RECOVERY_SERVICE_REFUSED")
+                    if type(result.returncode) is not int or result.returncode != 0:
+                        _deny("OWNED_DEDICATED_RECOVERY_SERVICE_REFUSED")
+                load_boundary()
+                after = _inspect_signed_owned_namespace_load_state(https_port=port)
+                if (after.get("profile_loaded") is not True
+                        or after.get("main_pid_observed") != 0
+                        or {k: v for k, v in after.items() if k != "profile_loaded"} !=
+                           {k: v for k, v in before.items() if k != "profile_loaded"}):
+                    _deny("OWNED_DEDICATED_INSTALLER_RESULT_REFUSED")
+                load_boundary()
+                if _inspect_signed_owned_namespace_load_state(https_port=port) != after:
+                    _deny("OWNED_DEDICATED_INSTALLER_RESULT_REFUSED")
+                load_boundary()
+                return {**retained_profile, "status": "OWNED_DEDICATED_PROFILE_LOADED",
+                        "profile_loaded": True, "daemon_reloaded": reloaded,
+                        "generation_manifest_sha256": pins["generation_manifest_sha256"],
+                        "executable_receipt_sha256": pins["executable_receipt_sha256"],
+                        "authorizes_nginx_activation": False,
+                        "authorizes_catalog_publication": False}
 
             fresh_boundary(placed=False)
             stopped = inspect_effective_owned_nginx_unit(active=False)

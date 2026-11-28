@@ -2860,7 +2860,38 @@ finally:
             require_prior_resources()
             require_status(OWN, False, False)
             print("PASS: authenticated installer stages fixed committed profile; foreign pins and repeat refused without activation", flush=True)
-        require("/usr/bin/systemctl", "daemon-reload")
+        if pending:
+            require("/usr/bin/systemctl", "daemon-reload")
+        else:
+            load_pins = dict(**profile_pins, profile_receipt_sha256=profile["receipt_sha256"])
+            for field in ("executable_receipt_sha256", "profile_receipt_sha256",
+                          "generation_manifest_sha256"):
+                try:
+                    native._load_authenticated_committed_dedicated_profile(
+                        assets, **{**load_pins, field: "0"*64})
+                except native.stage.WorkerStageError:
+                    pass
+                else:
+                    raise AssertionError("Foreign profile load pin accepted")
+                assert profile_receipt.read_bytes() == saved_profile
+                require_prior_resources()
+                require_status(OWN, False, False)
+                assert run("/usr/bin/systemctl", "show", "--property=NeedDaemonReload",
+                           "--value", OWN).stdout.strip() == "yes"
+            loaded = native._load_authenticated_committed_dedicated_profile(assets, **load_pins)
+            assert loaded["status"] == "OWNED_DEDICATED_PROFILE_LOADED"
+            assert loaded["profile_loaded"] is True and loaded["daemon_reloaded"] is True
+            assert loaded["receipt_sha256"] == profile["receipt_sha256"]
+            assert loaded["authorizes_nginx_activation"] is False
+            assert loaded["authorizes_catalog_publication"] is False
+            again = native._load_authenticated_committed_dedicated_profile(assets, **load_pins)
+            assert again == {**loaded, "daemon_reloaded": False}
+            assert profile_receipt.read_bytes() == saved_profile
+            assert not os.path.lexists(ns) and not os.path.lexists(boot_receipt)
+            require_prior_resources()
+            require_status(OWN, False, False)
+            require_status(VENDOR, False, False)
+            print("PASS: authenticated installer loads exact stopped committed profile; foreign pins refused, repeat read-only", flush=True)
         if pending and finalize:
             # Real fixture fault injection leaves a durable intent but no
             # policy. Resume it through the actual signed installer, not an

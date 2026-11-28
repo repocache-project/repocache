@@ -1591,6 +1591,25 @@ def _stage_authenticated_committed_dedicated_profile(
                            generation_manifest_sha256=generation_manifest_sha256))
 
 
+_DEDICATED_PROFILE_LOAD_CHILD = _DEDICATED_RECOVERY_CHILD.replace(
+    "transaction._recover_installed_prepared_dedicated(pins)",
+    "transaction._load_installed_committed_dedicated_profile(pins)")
+
+
+def _load_authenticated_committed_dedicated_profile(
+    assets: Path, *, commit: str, archive_sha256: str,
+    executable_receipt_sha256: str, profile_receipt_sha256: str,
+    generation_manifest_sha256: str,
+) -> dict:
+    """Load only the exact previously placed stopped profile; repeat is read-only."""
+    return _authenticated_prepared_dedicated_bridge(
+        assets, commit=commit, archive_sha256=archive_sha256,
+        prepare=True, load_profile=True,
+        recovery_pins=dict(executable_receipt_sha256=executable_receipt_sha256,
+                           profile_receipt_sha256=profile_receipt_sha256,
+                           generation_manifest_sha256=generation_manifest_sha256))
+
+
 def _prepare_authenticated_committed_dedicated_nginx(
     assets: Path, *, commit: str, archive_sha256: str,
     executable_receipt_sha256: str, profile_receipt_sha256: str,
@@ -1754,7 +1773,7 @@ def _authenticated_prepared_dedicated_bridge(
     prepare: bool = False, start: bool = False, rollover: bool = False,
     pending_prepare: bool = False, resume_boot: bool = False,
     pending_start: bool = False, expected_rolled_pins: dict | None = None,
-    stage_profile: bool = False,
+    stage_profile: bool = False, load_profile: bool = False,
 ) -> dict:
     if (expected_rolled_pins is not None and recovery_pins is not None
             or type(prepare) is not bool or type(start) is not bool or type(rollover) is not bool
@@ -1763,6 +1782,8 @@ def _authenticated_prepared_dedicated_bridge(
             or type(pending_start) is not bool or (pending_start and not start)
             or type(stage_profile) is not bool or (stage_profile and (
                 not prepare or rollover or pending_prepare or resume_boot))
+            or type(load_profile) is not bool or (load_profile and (
+                not prepare or rollover or pending_prepare or resume_boot or stage_profile))
             or (prepare and start) or (rollover and not prepare)
             or (prepare and recovery_pins is None)
             or (start and recovery_pins is None and
@@ -1891,6 +1912,7 @@ def _authenticated_prepared_dedicated_bridge(
         result = subprocess.run(
             ("/usr/bin/python3", "-IS", "-B", "-c",
              _DEDICATED_PROFILE_CHILD if stage_profile else
+             _DEDICATED_PROFILE_LOAD_CHILD if load_profile else
              _DEDICATED_PENDING_RESUME_CHILD if resume_boot and pending_prepare else
              _DEDICATED_COMMITTED_RESUME_CHILD if resume_boot else
              _DEDICATED_PENDING_ROLLOVER_CHILD if pending_prepare and rollover else
@@ -1927,6 +1949,18 @@ def _authenticated_prepared_dedicated_bridge(
                     or signatures.HEX64.fullmatch(report["receipt_sha256"]) is None
                     or report.get("receipt_matches_owned_dropin") is not True
                     or report.get("authorizes_systemctl") is not False
+                    or report.get("authorizes_nginx_activation") is not False
+                    or report.get("authorizes_catalog_publication") is not False):
+                _reject("NATIVE_DEDICATED_RECOVERY_CHILD_REFUSED")
+        elif load_profile:
+            if (report.get("status") != "OWNED_DEDICATED_PROFILE_LOADED"
+                    or report.get("generation_manifest_sha256") !=
+                       recovery_pins["generation_manifest_sha256"]
+                    or report.get("executable_receipt_sha256") !=
+                       recovery_pins["executable_receipt_sha256"]
+                    or report.get("receipt_sha256") != recovery_pins["profile_receipt_sha256"]
+                    or report.get("profile_loaded") is not True
+                    or type(report.get("daemon_reloaded")) is not bool
                     or report.get("authorizes_nginx_activation") is not False
                     or report.get("authorizes_catalog_publication") is not False):
                 _reject("NATIVE_DEDICATED_RECOVERY_CHILD_REFUSED")
