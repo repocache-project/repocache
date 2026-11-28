@@ -5872,3 +5872,101 @@ def test_fixed_loaded_policy_readback_refuses_unbound_module(tmp_path, monkeypat
     assert len(calls) == (1 if fault in ("alternate", "disabled", "absent") else
                           3 if fault in ("none", "inventory-drift") else 2)
     assert not list(tmp_path.glob("repocache-policy-readback-*"))
+
+
+@pytest.mark.parametrize("fault", [
+    "none", "foreign-label", "include", "public-entry", "symlink", "catalog-flag",
+    "invalid-flag",
+])
+def test_initial_dedicated_config_label_proof(tmp_path, monkeypatch, fault):
+    nginx = tmp_path / "nginx"
+    public = tmp_path / "public"
+    nginx.mkdir(mode=0o755)
+    public.mkdir(mode=0o755)
+    main = nginx / native._OWNED_MAIN
+    main.write_bytes(native._OWNED_BOOTSTRAP_CONFIG)
+    main.chmod(0o644)
+    inode = main.stat().st_ino
+    if fault == "include":
+        (nginx / native._INCLUDE).touch(mode=0o644)
+    if fault == "public-entry":
+        (public / "foreign").touch()
+    if fault == "symlink":
+        main.rename(nginx / "target")
+        main.symlink_to("target")
+    monkeypatch.setattr(os, "listxattr", lambda fd: ["security.selinux"])
+    monkeypatch.setattr(os, "getxattr", lambda fd, name: (
+        b"foreign" if fault == "foreign-label" and os.fstat(fd).st_ino == inode
+        else native._DEDICATED_PUBLIC_CONTEXT + b"\0"))
+    monkeypatch.setattr(os, "setxattr", lambda *a: pytest.fail("unexpected relabel"))
+    nfd = os.open(nginx, os.O_RDONLY | os.O_DIRECTORY)
+    pfd = os.open(public, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        def observe():
+            return native._dedicated_readonly_config_labels(
+                nfd, pfd, catalog_present=fault == "catalog-flag",
+                bootstrap=1 if fault == "invalid-flag" else True)
+        if fault == "none":
+            proof = observe()
+            assert len(proof[2]) == 1
+            assert observe() == proof
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                observe()
+        assert main.read_bytes() == native._OWNED_BOOTSTRAP_CONFIG
+    finally:
+        os.close(nfd)
+        os.close(pfd)
+
+
+@pytest.mark.parametrize("fault", [
+    "none", "stale", "active", "config-drift", "tls-drift", "intake-drift", "distro",
+])
+def test_initial_dedicated_candidate_readonly(filesystem, monkeypatch, fault):
+    old = _owned_bootstrap_resources()
+    candidate = _owned_generation(active=fault == "active")[V2_STATE]
+    paths = _owned_fixture_paths(filesystem, old)
+    root_fd = filesystem[0]
+    report = {"expected_generation": 1 if fault == "stale" else 0,
+              "expected_state_sha256": None}
+    calls = {"intake": 0, "config": 0, "tls": 0, "verify": 0}
+
+    def intake(*args, **kwargs):
+        calls["intake"] += 1
+        raw = b"changed" if fault == "intake-drift" and calls["intake"] == 4 else candidate
+        return report, raw
+
+    def proof(key):
+        calls[key] += 1
+        return (key, calls[key] if fault == key + "-drift" else 0)
+
+    def verify(*args, **kwargs):
+        calls["verify"] += 1
+        return "a" * 64
+
+    monkeypatch.setattr(native, "_load_private_under_root", intake)
+    monkeypatch.setattr(native, "_dedicated_readonly_config_labels",
+                        lambda *a, **kw: proof("config"))
+    monkeypatch.setattr(native, "_dedicated_readonly_tls_labels",
+                        lambda *a: proof("tls"))
+    monkeypatch.setattr(native._Labels, "_command", staticmethod(lambda *a: b"Enforcing"))
+    monkeypatch.setattr(native, "_verify_tls_pair", verify)
+    monkeypatch.setattr(native, "_resolve_pins", lambda doc: {})
+    with native._owned_fixture_layout(root_fd, recovering=False) as layout:
+        def prepare():
+            return native._prepare_owned_initial_dedicated_candidate_locked(
+                root_fd, *layout, "debian" if fault == "distro" else "almalinux")
+        if fault == "none":
+            previous, new, prepared = prepare()
+            assert previous == old and prepared == report
+            assert new[V2_STATE] == candidate
+            assert new[native._OWNED_MAIN] == native._owned_managed_config("almalinux")
+            assert calls == {"intake": 4, "config": 2, "tls": 2, "verify": 1}
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                prepare()
+            if fault in ("stale", "active", "distro"):
+                assert calls["verify"] == 0
+    assert _fixture_resource_bytes(paths) == old
+    _assert_owned_fixture_clean(filesystem, paths)
+

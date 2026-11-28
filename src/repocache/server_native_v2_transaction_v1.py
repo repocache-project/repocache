@@ -478,10 +478,12 @@ def _require_dedicated_public_label(fd: int) -> None:
         _deny("OWNED_DEDICATED_CATALOG_LABEL_UNVERIFIED")
 
 
-def _dedicated_readonly_config_labels(nginx: int, public: int, *, catalog_present: bool) -> tuple:
+def _dedicated_readonly_config_labels(nginx: int, public: int, *, catalog_present: bool,
+                                      bootstrap: bool = False) -> tuple:
     """Read-only exact label/identity proof for the retained owned layout."""
     code = "OWNED_DEDICATED_READONLY_LABEL_UNVERIFIED"
-    if type(catalog_present) is not bool:
+    if (type(catalog_present) is not bool or type(bootstrap) is not bool
+            or (bootstrap and catalog_present)):
         _deny(code)
     try:
         with ExitStack() as stack:
@@ -495,7 +497,9 @@ def _dedicated_readonly_config_labels(nginx: int, public: int, *, catalog_presen
                         (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) != (0, 0, 0o755)):
                     _deny(code)
                 _require_dedicated_public_label(parent)
-            names = [(nginx, _OWNED_MAIN), (nginx, _INCLUDE)]
+            names = [(nginx, _OWNED_MAIN)]
+            if not bootstrap:
+                names.append((nginx, _INCLUDE))
             if catalog_present:
                 names.append((public, _CATALOG))
             for parent, name in names:
@@ -516,6 +520,9 @@ def _dedicated_readonly_config_labels(nginx: int, public: int, *, catalog_presen
                 if (_identity(os.fstat(fd)) != identity
                         or _identity(os.stat(name, dir_fd=parent, follow_symlinks=False)) != identity
                         or _mount(fd) != _mount(parent)):
+                    _deny(code)
+            if bootstrap:
+                if set(os.listdir(nginx)) != {_OWNED_MAIN} or os.listdir(public):
                     _deny(code)
             if not catalog_present:
                 try:
@@ -5470,6 +5477,51 @@ def _prepare_owned_live_candidate_locked(root_fd: int, state_fd: int,
     again, again_candidate = _load_private_under_root(root_fd, owner_uid=0, owner_gid=0)
     if (again != report or again_candidate != candidate
             or _read_owned_resources(state_fd, nginx_fd, public_fd) != old):
+        _deny("CANDIDATE_CHANGED")
+    return old, new, report
+
+
+def _prepare_owned_initial_dedicated_candidate_locked(
+        root_fd: int, state_fd: int, nginx_fd: int, public_fd: int,
+        check_layout, distribution: str) -> tuple[dict, dict, dict]:
+    """Read-only generation-one preflight; never authorize a WAL or service.
+
+    The enforcing AlmaLinux path requires exact inert labelled configuration
+    and operator TLS identities on both sides of deterministic CAS rendering.
+    The caller must retain the authenticated lock and independently prove
+    installed policy, service and storage authority before any future effect.
+    """
+    code = "OWNED_INITIAL_DEDICATED_CANDIDATE_REFUSED"
+    if distribution != "almalinux":
+        _deny(code)
+    labels = _Labels("almalinux", dedicated=True)
+    check_layout()
+    config = _dedicated_readonly_config_labels(
+        nginx_fd, public_fd, catalog_present=False, bootstrap=True)
+    old = _read_owned_resources(state_fd, nginx_fd, public_fd)
+    if _validate_owned_resources(old, distribution=distribution) is not None:
+        _deny(code)
+    report, candidate = _load_private_under_root(root_fd, owner_uid=0, owner_gid=0)
+    if report["expected_generation"] != 0 or report["expected_state_sha256"] is not None:
+        _deny("STATE_STALE")
+    snapshot = _json(candidate, limit=_LIMIT[V2_STATE])
+    _owned_socket_require_inactive_routes(snapshot)
+    document = parse_install_bytes(
+        base64.b64decode(snapshot["configuration_base64"], validate=True),
+        for_apply=True,
+    )
+    tls = _dedicated_readonly_tls_labels(root_fd, document)
+    previous, new, prepared = _prepare_owned_live_candidate_locked(
+        root_fd, state_fd, nginx_fd, public_fd, distribution)
+    labels.finish()
+    check_layout()
+    again, raw = _load_private_under_root(root_fd, owner_uid=0, owner_gid=0)
+    if (previous != old or prepared != report or new[V2_STATE] != candidate
+            or again != report or raw != candidate
+            or _read_owned_resources(state_fd, nginx_fd, public_fd) != old
+            or _dedicated_readonly_config_labels(
+                nginx_fd, public_fd, catalog_present=False, bootstrap=True) != config
+            or _dedicated_readonly_tls_labels(root_fd, document) != tls):
         _deny("CANDIDATE_CHANGED")
     return old, new, report
 

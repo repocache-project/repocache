@@ -1944,3 +1944,17 @@ marker. If it drifts during placement, retain the pending claim, refuse
 the remaining writes, and never silently create the completion marker.
 The root-container recovery suite exercises this boundary as well as
 same-inode repeats, wrong pins and actual-root refusal.
+
+### Read-only first-generation candidate preflight
+
+The enforcing AlmaLinux generation-one candidate path retains the exact
+inert configuration and empty public namespace under the original lock.
+The bootstrap-specific label proof requires the fixed main file only and
+rejects any include, catalog, stage or foreign public entry. Before and
+after the existing deterministic root-intake CAS renderer, verify exact
+operator TLS labels and inode identities, unchanged bootstrap resources
+and the same intake report and bytes. Refuse active repositories and stale
+or changing inputs before returning a candidate. No WAL, catalog, service,
+policy or host installation effect is permitted by this helper; the
+initial authenticated transaction and health-gated publication remain
+separate prerequisites. Existing committed and recovery proofs are unchanged.
