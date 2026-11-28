@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import socket
+import stat
 import tempfile
 from pathlib import Path
 
@@ -4083,6 +4084,20 @@ def test_dedicated_wal_finalization_publishes_only_verified_prior(
     monkeypatch.setattr(native, "verify_service_storage_mounts", lambda *a: None)
     monkeypatch.setattr(native, "_verify_owned_alma_runtime_service_view", lambda *a: None)
     monkeypatch.setattr(native.pwd, "getpwnam", lambda name: SimpleNamespace(pw_uid=33))
+    labels = {}
+    def label(fd, name):
+        assert name == "security.selinux"
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            return native._DEDICATED_PUBLIC_CONTEXT + b"\0"
+        return labels.get(os.fstat(fd).st_ino, b"unconfined_u:object_r:repocache_nginx_ro_t:s0\0")
+    def set_label(fd, name, value):
+        assert name == "security.selinux" and value == native._DEDICATED_PUBLIC_CONTEXT + b"\0"
+        assert stat.S_IMODE(os.fstat(fd).st_mode) == 0o600
+        assert not catalog.exists()
+        labels[os.fstat(fd).st_ino] = value
+    monkeypatch.setattr(native.os, "listxattr", lambda fd: ["security.selinux"])
+    monkeypatch.setattr(native.os, "getxattr", label)
+    monkeypatch.setattr(native.os, "setxattr", set_label)
 
     def invoke():
         with native._locked(root, 0) as state_fd:
@@ -4116,3 +4131,31 @@ def test_dedicated_wal_finalization_publishes_only_verified_prior(
             assert not calls
         assert not any((path.parent / native._OWNED_STAGES[name]).exists()
                        for name, path in paths.items())
+
+
+@pytest.mark.parametrize("fault", ["stale", "timeout", "authority"])
+def test_owned_live_generation_wait_uses_deadline_without_extending_authority_retry(monkeypatch, fault):
+    identity = (123, (1, 2))
+    clock = [0.0]
+    calls = []
+    monkeypatch.setattr(native.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(native.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    monkeypatch.setattr(native, "_owned_live_observe", lambda fd: identity)
+    def health(*args, **kwargs):
+        calls.append(1)
+        if fault == "stale" and len(calls) == 7:
+            return
+        native._deny("OWNED_LIVE_UNIT_CHANGED" if fault == "authority"
+                     else "OWNED_LIVE_GENERATION_UNVERIFIED")
+    monkeypatch.setattr(native, "_owned_live_health_bound", health)
+    if fault == "stale":
+        native._owned_live_wait_generation(0, identity, ({}, 2, "a" * 64))
+        assert len(calls) == 7
+    else:
+        with pytest.raises(native.NativeV2TransactionError):
+            native._owned_live_wait_generation(0, identity, ({}, 2, "a" * 64))
+        assert len(calls) <= 61 and clock[0] <= 12
+        if fault == "authority":
+            assert len(calls) == 3
+        else:
+            assert clock[0] >= 11.9

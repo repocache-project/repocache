@@ -1334,11 +1334,20 @@ finally:
             # clearing that state; never let a status assertion strand the
             # temporary include or mask the original fixture failure.
             replace_include(raw)
-            status = run("/usr/bin/systemctl", "is-failed", OWN)
-            if status.returncode == 0:
-                assert run("/usr/bin/systemctl", "reset-failed", OWN).returncode == 0
+            stopped = run("/usr/bin/systemctl", "is-active", OWN)
+            assert (stopped.returncode, stopped.stdout.strip()) in ((3, "inactive"), (3, "failed"))
+            # The disposable fixture performs several intentionally rapid
+            # start/stop cycles. Reset only its start-rate counter after
+            # restoring exact authenticated bytes; never change the unit or
+            # its rate-limit policy. This is not production recovery.
+            assert hashlib.sha256(include.read_bytes()).hexdigest() == before[str(include)]
+            assert run("/usr/bin/systemctl", "reset-failed", OWN).returncode == 0
             require_status(OWN, False, True)
-            assert run("/usr/bin/systemctl", "start", OWN).returncode == 0
+            restored = run("/usr/bin/systemctl", "start", OWN)
+            if restored.returncode != 0:
+                print(run("/usr/bin/systemctl", "show", OWN, "-p", "Result",
+                          "-p", "ActiveState", "-p", "SubState", "-p", "ExecMainStatus").stdout, flush=True)
+                raise AssertionError("Restored fixture service failed to start")
             require_status(OWN, True, True)
         finally:
             os.close(fd)

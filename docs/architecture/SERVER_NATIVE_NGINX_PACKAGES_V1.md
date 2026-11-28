@@ -1460,3 +1460,13 @@ The original service and labels are restored only after successful exact
 readback. The new boot IDs and phase logs are distinct from the earlier
 legacy recovery witness. Execution evidence is required; the scenario itself
 does not certify installed dispatch or automatic boot.
+
+The dedicated finalizer assigns the exact fixed read-only SELinux context to
+its newly created 0600 catalog stage before publication, verifies the label
+on the published leaf and parent during ownership checks, and does not
+relabel an existing catalog or change policy. Graceful legacy reload
+observation uses the existing 12-second budget for generation convergence
+rather than stopping after three fast stale-generation probes; other
+refusals retain the previous three-attempt limit. Native harness diagnostics
+report fixed redacted transaction codes; the disposable data fixture resets
+its own start-rate counter only after restoring exact authenticated bytes.

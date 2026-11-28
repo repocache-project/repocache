@@ -261,6 +261,7 @@ _AUDIT_FAILURE_CODES = frozenset({
     "NATIVE_V2_OWNED_CONTEXT_DIAGNOSTIC_LIMIT",
     "NATIVE_V2_OWNED_DIRECTORY_FOREIGN_ENTRY",
     "NATIVE_V2_OWNED_DIRECTORY_MODE_UNSAFE",
+    "NATIVE_V2_OWNED_DEDICATED_CATALOG_LABEL_UNVERIFIED",
     "NATIVE_V2_OWNED_LIVE_APPLY_RECOVERY_REQUIRED",
     "NATIVE_V2_OWNED_LIVE_APPLY_ROLLED_BACK",
     "NATIVE_V2_OWNED_LIVE_BOOTSTRAP_DRIFT",
@@ -435,9 +436,36 @@ def _read_public(parent: int, name: str, maximum: int) -> bytes | None:
         os.close(fd)
 
 
+_DEDICATED_PUBLIC_CONTEXT = b"system_u:object_r:repocache_nginx_ro_t:s0"
+
+
+def _require_dedicated_public_label(fd: int) -> None:
+    if (set(os.listxattr(fd)) != {"security.selinux"}
+            or os.getxattr(fd, "security.selinux").rstrip(b"\0") != _DEDICATED_PUBLIC_CONTEXT):
+        _deny("OWNED_DEDICATED_CATALOG_LABEL_UNVERIFIED")
+
+
+def _require_dedicated_catalog_label(parent: int) -> None:
+    _require_dedicated_public_label(parent)
+    fd = os.open(_CATALOG, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                 | os.O_CLOEXEC, dir_fd=parent)
+    try:
+        _require_dedicated_public_label(fd)
+        if _identity(os.fstat(fd)) != _identity(
+                os.stat(_CATALOG, dir_fd=parent, follow_symlinks=False)):
+            _deny("RESOURCE_CHANGED")
+    finally:
+        os.close(fd)
+
+
 def _write_public(parent: int, name: str, before: bytes | None,
-                  after: bytes | None, maximum: int, *, stage: str = _STAGE) -> None:
+                  after: bytes | None, maximum: int, *, stage: str = _STAGE,
+                  dedicated_catalog: bool = False) -> None:
     """Atomic same-parent replacement, fsynced; no foreign target takeover."""
+    if dedicated_catalog:
+        if name != _CATALOG or before is not None or after is None:
+            _deny("OWNED_DEDICATED_CATALOG_LABEL_UNVERIFIED")
+        _require_dedicated_public_label(parent)
     if _read_public(parent, name, maximum) != before:
         _deny("RESOURCE_DRIFT")
     if after is None:
@@ -470,6 +498,15 @@ def _write_public(parent: int, name: str, before: bytes | None,
                 if count <= 0:
                     _deny("STAGE_WRITE_FAILED")
                 position += count
+            if dedicated_catalog:
+                # SELinux may inherit the type but select a different user
+                # component. Set the fixed context only on our fresh 0600
+                # stage, before making any catalog visible.
+                if set(os.listxattr(fd)) != {"security.selinux"}:
+                    _deny("OWNED_DEDICATED_CATALOG_LABEL_UNVERIFIED")
+                if os.getxattr(fd, "security.selinux").rstrip(b"\0") != _DEDICATED_PUBLIC_CONTEXT:
+                    os.setxattr(fd, "security.selinux", _DEDICATED_PUBLIC_CONTEXT + b"\0")
+                _require_dedicated_public_label(fd)
             os.fsync(fd)
             os.fchmod(fd, 0o644)
             os.fsync(fd)
@@ -488,6 +525,8 @@ def _write_public(parent: int, name: str, before: bytes | None,
         _deny("RESOURCE_WRITE_FAILED")
     if _read_public(parent, name, maximum) != after:
         _deny("RESOURCE_CHANGED")
+    if dedicated_catalog:
+        _require_dedicated_catalog_label(parent)
 
 
 def _write_private(parent: int, name: str, stage: str,
@@ -2471,7 +2510,7 @@ def _publish_owned_wal_fixture(root_fd: int, new: dict[str, bytes | None]) -> by
 
 def _owned_write_resource(state_fd: int, nginx_fd: int, public_fd: int,
                           name: str, before: bytes | None,
-                          after: bytes | None) -> None:
+                          after: bytes | None, *, dedicated_catalog: bool = False) -> None:
     if before == after:
         return
     parent = _owned_resource_parent(name, state_fd, nginx_fd, public_fd)
@@ -2480,7 +2519,11 @@ def _owned_write_resource(state_fd: int, nginx_fd: int, public_fd: int,
     if name in _OWNED_PRIVATE:
         _write_private(parent, name, stage, before, after, maximum)
     else:
-        _write_public(parent, name, before, after, maximum, stage=stage)
+        if dedicated_catalog:
+            _write_public(parent, name, before, after, maximum, stage=stage,
+                          dedicated_catalog=True)
+        else:
+            _write_public(parent, name, before, after, maximum, stage=stage)
 
 
 def _owned_cleanup_stages(state_fd: int, nginx_fd: int, public_fd: int,
@@ -3372,6 +3415,9 @@ def _finish_owned_prepared_wal_dedicated_locked(
         def exact():
             _owned_live_guard(state, nginx, public, check_layout, expected_wal, expected)
             _owned_check_stages_absent(state, nginx, public)
+            _require_dedicated_public_label(public)
+            if expected[_CATALOG] is not None:
+                _require_dedicated_catalog_label(public)
 
         exact()
         recheck_authenticated_owner()
@@ -3436,7 +3482,7 @@ def _finish_owned_prepared_wal_dedicated_locked(
         guarded()
         try:
             _owned_live_write(state, nginx, public, guarded, expected_wal,
-                              expected, _CATALOG, old[_CATALOG])
+                              expected, _CATALOG, old[_CATALOG], dedicated_catalog=True)
             after = health(True)
             if before["listener_inode"] != after["listener_inode"] or expected != old:
                 _deny("OWNED_DEDICATED_FINISH_LISTENER_CHANGED")
@@ -3459,16 +3505,22 @@ def _finish_owned_prepared_wal_dedicated_locked(
 def _owned_live_wait_generation(root_fd: int, identity: tuple, context: tuple) -> None:
     """A graceful reload is asynchronous; bounded retries cannot change authority."""
     deadline = time.monotonic() + 12
-    for attempt in range(3):
+    # A fast guest can complete all three old probes before the graceful
+    # reload has activated the new workers. Poll the exact generation until
+    # the existing deadline, but never extend retries for authority failures.
+    for attempt in range(61):
         if _owned_live_observe(root_fd) != identity:
             _deny("OWNED_LIVE_UNIT_CHANGED")
         try:
             _owned_live_health_bound(root_fd, identity, context, None, publish=False)
             return
-        except (NativeV2TransactionError, EffectiveNginxUnitError):
-            if attempt == 2 or time.monotonic() >= deadline:
+        except (NativeV2TransactionError, EffectiveNginxUnitError) as exc:
+            stale = (type(exc) is NativeV2TransactionError
+                     and exc.args == ("NATIVE_V2_OWNED_LIVE_GENERATION_UNVERIFIED",))
+            remaining = deadline - time.monotonic()
+            if attempt == 60 or remaining <= 0 or (not stale and attempt >= 2):
                 raise
-            time.sleep(min(0.2, max(0, deadline - time.monotonic())))
+            time.sleep(min(0.2, remaining))
 
 
 def _owned_live_guard(state_fd: int, nginx_fd: int, public_fd: int,
@@ -3481,9 +3533,13 @@ def _owned_live_guard(state_fd: int, nginx_fd: int, public_fd: int,
 
 def _owned_live_write(state_fd: int, nginx_fd: int, public_fd: int,
                       check_layout, wal: bytes, expected: dict,
-                      name: str, after: bytes | None) -> None:
+                      name: str, after: bytes | None, *, dedicated_catalog: bool = False) -> None:
     _owned_live_guard(state_fd, nginx_fd, public_fd, check_layout, wal, expected)
-    _owned_write_resource(state_fd, nginx_fd, public_fd, name, expected[name], after)
+    if dedicated_catalog:
+        _owned_write_resource(state_fd, nginx_fd, public_fd, name, expected[name], after,
+                              dedicated_catalog=True)
+    else:
+        _owned_write_resource(state_fd, nginx_fd, public_fd, name, expected[name], after)
     expected[name] = after
     _owned_live_guard(state_fd, nginx_fd, public_fd, check_layout, wal, expected)
 
@@ -4378,9 +4434,11 @@ def execute_native_fixed_v2_transaction(operation: str,
         )
         _verify_current_root_fd(fd)
         return result
-    except NativeV2TransactionError:
+    except NativeV2TransactionError as exc:
+        _audit_native_failure(exc)
         raise
-    except (OSError, ValueError, TypeError):
+    except (OSError, ValueError, TypeError) as exc:
+        _audit_native_failure(exc)
         _deny("HOST_OPERATION_REFUSED")
     finally:
         os.close(fd)

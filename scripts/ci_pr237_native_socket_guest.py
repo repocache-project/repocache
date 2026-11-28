@@ -378,7 +378,7 @@ def main(distribution: str) -> None:
             )
             for line in logs.stdout.splitlines()[-50:]:
                 for code in re.findall(
-                    r"(?:NATIVE_ROOT_CONTROL|ROOT_CONTROL|NATIVE_HOST|FIXED_REQUEST)_[A-Z0-9_]{2,100}",
+                    r"(?:NATIVE_ROOT_CONTROL|ROOT_CONTROL|NATIVE_HOST|FIXED_REQUEST|NATIVE_V2)_[A-Z0-9_]{2,100}",
                     line,
                 ):
                     print("NATIVE_SOCKET_DIAGNOSTIC: " + code, flush=True)
