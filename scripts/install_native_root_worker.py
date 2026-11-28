@@ -38,7 +38,8 @@ from repocache.server_protected_state_inspect_v1 import _FIXED_STATE_ROOT, _walk
 from repocache.server_stock_nginx_package_owner_v1 import inspect_stock_nginx_package_owner, inspect_stock_nginx_package_file_integrity
 from repocache.server_protected_namespace_bootstrap_v1 import (
     bootstrap_protected_namespace_under_root, _dedicated_ancestry,
-    _dedicated_public_directory,
+    _dedicated_public_directory, _prepare_dedicated_worker_namespace_under_root,
+    _require_dedicated_worker_claim,
 )
 from repocache.server_locked_manifest_reconcile_v1 import (
     _validate_proposed_v2_snapshot, preview_proposed_v2_state_transition,
@@ -316,10 +317,15 @@ def _place_worker_files(
                             for name in (stage.WORKER, _TEMP + stage.WORKER)))
                         or os.path.lexists(root / "run/repocache/server-control.sock")):
                     _reject("FOREIGN_EXISTING_DESTINATION")
-            namespace = bootstrap_protected_namespace_under_root(
-                fd, owner_uid=0, public_catalog=True, **({"_dedicated_public": True} if dedicated else {}))
-            if dedicated and namespace.get("dedicated_public_label_verified") is not True:
-                _reject("NATIVE_WORKER_DEDICATED_PUBLIC_REFUSED")
+            if dedicated:
+                namespace = _prepare_dedicated_worker_namespace_under_root(
+                    fd, receipt_sha256=digest)
+                if (namespace.get("dedicated_public_label_verified") is not True
+                        or namespace.get("worker_receipt_claim_verified") is not True):
+                    _reject("NATIVE_WORKER_DEDICATED_PUBLIC_REFUSED")
+            else:
+                namespace = bootstrap_protected_namespace_under_root(
+                    fd, owner_uid=0, public_catalog=True)
         with _locked(fd, 0) as state:
             if dedicated:
                 public, public_chain = _walk(fd, ("var", "lib", "repocache", "public"), stack, 0)
@@ -330,6 +336,8 @@ def _place_worker_files(
                     _recheck(public_chain, 0)
                     _dedicated_ancestry(fd, public_chain)
                     _dedicated_public_directory(public)
+                    _require_dedicated_worker_claim(
+                        fd, public_chain[-2][2], state, public, digest)
 
             check_public()
             markers = {name for name in os.listdir(state) if name.startswith(_MARKER)}
@@ -345,6 +353,16 @@ def _place_worker_files(
             targets = [(units, unit) for unit in stage.UNITS]
             if worker is not None:
                 targets.append((worker, stage.WORKER))
+            if (dedicated and complete not in markers
+                    and namespace["status"] == "FRESH_DEDICATED_WORKER_NAMESPACE_DURABLE"
+                    and (any(_named(directory, name) is not None
+                             or _named(directory, _TEMP + name) is not None
+                             for directory, name in targets)
+                         or _named(state, _RUNTIME_RECEIPT) is not None
+                         or _named(state, _TEMP + _RUNTIME_RECEIPT) is not None)):
+                # The newly published receipt claim is not permission to
+                # adopt a target that appeared during namespace preparation.
+                _reject("FOREIGN_EXISTING_DESTINATION")
             if complete in markers:
                 if worker is None:
                     _reject("MISSING_WORKER_DIRECTORY")

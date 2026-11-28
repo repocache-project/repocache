@@ -5767,7 +5767,9 @@ def test_dedicated_worker_placement_pins_fresh_public(tmp_path, monkeypatch, fau
     monkeypatch.setattr(os, "listxattr", lambda fd: ["security.selinux"])
     monkeypatch.setattr(os, "getxattr", lambda fd, name: labels.get(os.fstat(fd).st_ino, foreign))
     def set_label(fd, name, value):
-        assert os.fstat(fd).st_ino == public.stat().st_ino and value == context
+        stages = list((root / "var/lib").glob(".repocache-worker-namespace.stage-*"))
+        assert len(stages) == 1 and not public.exists()
+        assert os.fstat(fd).st_ino == (stages[0] / "public").stat().st_ino and value == context
         assert stat.S_IMODE(os.fstat(fd).st_mode) == 0o700
         labels[os.fstat(fd).st_ino] = value
         writes.append(os.fstat(fd).st_ino)

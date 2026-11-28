@@ -404,6 +404,10 @@ def _prepare_dedicated_worker_namespace_under_root(root_fd, *, receipt_sha256, i
 
             def verify(name, *, staged):
                 recheck_lib()
+                present = set(os.listdir(lib))
+                stages = {entry for entry in present if entry.startswith(_DEDICATED_WORKER_STAGE)}
+                if stages != ({stage} if staged else set()) or (staged and _ROOT_NAME in present):
+                    _deny("DEDICATED_WORKER_STAGE_CONFLICT")
                 if (_structural(os.stat(name, dir_fd=lib, follow_symlinks=False))
                         != _structural(os.fstat(anchor))
                         or _structural(os.fstat(lock)) != _lock_identity(state, 0)):
