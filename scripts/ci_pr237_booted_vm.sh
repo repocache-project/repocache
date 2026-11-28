@@ -82,7 +82,7 @@ ci_qemu_select "$out"
 vm_cpus=2
 vm_ram=3072
 if test "$scenario" = native-activation; then
-  ci_qemu_resources "$(nproc)" "$(awk '/^MemAvailable:/ {print $2; exit}' /proc/meminfo)"
+  ci_qemu_resources "$(nproc)" "$(awk '/^MemAvailable:/ {print $2; exit}' /proc/meminfo)" "$accel" "$PR237_PLATFORM"
 fi
 printf 'VM resources: %s vCPU, %s MiB\n' "$vm_cpus" "$vm_ram" | tee -a "$out/runner.txt"
 set_stage image-integrity

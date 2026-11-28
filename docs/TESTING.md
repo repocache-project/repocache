@@ -50,11 +50,18 @@ all applicable evidence.
 Native VM jobs probe real KVM initialization before choosing acceleration.
 If the disposable GitHub-hosted runner has a root-owned KVM device with
 the kvm group, QEMU may run under the existing unprivileged runner UID
-with that group for the process only. No global device permission change,
-root QEMU or guest privilege change is permitted. Failed or unavailable
-KVM probes explicitly fall back to TCG. The runner evidence records the
-access mode, selected acceleration and resources. Activation VMs increase
-their CPU and memory budgets only when the runner has spare capacity.
+with that group for the process only. Hosted root sudo launches only the
+fixed setpriv executable, which drops to the original nonroot UID/GID,
+retains only the device supplementary group, drops all capabilities and
+sets no-new-privs before executing QEMU. No global device permission
+change, root QEMU or guest privilege change is permitted. KVM selection
+requires a successful probe and an explicit QMP query-kvm response with
+both present and enabled true; otherwise use unprivileged TCG. The runner
+evidence records the access mode, selected acceleration and resources.
+Activation VMs increase their CPU and memory budgets only when the runner
+has spare capacity and either KVM is confirmed or the platform is
+AlmaLinux. Debian TCG retains its original 2 vCPU / 3072 MiB budget.
+These are tuning defaults pending controlled measurements.
 
 Each harness phase emits start/end markers and bounded phase-times.tsv
 evidence (elapsed seconds); the summary includes those timings even on
