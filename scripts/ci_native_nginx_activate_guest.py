@@ -2654,12 +2654,6 @@ try:
             elif action=="verify":
                 net_identity=namespace_identity()
                 result=policy(False)
-            elif action=="prepare-committed-runtime":
-                owner(False)
-                prepared=tx._owned_alma_runtime_temps(
-                    root,dedicated=True,allow_create=True,inactive=True)
-                assert tx._owned_alma_runtime_temps(root,dedicated=True,inactive=True)==prepared
-                result={"scratch_count":len(prepared[1]),"authorizes_nginx_activation":False}
             elif action=="start-committed":
                 entry=(tx._start_owned_prepared_wal_dedicated_locked if pending else
                        tx._start_owned_committed_dedicated_locked)
@@ -2777,60 +2771,49 @@ try:
                         assert "OWNED_WAL_CHANGED" in str(exc)
                     else:
                         raise AssertionError("Completed WAL was adopted again")
-            elif action in ("prepare-committed-storage","verify-committed-active"):
-                # Exercise exact committed or prepared prior resources,
-                # never a rewritten synthetic include or pending publication.
+            elif action=="verify-committed-active":
+                # Independent read-only active witness; all placement must
+                # use the authenticated installer selectors outside this fixture.
+                assert not pending
                 net_identity=namespace_identity()
-                active=action=="verify-committed-active"
-                assert not (pending and active)
-                observed_policy=policy(False,active=active)
-                with tx._owned_layout_locked(root,state,recovering=pending) as layout:
+                observed_policy=policy(False,active=True)
+                with tx._owned_layout_locked(root,state,recovering=False) as layout:
                     state_fd,nginx_fd,public_fd,check_layout=layout
                     exact=tx._read_owned_resources(state_fd,nginx_fd,public_fd)
-                    if pending:
-                        tx._owned_require_exact_wal(state_fd,pending_raw)
-                        prior,_=tx._decode_owned_wal(pending_raw,distribution="almalinux")
-                        assert exact=={**prior,tx._CATALOG:None}
-                    else:
-                        prior=exact
-                    snapshot=tx._validate_owned_resources(prior,distribution="almalinux")
-                    assert snapshot and prior[tx._CATALOG]
+                    snapshot=tx._validate_owned_resources(exact,distribution="almalinux")
+                    assert snapshot and exact[tx._CATALOG]
                     tx._owned_socket_require_inactive_routes(snapshot)
                     document=tx.parse_install_bytes(base64.b64decode(
                         snapshot["configuration_base64"],validate=True),for_apply=True)
                     prepared=storage.prepare_dedicated_candidate_storage(
-                        "almalinux",document,allow_create=not active)
+                        "almalinux",document,allow_create=False)
                     assert prepared["selinux_enforcing_labels_verified"]
                     assert prepared["repository_cache_roots_verified"]==[]
-                    if active:
-                        leaf=tx._verify_tls_pair(root,document,verify_identity=True)
-                        context=(document,snapshot["state_generation"],leaf)
-                        def unchanged():
-                            owner(True)
-                            check_layout()
-                            assert tx._read_owned_resources(state_fd,nginx_fd,public_fd)==exact
-                            assert tx._read_file(state_fd,tx._OWNED_WAL,0,tx._MAX_WAL) is None
-                            assert storage.prepare_dedicated_candidate_storage(
-                                "almalinux",document,allow_create=False)==prepared
-                        witness=tx._owned_dedicated_live_health_bound(
-                            root,context,exact[tx._CATALOG],publish=True,
-                            namespace_identity=net_identity,executable_identity=identity[:2],
-                            recheck_owned=unchanged)
-                        assert witness["catalog_observed"]
-                        assert witness["generation"]==snapshot["state_generation"]
-                        assert not witness["authorizes_nginx_activation"]
-                        assert not witness["authorizes_catalog_publication"]
-                        storage.verify_service_storage_mounts(witness["main_pid"])
-                        scratch=tx._owned_alma_runtime_temps(root,dedicated=True)
-                        assert len(scratch[1])==5
-                        tx._verify_owned_alma_runtime_service_view(witness["main_pid"],scratch)
-                        assert tx._verify_tls_pair(root,document,verify_identity=True)==leaf
-                        assert policy(False,active=True)==observed_policy
-                        unchanged()
-                        result={**witness,"storage":prepared}
-                    else:
-                        assert policy(False)==observed_policy
-                        result={"storage":prepared,"authorizes_nginx_activation":False}
+                    leaf=tx._verify_tls_pair(root,document,verify_identity=True)
+                    context=(document,snapshot["state_generation"],leaf)
+                    def unchanged():
+                        owner(True)
+                        check_layout()
+                        assert tx._read_owned_resources(state_fd,nginx_fd,public_fd)==exact
+                        assert tx._read_file(state_fd,tx._OWNED_WAL,0,tx._MAX_WAL) is None
+                        assert storage.prepare_dedicated_candidate_storage(
+                            "almalinux",document,allow_create=False)==prepared
+                    witness=tx._owned_dedicated_live_health_bound(
+                        root,context,exact[tx._CATALOG],publish=True,
+                        namespace_identity=net_identity,executable_identity=identity[:2],
+                        recheck_owned=unchanged)
+                    assert witness["catalog_observed"]
+                    assert witness["generation"]==snapshot["state_generation"]
+                    assert not witness["authorizes_nginx_activation"]
+                    assert not witness["authorizes_catalog_publication"]
+                    storage.verify_service_storage_mounts(witness["main_pid"])
+                    scratch=tx._owned_alma_runtime_temps(root,dedicated=True)
+                    assert len(scratch[1])==5
+                    tx._verify_owned_alma_runtime_service_view(witness["main_pid"],scratch)
+                    assert tx._verify_tls_pair(root,document,verify_identity=True)==leaf
+                    assert policy(False,active=True)==observed_policy
+                    unchanged()
+                    result={**witness,"storage":prepared}
             else:
                 raise AssertionError("Unknown fixed fixture action")
         assert not result["authorizes_nginx_activation"]
