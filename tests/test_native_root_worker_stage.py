@@ -1772,3 +1772,171 @@ def test_fixed_policy_native_tool_proof_binds_all_three_members(monkeypatch, tmp
             assert not calls and not snapshots and not authenticated
         elif fault == "owner":
             assert len(calls) == 1 and not authenticated
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="requires disposable root-owned workspace")
+@pytest.mark.parametrize("scope,fault", [
+    ("nginx", "none"), ("policy", "none"), ("policy", "foreign-url"),
+    ("policy", "duplicate-url"), ("policy", "signature"), ("policy", "payload-changed"),
+    ("policy", "identity"), ("policy", "member"), ("policy", "algorithm"),
+    ("policy", "trust-anchor"),
+])
+def test_fixed_signed_rpm_member_verifier_keeps_native_trust_boundary(monkeypatch, tmp_path, scope, fault):
+    from repocache import server_native_package_trust_v1 as trust
+    packages = {"nginx-core"} if scope == "nginx" else install._FIXED_POLICY_PACKAGES
+    identities = {p: p + "-0:1.0-1.el10." + install._FIXED_ALMA_RPM_MEMBERS[p][1] for p in packages}
+    work = tmp_path / "work"
+    work.mkdir(mode=0o700)
+    reference = tmp_path / "native-rpmdb"
+    reference.mkdir(mode=0o700)
+    query = ["dnf", "repoquery", "--available", "--queryformat=%{name}", "nginx"]
+    monkeypatch.setattr(trust, "_dnf_commands", lambda place: (["dnf", "makecache"], query))
+    monkeypatch.setattr(install, "_trusted_key", lambda key: fault != "trust-anchor")
+    original_open = os.open
+    original_temp = install.tempfile.TemporaryDirectory
+
+    def open_reference(name, flags, mode=0o777, *, dir_fd=None):
+        if name == "/usr/lib/sysimage/rpm" and dir_fd is None:
+            name = reference
+        return original_open(name, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(install.os, "open", open_reference)
+    monkeypatch.setattr(install.tempfile, "TemporaryDirectory",
+                        lambda **kw: original_temp(prefix=kw["prefix"], dir=tmp_path))
+    label = b"system_u:object_r:rpm_var_lib_t:s0\0"
+
+    def get_label(fd, name):
+        assert name == "security.selinux" and stat.S_ISDIR(os.fstat(fd).st_mode)
+        return label
+
+    def set_label(fd, name, raw):
+        assert name == "security.selinux" and raw == label
+        assert os.fstat(fd).st_ino != reference.stat().st_ino
+
+    monkeypatch.setattr(install.os, "getxattr", get_label)
+    monkeypatch.setattr(install.os, "setxattr", set_label)
+    calls = []
+    dbs = set()
+
+    def command(argv, place):
+        assert place == work
+        calls.append(tuple(argv))
+        if argv == ["dnf", "makecache"]:
+            return ""
+        if argv[:2] == ["dnf", "-q"]:
+            assert argv[2:5] == ["repoquery", "--available", "--location"]
+            package = next(p for p in packages if identities[p] == argv[-1])
+            url = ("https://repo.almalinux.org/almalinux/10/BaseOS/x86_64/os/Packages/"
+                   + package + "-1.0-1.el10." + install._FIXED_ALMA_RPM_MEMBERS[package][1] + ".rpm")
+            if fault == "foreign-url":
+                return url.replace("repo.almalinux.org", "untrusted.example.invalid")
+            return url + "\n" + url.replace("BaseOS", "AppStream") if fault == "duplicate-url" else url
+        if argv[0] == "/usr/bin/curl":
+            assert argv[1:9] == ["--fail", "--silent", "--show-error", "--proto", "=https", "--tlsv1.2",
+                                  "--max-filesize", "33554432"]
+            assert "--location" not in argv
+            leaf = Path(argv[argv.index("--output") + 1])
+            assert leaf.parent == work and not leaf.exists() and leaf.stem in packages
+            leaf.write_bytes(("fixture RPM " + leaf.stem).encode())
+            leaf.chmod(0o600)
+            return ""
+        assert argv[0] in ("/usr/bin/rpm", "/usr/bin/rpmkeys") and argv[1] == "--dbpath"
+        db = Path(argv[2])
+        assert db.parent == tmp_path and db.name.startswith("repocache-native-executable-rpmdb-")
+        dbs.add(db)
+        if argv[3] == "--initdb":
+            assert argv[0] == "/usr/bin/rpm" and len(argv) == 4
+            return ""
+        if argv[3] == "--import":
+            assert argv[0] == "/usr/bin/rpm" and argv[4] == install._NATIVE["almalinux"][2]
+            return ""
+        payload = Path(argv[-1])
+        package = payload.stem
+        assert payload.parent == work and package in packages
+        if argv[0] == "/usr/bin/rpmkeys":
+            assert argv[3] == "--checksig"
+            if fault == "payload-changed":
+                payload.write_bytes(b"changed after signature")
+            return str(payload) + (": BAD" if fault == "signature" else ": digests signatures OK")
+        assert argv[3] == "-qp"
+        fmt = argv[4]
+        if fmt == "--queryformat=%{NAME}-%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}":
+            return "foreign-0:1-1.x86_64" if fault == "identity" else identities[package]
+        if fmt == "--queryformat=%{FILEDIGESTALGO}":
+            return "1" if fault == "algorithm" else "8"
+        assert fmt == "--queryformat=[%{FILENAMES}\\t%{FILEDIGESTS}\\n]"
+        member = install._FIXED_ALMA_RPM_MEMBERS[package][0]
+        return "/foreign\t" + "a"*64 if fault == "member" else member + "\t" + "b"*64
+
+    monkeypatch.setattr(install, "_native_package_command", command)
+    if fault == "none":
+        if scope == "nginx":
+            report = {"nginx-core": install._authenticate_candidate_rpm(work, identities["nginx-core"])}
+        else:
+            report = install._authenticate_fixed_alma_rpm_members(work, identities)
+        assert report == {p: (hashlib.sha256(("fixture RPM " + p).encode()).hexdigest(), "b"*64)
+                          for p in packages}
+        assert len(dbs) == 1
+        assert calls.count(("dnf", "makecache")) == 1
+        assert len([call for call in calls if call[0] == "/usr/bin/rpmkeys"]) == len(packages)
+    else:
+        with pytest.raises(stage.WorkerStageError):
+            install._authenticate_fixed_alma_rpm_members(work, identities)
+        if fault in ("foreign-url", "duplicate-url", "trust-anchor"):
+            assert not any(call[0] == "/usr/bin/curl" for call in calls)
+    assert not any(db.exists() for db in dbs)
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="requires disposable root-owned tool files")
+@pytest.mark.parametrize("fault", ["none", "symlink", "hardlink", "mode", "ancestor", "replacement"])
+def test_fixed_policy_tool_snapshot_retains_native_path_identities(monkeypatch, tmp_path, fault):
+    root = tmp_path / "native-root"
+    for package in install._FIXED_POLICY_PACKAGES:
+        name, _, mode = install._FIXED_ALMA_RPM_MEMBERS[package]
+        leaf = root / name.lstrip("/")
+        leaf.parent.mkdir(parents=True, exist_ok=True)
+        leaf.write_bytes(package.encode())
+        leaf.chmod(mode)
+    target = root / "usr/bin/make"
+    other = root / "foreign"
+    other.write_bytes(b"make")
+    other.chmod(0o755)
+    if fault == "symlink":
+        target.unlink()
+        target.symlink_to(other)
+    elif fault == "hardlink":
+        target.unlink()
+        os.link(other, target)
+    elif fault == "mode":
+        target.chmod(0o775)
+    elif fault == "ancestor":
+        target.parent.chmod(0o777)
+    original_open = os.open
+
+    def open_root(name, flags, mode=0o777, *, dir_fd=None):
+        if name == "/" and dir_fd is None:
+            name = root
+        return original_open(name, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(install.os, "open", open_root)
+    if fault == "replacement":
+        original_read = stage._asset_bytes
+
+        def replace(directory, name, *args, **kw):
+            data = original_read(directory, name, *args, **kw)
+            if name == "make":
+                target.rename(target.with_name("old-make"))
+                target.write_bytes(data)
+                target.chmod(0o755)
+            return data
+
+        monkeypatch.setattr(stage, "_asset_bytes", replace)
+    if fault == "none":
+        report = install._fixed_policy_tool_snapshot()
+        assert set(report) == install._FIXED_POLICY_PACKAGES
+        for package, (identity, digest) in report.items():
+            leaf = root / install._FIXED_ALMA_RPM_MEMBERS[package][0].lstrip("/")
+            assert identity[:2] == (leaf.stat().st_dev, leaf.stat().st_ino)
+            assert digest == hashlib.sha256(package.encode()).hexdigest()
+    else:
+        with pytest.raises(stage.WorkerStageError):
+            install._fixed_policy_tool_snapshot()
