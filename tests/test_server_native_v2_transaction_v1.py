@@ -6280,6 +6280,7 @@ def test_stage_initial_dedicated_generation_fixture(filesystem, monkeypatch, fau
     monkeypatch.setattr(os, "setxattr", lambda *a: pytest.fail("unexpected relabel"))
     monkeypatch.setattr(native._Labels, "_command", staticmethod(lambda *a: b"Enforcing"))
     monkeypatch.setattr(native, "_dedicated_readonly_tls_labels", lambda *a: ("tls",))
+    monkeypatch.setattr(native, "_verify_tls_pair", lambda *a, **kw: "a" * 64)
     monkeypatch.setattr(native, "_prepare_owned_initial_dedicated_candidate_locked",
                         lambda *a: (old, new, report))
     intake_calls = []
@@ -6407,4 +6408,42 @@ def test_restore_initial_dedicated_generation_fixture(filesystem, monkeypatch, f
             assert _fixture_resource_bytes(paths) == before
             assert [native._identity(path.lstat()) for path in stage_paths] == stages_before
             assert (state / native._OWNED_WAL).exists()
+    assert not filesystem[-1]
+
+
+@pytest.mark.parametrize("fault", ["none", "foreign-tmp", "published-too", "target", "stage"])
+def test_discard_unpublished_initial_generation_fixture(filesystem, monkeypatch, fault):
+    old = _owned_bootstrap_resources()
+    new = _owned_generation(active=False, distribution="almalinux")
+    paths = _owned_fixture_paths(filesystem, old)
+    root_fd, state = filesystem[:2]
+    label = native._DEDICATED_PUBLIC_CONTEXT + b"\0"
+    monkeypatch.setattr(os, "listxattr", lambda fd: ["security.selinux"])
+    monkeypatch.setattr(os, "getxattr", lambda fd, name: label)
+    monkeypatch.setattr(native._Labels, "_command", staticmethod(lambda *a: b"Enforcing"))
+    wal = native._owned_wal_record(old, new, live=True)
+    pending = state / native._OWNED_WAL_TMP
+    pending.write_bytes(b"foreign" if fault == "foreign-tmp" else wal)
+    pending.chmod(0o600)
+    if fault == "published-too":
+        journal = state / native._OWNED_WAL
+        journal.write_bytes(wal)
+        journal.chmod(0o600)
+    elif fault == "target":
+        paths[native._OWNED_MAIN].write_bytes(new[native._OWNED_MAIN])
+    elif fault == "stage":
+        (paths[native._INCLUDE].parent / native._OWNED_STAGES[native._INCLUDE]).touch(mode=0o600)
+    before = _fixture_resource_bytes(paths)
+    with native._owned_fixture_layout(root_fd, recovering=True) as layout:
+        def restore():
+            return native._restore_owned_initial_dedicated_generation_fixture_locked(
+                root_fd, *layout, expected_wal=wal)
+        if fault == "none":
+            assert restore()["status"] == "OWNED_INITIAL_GENERATION_FIXTURE_UNPUBLISHED_DISCARDED"
+            _assert_owned_fixture_clean(filesystem, paths)
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                restore()
+            assert pending.exists()
+        assert _fixture_resource_bytes(paths) == before
     assert not filesystem[-1]

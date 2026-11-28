@@ -5588,6 +5588,9 @@ def _stage_owned_initial_dedicated_generation_fixture_locked(
         base64.b64decode(snapshot["configuration_base64"], validate=True), for_apply=True)
     labels = _Labels("almalinux", dedicated=True)
     tls = _dedicated_readonly_tls_labels(root_fd, document)
+    _verify_tls_pair(root_fd, document, verify_identity=True)
+    if _dedicated_readonly_tls_labels(root_fd, document) != tls:
+        _deny("CANDIDATE_CHANGED")
     config = _dedicated_readonly_config_labels(
         nginx_fd, public_fd, catalog_present=False, bootstrap=True)
 
@@ -5637,11 +5640,34 @@ def _restore_owned_initial_dedicated_generation_fixture_locked(
     code = "OWNED_INITIAL_PRIVATE_RECOVERY_REFUSED"
     labels = _Labels("almalinux", dedicated=True)
     check_layout()
-    _owned_require_exact_wal(state_fd, expected_wal)
     old, hashes = _decode_owned_wal(expected_wal, distribution="almalinux")
     if (_json(expected_wal, limit=_MAX_WAL)["version"] != 3
             or _validate_owned_resources(old, distribution="almalinux") is not None):
         _deny(code)
+    published = _read_file(state_fd, _OWNED_WAL, 0, _MAX_WAL)
+    if published is None:
+        # A valid unpublished record authorizes no target write. Discard
+        # it only with the exact original labelled bootstrap and no stages.
+        if _read_file(state_fd, _OWNED_WAL_TMP, 0, _MAX_WAL) != expected_wal:
+            _deny(code)
+        def unpublished():
+            check_layout()
+            if (_read_file(state_fd, _OWNED_WAL, 0, _MAX_WAL) is not None
+                    or _read_file(state_fd, _OWNED_WAL_TMP, 0, _MAX_WAL) != expected_wal
+                    or _read_owned_resources(state_fd, nginx_fd, public_fd) != old):
+                _deny(code)
+            _owned_check_stages_absent(state_fd, nginx_fd, public_fd)
+            labels.finish()
+            return _dedicated_readonly_config_labels(
+                nginx_fd, public_fd, catalog_present=False, bootstrap=True)
+        proof = unpublished()
+        if unpublished() != proof:
+            _deny(code)
+        _unlink_known(state_fd, _OWNED_WAL_TMP, expected_wal, 0, _MAX_WAL)
+        return {"status": "OWNED_INITIAL_GENERATION_FIXTURE_UNPUBLISHED_DISCARDED",
+                "fixture_only": True, "authorizes_nginx_activation": False,
+                "authorizes_catalog_publication": False}
+    _owned_require_exact_wal(state_fd, expected_wal)
     current = _read_owned_resources(state_fd, nginx_fd, public_fd)
     _owned_wal_resource_drift(old, hashes, current, unpublished=False)
     if current[_CATALOG] is not None:

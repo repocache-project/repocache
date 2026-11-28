@@ -2046,3 +2046,10 @@ Manifest staging requires a prefix of the exact reconstructed bytes.
 The signed enforcing guest also exercises complete prepared-byte
 reconstruction and detached reversal. The installed lifecycle, boot-policy
 binding and health-gated publication remain required before host activation.
+
+The detached recovery also discards an exact valid unpublished initial
+v3 WAL only when no published record exists, the original labelled
+bootstrap is unchanged and every stage is absent. Foreign or conflicting
+records, changed targets and stages are retained. Revalidate TLS identity
+and trust at the fresh staging boundary, before WAL publication; recovery
+of inert bytes does not require usable operator TLS material.
