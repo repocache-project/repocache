@@ -76,13 +76,17 @@ ci_qemu_resources() {
   vm_cpus=2
   vm_ram=3072
   # Retain the faster observed AlmaLinux TCG profile, but restore the
-  # smaller Debian TCG baseline. These are tuning defaults, not benchmarks.
+  # smaller Debian TCG baseline. KVM activation uses the measured 4 GiB profile.
   if test "$acceleration" != kvm && test "$platform" != almalinux10; then
     return 0
   fi
   # Keep at least one logical CPU and 3 GiB available to the runner.
   if test "$host_cpus" -ge 4; then vm_cpus=3; fi
-  if test "$available_kib" -ge 9437184; then vm_ram=6144; fi
+  if test "$acceleration" = kvm; then
+    if test "$available_kib" -ge 7340032; then vm_ram=4096; fi
+  elif test "$available_kib" -ge 9437184; then
+    vm_ram=6144
+  fi
 }
 ci_waitssh() {
   local previous="${1:-}" observed started=$SECONDS

@@ -50,6 +50,14 @@ jobs:
           set -Eeuo pipefail
           git rev-parse HEAD
           python3 -B scripts/ci_prepare_qemu_runner.py
+      - name: Prepare disposable image cache path
+        run: mkdir -m 700 "$RUNNER_TEMP/repocache-vm-image"
+      - name: Restore pristine vendor image (optional)
+        uses: actions/cache/restore@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        continue-on-error: true
+        with:
+          path: ${{ runner.temp }}/repocache-vm-image/base.qcow2
+          key: repocache-native-image-v1-${{ matrix.platform }}-${{ matrix.image_sha256 || matrix.image_sha512 }}
       - name: Run isolated boot and native system validation
         shell: bash
         env:
@@ -57,6 +65,7 @@ jobs:
           PR237_IMAGE_URL: ${{ matrix.image_url }}
           PR237_IMAGE_SHA512: ${{ matrix.image_sha512 }}
           PR237_IMAGE_SHA256: ${{ matrix.image_sha256 }}
+          PR237_IMAGE_CACHE_FILE: ${{ runner.temp }}/repocache-vm-image/base.qcow2
           PR237_SCENARIO: ${{ matrix.scenario }}
         run: bash scripts/ci_pr237_booted_vm.sh
       - name: Index partial cross-issue campaign evidence (never original acceptance)

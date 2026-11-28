@@ -87,7 +87,9 @@ test "$accel" = tcg
 
 def test_resource_budget():
     assert shell('ci_qemu_resources 2 4194304 kvm debian13; echo "$vm_cpus $vm_ram"') == "2 3072\n"
-    assert shell('ci_qemu_resources 4 10485760 kvm debian13; echo "$vm_cpus $vm_ram"') == "3 6144\n"
+    assert shell('ci_qemu_resources 4 10485760 kvm debian13; echo "$vm_cpus $vm_ram"') == "3 4096\n"
+    assert shell('ci_qemu_resources 4 7340032 kvm almalinux10; echo "$vm_cpus $vm_ram"') == "3 4096\n"
+    assert shell('ci_qemu_resources 4 7340031 kvm almalinux10; echo "$vm_cpus $vm_ram"') == "3 3072\n"
     assert shell('ci_qemu_resources 4 4194304 kvm almalinux10; echo "$vm_cpus $vm_ram"') == "3 3072\n"
     assert shell('ci_qemu_resources 4 10485760 tcg debian13; echo "$vm_cpus $vm_ram"') == "2 3072\n"
     assert shell('ci_qemu_resources 4 10485760 tcg almalinux10; echo "$vm_cpus $vm_ram"') == "3 6144\n"

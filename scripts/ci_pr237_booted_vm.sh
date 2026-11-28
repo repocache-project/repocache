@@ -3,6 +3,7 @@
 set -Eeuo pipefail
 umask 077
 source "$(dirname "${BASH_SOURCE[0]}")/ci_qemu_runner_runtime.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/ci_vm_image.sh"
 case "$PR237_PLATFORM" in
   debian13) PR237_PLATFORM_ID=debian ;;
   almalinux10) PR237_PLATFORM_ID=almalinux ;;
@@ -34,6 +35,14 @@ finish() {
   trap - EXIT
   phase_finish || true
   if test -f "$tmp/qemu.pid"; then kill "$(cat "$tmp/qemu.pid")" 2>/dev/null || true; fi
+  if test -f "$out/image-sha256.txt"; then
+    if ! ci_vm_image_verify "$tmp/base.qcow2" > "$out/image-integrity-after.txt" 2>&1; then
+      echo 'Base image integrity after exercise: FAIL' >> "$out/image-integrity-after.txt"
+      rc=1
+    else
+      echo 'Base image integrity after exercise: PASS' > "$out/image-integrity-after.txt"
+    fi
+  fi
   if test -f "$tmp/serial.log"; then tail -c 65536 "$tmp/serial.log" > "$out/serial-tail.log" || true; fi
   {
     echo "## PR #237 — $PR237_PLATFORM $scenario experimental booted VM"
@@ -86,18 +95,7 @@ if test "$scenario" = native-activation; then
 fi
 printf 'VM resources: %s vCPU, %s MiB\n' "$vm_cpus" "$vm_ram" | tee -a "$out/runner.txt"
 set_stage image-integrity
-case "$PR237_IMAGE_URL" in
-  https://cloud.debian.org/images/cloud/trixie/*|https://repo.almalinux.org/almalinux/10/cloud/x86_64/images/*) ;;
-  *) echo "Refusing unexpected image host" >&2; exit 2 ;;
-esac
-test -n "$PR237_IMAGE_SHA512$PR237_IMAGE_SHA256"
-curl --proto '=https' --tlsv1.2 -fL --retry 3 --retry-delay 5 --max-time 1200 -o "$tmp/base.qcow2" "$PR237_IMAGE_URL"
-if test -n "$PR237_IMAGE_SHA512"; then
-  printf '%s  %s\n' "$PR237_IMAGE_SHA512" "$tmp/base.qcow2" | sha512sum -c -
-fi
-if test -n "$PR237_IMAGE_SHA256"; then
-  printf '%s  %s\n' "$PR237_IMAGE_SHA256" "$tmp/base.qcow2" | sha256sum -c -
-fi
+ci_vm_image_acquire "$tmp/base.qcow2" "${PR237_IMAGE_CACHE_FILE:-}" | tee "$out/image-source.txt"
 sha256sum "$tmp/base.qcow2" > "$out/image-sha256.txt"
 qemu-img info "$tmp/base.qcow2" > "$out/image-info.txt"
 qemu-img create -f qcow2 -F qcow2 -b "$tmp/base.qcow2" "$tmp/disk.qcow2" >/dev/null

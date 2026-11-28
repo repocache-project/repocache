@@ -58,10 +58,14 @@ change, root QEMU or guest privilege change is permitted. KVM selection
 requires a successful probe and an explicit QMP query-kvm response with
 both present and enabled true; otherwise use unprivileged TCG. The runner
 evidence records the access mode, selected acceleration and resources.
-Activation VMs increase their CPU and memory budgets only when the runner
-has spare capacity and either KVM is confirmed or the platform is
-AlmaLinux. Debian TCG retains its original 2 vCPU / 3072 MiB budget.
-These are tuning defaults pending controlled measurements.
+Activation VMs prefer 3 vCPU / 4096 MiB with confirmed KVM when host
+capacity permits, reserving at least one logical CPU and 3 GiB before
+increasing the budget. The previous AlmaLinux TCG profile and Debian TCG
+2 vCPU / 3072 MiB profile are preserved. Other scenarios keep their
+existing budgets. The isolated campaigns 46124059138 and 46129927736
+passed 11 native activation jobs; the 4 GiB KVM profile passed on both
+distributions. Runner variation prevents attributing the total time
+difference solely to RAM.
 
 Each harness phase emits start/end markers and bounded phase-times.tsv
 evidence (elapsed seconds); the summary includes those timings even on
@@ -76,6 +80,21 @@ Compare complete native runs on exact HEADs and record KVM/TCG, phase
 times and total wall time before reporting a speedup. Keep the existing
 chained committed and pending-WAL reboot checks on the same guest:
 splitting them requires proof of equivalent durable state and evidence.
-Do not cache mutable guest disks, signing identities, or package trust
-state. The full image integrity checks and current acceptance matrices
-remain unchanged.
+Only pristine pinned vendor cloud images may be cached. Native workflows
+restore the exact platform/digest key with the pinned Node.js 24 cache
+action; no prefix restores and no per-PR cache saves. Trusted integration
+pushes touching cache code or image pins prime the two images, one runner
+at a time; manual priming on an integration ref is available once GitHub
+recognizes the dispatch workflow. PRs can restore their base branch cache.
+Missing or evicted entries use the existing authenticated HTTPS vendor
+origin. A present malformed, symlinked or digest-mismatched image fails
+closed; it is never silently accepted or replaced. Every guest gets an
+independently verified read-only base copy and a fresh QCOW2 overlay;
+verify the base again after the exercise. Do not cache mutable guest disks,
+signing identities, or package trust state. If cache transport is slow or
+storage capacity is constrained, revert only the optional restore steps;
+the native origin path remains supported. Keep the three workflow image
+matrices in sync when rotating pins. Cache reuse across independent runs
+passed in the isolated probe 46132452756; official base-branch reuse and
+cold cache seeding must be validated separately. The full native
+acceptance matrices and all required checks remain unchanged.

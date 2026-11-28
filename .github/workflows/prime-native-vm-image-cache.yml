@@ -1,0 +1,67 @@
+name: Prime native VM vendor image cache
+on:
+  push:
+    branches: ['integration/**']
+    paths:
+      - '.github/workflows/prime-native-vm-image-cache.yml'
+      - '.github/workflows/server-native-nginx-activation-vm.yml'
+      - '.github/workflows/pr237-booted-native-vm.yml'
+      - 'scripts/ci_vm_image.sh'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: native-vm-image-prime-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  prime:
+    if: ${{ startsWith(github.ref, 'refs/heads/integration/') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - platform: debian13
+            image_url: https://cloud.debian.org/images/cloud/trixie/20261001-2618/debian-13-genericcloud-amd64-20261001-2618.qcow2
+            image_sha512: f46f0671a6e5bdec5291ab8972bae2f10e5408c2f64a74078f11efc2f06a436a9d0313ed50e0472542eeabf780e9f7c792ac0a314c6c20507fcd9fd81b468c3d
+            image_sha256: ''
+          - platform: almalinux10
+            image_url: https://repo.almalinux.org/almalinux/10/cloud/x86_64/images/AlmaLinux-10-GenericCloud-10.3-20261116.0.x86_64.qcow2
+            image_sha512: ''
+            image_sha256: 845d3a4e41fde973bdbf9763b62a88538c1a1fadc2332a89f6ea01e2c17c78ee
+    env:
+      PR237_PLATFORM: ${{ matrix.platform }}
+      PR237_IMAGE_URL: ${{ matrix.image_url }}
+      PR237_IMAGE_SHA256: ${{ matrix.image_sha256 }}
+      PR237_IMAGE_SHA512: ${{ matrix.image_sha512 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Prepare disposable image cache path
+        run: mkdir -m 700 "$RUNNER_TEMP/repocache-vm-image"
+      - name: Restore exact vendor digest
+        id: restore
+        uses: actions/cache/restore@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: ${{ runner.temp }}/repocache-vm-image/base.qcow2
+          key: repocache-native-image-v1-${{ matrix.platform }}-${{ matrix.image_sha256 || matrix.image_sha512 }}
+      - name: Verify existing image or fetch official pristine bytes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source scripts/ci_vm_image.sh
+          image="$RUNNER_TEMP/repocache-vm-image/base.qcow2"
+          if test -e "$image" || test -L "$image"; then
+            ci_vm_image_verify "$image"
+          else
+            ci_vm_image_acquire "$image"
+          fi
+      - name: Save verified image to integration branch cache
+        if: ${{ steps.restore.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: ${{ runner.temp }}/repocache-vm-image/base.qcow2
+          key: repocache-native-image-v1-${{ matrix.platform }}-${{ matrix.image_sha256 || matrix.image_sha512 }}
