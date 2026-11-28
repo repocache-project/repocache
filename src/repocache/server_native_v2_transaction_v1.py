@@ -5510,6 +5510,8 @@ def _read_owned_initial_dedicated_prepared_locked(
         document = parse_install_bytes(
             base64.b64decode(snapshot["configuration_base64"], validate=True),
             for_apply=True)
+        if document["deployment"]["listen"]["bind_address"] != "127.0.0.1":
+            _deny("OWNED_INITIAL_DEDICATED_LOOPBACK_REQUIRED")
         tls = _dedicated_readonly_tls_labels(root_fd, document)
         main, include, catalog = _render_owned_managed_candidate(
             document, 1, "almalinux", {})
@@ -5644,6 +5646,8 @@ def _stage_owned_initial_dedicated_generation_fixture_locked(
     _owned_socket_require_inactive_routes(snapshot)
     document = parse_install_bytes(
         base64.b64decode(snapshot["configuration_base64"], validate=True), for_apply=True)
+if document["deployment"]["listen"]["bind_address"] != "127.0.0.1":
+    _deny("OWNED_INITIAL_DEDICATED_LOOPBACK_REQUIRED")
     labels = _Labels("almalinux", dedicated=True)
     tls = _dedicated_readonly_tls_labels(root_fd, document)
     _verify_tls_pair(root_fd, document, verify_identity=True)
@@ -5757,6 +5761,8 @@ def _restore_owned_initial_dedicated_generation_fixture_locked(
             _deny(code)
         document = parse_install_bytes(
             base64.b64decode(snapshot["configuration_base64"], validate=True), for_apply=True)
+    if document["deployment"]["listen"]["bind_address"] != "127.0.0.1":
+        _deny("OWNED_INITIAL_DEDICATED_LOOPBACK_REQUIRED")
         main, include, catalog = _render_owned_managed_candidate(document, 1, "almalinux", {})
         new = {V2_STATE: current[V2_STATE], _OWNED_MAIN: main, _INCLUDE: include,
                _CATALOG: catalog,
@@ -6228,6 +6234,8 @@ def _prepare_owned_initial_dedicated_candidate_locked(
     document = parse_install_bytes(
         base64.b64decode(snapshot["configuration_base64"], validate=True),
         for_apply=True,
+    if document["deployment"]["listen"]["bind_address"] != "127.0.0.1":
+        _deny("OWNED_INITIAL_DEDICATED_LOOPBACK_REQUIRED")
     )
     tls = _dedicated_readonly_tls_labels(root_fd, document)
     previous, new, prepared = _prepare_owned_live_candidate_locked(

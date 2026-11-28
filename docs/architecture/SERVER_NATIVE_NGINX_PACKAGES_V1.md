@@ -2060,3 +2060,9 @@ bytes; a same-byte replacement is not continuity. The fresh manifest
 writer retains the preceding state identity across its own staging and
 publication. New foreign mount, xattr and same-byte replacement tests
 exercise these refusal paths without enabling host writes.
+
+Require the existing dedicated loopback-only lifecycle boundary already at
+initial candidate preparation, before TLS or DNS, and again on reconstruction,
+staging and private rollback. Do not stage a candidate that the authenticated
+loopback-only start would necessarily refuse. This does not change the public
+listener specification or authorize actual network exposure.

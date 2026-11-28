@@ -1682,8 +1682,10 @@ def _owned_bootstrap_resources():
     }
 
 
-def _owned_generation(generation=1, previous=None, *, active=True, distribution="debian"):
+def _owned_generation(generation=1, previous=None, *, active=True, distribution="debian",
+                      bind_address="127.0.0.1"):
     cfg = document(1, generation=generation)
+    cfg["deployment"]["listen"]["bind_address"] = bind_address
     cfg["deployment"]["paths"]["generated_include"] = native._OWNED_INCLUDE_PATH
     cfg["repositories"][0]["desired_state"] = "active" if active else "disabled"
     state = _canon(snapshot(generation=generation, previous=previous, doc=cfg))
@@ -5921,11 +5923,12 @@ def test_initial_dedicated_config_label_proof(tmp_path, monkeypatch, fault):
 
 @pytest.mark.parametrize("fault", [
     "none", "stale", "active", "config-drift", "tls-drift", "intake-drift",
-    "active-intake-drift", "distro",
+    "active-intake-drift", "distro", "non-loopback",
 ])
 def test_initial_dedicated_candidate_readonly(filesystem, monkeypatch, fault):
     old = _owned_bootstrap_resources()
-    candidate = _owned_generation(active=fault == "active")[V2_STATE]
+    candidate = _owned_generation(active=fault == "active",
+                                  bind_address="0.0.0.0" if fault == "non-loopback" else "127.0.0.1")[V2_STATE]
     paths = _owned_fixture_paths(filesystem, old)
     root_fd = filesystem[0]
     report = {"expected_generation": 1 if fault == "stale" else 0,
@@ -5969,7 +5972,7 @@ def test_initial_dedicated_candidate_readonly(filesystem, monkeypatch, fault):
         else:
             with pytest.raises(native.NativeV2TransactionError):
                 prepare()
-            if fault in ("stale", "active", "active-intake-drift", "distro"):
+            if fault in ("stale", "active", "active-intake-drift", "distro", "non-loopback"):
                 assert calls["verify"] == 0
     assert _fixture_resource_bytes(paths) == old
     _assert_owned_fixture_clean(filesystem, paths)
@@ -6203,11 +6206,12 @@ def test_initial_dedicated_config_interrupted_stage_recovery(filesystem, monkeyp
 @pytest.mark.parametrize("fault", [
     "none", "state", "manifest", "catalog", "include", "active",
     "wrong-wal", "private-stage", "foreign-public", "tls-drift", "config-drift",
-    "private-inode-drift", "private-mount", "private-xattr",
+    "private-inode-drift", "private-mount", "private-xattr", "non-loopback",
 ])
 def test_reconstruct_initial_withdrawn_generation(filesystem, monkeypatch, fault):
     old = _owned_bootstrap_resources()
-    new = _owned_generation(active=fault == "active", distribution="almalinux")
+    new = _owned_generation(active=fault == "active", distribution="almalinux",
+                            bind_address="0.0.0.0" if fault == "non-loopback" else "127.0.0.1")
     paths = _owned_fixture_paths(filesystem, old)
     root_fd, state = filesystem[:2]
     label = native._DEDICATED_PUBLIC_CONTEXT + b"\0"
