@@ -1492,3 +1492,22 @@ exception compensation and a real SIGKILL after actual published HTTPS
 readback, followed by a fresh locked retry. This remains a private
 prepared-profile recovery primitive; no installed activation selection,
 automatic boot, active route or new public authority is introduced.
+
+### Composed recovery of a prepared dedicated profile
+
+The authenticated lifecycle caller can now select a stopped or already
+running prepared profile under the same original state lock. The fixed
+vendor service must remain inactive and disabled and the owned unit
+disabled. Only the exact prior withdrawn resources or (for an active
+retry) exact previously published resources and valid v3 WAL are eligible.
+A stopped profile starts through the existing verified primitive; the
+finalizer must retain that same signed unit/drop-in, master and listener.
+An active retry never starts another master. Any uncertain service state,
+foreign bytes, changed owner or failed finalization is refused without
+vendor fallback, enablement or a speculative stop. Independently
+authenticated release/package/executable/profile pins and boot intent
+remain prerequisites; this is not a public installer selector or a
+namespace/label migration. The enforcing guest exercises the composed
+stopped path with an injected boundary refusal after real start, then
+retains all existing compensation and SIGKILL assertions and resumes
+the active service through the same composed operation.

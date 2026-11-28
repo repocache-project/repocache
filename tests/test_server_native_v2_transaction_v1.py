@@ -3681,7 +3681,7 @@ def test_dedicated_health_child_timeout_and_preflight_do_not_signal_foreign_pid(
 @pytest.mark.parametrize("fault", ["none", "active-route", "nonloopback", "pending",
                                     "policy", "policy-drift", "storage-drift", "scratch-drift", "scratch-service",
                                     "enabled", "start", "health",
-                                    "foreign-master", "generation-drift"])
+                                    "foreign-master", "generation-drift", "selected-drift"])
 def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
         filesystem, monkeypatch, fault, prepared):
     from contextlib import contextmanager
@@ -3839,9 +3839,14 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
                  native._start_owned_committed_dedicated_locked)
         return entry(
             rootfd, 0, namespace_identity=ns, executable_identity=exe,
-            **({"expected_wal": wal} if prepared else {}),
+            **({"expected_wal": wal, "expected_stopped": (
+                {"main_pid_observed": 0, "private_unit_identity": (51, 62),
+                 "private_dropin_identity": (71, 81)} if fault == "selected-drift" else None)}
+                if prepared else {}),
             profile_receipt_sha256="a"*64, executable_receipt_sha256="b"*64,
             recheck_authenticated_owner=lambda: None)
+    if fault == "selected-drift" and not prepared:
+        pytest.skip("Only the composed prepared-WAL path supplies the stopped identity")
     if fault == "none":
         result = invoke()
         assert result["status"] == ("OWNED_DEDICATED_PREPARED_WAL_START_OBSERVED" if prepared
@@ -3859,7 +3864,7 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
             invoke()
         assert calls == {"active-route": [], "nonloopback": [], "pending": [],
                          "policy": [], "policy-drift": [], "storage-drift": [], "scratch-drift": [],
-                         "enabled": [],
+                         "enabled": [], "selected-drift": [],
                          "start": ["start", "stop"], "health": ["start", "health", "stop"],
                          "scratch-service": ["start", "health", "stop"],
                          "foreign-master": ["start", "health"],
@@ -4233,3 +4238,121 @@ def test_legacy_compensation_audit_is_closed_and_redacted(capsys):
         "REPOCACHE_FIXED_TRANSACTION_REFUSAL: NATIVE_V2_" + code
         for code in ("LEGACY_GENERATION_STALE", "APPLY_FAILED_ROLLED_BACK",
                      "APPLY_FAILED_RECOVERY_REQUIRED", "UNIT_CHANGED", "OTHER_REFUSAL")]
+
+
+@pytest.mark.parametrize("scenario", ["stopped", "active", "published", "foreign",
+                                     "enabled", "vendor-active", "vendor-enabled",
+                                     "failed-state", "changed-selection", "changed-master",
+                                     "changed-unit", "bad-start", "finish-refusal",
+                                     "stopped-published", "bad-wal", "owner-refusal"])
+def test_composed_prepared_dedicated_recovery_selects_exact_service(monkeypatch, scenario):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from repocache import server_native_nginx_effective_unit_v1 as unit
+    from repocache import server_root_control_host_preflight_v1 as host
+    wal = b"exact WAL"
+    old = {native._CATALOG: b"prior"}
+    current = dict(old) if scenario in ("published", "stopped-published") else {native._CATALOG: None}
+    if scenario == "foreign":
+        current[native._CATALOG] = b"foreign"
+    active = scenario in ("active", "published")
+    calls = []
+    observations = []
+    @contextmanager
+    def layout(root, state, *, recovering):
+        assert (root, state, recovering) == (1, 2, True)
+        yield state, 3, 4, lambda: None
+    monkeypatch.setattr(host, "require_native_host_preconditions", lambda: None)
+    monkeypatch.setattr(native, "_verify_current_root_fd", lambda *a: None)
+    monkeypatch.setattr(native, "_require_audited_native_package_for_activation", lambda *a, **kw: None)
+    monkeypatch.setattr(native, "_owned_layout_locked", layout)
+    def require_wal(state, raw):
+        assert (state, raw) == (2, wal)
+        if scenario == "bad-wal":
+            native._deny("OWNED_WAL_CHANGED")
+    monkeypatch.setattr(native, "_owned_require_exact_wal", require_wal)
+    monkeypatch.setattr(native, "_decode_owned_wal", lambda *a, **kw: (old, {}))
+    monkeypatch.setattr(native, "_json", lambda *a, **kw: {"version": 3})
+    snapshot = {"configuration_base64": "e30=", "state_generation": 1}
+    monkeypatch.setattr(native, "_validate_owned_resources", lambda *a, **kw: snapshot)
+    monkeypatch.setattr(native, "_owned_socket_require_inactive_routes", lambda *a: None)
+    monkeypatch.setattr(native, "parse_install_bytes", lambda *a, **kw: {
+        "deployment": {"listen": {"bind_address": "127.0.0.1", "https_port": 443}}})
+    monkeypatch.setattr(native, "_read_owned_resources", lambda *a: current)
+    monkeypatch.setattr(native, "_owned_live_guard", lambda *a: require_wal(2, a[-2]))
+    monkeypatch.setattr(native, "_owned_check_stages_absent", lambda *a: None)
+    monkeypatch.setattr(native, "_require_dedicated_public_label", lambda *a: None)
+    monkeypatch.setattr(native, "_require_dedicated_catalog_label", lambda *a: None)
+    monkeypatch.setattr(unit, "_safe_native_systemctl", lambda: None)
+    def command(argv, **kw):
+        assert argv[0] == native._SYSTEMCTL and kw["shell"] is False
+        action, service = argv[1:]
+        assert action in ("is-active", "is-enabled")
+        if action == "is-enabled":
+            enabled = ((scenario == "enabled" and service == native._OWNED_WAL_DOMAIN)
+                       or (scenario == "vendor-enabled" and service == native._UNIT))
+            return SimpleNamespace(returncode=0 if enabled else 1,
+                                   stdout=b"enabled\n" if enabled else b"disabled\n")
+        if service == native._UNIT:
+            running = scenario == "vendor-active"
+        else:
+            observations.append(active)
+            if scenario == "failed-state":
+                return SimpleNamespace(returncode=3, stdout=b"failed\n")
+            running = active or (scenario == "changed-selection" and len(observations) > 1)
+        return SimpleNamespace(returncode=0 if running else 3,
+                               stdout=b"active\n" if running else b"inactive\n")
+    monkeypatch.setattr(native.subprocess, "run", command)
+    def observe(*, https_port, active):
+        assert https_port == 443
+        return {"main_pid_observed": 123 if active else 0,
+                "private_unit_identity": (5, 6), "private_dropin_identity": (7, 8)}
+    monkeypatch.setattr(unit, "inspect_signed_owned_namespace_unit", observe)
+    def runtime(**kw):
+        assert active
+        result = observe(https_port=kw["https_port"], active=True)
+        if scenario == "changed-master":
+            result["main_pid_observed"] = 124
+        if scenario == "changed-unit":
+            result["private_dropin_identity"] = (7, 9)
+        return result
+    monkeypatch.setattr(unit, "_inspect_signed_owned_namespace_runtime", runtime)
+    def start(root, state, **kw):
+        nonlocal active
+        assert (root, state) == (1, 2) and not active
+        assert kw["expected_stopped"] == observe(https_port=443, active=False)
+        kw["recheck_authenticated_owner"]()
+        calls.append("start")
+        active = True
+        return {"status": "OWNED_DEDICATED_PREPARED_WAL_START_OBSERVED",
+                "wal_sha256": hashlib.sha256(wal).hexdigest(),
+                "catalog_withdrawn": scenario != "bad-start", "recovery_required": True,
+                "generation": 1, "enablement_changed": False, "main_pid": 123,
+                "listener_inode": 567}
+    monkeypatch.setattr(native, "_start_owned_prepared_wal_dedicated_locked", start)
+    def finish(root, state, **kw):
+        assert (root, state) == (1, 2) and active
+        kw["recheck_authenticated_owner"]()
+        assert kw["expected_runtime"] == observe(https_port=443, active=True)
+        assert kw["expected_listener"] == (567 if "start" in calls else None)
+        calls.append("finish")
+        if scenario == "finish-refusal":
+            native._deny("FINISH_REFUSED")
+        return {"status": "OWNED_DEDICATED_WAL_ROLLBACK_OBSERVED"}
+    monkeypatch.setattr(native, "_finish_owned_prepared_wal_dedicated_locked", finish)
+    def auth():
+        if scenario == "owner-refusal":
+            native._deny("OWNER_REFUSED")
+    def invoke():
+        return native._recover_owned_prepared_dedicated_locked(
+            1, 2, namespace_identity=(17, 29), executable_identity=(31, 41),
+            profile_receipt_sha256="a"*64, executable_receipt_sha256="b"*64,
+            expected_wal=wal, recheck_authenticated_owner=auth)
+    if scenario in ("stopped", "active", "published"):
+        assert invoke()["status"] == "OWNED_DEDICATED_WAL_ROLLBACK_OBSERVED"
+        assert calls == (["start", "finish"] if scenario == "stopped" else ["finish"])
+    else:
+        with pytest.raises(native.NativeV2TransactionError):
+            invoke()
+        assert calls == (["start", "finish"] if scenario == "finish-refusal" else
+                         ["start"] if scenario in ("changed-master", "changed-unit", "bad-start") else [])

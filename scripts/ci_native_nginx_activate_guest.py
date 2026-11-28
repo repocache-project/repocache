@@ -2620,6 +2620,44 @@ try:
                     profile_receipt_sha256=observed_profile["receipt_sha256"],
                     executable_receipt_sha256=hashlib.sha256(receipt).hexdigest(),
                     recheck_authenticated_owner=receipts)
+            elif action=="recover-dedicated-start-fault":
+                # Exercise the composed stopped-service path with actual
+                # signed start. Refuse at the finalization boundary so the
+                # independent 404, compensation and SIGKILL witnesses below
+                # still execute on the same healthy prior master.
+                assert pending
+                original_start=tx._start_owned_prepared_wal_dedicated_locked
+                original_finish=tx._finish_owned_prepared_wal_dedicated_locked
+                observed=[]
+                def record_start(*args,**kw):
+                    witness=original_start(*args,**kw)
+                    observed.append(witness)
+                    return witness
+                def refuse_finish(*args,**kw):
+                    assert len(observed)==1
+                    assert kw["expected_runtime"]["main_pid_observed"]==observed[0]["main_pid"]
+                    assert kw["expected_listener"]==observed[0]["listener_inode"]
+                    raise tx.NativeV2TransactionError("DISPOSABLE_RECOVERY_BOUNDARY")
+                tx._start_owned_prepared_wal_dedicated_locked=record_start
+                tx._finish_owned_prepared_wal_dedicated_locked=refuse_finish
+                try:
+                    try:
+                        tx._recover_owned_prepared_dedicated_locked(
+                            root,state,namespace_identity=namespace_identity(),
+                            executable_identity=identity[:2],expected_wal=pending_raw,
+                            profile_receipt_sha256=observed_profile["receipt_sha256"],
+                            executable_receipt_sha256=hashlib.sha256(receipt).hexdigest(),
+                            recheck_authenticated_owner=receipts)
+                    except tx.NativeV2TransactionError as exc:
+                        assert str(exc)=="DISPOSABLE_RECOVERY_BOUNDARY",str(exc)
+                    else:
+                        raise AssertionError("Injected recovery boundary returned success")
+                finally:
+                    tx._start_owned_prepared_wal_dedicated_locked=original_start
+                    tx._finish_owned_prepared_wal_dedicated_locked=original_finish
+                assert len(observed)==1
+                assert tx._read_file(state,tx._OWNED_WAL,0,tx._MAX_WAL)==pending_raw
+                result=observed[0]
             elif action in ("finish-dedicated","finish-dedicated-fault","finish-dedicated-kill"):
                 assert pending
                 def finish():
@@ -2674,7 +2712,14 @@ try:
                     assert tx._read_file(state,tx._OWNED_WAL,0,tx._MAX_WAL)==pending_raw
                     result={"interrupted":True,"authorizes_nginx_activation":False}
                 else:
-                    result=finish()
+                    # Resume through the same prepared-profile selector,
+                    # not by directly invoking the finalizer from the harness.
+                    result=tx._recover_owned_prepared_dedicated_locked(
+                        root,state,namespace_identity=namespace_identity(),
+                        executable_identity=identity[:2],expected_wal=pending_raw,
+                        profile_receipt_sha256=observed_profile["receipt_sha256"],
+                        executable_receipt_sha256=hashlib.sha256(receipt).hexdigest(),
+                        recheck_authenticated_owner=receipts)
                     assert tx._read_file(state,tx._OWNED_WAL,0,tx._MAX_WAL) is None
                     try:
                         finish()
@@ -2751,7 +2796,9 @@ finally:
                                                          pending if pending_mode is None else pending_mode,
                                                          wal_hash]),
                                   timeout=300 if action in ("start-committed", "verify-committed-active",
-                                                            "finish-dedicated", "finish-dedicated-fault") else 180)
+                                                            "finish-dedicated", "finish-dedicated-fault",
+                                                            "finish-dedicated-kill",
+                                                            "recover-dedicated-start-fault") else 180)
         return json.loads(result.stdout)
 
     assert not os.path.lexists(ns) and not os.path.lexists(rollover)
@@ -2922,7 +2969,7 @@ finally:
             require_prior_resources()
             assert signed("verify") == result
             try:
-                started = signed("start-committed")
+                started = signed("recover-dedicated-start-fault" if finalize else "start-committed")
             except Exception:
                 print(run("/usr/bin/journalctl", "-u", OWN, "-n", "20", "--no-pager").stdout[-4000:], flush=True)
                 raise
@@ -2949,6 +2996,7 @@ finally:
                 witnessed = started
                 if finalize:
                     require_prior_resources()
+                    print("PASS: composed prepared dedicated recovery starts exact prior master and retains WAL/404 at injected finalization boundary", flush=True)
                     fault = signed("finish-dedicated-fault")
                     assert fault["compensated"]
                     require_prior_resources()
@@ -2989,7 +3037,7 @@ finally:
                     assert os.getxattr(fd, "security.selinux").rstrip(b"\0") == b"system_u:object_r:repocache_nginx_ro_t:s0"
                     assert legacy_catalog_label
                     labels.append((catalog, fd, ident, legacy_catalog_label))
-                    print("PASS: actual dedicated WAL publication fault compensates to HTTP 404; SIGKILL retry republishes exact prior TLS catalog, removes WAL and refuses replay", flush=True)
+                    print("PASS: actual dedicated WAL publication fault compensates to HTTP 404; SIGKILL retry through composed recovery republishes exact prior TLS catalog, removes WAL and refuses replay", flush=True)
             else:
                 witnessed = signed("verify-committed-active")
                 assert witnessed["main_pid"] == started["main_pid"]

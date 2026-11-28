@@ -285,6 +285,9 @@ _AUDIT_FAILURE_CODES = frozenset({
     "NATIVE_V2_OWNED_DIRECTORY_MODE_UNSAFE",
     "NATIVE_V2_OWNED_DEDICATED_CATALOG_LABEL_UNVERIFIED",
     "NATIVE_V2_OWNED_DEDICATED_FINISH_RESOURCE_CHANGED",
+    "NATIVE_V2_OWNED_DEDICATED_RECOVERY_INPUT_INVALID",
+    "NATIVE_V2_OWNED_DEDICATED_RECOVERY_SERVICE_REFUSED",
+    "NATIVE_V2_OWNED_DEDICATED_RECOVERY_MASTER_CHANGED",
     "NATIVE_V2_OWNED_LIVE_APPLY_RECOVERY_REQUIRED",
     "NATIVE_V2_OWNED_LIVE_APPLY_ROLLED_BACK",
     "NATIVE_V2_OWNED_LIVE_BOOTSTRAP_DRIFT",
@@ -3189,7 +3192,7 @@ def _start_owned_prepared_wal_dedicated_locked(
     root_fd: int, state_fd: int, *, namespace_identity: tuple[int, int],
     executable_identity: tuple[int, int], profile_receipt_sha256: str,
     executable_receipt_sha256: str, expected_wal: bytes,
-    recheck_authenticated_owner,
+    recheck_authenticated_owner, expected_stopped: dict | None = None,
 ) -> dict:
     """Start exact prepared prior bytes while retaining WAL and withdrawal.
 
@@ -3206,14 +3209,14 @@ def _start_owned_prepared_wal_dedicated_locked(
         profile_receipt_sha256=profile_receipt_sha256,
         executable_receipt_sha256=executable_receipt_sha256,
         recheck_authenticated_owner=recheck_authenticated_owner,
-        expected_wal=expected_wal)
+        expected_wal=expected_wal, expected_stopped=expected_stopped)
 
 
 def _start_owned_dedicated_generation_locked(
     root_fd: int, state_fd: int, *, namespace_identity: tuple[int, int],
     executable_identity: tuple[int, int], profile_receipt_sha256: str,
     executable_receipt_sha256: str, recheck_authenticated_owner,
-    expected_wal: bytes | None,
+    expected_wal: bytes | None, expected_stopped: dict | None = None,
 ) -> dict:
     """Explicit isolated-candidate start of an already prepared profile.
 
@@ -3235,6 +3238,7 @@ def _start_owned_dedicated_generation_locked(
     from repocache.server_root_control_host_preflight_v1 import require_native_host_preconditions
 
     if (not callable(recheck_authenticated_owner)
+            or (expected_stopped is not None and type(expected_stopped) is not dict)
             or not _valid_sha(profile_receipt_sha256)
             or not _valid_sha(executable_receipt_sha256)
             or any(type(pair) is not tuple or len(pair) != 2
@@ -3333,6 +3337,8 @@ def _start_owned_dedicated_generation_locked(
 
             fixed_systemctl("is-enabled")
             stopped = owner(False)
+            if (expected_stopped is not None and stopped != expected_stopped):
+                _deny("OWNED_DEDICATED_RECOVERY_MASTER_CHANGED")
             if stopped["main_pid_observed"] != 0:
                 _deny("OWNED_DEDICATED_START_OWNER_REFUSED")
             before_policy = policy(False)
@@ -3436,7 +3442,8 @@ def _finish_owned_prepared_wal_dedicated_locked(
     root_fd: int, state_fd: int, *, namespace_identity: tuple[int, int],
     executable_identity: tuple[int, int], profile_receipt_sha256: str,
     executable_receipt_sha256: str, expected_wal: bytes,
-    recheck_authenticated_owner,
+    recheck_authenticated_owner, expected_runtime: dict | None = None,
+    expected_listener: int | None = None,
 ) -> dict:
     """Finalize an already running, authenticated disabled-route candidate.
 
@@ -3453,6 +3460,9 @@ def _finish_owned_prepared_wal_dedicated_locked(
 
     if (not callable(recheck_authenticated_owner)
             or type(expected_wal) is not bytes or not 1 <= len(expected_wal) <= _MAX_WAL
+            or (expected_runtime is not None and type(expected_runtime) is not dict)
+            or (expected_listener is not None
+                and (type(expected_listener) is not int or expected_listener <= 0))
             or not _valid_sha(profile_receipt_sha256)
             or not _valid_sha(executable_receipt_sha256)
             or any(type(pair) is not tuple or len(pair) != 2
@@ -3511,6 +3521,8 @@ def _finish_owned_prepared_wal_dedicated_locked(
                 executable_identity=executable_identity)
 
         master = runtime()
+        if expected_runtime is not None and master != expected_runtime:
+            _deny("OWNED_DEDICATED_RECOVERY_MASTER_CHANGED")
 
         def owner():
             exact()
@@ -3565,6 +3577,8 @@ def _finish_owned_prepared_wal_dedicated_locked(
             _owned_live_write(state, nginx, public, guarded, expected_wal,
                               expected, _CATALOG, None)
         before = health(False)
+        if expected_listener is not None and before["listener_inode"] != expected_listener:
+            _deny("OWNED_DEDICATED_RECOVERY_MASTER_CHANGED")
         guarded()
         try:
             _owned_live_write(state, nginx, public, guarded, expected_wal,
@@ -3586,6 +3600,134 @@ def _finish_owned_prepared_wal_dedicated_locked(
         return {**after, "status": "OWNED_DEDICATED_WAL_ROLLBACK_OBSERVED",
                 "wal_sha256": hashlib.sha256(expected_wal).hexdigest(),
                 "recovery_required": False, "storage": storage}
+
+
+def _recover_owned_prepared_dedicated_locked(
+    root_fd: int, state_fd: int, *, namespace_identity: tuple[int, int],
+    executable_identity: tuple[int, int], profile_receipt_sha256: str,
+    executable_receipt_sha256: str, expected_wal: bytes,
+    recheck_authenticated_owner,
+) -> dict:
+    """Compose prepared-profile start and recovery under the original lock.
+
+    The trusted signed lifecycle caller independently authenticates release,
+    executable, profile and boot intent and retains the state lock. This
+    accepts only a previously prepared, disabled AlmaLinux loopback profile.
+    It never provisions, enables, stops a foreign unit or falls back to the
+    vendor service. Active retry retains the exact verified runtime. If the
+    finalizer fails, its WAL remains the authority; do not automatically
+    stop the service or retry another ownership domain.
+    """
+    from repocache.server_native_nginx_effective_unit_v1 import (
+        inspect_signed_owned_namespace_unit, _inspect_signed_owned_namespace_runtime,
+        _safe_native_systemctl,
+    )
+    from repocache.server_root_control_host_preflight_v1 import require_native_host_preconditions
+
+    if (not callable(recheck_authenticated_owner)
+            or type(expected_wal) is not bytes or not 1 <= len(expected_wal) <= _MAX_WAL
+            or not _valid_sha(profile_receipt_sha256)
+            or not _valid_sha(executable_receipt_sha256)
+            or any(type(pair) is not tuple or len(pair) != 2
+                   or any(type(value) is not int or value <= 0 for value in pair)
+                   for pair in (namespace_identity, executable_identity))):
+        _deny("OWNED_DEDICATED_RECOVERY_INPUT_INVALID")
+    require_native_host_preconditions()
+    _verify_current_root_fd(root_fd)
+    _require_audited_native_package_for_activation(state_fd, distribution="almalinux")
+
+    def status(action, unit):
+        if action not in ("is-active", "is-enabled") or unit not in (_UNIT, _OWNED_WAL_DOMAIN):
+            _deny("OWNED_DEDICATED_RECOVERY_SERVICE_REFUSED")
+        _safe_native_systemctl()
+        try:
+            result = subprocess.run(
+                (_SYSTEMCTL, action, unit), shell=False, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, cwd="/",
+                env=_ENV, timeout=5, close_fds=True, start_new_session=True, check=False)
+        except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+            _deny("OWNED_DEDICATED_RECOVERY_SERVICE_REFUSED")
+        return result.returncode, result.stdout
+
+    def guard():
+        recheck_authenticated_owner()
+        if (status("is-active", _UNIT) != (3, b"inactive\n")
+                or status("is-enabled", _UNIT) != (1, b"disabled\n")
+                or status("is-enabled", _OWNED_WAL_DOMAIN) != (1, b"disabled\n")):
+            _deny("OWNED_DEDICATED_RECOVERY_SERVICE_REFUSED")
+
+    with _owned_layout_locked(root_fd, state_fd, recovering=True) as layout:
+        state, nginx, public, check_layout = layout
+        _owned_require_exact_wal(state, expected_wal)
+        old, _ = _decode_owned_wal(expected_wal, distribution="almalinux")
+        if _json(expected_wal, limit=_MAX_WAL)["version"] != 3:
+            _deny("OWNED_LIVE_WAL_REQUIRED")
+        snapshot = _validate_owned_resources(old, distribution="almalinux")
+        if snapshot is None:
+            _deny("OWNED_DEDICATED_FINISH_MANAGED_REQUIRED")
+        _owned_socket_require_inactive_routes(snapshot)
+        document = parse_install_bytes(base64.b64decode(
+            snapshot["configuration_base64"], validate=True), for_apply=True)
+        listen = document["deployment"]["listen"]
+        if listen["bind_address"] != "127.0.0.1":
+            _deny("OWNED_DEDICATED_FINISH_LOOPBACK_REQUIRED")
+        port = listen["https_port"]
+        withdrawn = {**old, _CATALOG: None}
+        current = _read_owned_resources(state, nginx, public)
+        if current != withdrawn and current != old:
+            _deny("OWNED_DEDICATED_FINISH_RESOURCE_CHANGED")
+
+        def exact():
+            _owned_live_guard(state, nginx, public, check_layout, expected_wal, current)
+            _owned_check_stages_absent(state, nginx, public)
+            _require_dedicated_public_label(public)
+            if current == old:
+                _require_dedicated_catalog_label(public)
+            guard()
+
+        exact()
+        service = status("is-active", _OWNED_WAL_DOMAIN)
+        if service not in ((3, b"inactive\n"), (0, b"active\n")):
+            _deny("OWNED_DEDICATED_RECOVERY_SERVICE_REFUSED")
+        active = service == (0, b"active\n")
+        if not active and current != withdrawn:
+            _deny("OWNED_DEDICATED_FINISH_RESOURCE_CHANGED")
+        selected = inspect_signed_owned_namespace_unit(https_port=port, active=active)
+        exact()
+        if status("is-active", _OWNED_WAL_DOMAIN) != service:
+            _deny("OWNED_DEDICATED_RECOVERY_SERVICE_REFUSED")
+
+    options = dict(namespace_identity=namespace_identity,
+                   executable_identity=executable_identity,
+                   profile_receipt_sha256=profile_receipt_sha256,
+                   executable_receipt_sha256=executable_receipt_sha256,
+                   expected_wal=expected_wal, recheck_authenticated_owner=guard)
+    listener = None
+    if not active:
+        started = _start_owned_prepared_wal_dedicated_locked(
+            root_fd, state_fd, **options, expected_stopped=selected)
+        if (started.get("status") != "OWNED_DEDICATED_PREPARED_WAL_START_OBSERVED"
+                or started.get("wal_sha256") != hashlib.sha256(expected_wal).hexdigest()
+                or started.get("catalog_withdrawn") is not True
+                or started.get("recovery_required") is not True
+                or started.get("generation") != snapshot["state_generation"]
+                or started.get("enablement_changed") is not False
+                or type(started.get("listener_inode")) is not int
+                or started["listener_inode"] <= 0):
+            _deny("OWNED_DEDICATED_RECOVERY_MASTER_CHANGED")
+        listener = started["listener_inode"]
+    guard()
+    runtime = _inspect_signed_owned_namespace_runtime(
+        https_port=port, namespace_identity=namespace_identity,
+        executable_identity=executable_identity)
+    if (runtime["private_unit_identity"] != selected["private_unit_identity"]
+            or runtime["private_dropin_identity"] != selected["private_dropin_identity"]
+            or runtime["main_pid_observed"] !=
+               (selected["main_pid_observed"] if active else started["main_pid"])):
+        _deny("OWNED_DEDICATED_RECOVERY_MASTER_CHANGED")
+    return _finish_owned_prepared_wal_dedicated_locked(
+        root_fd, state_fd, **options, expected_runtime=runtime,
+        expected_listener=listener)
 
 
 def _owned_live_wait_generation(root_fd: int, identity: tuple, context: tuple) -> None:
