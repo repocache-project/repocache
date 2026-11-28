@@ -4377,6 +4377,8 @@ def test_installed_dedicated_recovery_refuses_source_loader_before_host_access(m
         native._prepare_installed_prepared_wal_dedicated({})
     with pytest.raises(native.NativeV2TransactionError, match="INSTALLER_PIN_REFUSED"):
         native._resume_installed_prepared_wal_dedicated({})
+    with pytest.raises(native.NativeV2TransactionError, match="INSTALLER_PIN_REFUSED"):
+        native._start_installed_prepared_wal_dedicated({})
 
 
 @pytest.mark.parametrize("fault", ["none", "lock-held", "placement", "worker-drift",
@@ -4394,7 +4396,9 @@ def test_installed_dedicated_recovery_refuses_source_loader_before_host_access(m
                                    "pending-prepare-catalog", "pending-prepare-drift",
                                    "pending-resume", "pending-resume-boot",
                                    "pending-resume-wal", "pending-resume-catalog",
-                                   "pending-resume-drift", "pending-resume-result"])
+                                   "pending-resume-drift", "pending-resume-result",
+                                   "pending-start", "pending-start-wal", "pending-start-boot",
+                                   "pending-start-catalog", "pending-start-drift", "pending-start-result"])
 def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, monkeypatch, fault):
     """Actual protected files and flock; loader/host/package/runtime observations simulated."""
     import fcntl
@@ -4416,7 +4420,8 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
     rolling = fault.startswith("rollover") or pending_rolling
     pending_first = fault.startswith("pending-prepare")
     resuming = fault.startswith("pending-resume")
-    pending = pending_first or pending_rolling or resuming
+    pending_start = fault.startswith("pending-start")
+    pending = pending_first or pending_rolling or resuming or pending_start
     prior_boot_id = "11111111-1111-1111-1111-111111111111"
     new_boot_id = "22222222-2222-2222-2222-222222222222"
     boot = (_canonical({"boot_id": prior_boot_id}, limit=8192)
@@ -4445,7 +4450,7 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
                 wal_sha256="3"*64 if fault == "wal" else hashlib.sha256(wal).hexdigest())
     calls = []
     preparing = fault.startswith("prepare") or rolling or pending_first or resuming
-    starting = fault.startswith("start")
+    starting = fault.startswith("start") or pending_start
     manifest = b"exact committed manifest"
     resources = {native._OWNED_MANIFEST: manifest, native._CATALOG: b"catalog"}
     if preparing:
@@ -4469,12 +4474,16 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
             pins["boot_receipt_sha256"] = ("0"*64 if fault == "pending-resume-boot"
                                             else hashlib.sha256(boot).hexdigest())
     if starting:
-        (state_path / native._OWNED_WAL).unlink()
+        if not pending_start:
+            (state_path / native._OWNED_WAL).unlink()
         pins["generation_manifest_sha256"] = ("0"*64 if fault == "start-manifest"
                                                else hashlib.sha256(manifest).hexdigest())
-        if fault != "start-mixed":
+        if pending_start:
+            if fault == "pending-start-wal":
+                pins["wal_sha256"] = "0"*64
+        elif fault != "start-mixed":
             del pins["wal_sha256"]
-        if fault == "start-boot":
+        if fault in ("start-boot", "pending-start-boot"):
             pins["boot_receipt_sha256"] = "0"*64
     class Loader:
         archive = worker._WORKER
@@ -4690,22 +4699,40 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
             assert kw["namespace_identity"] == (31, 41)
             assert kw["executable_identity"] == (17, 29)
             kw["recheck_authenticated_owner"]()
-            if fault == "start-resource-drift":
+            if pending_start:
+                assert kw["expected_wal"] == wal
+            else:
+                assert "expected_wal" not in kw
+            if fault in ("start-resource-drift", "pending-start-drift"):
                 resources[native._CATALOG] = b"changed"
                 kw["recheck_authenticated_owner"]()
-            return {"status": "OWNED_DEDICATED_COMMITTED_START_OBSERVED",
-                    "generation": 1, "catalog_observed": True,
-                    "service_storage_mounts_verified": True,
-                    "service_scratch_mounts_verified": True,
-                    "enablement_changed": fault == "start-result"}
+            result = {"status": "OWNED_DEDICATED_COMMITTED_START_OBSERVED",
+                      "generation": 1, "catalog_observed": True,
+                      "service_storage_mounts_verified": True,
+                      "service_scratch_mounts_verified": True,
+                      "enablement_changed": fault == "start-result"}
+            if pending_start:
+                result.update(status="OWNED_DEDICATED_PREPARED_WAL_START_OBSERVED",
+                              catalog_observed=fault == "pending-start-result",
+                              catalog_withdrawn=True, recovery_required=True,
+                              wal_sha256=hashlib.sha256(wal).hexdigest())
+            return result
         monkeypatch.setattr(native, "_start_owned_committed_dedicated_locked", start)
-        if fault == "start":
-            assert native._start_installed_committed_dedicated(pins)["catalog_observed"]
+        monkeypatch.setattr(native, "_start_owned_prepared_wal_dedicated_locked", start)
+        invoke = (native._start_installed_prepared_wal_dedicated if pending_start
+                  else native._start_installed_committed_dedicated)
+        if fault in ("start", "pending-start"):
+            assert invoke(pins)["catalog_observed"] is (not pending_start)
         else:
             with pytest.raises(native.NativeV2TransactionError):
-                native._start_installed_committed_dedicated(pins)
-        assert calls == (["start"] if fault in ("start", "start-resource-drift", "start-result") else [])
-        assert not (state_path / native._OWNED_WAL).exists()
+                invoke(pins)
+        assert calls == (["start"] if fault in ("start", "start-resource-drift", "start-result",
+                                                "pending-start", "pending-start-drift", "pending-start-result",
+                                                "pending-start-catalog") else [])
+        if pending_start:
+            assert (state_path / native._OWNED_WAL).read_bytes() == wal
+        else:
+            assert not (state_path / native._OWNED_WAL).exists()
         assert (state_path / egress._BOOT_EGRESS_RECEIPT).read_bytes() == boot
         return
     if fault == "none":

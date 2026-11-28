@@ -818,7 +818,9 @@ def test_executable_candidate_selects_retained_native_effects_lock(
                                    "pending-prepare-wal", "pending-prepare-boot",
                                    "pending-prepare-report", "pending-resume",
                                    "pending-resume-wal", "pending-resume-boot",
-                                   "pending-resume-report", "pending-resume-digest"])
+                                   "pending-resume-report", "pending-resume-digest",
+                                   "pending-start", "pending-start-wal", "pending-start-boot",
+                                   "pending-start-report", "pending-start-missing-wal"])
 def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, tmp_path, fault):
     from contextlib import contextmanager
     from types import SimpleNamespace
@@ -858,13 +860,14 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
     rolling = fault.startswith("rollover") or pending_rolling
     pending_first = fault.startswith("pending-prepare")
     resuming = fault.startswith("pending-resume")
-    pending = pending_first or pending_rolling or resuming
+    pending_start = fault.startswith("pending-start")
+    pending = pending_first or pending_rolling or resuming or pending_start
     preparing = fault.startswith("prepare") or rolling or pending_first or resuming
-    starting = fault.startswith("start")
+    starting = fault.startswith("start") or pending_start
     manifest = b"committed manifest"
     boot = b"exact boot"
     monkeypatch.setattr(egress, "_read_boot_egress_receipt",
-                        lambda *a, **kw: b"existing boot" if fault in ("prepare-boot", "start-boot", "rollover-boot", "pending-prepare-boot", "pending-resume-boot")
+                        lambda *a, **kw: b"existing boot" if fault in ("prepare-boot", "start-boot", "rollover-boot", "pending-prepare-boot", "pending-resume-boot", "pending-start-boot")
                         else boot if starting or rolling or resuming else None)
     def read(fd, name, uid, limit):
         assert locked
@@ -905,6 +908,7 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
                         install._DEDICATED_PENDING_PREPARE_CHILD if pending_first else
                         install._DEDICATED_ROLLOVER_CHILD if rolling else
                         install._DEDICATED_PREPARE_CHILD if preparing else
+                        install._DEDICATED_PENDING_START_CHILD if pending_start else
                         install._DEDICATED_START_CHILD if starting else install._DEDICATED_RECOVERY_CHILD)
         compile(argv[-1], "<fixed-recovery-child>", "exec")
         assert kw["shell"] is False and kw["close_fds"] is True and "pass_fds" not in kw
@@ -945,13 +949,21 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
         elif starting:
             assert data["generation_manifest_sha256"] == hashlib.sha256(manifest).hexdigest()
             assert data["boot_receipt_sha256"] == hashlib.sha256(boot).hexdigest()
-            assert "wal_sha256" not in data
+            if pending_start:
+                assert data["wal_sha256"] == hashlib.sha256(wal).hexdigest()
+            else:
+                assert "wal_sha256" not in data
             report = {"status": "OWNED_DEDICATED_COMMITTED_START_OBSERVED",
                       "generation_manifest_sha256": data["generation_manifest_sha256"],
                       "boot_receipt_sha256": data["boot_receipt_sha256"],
                       "catalog_observed": True, "service_storage_mounts_verified": True,
                       "service_scratch_mounts_verified": True, "enablement_changed": fault == "start-report",
                       "main_pid": 43, "listener_inode": 47}
+            if pending_start:
+                report.update(status="OWNED_DEDICATED_PREPARED_WAL_START_OBSERVED",
+                              catalog_observed=fault == "pending-start-report",
+                              catalog_withdrawn=True, recovery_required=True,
+                              wal_sha256=data["wal_sha256"])
         else:
             assert data["boot_receipt_sha256"] == "9"*64
             report = {"status": "OWNED_DEDICATED_WAL_ROLLBACK_OBSERVED",
@@ -989,12 +1001,15 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
         start_pins = {key: value for key, value in options.items() if key != "wal_sha256"}
         start_pins["generation_manifest_sha256"] = hashlib.sha256(manifest).hexdigest()
         start_pins["boot_receipt_sha256"] = hashlib.sha256(boot).hexdigest()
-        if fault == "start":
-            assert install._start_authenticated_committed_dedicated_nginx(
-                tmp_path, **start_pins)["catalog_observed"]
+        if pending_start:
+            start_pins["wal_sha256"] = hashlib.sha256(wal).hexdigest()
+        invoke = (install._start_authenticated_prepared_wal_dedicated_nginx if pending_start
+                  else install._start_authenticated_committed_dedicated_nginx)
+        if fault in ("start", "pending-start"):
+            assert invoke(tmp_path, **start_pins)["catalog_observed"] is (not pending_start)
         else:
             with pytest.raises(stage.WorkerStageError):
-                install._start_authenticated_committed_dedicated_nginx(tmp_path, **start_pins)
+                invoke(tmp_path, **start_pins)
     elif fault in ("rolled", "rolled-refusal"):
         def retained(root, fd):
             assert locked
@@ -1023,7 +1038,9 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
                                                "rollover-boot", "pending-rollover-missing-wal",
                                                "pending-rollover-wal", "pending-prepare-missing-wal",
                                                "pending-prepare-wal", "pending-prepare-boot",
-                                               "pending-resume-wal", "pending-resume-boot") else
+                                               "pending-resume-wal", "pending-resume-boot",
+                                               "pending-start-wal", "pending-start-boot",
+                                               "pending-start-missing-wal") else
                      ["release", "rpm"] if fault == "package" else
                      ["release", "history"] if fault == "rolled-refusal" else
                      ["release", "history", "rpm", "child"] if fault == "rolled" else

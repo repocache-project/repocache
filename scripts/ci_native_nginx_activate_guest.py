@@ -3104,8 +3104,45 @@ finally:
             require_prior_resources()
             assert signed("verify") == result
             try:
-                if pending:
-                    started = signed("recover-dedicated-start-fault" if finalize else "start-committed")
+                if pending and finalize:
+                    started = signed("recover-dedicated-start-fault")
+                elif pending:
+                    start_pins = dict(
+                        **pins, executable_receipt_sha256=executable_proof["receipt_sha256"],
+                        profile_receipt_sha256=prior["profile"]["receipt_sha256"],
+                        generation_manifest_sha256=result["generation_manifest_sha256"],
+                        boot_receipt_sha256=result["receipt_sha256"], wal_sha256=wal_hash)
+                    for field in ("wal_sha256", "boot_receipt_sha256"):
+                        try:
+                            native._start_authenticated_prepared_wal_dedicated_nginx(
+                                assets, **{**start_pins, field: "0"*64})
+                        except native.stage.WorkerStageError:
+                            pass
+                        else:
+                            raise AssertionError("Foreign pending start pin accepted")
+                        require_status(OWN, False, False)
+                        require_prior_resources()
+                    try:
+                        native._start_authenticated_committed_dedicated_nginx(
+                            assets, **{k: v for k, v in start_pins.items() if k != "wal_sha256"})
+                    except native.stage.WorkerStageError as exc:
+                        assert str(exc) == "WORKER_PLACEMENT_NATIVE_DEDICATED_RECOVERY_PIN_REFUSED"
+                    else:
+                        raise AssertionError("Committed start accepted pending WAL")
+                    require_status(OWN, False, False)
+                    require_prior_resources()
+                    started = native._start_authenticated_prepared_wal_dedicated_nginx(
+                        assets, **start_pins)
+                    try:
+                        native._start_authenticated_prepared_wal_dedicated_nginx(
+                            assets, **start_pins)
+                    except native.stage.WorkerStageError:
+                        pass
+                    else:
+                        raise AssertionError("Running pending dedicated service adopted")
+                    require_status(OWN, True, False)
+                    require_prior_resources()
+                    print("PASS: authenticated installer starts prepared pending-WAL profile; foreign pins, committed selector and active replay refused", flush=True)
                 else:
                     start_pins = dict(
                         **pins, executable_receipt_sha256=executable_proof["receipt_sha256"],

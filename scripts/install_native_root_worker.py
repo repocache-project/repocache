@@ -1685,14 +1685,36 @@ def _start_authenticated_committed_dedicated_nginx(
                            boot_receipt_sha256=boot_receipt_sha256))
 
 
+_DEDICATED_PENDING_START_CHILD = _DEDICATED_RECOVERY_CHILD.replace(
+    "transaction._recover_installed_prepared_dedicated(pins)",
+    "transaction._start_installed_prepared_wal_dedicated(pins)")
+
+
+def _start_authenticated_prepared_wal_dedicated_nginx(
+    assets: Path, *, commit: str, archive_sha256: str,
+    executable_receipt_sha256: str, profile_receipt_sha256: str,
+    generation_manifest_sha256: str, boot_receipt_sha256: str, wal_sha256: str,
+) -> dict:
+    """Start only the prepared prior loopback generation; keep WAL and withdrawal."""
+    return _authenticated_prepared_dedicated_bridge(
+        assets, commit=commit, archive_sha256=archive_sha256, start=True,
+        pending_start=True,
+        recovery_pins=dict(executable_receipt_sha256=executable_receipt_sha256,
+                           profile_receipt_sha256=profile_receipt_sha256,
+                           generation_manifest_sha256=generation_manifest_sha256,
+                           boot_receipt_sha256=boot_receipt_sha256, wal_sha256=wal_sha256))
+
+
 def _authenticated_prepared_dedicated_bridge(
     assets: Path, *, commit: str, archive_sha256: str, recovery_pins: dict | None,
     prepare: bool = False, start: bool = False, rollover: bool = False,
     pending_prepare: bool = False, resume_pending: bool = False,
+    pending_start: bool = False,
 ) -> dict:
     if (type(prepare) is not bool or type(start) is not bool or type(rollover) is not bool
             or type(pending_prepare) is not bool or (pending_prepare and not prepare)
             or type(resume_pending) is not bool or (resume_pending and (not pending_prepare or rollover))
+            or type(pending_start) is not bool or (pending_start and not start)
             or (prepare and start) or (rollover and not prepare)
             or ((prepare or start) and recovery_pins is None)):
         _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
@@ -1702,7 +1724,7 @@ def _authenticated_prepared_dedicated_bridge(
         {"boot_receipt_sha256", "wal_sha256"})
     if rollover:
         fields.add("previous_boot_receipt_sha256")
-    if pending_prepare:
+    if pending_prepare or pending_start:
         fields.add("wal_sha256")
     if resume_pending:
         fields.add("boot_receipt_sha256")
@@ -1750,7 +1772,7 @@ def _authenticated_prepared_dedicated_bridge(
                 )
                 manifest = _read_file(state, _OWNED_MANIFEST, 0, _OWNED_LIMIT[_OWNED_MANIFEST])
                 wal = _read_file(state, _OWNED_WAL, 0, _MAX_WAL)
-                if pending_prepare:
+                if pending_prepare or pending_start:
                     if wal is None or hashlib.sha256(wal).hexdigest() != recovery_pins["wal_sha256"]:
                         _reject("NATIVE_DEDICATED_RECOVERY_WAL_REFUSED")
                 elif wal is not None:
@@ -1806,6 +1828,7 @@ def _authenticated_prepared_dedicated_bridge(
              _DEDICATED_PENDING_PREPARE_CHILD if pending_prepare else
              _DEDICATED_ROLLOVER_CHILD if rollover else
              _DEDICATED_PREPARE_CHILD if prepare else
+             _DEDICATED_PENDING_START_CHILD if pending_start else
              _DEDICATED_START_CHILD if start else _DEDICATED_RECOVERY_CHILD),
             input=json.dumps(pins, sort_keys=True).encode("ascii"),
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd="/",
@@ -1844,10 +1867,15 @@ def _authenticated_prepared_dedicated_bridge(
                     or (resume_pending and report["receipt_sha256"] != recovery_pins["boot_receipt_sha256"])):
                 _reject("NATIVE_DEDICATED_RECOVERY_CHILD_REFUSED")
         elif start:
-            if (report.get("status") != "OWNED_DEDICATED_COMMITTED_START_OBSERVED"
+            if (report.get("status") != (
+                    "OWNED_DEDICATED_PREPARED_WAL_START_OBSERVED" if pending_start else
+                    "OWNED_DEDICATED_COMMITTED_START_OBSERVED")
                     or report.get("generation_manifest_sha256") != recovery_pins["generation_manifest_sha256"]
                     or report.get("boot_receipt_sha256") != recovery_pins["boot_receipt_sha256"]
-                    or report.get("catalog_observed") is not True
+                    or report.get("catalog_observed") is not (not pending_start)
+                    or (pending_start and (report.get("wal_sha256") != recovery_pins["wal_sha256"]
+                                           or report.get("catalog_withdrawn") is not True
+                                           or report.get("recovery_required") is not True))
                     or report.get("service_storage_mounts_verified") is not True
                     or report.get("service_scratch_mounts_verified") is not True
                     or report.get("enablement_changed") is not False

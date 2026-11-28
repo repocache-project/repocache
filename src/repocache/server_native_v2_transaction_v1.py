@@ -3856,9 +3856,16 @@ def _start_installed_committed_dedicated(pins: dict) -> dict:
     return _installed_dedicated_lifecycle(pins, prepare=False, start=True)
 
 
+def _start_installed_prepared_wal_dedicated(pins: dict) -> dict:
+    """Private authenticated start of prior bytes with the catalog withdrawn."""
+    return _installed_dedicated_lifecycle(pins, prepare=False, start=True,
+                                          pending_start=True)
+
+
 def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = False,
                                    rollover: bool = False, pending_prepare: bool = False,
-                                   resume_pending: bool = False) -> dict:
+                                   resume_pending: bool = False,
+                                   pending_start: bool = False) -> dict:
     import zipimport
     from repocache.server_native_nginx_executable_v1 import (
         signed_owned_nginx_policy_candidate, verify_nginx_candidate_receipt,
@@ -3882,13 +3889,14 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
         {"boot_receipt_sha256", "wal_sha256"})
     if rollover:
         digests.add("previous_boot_receipt_sha256")
-    if pending_prepare:
+    if pending_prepare or pending_start:
         digests.add("wal_sha256")
     if resume_pending:
         digests.add("boot_receipt_sha256")
     if (type(prepare) is not bool or type(start) is not bool or type(rollover) is not bool
             or type(pending_prepare) is not bool or (pending_prepare and not prepare)
             or type(resume_pending) is not bool or (resume_pending and (not pending_prepare or rollover))
+            or type(pending_start) is not bool or (pending_start and not start)
             or (prepare and start) or (rollover and not prepare)
             or not isinstance(__loader__, zipimport.zipimporter)
             or __loader__.archive != worker or not sys.flags.isolated
@@ -3965,7 +3973,7 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
 
         placement()
         package()
-        if pending_prepare:
+        if pending_prepare or pending_start:
             wal = _read_file(state, _OWNED_WAL, 0, _MAX_WAL)
             if wal is None or hashlib.sha256(wal).hexdigest() != pins["wal_sha256"]:
                 _deny("OWNED_WAL_CHANGED")
@@ -4031,8 +4039,8 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
                     _deny("OWNED_DEDICATED_RECOVERY_SERVICE_REFUSED")
 
         def prepared_resources():
-            with _owned_layout_locked(root, state, recovering=pending_prepare) as layout:
-                if pending_prepare:
+            with _owned_layout_locked(root, state, recovering=pending_prepare or pending_start) as layout:
+                if pending_prepare or pending_start:
                     state_dir, nginx, public, check_layout = layout
                     _owned_live_guard(state_dir, nginx, public, check_layout,
                                       wal, {**old, _CATALOG: None})
@@ -4161,8 +4169,11 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
                 guard()
 
             committed_owner()
-            result = _start_owned_committed_dedicated_locked(
+            entry = (_start_owned_prepared_wal_dedicated_locked if pending_start else
+                     _start_owned_committed_dedicated_locked)
+            result = entry(
                 root, state, namespace_identity=namespace_identity,
+                **({"expected_wal": wal} if pending_start else {}),
                 executable_identity=executable_before["executable_identity"][:2],
                 profile_receipt_sha256=pins["profile_receipt_sha256"],
                 executable_receipt_sha256=pins["executable_receipt_sha256"],
@@ -4170,9 +4181,14 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
             committed_owner()
             package()
             committed_owner()
-            if (result.get("status") != "OWNED_DEDICATED_COMMITTED_START_OBSERVED"
+            if (result.get("status") != (
+                    "OWNED_DEDICATED_PREPARED_WAL_START_OBSERVED" if pending_start else
+                    "OWNED_DEDICATED_COMMITTED_START_OBSERVED")
                     or result.get("generation") != snapshot["state_generation"]
-                    or result.get("catalog_observed") is not True
+                    or result.get("catalog_observed") is not (not pending_start)
+                    or (pending_start and (result.get("wal_sha256") != pins["wal_sha256"]
+                                           or result.get("catalog_withdrawn") is not True
+                                           or result.get("recovery_required") is not True))
                     or result.get("service_storage_mounts_verified") is not True
                     or result.get("service_scratch_mounts_verified") is not True
                     or result.get("enablement_changed") is not False):

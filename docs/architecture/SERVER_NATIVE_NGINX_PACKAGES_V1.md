@@ -1654,3 +1654,18 @@ with the same verified policy is read-only. The native SIGKILL fixture
 leaves the actual uninitialized intent, releases its fixture lock, and
 resumes through this signed bridge; verify-only and foreign pins refuse
 before policy initialization, then exact resume and readback succeed.
+
+### Authenticated prepared pending-WAL start
+
+A distinct private installer selector starts an independently prepared
+loopback generation while retaining the exact WAL and withdrawn catalog.
+It authenticates the signed release, installed worker, native package,
+profile, executable, prior manifest and current boot intent; the worker
+rechecks under its own protected lock. The existing prepared-generation
+start primitive retains its exact stopped-owner and compensation checks.
+The signed parent rejects a published catalog, changed WAL, missing
+recovery-required status or enablement change. The booted pending-WAL
+scenario uses the authenticated selector and requires fresh TLS HTTP 404,
+foreign pin refusal, committed selector refusal and active replay refusal.
+The independent finalization fault and SIGKILL scenario remains intact.
+No public CLI or automatic boot dispatch is introduced.
