@@ -3519,6 +3519,26 @@ finally:
                 if finalize:
                     require_prior_resources()
                     print("PASS: composed prepared dedicated recovery starts exact prior master and retains WAL/404 at injected finalization boundary", flush=True)
+                    path, fd, identity, legacy_label = next(
+                        item for item in labels if item[0] == OWN_CONFIG)
+                    dedicated_label = os.getxattr(fd, "security.selinux")
+                    assert legacy_label.rstrip(b"\0") != dedicated_label.rstrip(b"\0")
+                    assert file_identity(path) == identity
+                    os.setxattr(fd, "security.selinux", legacy_label)
+                    try:
+                        try:
+                            native.activate_authenticated_native_nginx(assets, **pins)
+                        except native.stage.WorkerStageError:
+                            pass
+                        else:
+                            raise AssertionError("Finalizer accepted foreign configuration label")
+                        require_prior_resources()
+                        assert fresh_catalog().startswith(b"HTTP/1.1 404 ")
+                        require_status(OWN, True, False)
+                    finally:
+                        assert file_identity(path) == identity
+                        os.setxattr(fd, "security.selinux", dedicated_label)
+                    print("PASS: signed finalization refuses foreign configuration label and retains WAL/404", flush=True)
                     fault = signed("finish-dedicated-fault")
                     assert fault["compensated"]
                     require_prior_resources()

@@ -4099,7 +4099,8 @@ def test_dedicated_withdrawn_catalog_requires_fresh_pinned_tls_404(monkeypatch, 
                                    "published-retry", "published-bad-label",
                                    "published-owner-drift", "published-wal-lost",
                                    "published-pre-health", "initial-foreign-catalog",
-                                   "tls-label", "tls-label-drift"])
+                                   "tls-label", "tls-label-drift", "config-label",
+                                   "config-label-after-publish", "config-inode-drift"])
 def test_dedicated_wal_finalization_publishes_only_verified_prior(
         filesystem, monkeypatch, fault):
     """Real owned WAL/resource filesystem; mocked runtime and policy only."""
@@ -4158,6 +4159,13 @@ def test_dedicated_wal_finalization_publishes_only_verified_prior(
         kwargs["recheck_owned"]()
         calls.append(publish)
         assert pending.read_bytes() == wal
+        if fault == "config-inode-drift" and not publish:
+            include = paths[native._INCLUDE]
+            replacement = include.with_name("fixture-replacement")
+            replacement.write_bytes(include.read_bytes())
+            replacement.chmod(0o644)
+            os.replace(replacement, include)
+            labels[include.stat().st_ino] = native._DEDICATED_PUBLIC_CONTEXT + b"\0"
         if fault == "foreign-catalog" and publish:
             catalog.write_bytes(b"foreign catalog")
             raise native.NativeV2TransactionError("FOREIGN_CATALOG")
@@ -4193,7 +4201,11 @@ def test_dedicated_wal_finalization_publishes_only_verified_prior(
     monkeypatch.setattr(native, "verify_service_storage_mounts", lambda *a: None)
     monkeypatch.setattr(native, "_verify_owned_alma_runtime_service_view", lambda *a: None)
     monkeypatch.setattr(native.pwd, "getpwnam", lambda name: SimpleNamespace(pw_uid=33))
-    labels = {}
+    labels = {
+        paths[name].stat().st_ino: native._DEDICATED_PUBLIC_CONTEXT + b"\0"
+        for name in (native._OWNED_MAIN, native._INCLUDE)
+    }
+    config_inode = paths[native._OWNED_MAIN].stat().st_ino
     if fault.startswith("published-") and fault != "published-bad-label":
         labels[catalog.stat().st_ino] = native._DEDICATED_PUBLIC_CONTEXT + b"\0"
     if fault == "published-wal-lost":
@@ -4202,7 +4214,11 @@ def test_dedicated_wal_finalization_publishes_only_verified_prior(
         assert name == "security.selinux"
         if stat.S_ISDIR(os.fstat(fd).st_mode):
             return native._DEDICATED_PUBLIC_CONTEXT + b"\0"
-        return labels.get(os.fstat(fd).st_ino, b"unconfined_u:object_r:repocache_nginx_ro_t:s0\0")
+        inode = os.fstat(fd).st_ino
+        if inode == config_inode and (fault == "config-label" or (
+                fault == "config-label-after-publish" and catalog.exists())):
+            return b"system_u:object_r:httpd_config_t:s0\0"
+        return labels.get(inode, b"unconfined_u:object_r:repocache_nginx_ro_t:s0\0")
     def set_label(fd, name, value):
         assert name == "security.selinux" and value == native._DEDICATED_PUBLIC_CONTEXT + b"\0"
         assert stat.S_IMODE(os.fstat(fd).st_mode) == 0o600
@@ -4244,8 +4260,10 @@ def test_dedicated_wal_finalization_publishes_only_verified_prior(
             assert pending.read_bytes() == (b"foreign WAL" if fault == "wrong-wal" else wal)
         if fault in ("wrong-wal", "active-route", "initial-foreign-catalog",
                      "published-bad-label", "published-owner-drift", "published-wal-lost",
-                     "tls-label", "tls-label-drift"):
+                     "tls-label", "tls-label-drift", "config-label"):
             assert not calls
+        if fault in ("config-inode-drift", "config-label-after-publish"):
+            assert calls == [False]
         assert not any((path.parent / native._OWNED_STAGES[name]).exists()
                        for name, path in paths.items())
 
@@ -5457,3 +5475,55 @@ def test_dedicated_readonly_tls_label_proof(tmp_path, monkeypatch, fault):
         assert cert.read_bytes() == b"certificate fixture"
     finally:
         os.close(root)
+
+
+@pytest.mark.parametrize("fault", ["none", "bad-config-label", "bad-catalog-label",
+                                   "config-replacement", "public-mode", "wrong-presence"])
+def test_dedicated_recovery_config_identity_across_catalog_phases(tmp_path, monkeypatch, fault):
+    nginx, public = tmp_path / "nginx", tmp_path / "public"
+    for parent in (nginx, public):
+        parent.mkdir(mode=0o755)
+    main, include = nginx / native._OWNED_MAIN, nginx / native._INCLUDE
+    catalog = public / native._CATALOG
+    for path in (main, include):
+        path.write_bytes(b"configuration")
+        path.chmod(0o644)
+    wrong = set()
+    monkeypatch.setattr(os, "listxattr", lambda fd: ["security.selinux"])
+    monkeypatch.setattr(os, "getxattr", lambda fd, name: (
+        b"system_u:object_r:httpd_config_t:s0\0"
+        if os.fstat(fd).st_ino in wrong else native._DEDICATED_PUBLIC_CONTEXT + b"\0"))
+    monkeypatch.setattr(os, "setxattr", lambda *a: pytest.fail("read-only proof attempted relabel"))
+    nfd = os.open(nginx, os.O_RDONLY | os.O_DIRECTORY)
+    pfd = os.open(public, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        baseline = native._dedicated_recovery_config_identity(nfd, pfd, catalog_present=False)
+        catalog.write_bytes(b"catalog")
+        catalog.chmod(0o644)
+        if fault == "bad-config-label":
+            wrong.add(main.stat().st_ino)
+        if fault == "bad-catalog-label":
+            wrong.add(catalog.stat().st_ino)
+        if fault == "public-mode":
+            public.chmod(0o777)
+        if fault == "config-replacement":
+            replacement = nginx / "replacement"
+            replacement.write_bytes(include.read_bytes())
+            replacement.chmod(0o644)
+            os.replace(replacement, include)
+        if fault in ("none", "config-replacement"):
+            after = native._dedicated_recovery_config_identity(nfd, pfd, catalog_present=True)
+            if fault == "none":
+                assert after == baseline
+                catalog.unlink()
+                assert native._dedicated_recovery_config_identity(
+                    nfd, pfd, catalog_present=False) == baseline
+            else:
+                assert after != baseline
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                native._dedicated_recovery_config_identity(
+                    nfd, pfd, catalog_present=fault != "wrong-presence")
+    finally:
+        os.close(nfd)
+        os.close(pfd)

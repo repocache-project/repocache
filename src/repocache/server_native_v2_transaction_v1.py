@@ -535,6 +535,18 @@ def _dedicated_readonly_config_labels(nginx: int, public: int, *, catalog_presen
         _deny(code)
 
 
+def _dedicated_recovery_config_identity(nginx: int, public: int, *,
+                                        catalog_present: bool) -> tuple:
+    """Pin unchanged config while permitting only the catalog phase transition."""
+    parents, mounts, files = _dedicated_readonly_config_labels(
+        nginx, public, catalog_present=catalog_present)
+    # Catalog publication/withdrawal changes the public directory's size
+    # and timestamps. The full proof above still checks those within each
+    # observation. Across phases retain its inode, mode, owner, links and
+    # mount, plus the complete immutable NGINX directory and file identities.
+    return (parents[0], parents[1][:6], mounts, files[:2])
+
+
 def _require_dedicated_catalog_label(parent: int) -> None:
     _require_dedicated_public_label(parent)
     fd = os.open(_CATALOG, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
@@ -3811,13 +3823,15 @@ def _finish_owned_prepared_wal_dedicated_locked(
             _deny("OWNED_DEDICATED_FINISH_RESOURCE_CHANGED")
         expected = dict(current)
         published_before_retry = current == old
+        config_identity = _dedicated_recovery_config_identity(
+            nginx, public, catalog_present=published_before_retry)
 
         def exact():
             _owned_live_guard(state, nginx, public, check_layout, expected_wal, expected)
             _owned_check_stages_absent(state, nginx, public)
-            _require_dedicated_public_label(public)
-            if expected[_CATALOG] is not None:
-                _require_dedicated_catalog_label(public)
+            if _dedicated_recovery_config_identity(
+                    nginx, public, catalog_present=expected[_CATALOG] is not None) != config_identity:
+                _deny("OWNED_DEDICATED_FINISH_CONFIG_CHANGED")
 
         exact()
         recheck_authenticated_owner()

@@ -1842,3 +1842,19 @@ Do not copy, log, relabel or repair any operator-owned TLS material.
 The native fixture tests a foreign private-key label before real start,
 restoring only its own disposable label. Fresh label placement, production
 policy installation and complete installed activation remain separate gates.
+
+### Dedicated finalizer configuration continuity
+
+Before a prepared-WAL finalizer observes the running master or publishes
+the prior catalog, re-establish the same full read-only configuration
+label proof as the dedicated start. During every existing ownership guard,
+check the complete unchanged main/include and NGINX directory identities,
+the public directory's stable inode, owner, mode and mount, and the
+exact catalog presence/absence and label. Catalog publication/withdrawal
+may change only the public directory's size and timestamps across phases;
+the full within-observation checks still apply. Refuse foreign labels and
+same-byte configuration replacement, retaining the WAL; after a failed
+publication use only the existing exact-byte compensation boundary.
+The disposable native fixture substitutes the old main-file label during
+the running prepared-WAL phase and requires signed refusal with HTTP 404
+and an unchanged WAL, then restores its own label. No new write authority.
