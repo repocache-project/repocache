@@ -793,6 +793,12 @@ def prepare_and_interrupt_live_wal(distribution: str, native, assets, pins) -> N
         assets, proposal, proposal_sha256=prepared["proposed_state_sha256"], **pins,
     )
     assert staged["expected_generation"] == 0
+    if distribution == "almalinux":
+        recorded = json.loads((ROOT / "native-executable-candidate-proof.json").read_bytes())
+        policy = {"policy_sha256": recorded["dedicated_policy_sha256"],
+                  "compiled_policy_sha256": recorded["fixture_compiled_policy_sha256"]}
+        verify_fresh_dedicated_bootstrap_candidate(
+            native, assets, pins, policy, initial=True)
     bootstrap = OWN_CONFIG.read_bytes()
     def vendor_temp_identity():
         if distribution == "debian":
@@ -2173,8 +2179,12 @@ print(json.dumps(report))
         capture_output=True, text=True, timeout=30).stdout)
 
 
-def verify_fresh_dedicated_bootstrap_candidate(native, assets, pins, policy):
-    """Compose signed worker, labelled namespace and inert config in a detached root."""
+def verify_fresh_dedicated_bootstrap_candidate(native, assets, pins, policy, *, initial=False):
+    """Compose signed worker, labelled namespace and inert config in a detached root.
+
+    The later initial pass uses the existing disposable guest CA and exact
+    generation-one intake; no real host service or generation is changed.
+    """
     import tempfile
     from scripts import ci_selinux_nginx_egress_guest as isolated
 
@@ -2188,6 +2198,7 @@ import hashlib,os,stat,sys,zipimport
 from pathlib import Path
 root=Path(sys.argv[1])
 expected_worker=sys.argv[2]
+initial=sys.argv[3]=="initial"
 worker=str(root/"usr/libexec/repocache/server-control-worker")
 sys.path.insert(0,worker)
 from repocache import server_native_v2_transaction_v1 as tx
@@ -2221,6 +2232,51 @@ try:
         assert stat.S_IMODE(main.stat().st_mode)==0o644
         assert not list(public.iterdir()) and not list((root/"etc/nginx/conf.d").iterdir())
         original=(main.stat().st_dev,main.stat().st_ino)
+        with tx._owned_layout_locked(fd,state,recovering=False) as layout:
+            _,nginx,pub,check=layout
+            proof=tx._dedicated_readonly_config_labels(
+                nginx,pub,catalog_present=False,bootstrap=True)
+            assert len(proof[2])==1
+            assert tx._dedicated_readonly_config_labels(
+                nginx,pub,catalog_present=False,bootstrap=True)==proof
+            if initial:
+                intake=root/"var/lib/repocache/server/.admin-candidate-v2.json"
+                tls=root/"etc/repocache/tls"
+                key=tls/"example-key.pem"
+                cert=tls/"example-chain.pem"
+                tracked=(intake,key,cert,main,config,public)
+                def observed():
+                    return tuple(tx._identity(path.lstat()) for path in tracked)
+                before=observed()
+                def boundary():
+                    guard()
+                    check()
+                def prepare():
+                    return tx._prepare_owned_initial_dedicated_candidate_locked(
+                        fd,state,nginx,pub,boundary,"almalinux")
+                old,new,report=prepare()
+                assert old[tx.V2_STATE] is None and old[tx._CATALOG] is None
+                assert new[tx._OWNED_MAIN]==tx._owned_managed_config("almalinux")
+                assert report["expected_generation"]==0
+                assert report["next_state_sha256"]==hashlib.sha256(new[tx.V2_STATE]).hexdigest()
+                assert prepare()==(old,new,report)
+                assert observed()==before
+                assert tx._read_owned_resources(state,nginx,pub)==old
+                assert not os.listdir(pub)
+                assert not (root/"var/lib/repocache/server"/tx._OWNED_WAL).exists()
+                label=os.getxattr(key,"security.selinux")
+                os.setxattr(key,"security.selinux",os.getxattr(root/"etc/nginx","security.selinux"))
+                try:
+                    try:
+                        prepare()
+                    except tx.NativeV2TransactionError:
+                        pass
+                    else:
+                        raise AssertionError("Foreign TLS label accepted")
+                    assert tx._read_owned_resources(state,nginx,pub)==old
+                finally:
+                    os.setxattr(key,"security.selinux",label)
+                assert prepare()==(old,new,report)
         # Change only a disposable fixture label. Never repair it.
         foreign=os.getxattr(root/"etc/nginx","security.selinux")
         assert foreign.rstrip(b"\\0")!=tx._DEDICATED_PUBLIC_CONTEXT
@@ -2233,6 +2289,14 @@ try:
             raise AssertionError("Foreign bootstrap label adopted")
         assert (main.stat().st_dev,main.stat().st_ino)==original
         assert main.read_bytes()==tx._OWNED_BOOTSTRAP_CONFIG
+        with tx._owned_layout_locked(fd,state,recovering=False) as layout:
+            try:
+                tx._dedicated_readonly_config_labels(
+                    layout[1],layout[2],catalog_present=False,bootstrap=True)
+            except tx.NativeV2TransactionError:
+                pass
+            else:
+                raise AssertionError("Foreign bootstrap label accepted by initial proof")
     assert bootstrap.bootstrap_protected_namespace_under_root(
         fd,owner_uid=0,public_catalog=True,_dedicated_public=True)["dedicated_public_label_verified"]
 finally:
@@ -2260,12 +2324,31 @@ finally:
         before = [identity(path) for path in tracked]
         native._place_worker_files(root, payloads, receipt, **options)
         assert [identity(path) for path in tracked] == before
+        if initial:
+            from repocache.server_protected_namespace_bootstrap_v1 import _DEDICATED_PUBLIC_CONTEXT
+            tls = root / "etc/repocache/tls"
+            tls.mkdir(parents=True, mode=0o755)
+            os.setxattr(tls, "security.selinux", _DEDICATED_PUBLIC_CONTEXT + b"\\0")
+            for name, mode in (("example-chain.pem", 0o644), ("example-key.pem", 0o600)):
+                source = Path("/etc/repocache/tls") / name
+                target = tls / name
+                with target.open("xb") as out:
+                    os.fchmod(out.fileno(), mode)
+                    out.write(source.read_bytes())
+                    os.setxattr(out.fileno(), "security.selinux", _DEDICATED_PUBLIC_CONTEXT + b"\\0")
+            intake = state / ".admin-candidate-v2.json"
+            with intake.open("xb") as out:
+                os.fchmod(out.fileno(), 0o600)
+                out.write((STATE / intake.name).read_bytes())
         subprocess.run(["/usr/bin/python3", "-IS", "-B", "-c", code, str(root),
-                        receipt["files"][native.stage.WORKER]], check=True, timeout=60)
+                        receipt["files"][native.stage.WORKER],
+                        "initial" if initial else "bootstrap"], check=True, timeout=90)
         native.stage._audit_worker_files(root, payloads)
         assert isolated.verify_fixed_loaded_policy(policy["compiled_policy_sha256"]) == policy["compiled_policy_sha256"]
     print("PASS: signed worker fresh detached namespace and inert configuration labels, repeat and foreign-label refusal", flush=True)
     print("PASS: authenticated fresh worker placement creates labelled public directory before any config effect", flush=True)
+    if initial:
+        print("PASS: enforcing signed worker generation-one read-only CAS and TLS preflight, exact repeat and foreign-key-label refusal", flush=True)
 
 
 def verify_fixed_executable_candidate(native, assets, pins, distribution):

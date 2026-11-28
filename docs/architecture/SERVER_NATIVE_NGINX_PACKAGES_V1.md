@@ -1961,3 +1961,11 @@ No WAL, catalog, service,
 policy or host installation effect is permitted by this helper; the
 initial authenticated transaction and health-gated publication remain
 separate prerequisites. Existing committed and recovery proofs are unchanged.
+
+The enforcing booted guest also invokes this preflight from a freshly
+placed authenticated archive against a detached root, using the already
+verified disposable CA and exact first-generation root intake copied
+from the existing test fixture. It checks repeated exact preparation,
+unchanged resource identities and absent WAL/catalog, then refuses a
+foreign label on the disposable key before restoring that fixture only.
+No host service activation or production trust claim follows.
