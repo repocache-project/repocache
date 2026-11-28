@@ -1689,3 +1689,17 @@ entry after actual SIGKILL and checks exact prior TLS publication and WAL
 removal, while preserving the disabled unit state. First-boot dispatch,
 committed dedicated activation, automatic boot and active route authority
 remain separate prerequisites.
+
+### Authenticated committed same-boot intent resume
+
+The committed counterpart of the pending-WAL resume selector requires no
+WAL, exact independently pinned committed manifest, executable, profile
+and current boot receipt. The existing namespace is opened, never created
+or replaced. The worker checks the stopped owner and exact receipt under
+its fresh state lock and supplies the retained bytes as a compare-and-swap
+input to the shared closed-policy initializer. Verify-only readback must
+match the result; the same receipt and inode are retained. No unit start,
+enablement or catalog mutation is authorized. The native committed boot
+scenario checks repeat and foreign pins against the actual installer;
+interrupted initialization on this committed-specific path still requires
+separate native evidence before full lifecycle acceptance.

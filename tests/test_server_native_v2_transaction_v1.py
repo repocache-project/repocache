@@ -4378,6 +4378,8 @@ def test_installed_dedicated_recovery_refuses_source_loader_before_host_access(m
     with pytest.raises(native.NativeV2TransactionError, match="INSTALLER_PIN_REFUSED"):
         native._resume_installed_prepared_wal_dedicated({})
     with pytest.raises(native.NativeV2TransactionError, match="INSTALLER_PIN_REFUSED"):
+        native._resume_installed_committed_dedicated({})
+    with pytest.raises(native.NativeV2TransactionError, match="INSTALLER_PIN_REFUSED"):
         native._start_installed_prepared_wal_dedicated({})
 
 
@@ -4398,7 +4400,9 @@ def test_installed_dedicated_recovery_refuses_source_loader_before_host_access(m
                                    "pending-resume-wal", "pending-resume-catalog",
                                    "pending-resume-drift", "pending-resume-result",
                                    "pending-start", "pending-start-wal", "pending-start-boot",
-                                   "pending-start-catalog", "pending-start-drift", "pending-start-result"])
+                                   "pending-start-catalog", "pending-start-drift", "pending-start-result",
+                                   "committed-resume", "committed-resume-boot",
+                                   "committed-resume-drift", "committed-resume-result"])
 def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, monkeypatch, fault):
     """Actual protected files and flock; loader/host/package/runtime observations simulated."""
     import fcntl
@@ -4419,9 +4423,10 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
     pending_rolling = fault.startswith("pending-rollover")
     rolling = fault.startswith("rollover") or pending_rolling
     pending_first = fault.startswith("pending-prepare")
-    resuming = fault.startswith("pending-resume")
+    committed_resume = fault.startswith("committed-resume")
+    resuming = fault.startswith("pending-resume") or committed_resume
     pending_start = fault.startswith("pending-start")
-    pending = pending_first or pending_rolling or resuming or pending_start
+    pending = pending_first or pending_rolling or (resuming and not committed_resume) or pending_start
     prior_boot_id = "11111111-1111-1111-1111-111111111111"
     new_boot_id = "22222222-2222-2222-2222-222222222222"
     boot = (_canonical({"boot_id": prior_boot_id}, limit=8192)
@@ -4471,7 +4476,7 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
             pins["wal_sha256"] = ("0"*64 if fault.endswith("-wal")
                                   else hashlib.sha256(wal).hexdigest())
         if resuming:
-            pins["boot_receipt_sha256"] = ("0"*64 if fault == "pending-resume-boot"
+            pins["boot_receipt_sha256"] = ("0"*64 if fault in ("pending-resume-boot", "committed-resume-boot")
                                             else hashlib.sha256(boot).hexdigest())
     if starting:
         if not pending_start:
@@ -4637,6 +4642,24 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
                     else hashlib.sha256(boot).hexdigest()}
 
         def verify_boot(root, state, **kw):
+            if committed_resume and kw["allow_prepare"]:
+                calls.append("resume")
+                assert kw["expected_existing_receipt"] == boot
+                assert kw["namespace_identity"] == (31, 41)
+                contender = os.open(state_path / LOCK_NAME, os.O_RDONLY)
+                try:
+                    with pytest.raises(BlockingIOError):
+                        fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                finally:
+                    os.close(contender)
+                kw["recheck_namespace_owner"]()
+                if fault == "committed-resume-drift":
+                    (state_path / egress._BOOT_EGRESS_RECEIPT).write_bytes(b"foreign")
+                    kw["recheck_namespace_owner"]()
+                return {"namespace_device": 31, "namespace_inode": 41,
+                        "generation_manifest_sha256": hashlib.sha256(manifest).hexdigest(),
+                        "receipt_sha256": "0"*64 if fault == "committed-resume-result"
+                        else hashlib.sha256(boot).hexdigest()}
             calls.append("verify")
             assert kw["namespace_identity"] == (31, 41)
             if pending:
@@ -4656,18 +4679,21 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
         monkeypatch.setattr(native, "_prepare_owned_committed_boot_egress_locked", verify_boot)
         monkeypatch.setattr(native, "_create_owned_prepared_wal_boot_egress_locked", create)
         monkeypatch.setattr(native, "_verify_owned_prepared_wal_boot_egress_locked", verify_boot)
-        invoke = (native._resume_installed_prepared_wal_dedicated if resuming
+        invoke = (native._resume_installed_committed_dedicated if committed_resume
+                  else native._resume_installed_prepared_wal_dedicated if resuming
                   else native._rollover_installed_prepared_wal_dedicated if pending_rolling
                   else native._prepare_installed_prepared_wal_dedicated if pending_first
                   else native._rollover_installed_committed_dedicated if rolling
                   else native._prepare_installed_committed_dedicated)
-        if fault in ("prepare", "rollover", "pending-rollover", "pending-prepare", "pending-resume"):
+        if fault in ("prepare", "rollover", "pending-rollover", "pending-prepare", "pending-resume",
+                     "committed-resume"):
             assert invoke(pins)["namespace_inode"] == 41
         else:
             with pytest.raises(native.NativeV2TransactionError):
                 invoke(pins)
-        assert calls == (["resume", "verify"] if fault in ("pending-resume", "pending-resume-result") else
-                         ["resume"] if fault == "pending-resume-drift" else
+        assert calls == (["resume", "verify"] if fault in ("pending-resume", "pending-resume-result",
+                                                           "committed-resume", "committed-resume-result") else
+                         ["resume"] if fault in ("pending-resume-drift", "committed-resume-drift") else
                          ["prepare", "verify"] if fault in (
                              "prepare", "prepare-result", "rollover", "rollover-archive",
                              "pending-rollover", "pending-prepare") else
@@ -4677,7 +4703,7 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
                                  "pending-rollover-wal", "pending-rollover-catalog", "pending-rollover-drift"):
             assert (state_path / egress._BOOT_EGRESS_RECEIPT).read_bytes() == boot
             assert not list(state_path.glob(egress._BOOT_EGRESS_HISTORY_PREFIX + "*"))
-        if resuming and fault != "pending-resume-drift":
+        if resuming and not fault.endswith("-drift"):
             assert (state_path / egress._BOOT_EGRESS_RECEIPT).read_bytes() == boot
         if pending_first and fault != "pending-prepare":
             assert not (state_path / egress._BOOT_EGRESS_RECEIPT).exists()

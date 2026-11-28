@@ -2917,6 +2917,26 @@ finally:
                 raise AssertionError("Existing first-boot namespace adopted")
             assert signed("verify") == policy
             print("PASS: authenticated installer first-boot namespace preparation; wrong generation and repeat refused", flush=True)
+            # Read-only repeat through the distinct committed resume selector.
+            # The pending-WAL scenario independently retains real SIGKILL
+            # evidence for the shared boot policy initializer.
+            retained = boot_receipt.read_bytes()
+            identity = ns.stat()
+            resume_pins = dict(**boot_pins, boot_receipt_sha256=policy["receipt_sha256"])
+            for field in ("boot_receipt_sha256", "generation_manifest_sha256"):
+                try:
+                    native._resume_authenticated_committed_dedicated_nginx(
+                        assets, **{**resume_pins, field: "0"*64})
+                except native.stage.WorkerStageError:
+                    pass
+                else:
+                    raise AssertionError("Foreign committed resume pin accepted")
+                assert boot_receipt.read_bytes() == retained
+                assert signed("verify") == policy
+            assert native._resume_authenticated_committed_dedicated_nginx(assets, **resume_pins) == policy
+            assert boot_receipt.read_bytes() == retained
+            assert (ns.stat().st_dev, ns.stat().st_ino) == (identity.st_dev, identity.st_ino)
+            print("PASS: authenticated committed same-boot intent repeat preserves exact receipt and namespace; foreign pins refused", flush=True)
         assert policy["boot_id"] == boot
         assert policy["generation"] == current["state_generation"]
         assert policy["generation_manifest_sha256"] == state_before[

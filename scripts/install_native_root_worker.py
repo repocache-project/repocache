@@ -1626,6 +1626,26 @@ def _prepare_authenticated_prepared_wal_dedicated_nginx(
                            wal_sha256=wal_sha256))
 
 
+_DEDICATED_COMMITTED_RESUME_CHILD = _DEDICATED_RECOVERY_CHILD.replace(
+    "transaction._recover_installed_prepared_dedicated(pins)",
+    "transaction._resume_installed_committed_dedicated(pins)")
+
+
+def _resume_authenticated_committed_dedicated_nginx(
+    assets: Path, *, commit: str, archive_sha256: str,
+    executable_receipt_sha256: str, profile_receipt_sha256: str,
+    generation_manifest_sha256: str, boot_receipt_sha256: str,
+) -> dict:
+    """Resume only an exact retained same-boot committed namespace intent."""
+    return _authenticated_prepared_dedicated_bridge(
+        assets, commit=commit, archive_sha256=archive_sha256,
+        prepare=True, resume_boot=True,
+        recovery_pins=dict(executable_receipt_sha256=executable_receipt_sha256,
+                           profile_receipt_sha256=profile_receipt_sha256,
+                           generation_manifest_sha256=generation_manifest_sha256,
+                           boot_receipt_sha256=boot_receipt_sha256))
+
+
 _DEDICATED_PENDING_RESUME_CHILD = _DEDICATED_RECOVERY_CHILD.replace(
     "transaction._recover_installed_prepared_dedicated(pins)",
     "transaction._resume_installed_prepared_wal_dedicated(pins)")
@@ -1639,7 +1659,7 @@ def _resume_authenticated_prepared_wal_dedicated_nginx(
     """Resume only the exact same-boot pending WAL namespace intent."""
     return _authenticated_prepared_dedicated_bridge(
         assets, commit=commit, archive_sha256=archive_sha256,
-        prepare=True, pending_prepare=True, resume_pending=True,
+        prepare=True, pending_prepare=True, resume_boot=True,
         recovery_pins=dict(executable_receipt_sha256=executable_receipt_sha256,
                            profile_receipt_sha256=profile_receipt_sha256,
                            generation_manifest_sha256=generation_manifest_sha256,
@@ -1710,13 +1730,13 @@ def _start_authenticated_prepared_wal_dedicated_nginx(
 def _authenticated_prepared_dedicated_bridge(
     assets: Path, *, commit: str, archive_sha256: str, recovery_pins: dict | None,
     prepare: bool = False, start: bool = False, rollover: bool = False,
-    pending_prepare: bool = False, resume_pending: bool = False,
+    pending_prepare: bool = False, resume_boot: bool = False,
     pending_start: bool = False, expected_rolled_pins: dict | None = None,
 ) -> dict:
     if (expected_rolled_pins is not None and recovery_pins is not None
             or type(prepare) is not bool or type(start) is not bool or type(rollover) is not bool
             or type(pending_prepare) is not bool or (pending_prepare and not prepare)
-            or type(resume_pending) is not bool or (resume_pending and (not pending_prepare or rollover))
+            or type(resume_boot) is not bool or (resume_boot and (not prepare or rollover))
             or type(pending_start) is not bool or (pending_start and not start)
             or (prepare and start) or (rollover and not prepare)
             or ((prepare or start) and recovery_pins is None)):
@@ -1729,7 +1749,7 @@ def _authenticated_prepared_dedicated_bridge(
         fields.add("previous_boot_receipt_sha256")
     if pending_prepare or pending_start:
         fields.add("wal_sha256")
-    if resume_pending:
+    if resume_boot:
         fields.add("boot_receipt_sha256")
 
     def validate_pins(pins):
@@ -1794,7 +1814,7 @@ def _authenticated_prepared_dedicated_bridge(
                     if (boot is None or hashlib.sha256(boot).hexdigest() !=
                             recovery_pins["previous_boot_receipt_sha256"]):
                         _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
-                elif resume_pending:
+                elif resume_boot:
                     if boot is None or hashlib.sha256(boot).hexdigest() != recovery_pins["boot_receipt_sha256"]:
                         _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
                 elif prepare:
@@ -1830,7 +1850,8 @@ def _authenticated_prepared_dedicated_bridge(
     try:
         result = subprocess.run(
             ("/usr/bin/python3", "-IS", "-B", "-c",
-             _DEDICATED_PENDING_RESUME_CHILD if resume_pending else
+             _DEDICATED_PENDING_RESUME_CHILD if resume_boot and pending_prepare else
+             _DEDICATED_COMMITTED_RESUME_CHILD if resume_boot else
              _DEDICATED_PENDING_ROLLOVER_CHILD if pending_prepare and rollover else
              _DEDICATED_PENDING_PREPARE_CHILD if pending_prepare else
              _DEDICATED_ROLLOVER_CHILD if rollover else
@@ -1871,7 +1892,7 @@ def _authenticated_prepared_dedicated_bridge(
                     or signatures.HEX64.fullmatch(report["receipt_sha256"]) is None
                     or (rollover and report["receipt_sha256"] ==
                         recovery_pins["previous_boot_receipt_sha256"])
-                    or (resume_pending and report["receipt_sha256"] != recovery_pins["boot_receipt_sha256"])):
+                    or (resume_boot and report["receipt_sha256"] != recovery_pins["boot_receipt_sha256"])):
                 _reject("NATIVE_DEDICATED_RECOVERY_CHILD_REFUSED")
         elif start:
             if (report.get("status") != (

@@ -2025,7 +2025,7 @@ def _prepare_owned_committed_boot_egress_locked(
     root_fd: int, state_fd: int, *, distribution: str, worker_uid: int,
     namespace_identity: tuple[int, int], profile_receipt_sha256: str,
     executable_receipt_sha256: str, recheck_namespace_owner, allow_prepare: bool,
-    allow_boot_rollover: bool = False,
+    allow_boot_rollover: bool = False, expected_existing_receipt: bytes | None = None,
 ) -> dict:
     """Connect committed generation evidence to the boot receipt candidate.
 
@@ -2035,7 +2035,10 @@ def _prepare_owned_committed_boot_egress_locked(
     """
     if (not callable(recheck_namespace_owner) or type(allow_prepare) is not bool
             or type(allow_boot_rollover) is not bool
-            or (allow_boot_rollover and not allow_prepare)):
+            or (allow_boot_rollover and not allow_prepare)
+            or (expected_existing_receipt is not None and (
+                type(expected_existing_receipt) is not bytes or not expected_existing_receipt
+                or not allow_prepare or allow_boot_rollover))):
         _deny("OWNED_BOOT_EGRESS_INPUT_INVALID")
     with _owned_committed_boot_egress_generation_locked(
             root_fd, state_fd, distribution=distribution, worker_uid=worker_uid,
@@ -2053,7 +2056,9 @@ def _prepare_owned_committed_boot_egress_locked(
             profile_receipt_sha256=profile_receipt_sha256,
             executable_receipt_sha256=executable_receipt_sha256,
             recheck_owned=owned, allow_prepare=allow_prepare,
-            allow_boot_rollover=allow_boot_rollover)
+            allow_boot_rollover=allow_boot_rollover,
+            **({"expected_previous_receipt": expected_existing_receipt}
+               if expected_existing_receipt is not None else {}))
         owned()
         return {**result, "generation_manifest_sha256": plan["generation_manifest_sha256"],
                 "committed_resources_verified": True,
@@ -3839,10 +3844,15 @@ def _prepare_installed_prepared_wal_dedicated(pins: dict) -> dict:
     return _installed_dedicated_lifecycle(pins, prepare=True, pending_prepare=True)
 
 
+def _resume_installed_committed_dedicated(pins: dict) -> dict:
+    """Private same-boot committed intent resume; no service effects."""
+    return _installed_dedicated_lifecycle(pins, prepare=True, resume_boot=True)
+
+
 def _resume_installed_prepared_wal_dedicated(pins: dict) -> dict:
     """Private same-boot pending intent resume; no service or catalog effects."""
     return _installed_dedicated_lifecycle(pins, prepare=True, pending_prepare=True,
-                                          resume_pending=True)
+                                          resume_boot=True)
 
 
 def _rollover_installed_prepared_wal_dedicated(pins: dict) -> dict:
@@ -3864,7 +3874,7 @@ def _start_installed_prepared_wal_dedicated(pins: dict) -> dict:
 
 def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = False,
                                    rollover: bool = False, pending_prepare: bool = False,
-                                   resume_pending: bool = False,
+                                   resume_boot: bool = False,
                                    pending_start: bool = False) -> dict:
     import zipimport
     from repocache.server_native_nginx_executable_v1 import (
@@ -3891,11 +3901,11 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
         digests.add("previous_boot_receipt_sha256")
     if pending_prepare or pending_start:
         digests.add("wal_sha256")
-    if resume_pending:
+    if resume_boot:
         digests.add("boot_receipt_sha256")
     if (type(prepare) is not bool or type(start) is not bool or type(rollover) is not bool
             or type(pending_prepare) is not bool or (pending_prepare and not prepare)
-            or type(resume_pending) is not bool or (resume_pending and (not pending_prepare or rollover))
+            or type(resume_boot) is not bool or (resume_boot and (not prepare or rollover))
             or type(pending_start) is not bool or (pending_start and not start)
             or (prepare and start) or (rollover and not prepare)
             or not isinstance(__loader__, zipimport.zipimporter)
@@ -4085,7 +4095,7 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
                            profile_receipt_sha256=pins["profile_receipt_sha256"],
                            executable_receipt_sha256=pins["executable_receipt_sha256"])
             stopped_owner()
-            if resume_pending:
+            if resume_boot:
                 # Never create a namespace or replace a receipt in this path.
                 # The lower-level primitive independently binds the exact saved
                 # canonical intent to the current boot, inode and closed policy.
@@ -4102,14 +4112,25 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
                     recheck_namespace()
 
                 resume_owner()
-                result = _resume_owned_prepared_wal_boot_egress_locked(
-                    root, state, **options, namespace_identity=identity,
-                    expected_wal=wal, recheck_stopped_owner=resume_owner)
+                if pending_prepare:
+                    result = _resume_owned_prepared_wal_boot_egress_locked(
+                        root, state, **options, namespace_identity=identity,
+                        expected_wal=wal, recheck_stopped_owner=resume_owner)
+                else:
+                    result = _prepare_owned_committed_boot_egress_locked(
+                        root, state, **options, namespace_identity=identity,
+                        recheck_namespace_owner=resume_owner, allow_prepare=True,
+                        expected_existing_receipt=saved)
                 resume_owner()
                 package()
-                observed = _verify_owned_prepared_wal_boot_egress_locked(
-                    root, state, **options, namespace_identity=identity,
-                    expected_wal=wal, recheck_stopped_owner=resume_owner)
+                if pending_prepare:
+                    observed = _verify_owned_prepared_wal_boot_egress_locked(
+                        root, state, **options, namespace_identity=identity,
+                        expected_wal=wal, recheck_stopped_owner=resume_owner)
+                else:
+                    observed = _prepare_owned_committed_boot_egress_locked(
+                        root, state, **options, namespace_identity=identity,
+                        recheck_namespace_owner=resume_owner, allow_prepare=False)
                 if (observed != result or result.get("receipt_sha256") != pins["boot_receipt_sha256"]
                         or result.get("generation_manifest_sha256") != pins["generation_manifest_sha256"]):
                     _deny("OWNED_DEDICATED_INSTALLER_RESULT_REFUSED")
