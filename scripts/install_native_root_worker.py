@@ -1749,6 +1749,26 @@ def _prepare_authenticated_committed_dedicated_storage(
                            boot_receipt_sha256=boot_receipt_sha256))
 
 
+_DEDICATED_RUNTIME_CHILD = _DEDICATED_RECOVERY_CHILD.replace(
+    "transaction._recover_installed_prepared_dedicated(pins)",
+    "transaction._prepare_installed_committed_dedicated_runtime(pins)")
+
+
+def _prepare_authenticated_committed_dedicated_runtime(
+    assets: Path, *, commit: str, archive_sha256: str,
+    executable_receipt_sha256: str, profile_receipt_sha256: str,
+    generation_manifest_sha256: str, boot_receipt_sha256: str,
+) -> dict:
+    """Private stopped committed runtime placement, never service activation."""
+    return _authenticated_prepared_dedicated_bridge(
+        assets, commit=commit, archive_sha256=archive_sha256,
+        prepare_runtime=True,
+        recovery_pins=dict(executable_receipt_sha256=executable_receipt_sha256,
+                           profile_receipt_sha256=profile_receipt_sha256,
+                           generation_manifest_sha256=generation_manifest_sha256,
+                           boot_receipt_sha256=boot_receipt_sha256))
+
+
 def _start_authenticated_committed_dedicated_nginx(
     assets: Path, *, commit: str, archive_sha256: str,
     executable_receipt_sha256: str, profile_receipt_sha256: str,
@@ -1794,7 +1814,7 @@ def _authenticated_prepared_dedicated_bridge(
     pending_prepare: bool = False, resume_boot: bool = False,
     pending_start: bool = False, expected_rolled_pins: dict | None = None,
     stage_profile: bool = False, load_profile: bool = False,
-    prepare_storage: bool = False,
+    prepare_storage: bool = False, prepare_runtime: bool = False,
 ) -> dict:
     if (expected_rolled_pins is not None and recovery_pins is not None
             or type(prepare) is not bool or type(start) is not bool or type(rollover) is not bool
@@ -1807,6 +1827,8 @@ def _authenticated_prepared_dedicated_bridge(
                 not prepare or rollover or pending_prepare or resume_boot or stage_profile))
             or type(prepare_storage) is not bool or (prepare_storage and (
                 prepare or start or recovery_pins is None or expected_rolled_pins is not None))
+            or type(prepare_runtime) is not bool or (prepare_runtime and (
+                prepare or start or prepare_storage or recovery_pins is None or expected_rolled_pins is not None))
             or (prepare and start) or (rollover and not prepare)
             or (prepare and recovery_pins is None)
             or (start and recovery_pins is None and
@@ -1815,7 +1837,7 @@ def _authenticated_prepared_dedicated_bridge(
     rolled_start = start and recovery_pins is None
     fields = {"executable_receipt_sha256", "profile_receipt_sha256"} | (
         {"generation_manifest_sha256"} if prepare else
-        {"generation_manifest_sha256", "boot_receipt_sha256"} if start or prepare_storage else
+        {"generation_manifest_sha256", "boot_receipt_sha256"} if start or prepare_storage or prepare_runtime else
         {"boot_receipt_sha256", "wal_sha256"})
     if stage_profile:
         fields.remove("profile_receipt_sha256")
@@ -1867,7 +1889,7 @@ def _authenticated_prepared_dedicated_bridge(
                 if expected_rolled_pins is not None and recovery_pins != expected_rolled_pins:
                     _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
             validate_pins(recovery_pins)
-            if prepare or start or prepare_storage:
+            if prepare or start or prepare_storage or prepare_runtime:
                 from repocache.server_native_v2_transaction_v1 import (
                     _OWNED_MANIFEST, _OWNED_LIMIT, _OWNED_WAL_TMP,
                 )
@@ -1945,6 +1967,7 @@ def _authenticated_prepared_dedicated_bridge(
              _DEDICATED_PENDING_START_CHILD if pending_start else
              _DEDICATED_ROLLED_START_CHILD if rolled_start else
              _DEDICATED_STORAGE_CHILD if prepare_storage else
+             _DEDICATED_RUNTIME_CHILD if prepare_runtime else
              _DEDICATED_START_CHILD if start else _DEDICATED_RECOVERY_CHILD),
             input=json.dumps(pins, sort_keys=True).encode("ascii"),
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd="/",
@@ -2009,11 +2032,16 @@ def _authenticated_prepared_dedicated_bridge(
                         recovery_pins["previous_boot_receipt_sha256"])
                     or (resume_boot and report["receipt_sha256"] != recovery_pins["boot_receipt_sha256"])):
                 _reject("NATIVE_DEDICATED_RECOVERY_CHILD_REFUSED")
-        elif prepare_storage:
+        elif prepare_storage or prepare_runtime:
             from repocache.server_native_v2_transaction_v1 import (
                 _closed_committed_dedicated_storage_report,
             )
-            if (report.get("status") != "OWNED_DEDICATED_COMMITTED_STORAGE_PREPARED"
+            expected_status = ("OWNED_DEDICATED_COMMITTED_RUNTIME_PREPARED" if prepare_runtime
+                               else "OWNED_DEDICATED_COMMITTED_STORAGE_PREPARED")
+            if (report.get("status") != expected_status
+                    or (prepare_runtime and (type(report.get("scratch_count")) is not int
+                                             or report["scratch_count"] != 5))
+                    or (prepare_storage and "scratch_count" in report)
                     or any(report.get(key) != recovery_pins[key] for key in fields)
                     or not _closed_committed_dedicated_storage_report(report.get("storage"))
                     or report.get("authorizes_systemctl") is not False

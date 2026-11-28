@@ -3326,10 +3326,52 @@ finally:
                 assert file_identity(path) == ident
                 os.setxattr(fd, "security.selinux", b"system_u:object_r:repocache_nginx_ro_t:s0\0")
                 assert os.getxattr(fd, "security.selinux").rstrip(b"\0") == b"system_u:object_r:repocache_nginx_ro_t:s0"
-            runtime.mkdir(mode=0o755)
-            require("/usr/bin/chcon", "-t", "repocache_nginx_pid_t", str(runtime))
-            assert signed("prepare-committed-runtime")=={
-                "scratch_count":5,"authorizes_nginx_activation":False}
+            if pending:
+                runtime.mkdir(mode=0o755)
+                require("/usr/bin/chcon", "-t", "repocache_nginx_pid_t", str(runtime))
+                assert signed("prepare-committed-runtime")=={
+                    "scratch_count":5,"authorizes_nginx_activation":False}
+            else:
+                # Refuse an incomplete parent and preserve the exact inode.
+                runtime.mkdir(mode=0o700)
+                partial_identity = file_identity(runtime)
+                try:
+                    native._prepare_authenticated_committed_dedicated_runtime(assets, **storage_pins)
+                except native.stage.WorkerStageError:
+                    pass
+                else:
+                    raise AssertionError("Incomplete runtime parent adopted")
+                assert file_identity(runtime) == partial_identity and not list(runtime.iterdir())
+                assert stat.S_IMODE(runtime.stat().st_mode) == 0o700
+                runtime.rmdir()  # Only our empty disposable negative-test directory.
+                for field in ("executable_receipt_sha256", "profile_receipt_sha256",
+                              "generation_manifest_sha256", "boot_receipt_sha256"):
+                    try:
+                        native._prepare_authenticated_committed_dedicated_runtime(
+                            assets, **{**storage_pins, field: "0"*64})
+                    except native.stage.WorkerStageError:
+                        pass
+                    else:
+                        raise AssertionError("Foreign runtime pin accepted")
+                    assert not os.path.lexists(runtime)
+                    require_prior_resources()
+                    require_status(OWN, False, False)
+                runtime_report = native._prepare_authenticated_committed_dedicated_runtime(
+                    assets, **storage_pins)
+                assert runtime_report["status"] == "OWNED_DEDICATED_COMMITTED_RUNTIME_PREPARED"
+                assert runtime_report["scratch_count"] == 5
+                assert runtime_report["storage"] == prepared_storage
+                assert runtime_report["authorizes_nginx_activation"] is False
+                assert runtime_report["authorizes_catalog_publication"] is False
+                assert runtime_report["authorizes_systemctl"] is False
+                original_runtime = fixture_snapshot_dedicated_runtime()
+                assert native._prepare_authenticated_committed_dedicated_runtime(
+                    assets, **storage_pins) == runtime_report
+                assert fixture_snapshot_dedicated_runtime() == original_runtime
+                require_prior_resources()
+                require_status(OWN, False, False)
+                require_status(VENDOR, False, False)
+                print("PASS: authenticated committed runtime placement, exact scratch repeat and foreign/partial refusal", flush=True)
             runtime_snapshot = fixture_snapshot_dedicated_runtime()
             require_prior_resources()
             assert signed("verify") == result

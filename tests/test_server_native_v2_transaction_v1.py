@@ -4478,7 +4478,9 @@ def test_installed_dedicated_recovery_refuses_source_loader_before_host_access(m
                                    "storage", "storage-wal", "storage-boot", "storage-service",
                                    "storage-policy", "storage-drift", "storage-result",
                                    "storage-readback", "storage-int-report",
-                                   "storage-int-readback"])
+                                   "storage-int-readback", "runtime", "runtime-wal",
+                                   "runtime-boot", "runtime-service", "runtime-policy",
+                                   "runtime-storage", "runtime-drift", "runtime-readback"])
 def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, monkeypatch, fault):
     """Actual protected files and flock; loader/host/package/runtime observations simulated."""
     import fcntl
@@ -4536,7 +4538,8 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
     preparing = (fault.startswith("prepare") or rolling or pending_first or resuming
                  or staging_profile or loading_profile)
     loaded = fault == "profile-load-repeat"
-    storage_prep = fault.startswith("storage")
+    runtime_prep = fault.startswith("runtime")
+    storage_prep = fault.startswith("storage") or runtime_prep
     starting = fault.startswith("start") or pending_start or storage_prep
     active_repeat = fault.startswith("start-repeat")
     manifest = b"exact committed manifest"
@@ -4572,7 +4575,7 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
             pins["boot_receipt_sha256"] = ("0"*64 if fault in ("pending-resume-boot", "committed-resume-boot")
                                             else hashlib.sha256(boot).hexdigest())
     if starting:
-        if not pending_start and fault not in ("start-repeat-wal", "storage-wal"):
+        if not pending_start and fault not in ("start-repeat-wal", "storage-wal", "runtime-wal"):
             (state_path / native._OWNED_WAL).unlink()
         pins["generation_manifest_sha256"] = ("0"*64 if fault == "start-manifest"
                                                else hashlib.sha256(manifest).hexdigest())
@@ -4581,7 +4584,7 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
                 pins["wal_sha256"] = "0"*64
         elif fault != "start-mixed":
             del pins["wal_sha256"]
-        if fault in ("start-boot", "pending-start-boot", "start-repeat-boot", "storage-boot"):
+        if fault in ("start-boot", "pending-start-boot", "start-repeat-boot", "storage-boot", "runtime-boot"):
             pins["boot_receipt_sha256"] = "0"*64
     class Loader:
         archive = worker._WORKER
@@ -4616,7 +4619,7 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
             assert (preparing or starting) and argv[2] in (native._UNIT, native._OWNED_WAL_DOMAIN)
             assert argv[1] in ("is-active", "is-enabled")
             if argv[1] == "is-active":
-                active = fault in ("prepare-service", "start-service", "profile-stage-service", "profile-load-service", "storage-service")
+                active = fault in ("prepare-service", "start-service", "profile-stage-service", "profile-load-service", "storage-service", "runtime-service")
                 return SimpleNamespace(returncode=0 if active else 3,
                                        stdout=b"active\n" if active else b"inactive\n")
             return SimpleNamespace(returncode=1, stdout=b"disabled\n")
@@ -4747,13 +4750,14 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
             assert kw["allow_prepare"] is False and kw["namespace_identity"] == (31, 41)
             kw["recheck_namespace_owner"]()
             calls.append("policy")
-            return {"receipt_sha256": "0"*64 if fault == "storage-policy" else pins["boot_receipt_sha256"],
+            return {"receipt_sha256": "0"*64 if fault in ("storage-policy", "runtime-policy") else pins["boot_receipt_sha256"],
                     "generation_manifest_sha256": pins["generation_manifest_sha256"],
                     "committed_resources_verified": True, "authorizes_nginx_activation": False,
                     "authorizes_catalog_publication": False}
         monkeypatch.setattr(native, "_prepare_owned_committed_boot_egress_locked", verify_policy)
         def prepare_storage(dist, document, *, allow_create):
             assert dist == "almalinux"
+            assert not runtime_prep or not allow_create
             calls.append("create" if allow_create else "read")
             contender = os.open(state_path / LOCK_NAME, os.O_RDONLY)
             try:
@@ -4768,8 +4772,47 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
                         1 if fault == "storage-int-report" or (
                             fault == "storage-int-readback" and not allow_create)
                         else not (fault == "storage-readback" and not allow_create)),
-                    "actual_service_write_verified": fault == "storage-result"}
+                    "actual_service_write_verified": fault in ("storage-result", "runtime-storage")}
         monkeypatch.setattr(storage, "prepare_dedicated_candidate_storage", prepare_storage)
+        if runtime_prep:
+            scratch = (("runtime",), {str(i): i for i in range(5)})
+            def runtime_prepare(root, *, recheck_owned):
+                calls.append("runtime")
+                contender = os.open(state_path / LOCK_NAME, os.O_RDONLY)
+                try:
+                    with pytest.raises(BlockingIOError):
+                        fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                finally:
+                    os.close(contender)
+                recheck_owned()
+                if fault == "runtime-drift":
+                    resources[native._CATALOG] = b"changed"
+                    recheck_owned()
+                return scratch
+            def runtime_verify(*a, **kw):
+                assert kw == {"dedicated": True, "inactive": True}
+                calls.append("runtime-read")
+                return (("foreign",), {}) if fault == "runtime-readback" else scratch
+            monkeypatch.setattr(native, "_prepare_owned_dedicated_runtime_locked", runtime_prepare)
+            monkeypatch.setattr(native, "_owned_alma_runtime_temps", runtime_verify)
+            if fault == "runtime":
+                report = native._prepare_installed_committed_dedicated_runtime(pins)
+                assert report["scratch_count"] == 5
+                assert report["status"] == "OWNED_DEDICATED_COMMITTED_RUNTIME_PREPARED"
+            else:
+                with pytest.raises(native.NativeV2TransactionError):
+                    native._prepare_installed_committed_dedicated_runtime(pins)
+            assert calls == {
+                "runtime": ["policy", "read", "runtime", "read", "policy", "runtime-read"],
+                "runtime-wal": [], "runtime-boot": [], "runtime-service": [],
+                "runtime-policy": ["policy"], "runtime-storage": ["policy", "read"],
+                "runtime-drift": ["policy", "read", "runtime"],
+                "runtime-readback": ["policy", "read", "runtime", "read", "policy", "runtime-read"],
+            }[fault]
+            assert (state_path / egress._BOOT_EGRESS_RECEIPT).read_bytes() == boot
+            with real_locked(rootfd, 0):
+                pass
+            return
         if fault == "storage":
             result = native._prepare_installed_committed_dedicated_storage(pins)
             assert result["status"] == "OWNED_DEDICATED_COMMITTED_STORAGE_PREPARED"
@@ -5108,3 +5151,103 @@ def test_retained_rolled_committed_selection_reconstructs_from_real_protected_by
         assert _fixture_resource_bytes(paths) == resources
     if fault != "history-drift":
         assert {p.name: p.read_bytes() for p in state.iterdir()} == before
+
+
+@pytest.mark.parametrize("fault", ["fresh", "repeat", "partial", "foreign-label",
+                                   "symlink", "unsafe-run", "unsafe-parent", "xattr",
+                                   "mount", "permissive", "label-failure", "drift",
+                                   "readback", "foreign-content"])
+def test_prepare_owned_dedicated_runtime_parent_is_fresh_only(tmp_path, monkeypatch, fault):
+    """Real descriptors and scratch creation; mock only labels and host observations."""
+    from types import SimpleNamespace
+
+    run = tmp_path / "run"
+    run.mkdir(mode=0o755)
+    runtime = run / "repocache-nginx"
+    pid_context = b"system_u:object_r:repocache_nginx_pid_t:s0"
+    rw_context = b"system_u:object_r:repocache_nginx_rw_t:s0"
+    legacy = b"system_u:object_r:var_run_t:s0"
+    names = sorted(name for _, name in native._OWNED_RUNTIME_TEMP_NAMES)
+    existing = fault in ("repeat", "partial", "foreign-label", "unsafe-parent",
+                         "xattr", "mount", "foreign-content")
+    if existing:
+        runtime.mkdir(mode=0o755)
+        runtime.chmod(0o700 if fault == "partial" else 0o775 if fault == "unsafe-parent" else 0o755)
+    if fault == "symlink":
+        runtime.symlink_to(tmp_path, target_is_directory=True)
+    if fault == "unsafe-run":
+        run.chmod(0o777)
+    if fault == "foreign-content":
+        (runtime / "retain").write_bytes(b"foreign")
+    values = {runtime.stat().st_ino: legacy if fault == "foreign-label" else pid_context} if existing else {}
+    if fault == "repeat":
+        for name in names:
+            leaf = runtime / name
+            leaf.mkdir(mode=0o700)
+            os.chown(leaf, 33, 0)
+            values[leaf.stat().st_ino] = rw_context
+    writes = []
+
+    def labels(distribution, *, dedicated):
+        assert distribution == "almalinux" and dedicated is True
+        if fault == "permissive":
+            raise native.InstalledStorageError("SELINUX_NOT_ENFORCING")
+        return SimpleNamespace(check=lambda fd: None, finish=lambda: None)
+
+    def inode(fd):
+        return os.fstat(fd).st_ino
+
+    def listxattr(fd):
+        return ["security.selinux", "user.foreign"] if (
+            fault == "xattr" and inode(fd) == runtime.stat().st_ino) else ["security.selinux"]
+
+    def setxattr(fd, key, value):
+        assert key == "security.selinux" and value.rstrip(b"\x00") in (pid_context, rw_context)
+        assert os.fstat(fd).st_uid == 0
+        writes.append(inode(fd))
+        if fault == "label-failure":
+            raise OSError("fixture label failure")
+        values[inode(fd)] = value
+
+    real_mount = native._mount
+    real_scratch = native._owned_alma_runtime_temps
+
+    def mount(fd):
+        return "foreign" if fault == "mount" and inode(fd) == runtime.stat().st_ino else real_mount(fd)
+
+    def owner():
+        if fault == "drift" and writes:
+            native._deny("OWNED_LIVE_RESOURCE_DRIFT")
+
+    def scratch(*a, **kw):
+        result = real_scratch(*a, **kw)
+        if fault == "readback" and not kw.get("allow_create"):
+            return (result[0], {})
+        return result
+
+    monkeypatch.setattr(native, "_Labels", labels)
+    monkeypatch.setattr(native.pwd, "getpwnam", lambda name: SimpleNamespace(pw_uid=33))
+    monkeypatch.setattr(native.os, "listxattr", listxattr)
+    monkeypatch.setattr(native.os, "getxattr", lambda fd, key: values.get(inode(fd), legacy))
+    monkeypatch.setattr(native.os, "setxattr", setxattr)
+    monkeypatch.setattr(native, "_mount", mount)
+    monkeypatch.setattr(native, "_owned_alma_runtime_temps", scratch)
+    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        if fault in ("fresh", "repeat"):
+            first = native._prepare_owned_dedicated_runtime_locked(fd, recheck_owned=owner)
+            assert set(first[1]) == set(names)
+            assert native._prepare_owned_dedicated_runtime_locked(fd, recheck_owned=owner) == first
+            assert len(writes) == (6 if fault == "fresh" else 0)
+            assert stat.S_IMODE(runtime.stat().st_mode) == 0o755
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                native._prepare_owned_dedicated_runtime_locked(fd, recheck_owned=owner)
+            assert len(writes) == (6 if fault == "readback" else 1 if fault in (
+                "label-failure", "drift") else 0)
+            if fault == "foreign-content":
+                assert (runtime / "retain").read_bytes() == b"foreign"
+            if fault == "partial":
+                assert stat.S_IMODE(runtime.stat().st_mode) == 0o700
+    finally:
+        os.close(fd)

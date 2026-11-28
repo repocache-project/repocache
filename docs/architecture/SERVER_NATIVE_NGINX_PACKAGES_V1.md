@@ -1792,3 +1792,22 @@ roots are read-only on repeat. Partial effects remain governed by the
 existing storage ownership and refusal contract; no speculative cleanup.
 The disposable committed VM still explicitly archives its empty legacy
 fixture roots; this does not implement a production storage migration.
+
+
+### Authenticated committed dedicated runtime preparation
+
+After the exact dedicated storage and boot namespace policy are verified,
+the private signed installer may prepare the fixed boot-local runtime
+parent and five empty scratch leaves while both NGINX services remain
+stopped and disabled. Open /run and the fixed child without following
+symlinks; verify root ownership, mount identity, permissions and SELinux
+enforcing. Create a new parent in mode 0700, assign only its descriptor
+the exact dedicated PID context, then publish mode 0755. Never relabel,
+chmod, chown or remove an existing parent. Reject an incomplete parent,
+foreign entries and invalid labels, use the existing scratch primitive,
+and recheck all identities and the committed policy and storage. A repeat
+with exact existing leaves performs no file writes. No service start,
+enablement, migration, catalog publication or arbitrary path authority.
+The committed VM exercises the authenticated path; pending recovery still
+uses the isolated fixture. A partial parent is retained for explicit
+diagnosis; no automatic destructive cleanup or production repair authority.

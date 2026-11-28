@@ -833,7 +833,9 @@ def test_executable_candidate_selects_retained_native_effects_lock(
                                    "profile-load-manifest", "profile-load-report",
                                    "profile-load-authority", "storage", "storage-wal",
                                    "storage-boot", "storage-manifest", "storage-report",
-                                   "storage-authority", "storage-int-report"])
+                                   "storage-authority", "storage-int-report",
+                                   "runtime", "runtime-wal", "runtime-boot",
+                                   "runtime-manifest", "runtime-report", "runtime-authority"])
 def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, tmp_path, fault):
     from contextlib import contextmanager
     from types import SimpleNamespace
@@ -884,17 +886,18 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
         from repocache.server_native_nginx_effective_unit_v1 import _NAMESPACE_PROFILE_RECEIPT
         (state / _NAMESPACE_PROFILE_RECEIPT).touch()
     rolled_start = fault.startswith("rolled-start")
-    storage = fault.startswith("storage")
+    runtime = fault.startswith("runtime")
+    storage = fault.startswith("storage") or runtime
     starting = fault.startswith("start") or pending_start or rolled_start or storage
     manifest = b"committed manifest"
     boot = b"exact boot"
     monkeypatch.setattr(egress, "_read_boot_egress_receipt",
-                        lambda *a, **kw: b"existing boot" if fault in ("prepare-boot", "start-boot", "rollover-boot", "pending-prepare-boot", "pending-resume-boot", "pending-start-boot", "committed-resume-boot", "profile-stage-boot", "profile-load-boot", "storage-boot")
+                        lambda *a, **kw: b"existing boot" if fault in ("prepare-boot", "start-boot", "rollover-boot", "pending-prepare-boot", "pending-resume-boot", "pending-start-boot", "committed-resume-boot", "profile-stage-boot", "profile-load-boot", "storage-boot", "runtime-boot")
                         else boot if starting or rolling or resuming else None)
     def read(fd, name, uid, limit):
         assert locked
         if name == tx._OWNED_MANIFEST:
-            return b"foreign" if fault in ("prepare-manifest", "profile-stage-manifest", "profile-load-manifest", "storage-manifest") else manifest
+            return b"foreign" if fault in ("prepare-manifest", "profile-stage-manifest", "profile-load-manifest", "storage-manifest", "runtime-manifest") else manifest
         if name == tx._OWNED_WAL_TMP:
             return None
         if name == install._RUNTIME_RECEIPT:
@@ -904,7 +907,7 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
                 return (None if fault.endswith("-missing-wal") else
                         b"foreign WAL" if fault.endswith("-wal") else wal)
             return None if (fault == "wal" or (preparing and fault not in ("prepare-wal", "rollover-wal", "committed-resume-wal", "profile-stage-wal", "profile-load-wal"))
-                            or (starting and fault not in ("start-wal", "rolled-start-wal", "storage-wal"))) else wal
+                            or (starting and fault not in ("start-wal", "rolled-start-wal", "storage-wal", "runtime-wal"))) else wal
         assert name == marker
         return b""
     monkeypatch.setattr(install, "_read_file", read)
@@ -935,6 +938,7 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
                         install._DEDICATED_PREPARE_CHILD if preparing else
                         install._DEDICATED_PENDING_START_CHILD if pending_start else
                         install._DEDICATED_ROLLED_START_CHILD if rolled_start else
+                        install._DEDICATED_RUNTIME_CHILD if runtime else
                         install._DEDICATED_STORAGE_CHILD if storage else
                         install._DEDICATED_START_CHILD if starting else install._DEDICATED_RECOVERY_CHILD)
         compile(argv[-1], "<fixed-recovery-child>", "exec")
@@ -998,13 +1002,15 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
             assert data["generation_manifest_sha256"] == hashlib.sha256(manifest).hexdigest()
             assert data["boot_receipt_sha256"] == hashlib.sha256(boot).hexdigest()
             assert "wal_sha256" not in data
-            report = {"status": "OWNED_DEDICATED_COMMITTED_STORAGE_PREPARED",
+            report = {"status": ("OWNED_DEDICATED_COMMITTED_RUNTIME_PREPARED" if runtime
+                                 else "OWNED_DEDICATED_COMMITTED_STORAGE_PREPARED"),
+                      **({"scratch_count": True if fault == "runtime-report" else 5} if runtime else {}),
                       **{key: data[key] for key in ("generation_manifest_sha256",
                             "boot_receipt_sha256", "profile_receipt_sha256", "executable_receipt_sha256")},
                       "storage": {"repository_cache_roots_verified": [], "metrics_file_verified": False,
                                   "selinux_enforcing_labels_verified": 1 if fault == "storage-int-report" else True,
                                   "actual_service_write_verified": fault == "storage-report"},
-                      "authorizes_systemctl": fault == "storage-authority",
+                      "authorizes_systemctl": fault in ("storage-authority", "runtime-authority"),
                       "authorizes_nginx_activation": False, "authorizes_catalog_publication": False}
         elif starting:
             assert data["generation_manifest_sha256"] == hashlib.sha256(manifest).hexdigest()
@@ -1077,6 +1083,7 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
         if pending_start:
             start_pins["wal_sha256"] = hashlib.sha256(wal).hexdigest()
         invoke = (install._start_authenticated_prepared_wal_dedicated_nginx if pending_start
+                  else install._prepare_authenticated_committed_dedicated_runtime if runtime
                   else install._prepare_authenticated_committed_dedicated_storage if storage
                   else install._start_authenticated_committed_dedicated_nginx)
         if rolled_start:
@@ -1096,8 +1103,11 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
             else:
                 with pytest.raises(stage.WorkerStageError):
                     invoke_rolled()
-        elif fault == "storage":
-            assert invoke(tmp_path, **start_pins)["storage"]["selinux_enforcing_labels_verified"]
+        elif fault in ("storage", "runtime"):
+            report = invoke(tmp_path, **start_pins)
+            assert report["storage"]["selinux_enforcing_labels_verified"]
+            if runtime:
+                assert report["scratch_count"] == 5
         elif fault in ("start", "pending-start"):
             assert invoke(tmp_path, **start_pins)["catalog_observed"] is (not pending_start)
         else:
@@ -1145,7 +1155,8 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
                                                "profile-stage-manifest", "profile-stage-existing",
                                                "profile-load-wal", "profile-load-boot",
                                                "profile-load-manifest", "storage-wal",
-                                               "storage-boot", "storage-manifest") else
+                                               "storage-boot", "storage-manifest",
+                                               "runtime-wal", "runtime-boot", "runtime-manifest") else
                      ["release", "rpm"] if fault == "package" else
                      ["release", "history"] if fault in ("rolled-refusal", "rolled-pins-changed",
                                                            "rolled-start-changed", "rolled-start-wal") else

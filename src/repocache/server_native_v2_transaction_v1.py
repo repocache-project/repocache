@@ -1653,6 +1653,97 @@ def _owned_alma_runtime_temps(root_fd: int, *, dedicated: bool,
         _deny(code)
 
 
+def _prepare_owned_dedicated_runtime_locked(root_fd: int, *, recheck_owned) -> tuple:
+    """Prepare only the fixed boot-local parent and empty dedicated scratch.
+
+    The authenticated stopped-service caller retains the state lock. Never
+    change an existing parent, adopt a partial parent or remove any inode.
+    The existing scratch primitive verifies all leaves before creating any.
+    """
+    code = "OWNED_CONTEXT_RUNTIME_TEMP_UNVERIFIED"
+    if not callable(recheck_owned):
+        _deny(code)
+
+    def identity(info):
+        return info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid
+
+    context = b"system_u:object_r:repocache_nginx_pid_t:s0"
+    try:
+        labels = _Labels("almalinux", dedicated=True)
+        recheck_owned()
+        with ExitStack() as stack:
+            run = os.open("run", _DIRECTORY_FLAGS, dir_fd=root_fd)
+            stack.callback(os.close, run)
+            run_info = os.fstat(run)
+            run_mount = _mount(run)
+
+            def guard_run():
+                recheck_owned()
+                if (run_info.st_uid != 0 or run_info.st_gid != 0
+                        or run_info.st_mode & 0o022
+                        or identity(os.fstat(run)) != identity(run_info)
+                        or identity(os.stat("run", dir_fd=root_fd, follow_symlinks=False)) != identity(run_info)
+                        or _mount(run) != run_mount
+                        or os.fstatvfs(run).f_flag & os.ST_RDONLY):
+                    _deny(code)
+                labels.check(run)
+
+            guard_run()
+            fresh = False
+            try:
+                runtime = os.open("repocache-nginx", _DIRECTORY_FLAGS, dir_fd=run)
+            except FileNotFoundError:
+                guard_run()
+                os.mkdir("repocache-nginx", 0o700, dir_fd=run)
+                runtime = os.open("repocache-nginx", _DIRECTORY_FLAGS, dir_fd=run)
+                fresh = True
+            stack.callback(os.close, runtime)
+            initial = os.fstat(runtime)
+
+            def guard_runtime(mode):
+                guard_run()
+                current = os.fstat(runtime)
+                if (not stat.S_ISDIR(current.st_mode)
+                        or (current.st_dev, current.st_ino) != (initial.st_dev, initial.st_ino)
+                        or (current.st_uid, current.st_gid, stat.S_IMODE(current.st_mode)) != (0, 0, mode)
+                        or identity(os.stat("repocache-nginx", dir_fd=run, follow_symlinks=False)) != identity(current)
+                        or _mount(runtime) != run_mount
+                        or os.fstatvfs(runtime).f_flag & os.ST_RDONLY
+                        or set(os.listxattr(runtime)) != {"security.selinux"}):
+                    _deny(code)
+                return current
+
+            if fresh:
+                guard_runtime(0o700)
+                if os.listdir(runtime):
+                    _deny(code)
+                os.setxattr(runtime, "security.selinux", context + b"\x00")
+                guard_runtime(0o700)
+                if os.getxattr(runtime, "security.selinux").rstrip(b"\x00") != context or os.listdir(runtime):
+                    _deny(code)
+                os.fchmod(runtime, 0o755)
+                os.fsync(runtime)
+                os.fsync(run)
+            guard_runtime(0o755)
+            if os.getxattr(runtime, "security.selinux").rstrip(b"\x00") != context:
+                _deny(code)
+            prepared = _owned_alma_runtime_temps(root_fd, dedicated=True, allow_create=True, inactive=True)
+            guard_runtime(0o755)
+            if (_owned_alma_runtime_temps(root_fd, dedicated=True, inactive=True) != prepared
+                    or prepared[0] != identity(os.fstat(runtime)) + (context,)
+                    or set(prepared[1]) != {name for _, name in _OWNED_RUNTIME_TEMP_NAMES}):
+                _deny(code)
+            guard_runtime(0o755)
+            if os.getxattr(runtime, "security.selinux").rstrip(b"\x00") != context:
+                _deny(code)
+            labels.finish()
+            return prepared
+    except NativeV2TransactionError:
+        raise
+    except (InstalledStorageError, OSError, ValueError, KeyError, TypeError):
+        _deny(code)
+
+
 def _verify_owned_alma_runtime_service_view(pid: int, expected: tuple) -> None:
     """Compare the signed master's private mount view with retained host leaves."""
     code = "OWNED_CONTEXT_RUNTIME_TEMP_UNVERIFIED"
@@ -3980,6 +4071,11 @@ def _prepare_installed_committed_dedicated_storage(pins: dict) -> dict:
     return _installed_dedicated_lifecycle(pins, prepare=False, prepare_storage=True)
 
 
+def _prepare_installed_committed_dedicated_runtime(pins: dict) -> dict:
+    """Private authenticated stopped runtime placement; no service effects."""
+    return _installed_dedicated_lifecycle(pins, prepare=False, prepare_runtime=True)
+
+
 def _start_installed_committed_dedicated(pins: dict) -> dict:
     """Private signed-installer start of an independently prepared profile."""
     return _installed_dedicated_lifecycle(pins, prepare=False, start=True)
@@ -4002,7 +4098,8 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
                                    pending_start: bool = False, active_repeat: bool = False,
                                    stage_profile: bool = False,
                                    load_profile: bool = False,
-                                   prepare_storage: bool = False) -> dict:
+                                   prepare_storage: bool = False,
+                                   prepare_runtime: bool = False) -> dict:
     import zipimport
     from repocache.server_native_nginx_executable_v1 import (
         signed_owned_nginx_policy_candidate, verify_nginx_candidate_receipt,
@@ -4022,7 +4119,7 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
                "native_payload_sha256", "binary_sha256", "executable_receipt_sha256",
                "profile_receipt_sha256"} | (
         {"generation_manifest_sha256"} if prepare else
-        {"generation_manifest_sha256", "boot_receipt_sha256"} if start or prepare_storage else
+        {"generation_manifest_sha256", "boot_receipt_sha256"} if start or prepare_storage or prepare_runtime else
         {"boot_receipt_sha256", "wal_sha256"})
     if stage_profile:
         digests.remove("profile_receipt_sha256")
@@ -4042,6 +4139,7 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
             or type(load_profile) is not bool or (load_profile and (
                 not prepare or rollover or pending_prepare or resume_boot or stage_profile))
             or type(prepare_storage) is not bool or (prepare_storage and (prepare or start))
+            or type(prepare_runtime) is not bool or (prepare_runtime and (prepare or start or prepare_storage))
             or (prepare and start) or (rollover and not prepare)
             or not isinstance(__loader__, zipimport.zipimporter)
             or __loader__.archive != worker or not sys.flags.isolated
@@ -4127,7 +4225,7 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
             if (manifest is None or hashlib.sha256(manifest).hexdigest() !=
                     pins["generation_manifest_sha256"]):
                 _deny("OWNED_DEDICATED_INSTALLER_PIN_REFUSED")
-        elif prepare or start or prepare_storage:
+        elif prepare or start or prepare_storage or prepare_runtime:
             with _owned_layout_locked(root, state, recovering=False) as layout:
                 old = _read_owned_resources(*layout[:3])
                 manifest = old[_OWNED_MANIFEST]
@@ -4433,7 +4531,7 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
                 _deny("OWNED_DEDICATED_INSTALLER_PROFILE_REFUSED")
             recheck_namespace()
 
-        if prepare_storage:
+        if prepare_storage or prepare_runtime:
             from repocache.server_native_nginx_effective_unit_v1 import (
                 inspect_signed_owned_namespace_unit,
             )
@@ -4443,9 +4541,10 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
             if doc["deployment"]["listen"]["bind_address"] != "127.0.0.1":
                 _deny("OWNED_DEDICATED_INSTALLER_PIN_REFUSED")
 
-            def stopped_storage_owner():
+            def stopped_storage_owner(*, audit_package=True):
                 guard()
-                package()
+                if audit_package:
+                    package()
                 require_disabled_unit(_UNIT, inactive=True)
                 require_disabled_unit(_OWNED_WAL_DOMAIN, inactive=True)
                 with _owned_layout_locked(root, state, recovering=False) as layout:
@@ -4463,11 +4562,11 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
             if stopped.get("main_pid_observed") != 0:
                 _deny("OWNED_DEDICATED_RECOVERY_SERVICE_REFUSED")
 
-            def storage_owner():
-                stopped_storage_owner()
+            def storage_owner(*, audit_package=True):
+                stopped_storage_owner(audit_package=audit_package)
                 if inspect_signed_owned_namespace_unit(https_port=port, active=False) != stopped:
                     _deny("OWNED_DEDICATED_RECOVERY_SERVICE_REFUSED")
-                stopped_storage_owner()
+                stopped_storage_owner(audit_package=audit_package)
 
             def storage_policy():
                 result = _prepare_owned_committed_boot_egress_locked(
@@ -4486,6 +4585,30 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
 
             before = storage_policy()
             storage_owner()
+            if prepare_runtime:
+                # Persistent dedicated storage must already exist. Never
+                # create or migrate it as a side effect of runtime placement.
+                existing = prepare_dedicated_candidate_storage("almalinux", doc, allow_create=False)
+                if not _closed_committed_dedicated_storage_report(existing):
+                    _deny("OWNED_DEDICATED_INSTALLER_RESULT_REFUSED")
+                storage_owner()
+                scratch = _prepare_owned_dedicated_runtime_locked(
+                    root, recheck_owned=lambda: storage_owner(audit_package=False))
+                storage_owner()
+                readback = prepare_dedicated_candidate_storage("almalinux", doc, allow_create=False)
+                if (not _closed_committed_dedicated_storage_report(readback)
+                        or readback != existing or storage_policy() != before
+                        or _owned_alma_runtime_temps(root, dedicated=True, inactive=True) != scratch
+                        or len(scratch[1]) != 5):
+                    _deny("OWNED_DEDICATED_INSTALLER_RESULT_REFUSED")
+                storage_owner()
+                return {"status": "OWNED_DEDICATED_COMMITTED_RUNTIME_PREPARED",
+                        "scratch_count": 5, "storage": readback,
+                        **{key: pins[key] for key in (
+                            "generation_manifest_sha256", "boot_receipt_sha256",
+                            "profile_receipt_sha256", "executable_receipt_sha256")},
+                        "authorizes_systemctl": False, "authorizes_nginx_activation": False,
+                        "authorizes_catalog_publication": False}
             created = prepare_dedicated_candidate_storage("almalinux", doc, allow_create=True)
             storage_owner()
             if not _closed_committed_dedicated_storage_report(created):
