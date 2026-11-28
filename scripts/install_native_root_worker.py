@@ -842,11 +842,54 @@ def _fixed_alma_rpm_identity(package: str, identity: str) -> None:
         _reject("NATIVE_EXECUTABLE_RPM_IDENTITY_REFUSED")
 
 
+def _fixed_alma_rpm_inventory_limit(package: str) -> int:
+    # The development policy RPM contains a much larger interface/macro
+    # manifest than the ordinary executable RPMs. This exception is only
+    # for a fixed, independently signature-verified RPM file inventory.
+    if type(package) is not str or package not in _FIXED_ALMA_RPM_MEMBERS:
+        _reject("NATIVE_EXECUTABLE_RPM_MEMBER_REFUSED")
+    return 4 * 1024 * 1024 if package == "selinux-policy-devel" else 64 * 1024
+
+
+def _query_fixed_alma_rpm_file_inventory(package: str, work: Path, db: Path, payload: Path) -> str:
+    """Read only a previously authenticated fixed RPM's file digest inventory."""
+    limit = _fixed_alma_rpm_inventory_limit(package)
+    if payload != work / (package + ".rpm"):
+        _reject("NATIVE_EXECUTABLE_RPM_INVENTORY_PATH_REFUSED")
+    # Keep the general native manager output bound unchanged. A signed
+    # development RPM's longer inventory has its own bounded read and
+    # redacted failure classes, not a general-purpose RPM command seam.
+    try:
+        with tempfile.TemporaryFile(dir=work) as output, tempfile.TemporaryFile(dir=work) as errors:
+            result = subprocess.run(
+                ["/usr/bin/rpm", "--dbpath", str(db), "-qp",
+                 r"--queryformat=[%{FILENAMES}\t%{FILEDIGESTS}\n]", str(payload)],
+                stdin=subprocess.DEVNULL, stdout=output, stderr=errors,
+                cwd=str(work), env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+                                    "HOME": str(work), "TMPDIR": str(work),
+                                    "LC_ALL": "C", "LANG": "C"},
+                timeout=120, check=False,
+            )
+            if type(result.returncode) is not int or result.returncode != 0:
+                _reject("NATIVE_EXECUTABLE_RPM_INVENTORY_COMMAND_FAILED")
+            if errors.tell() != 0:
+                _reject("NATIVE_EXECUTABLE_RPM_INVENTORY_DIAGNOSTIC")
+            if not 0 < output.tell() <= limit:
+                _reject("NATIVE_EXECUTABLE_RPM_INVENTORY_LIMIT_REFUSED")
+            output.seek(0)
+            raw = output.read(limit + 1)
+            if not 0 < len(raw) <= limit:
+                _reject("NATIVE_EXECUTABLE_RPM_INVENTORY_LIMIT_REFUSED")
+            return raw.decode("utf-8")
+    except (OSError, UnicodeError, subprocess.TimeoutExpired):
+        _reject("NATIVE_EXECUTABLE_RPM_INVENTORY_READ_FAILED")
+
+
 def _fixed_alma_rpm_member_digest(package: str, rows: str) -> str:
     if type(package) is not str or package not in _FIXED_ALMA_RPM_MEMBERS:
         _reject("NATIVE_EXECUTABLE_RPM_MEMBER_REFUSED")
     member = _FIXED_ALMA_RPM_MEMBERS[package][0]
-    if type(rows) is not str or len(rows) > 64 * 1024:
+    if type(rows) is not str or len(rows) > _fixed_alma_rpm_inventory_limit(package):
         _reject("NATIVE_EXECUTABLE_RPM_MEMBER_REFUSED")
     matching = [row.split("\t", 1)[1] for row in rows.splitlines()
                 if row.startswith(member + "\t")]
@@ -932,7 +975,7 @@ def _authenticate_fixed_alma_rpm_members(work: Path, identities: dict[str, str])
                     or query_rpm("%{FILEDIGESTALGO}") != "8"):
                 _reject("NATIVE_EXECUTABLE_RPM_IDENTITY_REFUSED")
             member = _fixed_alma_rpm_member_digest(
-                package, query_rpm("[%{FILENAMES}\\t%{FILEDIGESTS}\\n]"))
+                package, _query_fixed_alma_rpm_file_inventory(package, work, db, payload))
             if _candidate_payload_sha256(payload) != archive_digest:
                 _reject("NATIVE_EXECUTABLE_PAYLOAD_CHANGED")
             results[package] = (archive_digest, member)

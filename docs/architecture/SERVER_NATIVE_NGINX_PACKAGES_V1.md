@@ -2159,3 +2159,10 @@ public entry is refused without relabelling or deletion. The signed worker
 placement rechecks this claim under the retained state lock. Legacy placement
 and activation cannot adopt the dedicated claim or staging path. This is
 still a detached-root composition; actual host placement remains refused.
+
+The fixed signed RPM file inventory has a distinct bounded query. Only the
+SELinux development RPM may exceed the ordinary 64 KiB manager output
+limit (up to 4 MiB); the general native manager cap is unchanged. The
+query runs after exact RPM signature/identity verification, refuses command
+errors, diagnostics, invalid encoding and oversized inventory, and never
+exposes raw diagnostics. Native execution of this correction is required.

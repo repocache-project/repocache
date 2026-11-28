@@ -1693,7 +1693,7 @@ def test_fixed_native_rpm_member_refuses_ambiguous_or_foreign_digest(fault):
     rows = {
         "missing": "", "duplicate": member + "\n" + member,
         "bad-digest": member[:-1] + "G",
-        "foreign-path": "/tmp" + member, "oversize": member + "\n" + "x"*65536,
+        "foreign-path": "/tmp" + member, "oversize": member + "\n" + "x"*(4*1024*1024),
     }[fault]
     with pytest.raises(stage.WorkerStageError):
         install._fixed_alma_rpm_member_digest("selinux-policy-devel", rows)
@@ -1863,10 +1863,16 @@ def test_fixed_signed_rpm_member_verifier_keeps_native_trust_boundary(monkeypatc
             return "foreign-0:1-1.x86_64" if fault == "identity" else identities[package]
         if fmt == "--queryformat=%{FILEDIGESTALGO}":
             return "1" if fault == "algorithm" else "8"
-        assert fmt == "--queryformat=[%{FILENAMES}\\t%{FILEDIGESTS}\\n]"
+        pytest.fail("unexpected general native command")
+
+    def inventory(package, place, db, payload):
+        assert place == work and payload == work / (package + ".rpm")
+        assert db in dbs
+        assert ("/usr/bin/rpmkeys", "--dbpath", str(db), "--checksig", str(payload)) in calls
         member = install._FIXED_ALMA_RPM_MEMBERS[package][0]
         return "/foreign\t" + "a"*64 if fault == "member" else member + "\t" + "b"*64
 
+    monkeypatch.setattr(install, "_query_fixed_alma_rpm_file_inventory", inventory)
     monkeypatch.setattr(install, "_native_package_command", command)
     if fault == "none":
         if scope == "nginx":
@@ -1940,3 +1946,54 @@ def test_fixed_policy_tool_snapshot_retains_native_path_identities(monkeypatch, 
     else:
         with pytest.raises(stage.WorkerStageError):
             install._fixed_policy_tool_snapshot()
+
+@pytest.mark.parametrize("package,fault", [
+    ("nginx-core", "none"), ("selinux-policy-devel", "large"),
+    ("make", "large"), ("selinux-policy-devel", "oversize"),
+    ("selinux-policy-devel", "exit"), ("selinux-policy-devel", "stderr"),
+    ("selinux-policy-devel", "encoding"), ("selinux-policy-devel", "timeout"),
+    ("selinux-policy-devel", "path"), ("foreign", "scope"),
+])
+def test_fixed_rpm_file_inventory_bounds_large_signed_development_manifest(monkeypatch, tmp_path, package, fault):
+    from types import SimpleNamespace
+    work = tmp_path / "work"
+    work.mkdir()
+    db = tmp_path / "db"
+    db.mkdir()
+    payload = work / (package + ".rpm")
+    if fault == "path":
+        payload = work / "foreign.rpm"
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append(argv)
+        assert argv == ["/usr/bin/rpm", "--dbpath", str(db), "-qp",
+                        r"--queryformat=[%{FILENAMES}\t%{FILEDIGESTS}\n]", str(payload)]
+        assert kwargs["cwd"] == str(work) and kwargs["timeout"] == 120
+        assert kwargs["stdin"] == subprocess.DEVNULL and kwargs["check"] is False
+        if fault == "timeout":
+            raise subprocess.TimeoutExpired(argv, 120)
+        member = install._FIXED_ALMA_RPM_MEMBERS[package][0]
+        raw = (member + "\t" + "a"*64 + "\n").encode()
+        if fault in ("large", "oversize"):
+            count = 1200 if fault == "large" else 60000
+            raw = b"".join(("/usr/share/selinux/devel/interfaces/fixture-" + str(i)
+                            + ".if\t" + "b"*64 + "\n").encode() for i in range(count)) + raw
+        elif fault == "encoding":
+            raw = b"\xff"
+        kwargs["stdout"].write(raw)
+        if fault == "stderr":
+            kwargs["stderr"].write(b"unexpected RPM diagnostic")
+        return SimpleNamespace(returncode=1 if fault == "exit" else 0)
+
+    monkeypatch.setattr(install.subprocess, "run", run)
+    if fault == "none" or (fault == "large" and package == "selinux-policy-devel"):
+        rows = install._query_fixed_alma_rpm_file_inventory(package, work, db, payload)
+        assert install._fixed_alma_rpm_member_digest(package, rows) == "a"*64
+        assert (len(rows) > 65536) is (fault == "large")
+    else:
+        with pytest.raises(stage.WorkerStageError):
+            install._query_fixed_alma_rpm_file_inventory(package, work, db, payload)
+        if fault in ("path", "scope"):
+            assert not calls
+    assert not list(work.iterdir())
