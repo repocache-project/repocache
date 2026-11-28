@@ -1,28 +1,40 @@
-name: Isolated VM performance experiment (#19)
+name: Isolated VM performance experiment — digest cache (#19)
 on:
   push:
     branches: [perf/experimental-vm-benchmark]
     paths: ['.github/workflows/experimental-vm-benchmark.yml', 'experiment/**']
 permissions:
   contents: read
-  actions: read
 concurrency:
   group: experimental-vm-benchmark-only
   cancel-in-progress: false
 env:
   SOURCE_SHA: 1c69839978b5326d42f37492406d164576215369
-  PR237_PLATFORM: almalinux10
-  PR237_IMAGE_URL: https://repo.almalinux.org/almalinux/10/cloud/x86_64/images/AlmaLinux-10-GenericCloud-10.3-20261116.0.x86_64.qcow2
-  PR237_IMAGE_SHA256: 845d3a4e41fde973bdbf9763b62a88538c1a1fadc2332a89f6ea01e2c17c78ee
-  PR237_IMAGE_SHA512: ''
   PR237_SCENARIO: native-activation
 jobs:
   control:
-    name: A — origin / 3 vCPU / 6 GiB
+    name: Origin / ${{ matrix.platform }} / 3 vCPU / 6 GiB
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - platform: debian13
+            image_url: https://cloud.debian.org/images/cloud/trixie/20261001-2618/debian-13-genericcloud-amd64-20261001-2618.qcow2
+            image_sha512: f46f0671a6e5bdec5291ab8972bae2f10e5408c2f64a74078f11efc2f06a436a9d0313ed50e0472542eeabf780e9f7c792ac0a314c6c20507fcd9fd81b468c3d
+            image_sha256: ''
+          - platform: almalinux10
+            image_url: https://repo.almalinux.org/almalinux/10/cloud/x86_64/images/AlmaLinux-10-GenericCloud-10.3-20261116.0.x86_64.qcow2
+            image_sha512: ''
+            image_sha256: 845d3a4e41fde973bdbf9763b62a88538c1a1fadc2332a89f6ea01e2c17c78ee
     env:
       BENCH_PROFILE: current
+      PR237_PLATFORM: ${{ matrix.platform }}
+      PR237_IMAGE_URL: ${{ matrix.image_url }}
+      PR237_IMAGE_SHA256: ${{ matrix.image_sha256 }}
+      PR237_IMAGE_SHA512: ${{ matrix.image_sha512 }}
       BENCH_DELIVERY: origin
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -50,39 +62,57 @@ jobs:
       - name: Full unchanged native activation scenario
         working-directory: source
         run: bash scripts/ci_pr237_experimental_vm.sh
-      - name: Verify pristine image before temporary publication
-        run: |
-          set -Eeuo pipefail
-          printf '%s  %s\n' "$PR237_IMAGE_SHA256" "$BENCH_IMAGE" | sha256sum -c -
-      - name: Store only verified pristine image for this run
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - name: Verify pristine vendor image before cache save
+        run: bash experiment-code/experiment/verify-image.sh
+      - name: Save isolated digest-keyed cache
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
-          name: benchmark-only-alma-845d3a4e-${{ github.run_attempt }}
           path: ${{ runner.temp }}/benchmark-image/base.qcow2
-          compression-level: 0
-          retention-days: 1
-          if-no-files-found: error
-      - name: Upload experiment evidence
+          key: experimental-vm-only-v1-${{ matrix.platform }}-${{ matrix.image_sha256 || matrix.image_sha512 }}
+      - name: Upload bounded experimental evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: benchmark-control-evidence-${{ github.run_attempt }}
+          name: cache-benchmark-origin-${{ matrix.platform }}-${{ github.run_attempt }}
           path: source/pr237-vm-evidence/
           if-no-files-found: warn
           retention-days: 7
   comparison:
     needs: control
-    name: Comparison / ${{ matrix.profile }}
+    name: Cache / ${{ matrix.platform }} / ${{ matrix.profile }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
       fail-fast: false
       max-parallel: 1
       matrix:
-        profile: [current, two-four, three-four, two-eight]
+        include:
+          - platform: debian13
+            image_url: https://cloud.debian.org/images/cloud/trixie/20261001-2618/debian-13-genericcloud-amd64-20261001-2618.qcow2
+            image_sha512: f46f0671a6e5bdec5291ab8972bae2f10e5408c2f64a74078f11efc2f06a436a9d0313ed50e0472542eeabf780e9f7c792ac0a314c6c20507fcd9fd81b468c3d
+            image_sha256: ''
+            profile: current
+          - platform: debian13
+            image_url: https://cloud.debian.org/images/cloud/trixie/20261001-2618/debian-13-genericcloud-amd64-20261001-2618.qcow2
+            image_sha512: f46f0671a6e5bdec5291ab8972bae2f10e5408c2f64a74078f11efc2f06a436a9d0313ed50e0472542eeabf780e9f7c792ac0a314c6c20507fcd9fd81b468c3d
+            image_sha256: ''
+            profile: three-four
+          - platform: almalinux10
+            image_url: https://repo.almalinux.org/almalinux/10/cloud/x86_64/images/AlmaLinux-10-GenericCloud-10.3-20261116.0.x86_64.qcow2
+            image_sha512: ''
+            image_sha256: 845d3a4e41fde973bdbf9763b62a88538c1a1fadc2332a89f6ea01e2c17c78ee
+            profile: current
+          - platform: almalinux10
+            image_url: https://repo.almalinux.org/almalinux/10/cloud/x86_64/images/AlmaLinux-10-GenericCloud-10.3-20261116.0.x86_64.qcow2
+            image_sha512: ''
+            image_sha256: 845d3a4e41fde973bdbf9763b62a88538c1a1fadc2332a89f6ea01e2c17c78ee
+            profile: three-four
     env:
       BENCH_PROFILE: ${{ matrix.profile }}
-      BENCH_DELIVERY: artifact
+      PR237_PLATFORM: ${{ matrix.platform }}
+      PR237_IMAGE_URL: ${{ matrix.image_url }}
+      PR237_IMAGE_SHA256: ${{ matrix.image_sha256 }}
+      PR237_IMAGE_SHA512: ${{ matrix.image_sha512 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -106,25 +136,36 @@ jobs:
           start=$SECONDS
           python3 -B scripts/ci_prepare_qemu_runner.py
           echo "QEMU preparation: $((SECONDS-start)) s"
-      - name: Fetch and verify run-local image
+      - name: Start cache timing
+        run: echo "CACHE_START=$(date +%s)" >> "$GITHUB_ENV"
+      - name: Restore isolated exact-digest cache
+        id: cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ${{ runner.temp }}/benchmark-image/base.qcow2
+          key: experimental-vm-only-v1-${{ matrix.platform }}-${{ matrix.image_sha256 || matrix.image_sha512 }}
+      - name: Select verified cache or official origin
         env:
-          GH_TOKEN: ${{ github.token }}
+          CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
         run: |
           set -Eeuo pipefail
-          start=$SECONDS
-          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "benchmark-only-alma-845d3a4e-$GITHUB_RUN_ATTEMPT" --dir "$RUNNER_TEMP/benchmark-image"
-          test -f "$BENCH_IMAGE" && test ! -L "$BENCH_IMAGE"
-          printf '%s  %s\n' "$PR237_IMAGE_SHA256" "$BENCH_IMAGE" | sha256sum -c -
-          chmod 0444 "$BENCH_IMAGE"
-          echo "Artifact download + verification: $((SECONDS-start)) s"
+          if test "$CACHE_HIT" = true; then
+            bash experiment-code/experiment/verify-image.sh
+            chmod 0444 "$BENCH_IMAGE"
+            echo "BENCH_DELIVERY=artifact" >> "$GITHUB_ENV"
+          else
+            test ! -e "$BENCH_IMAGE" && test ! -L "$BENCH_IMAGE"
+            echo "BENCH_DELIVERY=origin" >> "$GITHUB_ENV"
+          fi
+          echo "Cache exact hit: $CACHE_HIT; restore + verify: $(($(date +%s)-CACHE_START)) s"
       - name: Full unchanged native activation scenario
         working-directory: source
         run: bash scripts/ci_pr237_experimental_vm.sh
-      - name: Upload experiment evidence
+      - name: Upload bounded experimental evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: benchmark-${{ matrix.profile }}-evidence-${{ github.run_attempt }}
+          name: cache-benchmark-${{ matrix.profile }}-${{ matrix.platform }}-${{ github.run_attempt }}
           path: source/pr237-vm-evidence/
           if-no-files-found: warn
           retention-days: 7
