@@ -1470,3 +1470,13 @@ rather than stopping after three fast stale-generation probes; other
 refusals retain the previous three-attempt limit. Native harness diagnostics
 report fixed redacted transaction codes; the disposable data fixture resets
 its own start-rate counter only after restoring exact authenticated bytes.
+
+Legacy vendor-service APPLY, explicit reload and compensating recovery retain
+the observed vendor unit digest and master PID across fresh HTTPS readback.
+Only a valid empty 204 carrying the known adjacent generation may be retried
+within the existing 12-second convergence window; TLS, malformed response,
+foreign generation or identity failure still refuses immediately. Rollback
+diagnostics use the fixed local redacted vocabulary without extending the
+socket protocol. The independent disposable interrupted-generation witness
+also observes bounded convergence on the same signed unit, retaining the
+actual interrupt and exact durable WAL/catalog assertions.

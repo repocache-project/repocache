@@ -65,10 +65,14 @@ def filesystem(tmp_path, monkeypatch):
                         lambda *_: events.append("tls"))
     monkeypatch.setattr(native, "_native_syntax_check",
                         lambda: events.append("syntax"))
-    monkeypatch.setattr(native, "_reload_native",
-                        lambda distro: events.append(("reload", distro)))
+    identity = ("a" * 64, 123)
+    def fixture_reload(distribution):
+        events.append(("reload", distribution))
+        return identity
+    monkeypatch.setattr(native, "_reload_native", fixture_reload)
+    monkeypatch.setattr(native, "_native_reload_identity", lambda distro: identity)
     monkeypatch.setattr(native, "_local_https_generation",
-                        lambda document, generation: events.append(
+                        lambda document, generation, **kw: events.append(
                             ("exposure", generation)))
     monkeypatch.setattr(native, "_route_dump_check",
                         lambda *_args: events.append("dump"))
@@ -767,11 +771,11 @@ def test_failed_native_phase_rolls_back_previous_bytes(filesystem, monkeypatch,
     old = getattr(native, function)
     attempts = []
 
-    def fail_once(*args):
+    def fail_once(*args, **kwargs):
         attempts.append(1)
         if len(attempts) == 1:
             raise native.NativeV2TransactionError("SIMULATED_REFUSAL")
-        return old(*args)
+        return old(*args, **kwargs)
 
     monkeypatch.setattr(native, function, fail_once)
     with pytest.raises(native.NativeV2TransactionError,
@@ -834,7 +838,7 @@ def test_same_version_repair_preserves_prior_catalog_and_rolls_back(
                        match="APPLY_FAILED_RECOVERY_REQUIRED"):
         apply(filesystem)
     assert (state / native._WAL).is_file()
-    monkeypatch.setattr(native, "_reload_native", lambda *_: None)
+    monkeypatch.setattr(native, "_reload_native", lambda *_: ("a" * 64, 123))
     assert recover(filesystem)["status"] == "NATIVE_V2_ROLLED_BACK"
     assert [(state / V2_STATE).read_bytes(), include.read_bytes(),
             catalog.read_bytes(), (state / native._MANIFEST).read_bytes()] == old_bytes
@@ -4159,3 +4163,59 @@ def test_owned_live_generation_wait_uses_deadline_without_extending_authority_re
             assert len(calls) == 3
         else:
             assert clock[0] >= 11.9
+
+
+@pytest.mark.parametrize("scenario", ["late", "rollback", "timeout", "wrong", "duplicate",
+                                      "body", "encoding", "tls", "master-before", "master-after"])
+def test_legacy_reload_generation_wait_is_bounded_and_exact(monkeypatch, scenario):
+    expected, prior = (1, 2) if scenario == "rollback" else (2, 1)
+    identity = ("a" * 64, 123)
+    clock = [0.0]
+    calls = []
+    monkeypatch.setattr(native.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(native.time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    def observe(distribution):
+        assert distribution == "debian"
+        if scenario == "master-before" or (scenario == "master-after" and calls):
+            return ("a" * 64, 124)
+        return identity
+    monkeypatch.setattr(native, "_native_reload_identity", observe)
+    def request(doc, path, maximum):
+        calls.append(1)
+        assert path == native._HEALTH and maximum == 8192
+        if scenario == "tls":
+            native._deny("EXPOSURE_UNVERIFIED")
+        value = (99 if scenario == "wrong" else expected if
+                 scenario in ("duplicate", "body", "encoding", "master-after") or
+                 (scenario in ("late", "rollback") and len(calls) >= 7) else prior)
+        header = b"HTTP/1.1 204 No Content\r\nX-Repocache-Generation: " + str(value).encode()
+        if scenario == "duplicate":
+            header += b"\r\nX-Repocache-Generation: 2"
+        if scenario == "encoding":
+            header += b"\r\nContent-Encoding: gzip"
+        return header + b"\r\n\r\n" + (b"unexpected" if scenario == "body" else b"")
+    monkeypatch.setattr(native, "_fixed_https_get", request)
+    if scenario in ("late", "rollback"):
+        native._wait_native_generation({}, expected, "debian", identity, stale_generation=prior)
+        assert len(calls) == 7
+    else:
+        with pytest.raises(native.NativeV2TransactionError):
+            native._wait_native_generation({}, expected, "debian", identity, stale_generation=prior)
+        if scenario == "timeout":
+            assert 11.9 <= clock[0] <= 12 and len(calls) <= 61
+        else:
+            assert len(calls) == (0 if scenario == "master-before" else 1)
+            assert clock[0] == 0
+
+
+def test_legacy_compensation_audit_is_closed_and_redacted(capsys):
+    for code in ("LEGACY_GENERATION_STALE", "APPLY_FAILED_ROLLED_BACK",
+                 "APPLY_FAILED_RECOVERY_REQUIRED", "UNIT_CHANGED"):
+        native._audit_native_failure(native.NativeV2TransactionError("NATIVE_V2_" + code))
+    native._audit_native_failure(ValueError("private untrusted contents"))
+    output = capsys.readouterr().err
+    assert "private untrusted contents" not in output
+    assert output.splitlines() == [
+        "REPOCACHE_FIXED_TRANSACTION_REFUSAL: NATIVE_V2_" + code
+        for code in ("LEGACY_GENERATION_STALE", "APPLY_FAILED_ROLLED_BACK",
+                     "APPLY_FAILED_RECOVERY_REQUIRED", "UNIT_CHANGED", "OTHER_REFUSAL")]

@@ -219,6 +219,28 @@ def _deny(code: str) -> None:
 # Closed, first-party diagnostic vocabulary. Never render arbitrary exception
 # text, paths, NGINX output, request fields or configuration into the journal.
 _AUDIT_FAILURE_CODES = frozenset({
+    "NATIVE_V2_APPLY_FAILED_RECOVERY_REQUIRED",
+    "NATIVE_V2_APPLY_FAILED_ROLLED_BACK",
+    "NATIVE_V2_LEGACY_GENERATION_STALE",
+    "NATIVE_V2_NGINX_DUMP_MISMATCH",
+    "NATIVE_V2_NGINX_DUMP_UNVERIFIED",
+    "NATIVE_V2_NGINX_NOT_ACTIVE_BEFORE_WAL",
+    "NATIVE_V2_POST_COMMIT_DRIFT",
+    "NATIVE_V2_POST_RELOAD_DRIFT",
+    "NATIVE_V2_PRE_RELOAD_DRIFT",
+    "NATIVE_V2_PREVIOUS_STATE_INVALID",
+    "NATIVE_V2_PREPARE_DRIFT",
+    "NATIVE_V2_SYNTAX_UNVERIFIED",
+    "NATIVE_V2_UNIT_CHANGED",
+    "NATIVE_V2_OWNER_MANIFEST_DRIFT",
+    "NATIVE_V2_MANAGED_GENERATION_REQUIRED",
+    "NATIVE_V2_LAYOUT_UNSUPPORTED",
+    "NATIVE_V2_NGINX_TLS_CANDIDATE_INVALID",
+    "NATIVE_V2_NGINX_TLS_CANDIDATE_UNTRUSTED",
+    "NATIVE_V2_NGINX_SIZE",
+    "NATIVE_V2_CONFLICTING_WALS",
+    "NATIVE_V2_NATIVE_RECOVERY_REQUIRED",
+    "NATIVE_V2_NGINX_OWNERSHIP_UNVERIFIED",
     "NATIVE_V2_CANDIDATE_CHANGED",
     "NATIVE_V2_CANDIDATE_INVALID",
     "NATIVE_V2_CATALOG_DRIFT",
@@ -797,19 +819,22 @@ def _require_active_nginx_before_wal(distribution: str) -> None:
         _deny("NGINX_NOT_ACTIVE_BEFORE_WAL")
 
 
-def _reload_native(distribution: str) -> None:
+def _native_reload_identity(distribution: str) -> tuple[str, int]:
+    observed = inspect_effective_native_nginx_unit(distribution)
+    if (observed["unit_name"] != _UNIT
+            or observed["authorizes_nginx_reload"] is not False):
+        _deny("FOREIGN_UNIT")
+    return observed["vendor_unit_sha256"], observed["main_pid_observed"]
+
+
+def _reload_native(distribution: str) -> tuple[str, int]:
     # Both observations must prove the same intended vendor unit, active
     # master identity and immutable fixed command across the reload.
-    before = inspect_effective_native_nginx_unit(distribution)
-    if (before["unit_name"] != _UNIT
-            or before["authorizes_nginx_reload"] is not False):
-        _deny("FOREIGN_UNIT")
+    before = _native_reload_identity(distribution)
     _fixed_command((_SYSTEMCTL, "reload", _UNIT), timeout=10)
-    after = inspect_effective_native_nginx_unit(distribution)
-    if (after["unit_name"] != _UNIT
-            or before["vendor_unit_sha256"] != after["vendor_unit_sha256"]
-            or before["main_pid_observed"] != after["main_pid_observed"]):
+    if _native_reload_identity(distribution) != before:
         _deny("UNIT_CHANGED")
+    return before
 
 
 def _fixed_https_get(document: dict[str, Any], path: str,
@@ -861,14 +886,54 @@ def _fixed_https_get(document: dict[str, Any], path: str,
     return raw
 
 
-def _local_https_generation(document: dict[str, Any], generation: int) -> None:
+def _local_https_generation(document: dict[str, Any], generation: int, *,
+                            stale_generation: int | None = None) -> None:
     response = _fixed_https_get(document, _HEALTH, 8192)
     header, body = response.split(b"\r\n\r\n", 1)
-    marker = f"X-Repocache-Generation: {generation}".encode("ascii").lower()
-    if (not header.startswith(b"HTTP/1.1 204 ")
-            or marker not in header.lower().split(b"\r\n")
-            or body):
+    lines = header.lower().split(b"\r\n")
+    markers = [line for line in lines if line.startswith(b"x-repocache-generation:")]
+    if (not header.startswith(b"HTTP/1.1 204 ") or body
+            or any(line.startswith((b"transfer-encoding:", b"content-encoding:"))
+                   for line in lines)
+            or [line for line in lines if line.startswith(b"content-length:")]
+               not in ([], [b"content-length: 0"])):
         _deny("EXPOSURE_UNVERIFIED")
+    marker = f"x-repocache-generation: {generation}".encode("ascii")
+    if markers == [marker]:
+        return
+    if (stale_generation is not None and stale_generation != generation
+            and markers == [f"x-repocache-generation: {stale_generation}".encode("ascii")]):
+        _deny("LEGACY_GENERATION_STALE")
+    _deny("EXPOSURE_UNVERIFIED")
+
+
+def _wait_native_generation(document: dict[str, Any], generation: int,
+                            distribution: str, identity: tuple[str, int], *,
+                            stale_generation: int | None) -> None:
+    """Wait only for the known adjacent generation after a fixed reload.
+
+    Preserve the observed vendor unit/master throughout; never retry a TLS,
+    malformed-response, unrelated-generation or ownership failure.
+    """
+    deadline = time.monotonic() + 12
+    for attempt in range(61):
+        if _native_reload_identity(distribution) != identity:
+            _deny("UNIT_CHANGED")
+        try:
+            _local_https_generation(document, generation, stale_generation=stale_generation)
+        except NativeV2TransactionError as exc:
+            if exc.args != ("NATIVE_V2_LEGACY_GENERATION_STALE",):
+                raise
+            if _native_reload_identity(distribution) != identity:
+                _deny("UNIT_CHANGED")
+            remaining = deadline - time.monotonic()
+            if attempt == 60 or remaining <= 0:
+                raise
+            time.sleep(min(0.2, remaining))
+        else:
+            if _native_reload_identity(distribution) != identity:
+                _deny("UNIT_CHANGED")
+            return
 
 
 def _local_https_catalog(document: dict[str, Any], catalog: bytes) -> None:
@@ -1059,8 +1124,9 @@ def _reload_owned_locked(
         _deny("PRE_RELOAD_DRIFT")
     # NGINX reloads the same known-good generation. There are no staged
     # state/catalog bytes to promote, restore or mark committed on failure.
-    _reload_native(distribution)
-    _local_https_generation(document, generation)
+    identity = _reload_native(distribution)
+    _wait_native_generation(document, generation, distribution, identity,
+                            stale_generation=None)
     _local_https_catalog(document, old[_CATALOG])
     # The reloaded service is not allowed to report success if the fixed
     # NGINX -T include section changed during reload, even when the saved
@@ -1183,9 +1249,11 @@ def _apply_locked(root_fd: int, state_fd: int,
         # the WAL still restores the previous known-good generation.
         _route_dump_check(doc, new[_INCLUDE], new[_CATALOG],
                           distribution, snapshot["state_generation"], pins)
-        _reload_native(distribution)
-        # Exactly one fixed generation health endpoint must have become live.
-        _local_https_generation(doc, snapshot["state_generation"])
+        identity = _reload_native(distribution)
+        # systemctl reload is asynchronous. Accept only the exact next
+        # generation; the known prior generation may briefly answer.
+        _wait_native_generation(doc, snapshot["state_generation"], distribution,
+                                identity, stale_generation=generation or None)
         # Reobserve AFTER the actual reload: the pre-reload dump alone cannot
         # prove that another privileged actor left the include unchanged.
         _route_dump_check(doc, new[_INCLUDE], new[_CATALOG],
@@ -1208,12 +1276,14 @@ def _apply_locked(root_fd: int, state_fd: int,
             "nginx_reload_and_generation_observed": True,
             "durable_wal_cleared": True,
         }
-    except Exception:
+    except Exception as exc:
         # Rollback occurs under the SAME exclusive lock. If the OS crashes,
         # recovery is a separate fixed operation; never claim success.
+        _audit_native_failure(exc)
         try:
             _recover_locked(state_fd, include_fd, public_fd, distribution)
-        except Exception:
+        except Exception as recovery_error:
+            _audit_native_failure(recovery_error)
             _deny("APPLY_FAILED_RECOVERY_REQUIRED")
         _deny("APPLY_FAILED_ROLLED_BACK")
 
@@ -4022,7 +4092,7 @@ def _recover_locked(state_fd: int, include_fd: int,
     # Revalidate and reload previous installed config before declaring
     # rollback complete. On failure, retain WAL for later exact recovery.
     _native_syntax_check()
-    _reload_native(distribution)
+    identity = _reload_native(distribution)
     if now[V2_STATE] != old[V2_STATE]:
         _write_private(state_fd, V2_STATE, _STATE_STAGE, now[V2_STATE],
                        old[V2_STATE], _LIMIT[V2_STATE])
@@ -4038,7 +4108,9 @@ def _recover_locked(state_fd: int, include_fd: int,
             )
         except (ValueError, TypeError):
             _deny("PREVIOUS_STATE_INVALID")
-        _local_https_generation(prior_doc, prior_state["state_generation"])
+        generation = prior_state["state_generation"]
+        _wait_native_generation(prior_doc, generation, distribution, identity,
+                                stale_generation=generation + 1)
         _local_https_catalog(prior_doc, old[_CATALOG])
     # A successful syntax check and a matching health endpoint do not prove
     # that the *exact old managed include* is loaded (or absent for an

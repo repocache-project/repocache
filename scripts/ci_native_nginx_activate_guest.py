@@ -388,6 +388,39 @@ finally:
         raise AssertionError("Actual signed-test live WAL operation failed: " + operation)
 
 
+def require_interrupted_generation_two() -> None:
+    """Independent fresh TLS observation after the signed interrupt witness."""
+    from scripts.ci_pr237_native_socket_guest import https_response
+    from repocache.server_native_nginx_effective_unit_v1 import (
+        _inspect_owned_nginx_unit_bytes,
+    )
+    # verify_guest has already authenticated the exact installed archive.
+    # Use its fixed member, not the source import's deliberately unavailable
+    # signed-worker loader. This is read-only guest evidence, not authority.
+    import zipfile
+    with zipfile.ZipFile("/usr/libexec/repocache/server-control-worker") as archive:
+        expected = archive.read("repocache/_signed-owned-nginx.service")
+    identity = _inspect_owned_nginx_unit_bytes(expected)
+    deadline = time.monotonic() + 12
+    for attempt in range(61):
+        assert _inspect_owned_nginx_unit_bytes(expected) == identity
+        header, body = https_response("/__repocache/healthz").split(b"\r\n\r\n", 1)
+        lines = header.lower().split(b"\r\n")
+        markers = [line for line in lines if line.startswith(b"x-repocache-generation:")]
+        assert header.startswith(b"HTTP/1.1 204 ") and not body
+        assert not any(line.startswith((b"transfer-encoding:", b"content-encoding:"))
+                       for line in lines)
+        assert [line for line in lines if line.startswith(b"content-length:")] in (
+            [], [b"content-length: 0"])
+        assert _inspect_owned_nginx_unit_bytes(expected) == identity
+        if markers == [b"x-repocache-generation: 2"]:
+            return
+        assert markers == [b"x-repocache-generation: 1"]
+        remaining = deadline - time.monotonic()
+        assert attempt < 60 and remaining > 0, "Interrupted generation did not converge"
+        time.sleep(min(0.2, remaining))
+
+
 def live_wal_resource_hashes() -> dict[str, str]:
     paths = (
         STATE / "state-v2.json", STATE / ".state-v2-owned-nginx.manifest",
@@ -783,7 +816,7 @@ def prepare_and_interrupt_live_wal(distribution: str, native, assets, pins) -> N
     run_live_wal(distribution, "interrupt")
     assert (STATE / ".state-v2-owned-nginx.pending").is_file()
     assert not Path("/var/lib/repocache/public/catalog.json").exists()
-    assert b"x-repocache-generation: 2" in https_response("/__repocache/healthz").lower()
+    require_interrupted_generation_two()
     (ROOT / "owned-live-prior-hashes.json").write_text(json.dumps(old, sort_keys=True))
     print("PASS: actual dedicated generation-two reload interrupted with durable WAL and catalog withdrawn", flush=True)
 
@@ -859,7 +892,7 @@ def verify_stopped_wal_preparation_fixture(distribution, native, assets, pins):
     inode = wal.stat().st_ino
     catalog = Path("/var/lib/repocache/public/catalog.json")
     assert not catalog.exists()
-    assert b"x-repocache-generation: 2" in https_response("/__repocache/healthz").lower()
+    require_interrupted_generation_two()
     command("/usr/bin/systemctl", "stop", OWN)
     require_status(OWN, False, True)
     require_status(VENDOR, False, False)
