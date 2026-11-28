@@ -249,3 +249,98 @@ def test_private_dnf4_claim_refuses_dnf5_before_open(monkeypatch):
     with pytest.raises(AssertionError):
         with rpm_probe._private_dnf4_claim(Path("/var/lib/repocache-ci-dnf-root-fixture")):
             pytest.fail("DNF5 misidentified as DNF4")
+
+def test_withdrawn_fixture_route_refuses_unexpected_path(tmp_path):
+    from pathlib import Path
+    with pytest.raises(RuntimeError, match="Unexpected disposable"):
+        with rpm_probe._withdrawn_fixture_route(tmp_path, Path("/"), "https://invalid/", tmp_path / "ca"):
+            pytest.fail("non-fixture path accepted")
+
+
+def test_withdrawn_fixture_route_restores_after_verified_404(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from urllib.error import HTTPError
+    mapped = tmp_path / "www/__repocache/repos/approved"
+    mapped.mkdir(parents=True)
+    marker = mapped / "marker"
+    marker.write_bytes(b"retained")
+    inode = mapped.stat().st_ino
+    calls = []
+
+    def request(url, *, timeout):
+        calls.append(url)
+        assert timeout == 10 and not mapped.exists()
+        raise HTTPError(url, 404, "withdrawn", {}, None)
+
+    monkeypatch.setattr(rpm_probe.ssl, "create_default_context", lambda **kw: None)
+    monkeypatch.setattr(rpm_probe.urllib.request, "HTTPSHandler", lambda **kw: None)
+    monkeypatch.setattr(rpm_probe.urllib.request, "build_opener",
+                        lambda *_: SimpleNamespace(open=request))
+    with rpm_probe._withdrawn_fixture_route(tmp_path, mapped, "https://example.invalid/approved/", tmp_path / "ca"):
+        assert not mapped.exists()
+        assert (tmp_path / ".repocache-ci-withdrawn-route/marker").read_bytes() == b"retained"
+    assert marker.read_bytes() == b"retained" and mapped.stat().st_ino == inode
+    assert calls == ["https://example.invalid/approved/repodata/repomd.xml"]
+
+
+@pytest.mark.parametrize("status", [403, 503])
+def test_withdrawn_fixture_route_refuses_non_404_and_restores(tmp_path, monkeypatch, status):
+    from types import SimpleNamespace
+    from urllib.error import HTTPError
+    mapped = tmp_path / "www/__repocache/repos/approved"
+    mapped.mkdir(parents=True)
+    inode = mapped.stat().st_ino
+
+    def request(url, **kw):
+        raise HTTPError(url, status, "unexpected", {}, None)
+
+    monkeypatch.setattr(rpm_probe.ssl, "create_default_context", lambda **kw: None)
+    monkeypatch.setattr(rpm_probe.urllib.request, "HTTPSHandler", lambda **kw: None)
+    monkeypatch.setattr(rpm_probe.urllib.request, "build_opener",
+                        lambda *_: SimpleNamespace(open=request))
+    with pytest.raises(HTTPError):
+        with rpm_probe._withdrawn_fixture_route(tmp_path, mapped, "https://example.invalid/", tmp_path / "ca"):
+            pytest.fail("non-404 accepted")
+    assert mapped.stat().st_ino == inode
+
+@pytest.mark.parametrize("mode", ["fallback", "rpm-retry", "cache-200", "cache-503",
+                                  "no-metadata-404", "upstream-404"])
+def test_withdrawn_transfer_distinguishes_attempt_from_response(mode):
+    from types import SimpleNamespace
+    prefix = "/__repocache/repos/approved/"
+    name = rpm_probe._RPM_NAME
+    primary = [("GET", prefix + "repodata/repomd.xml", 404)]
+    if mode == "rpm-retry":
+        primary.append(("GET", prefix + name, 404))
+    if mode in ("cache-200", "cache-503"):
+        primary.append(("GET", prefix + name, 200 if mode == "cache-200" else 503))
+    if mode == "no-metadata-404":
+        primary = [("GET", prefix + name, 404)]
+    upstream = [("GET", "/repo/" + name, 404 if mode == "upstream-404" else 200)]
+    args = (SimpleNamespace(responses=primary), SimpleNamespace(responses=upstream))
+    if mode in ("fallback", "rpm-retry"):
+        rpm_probe._require_withdrawn_dnf4_transfer(*args)
+    else:
+        with pytest.raises(AssertionError):
+            rpm_probe._require_withdrawn_dnf4_transfer(*args)
+
+
+def test_http_backend_records_actual_response_status(tmp_path):
+    from urllib.request import urlopen
+    from urllib.error import HTTPError
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    (repository / rpm_probe._RPM_NAME).write_bytes(b"fixture")
+    backend = rpm_probe.native.HTTPBackend(tmp_path)
+    try:
+        with urlopen(backend.origin + rpm_probe._RPM_NAME, timeout=5) as response:
+            assert response.read() == b"fixture"
+        with pytest.raises(HTTPError) as exc:
+            urlopen(backend.origin + "withdrawn", timeout=5)
+        assert exc.value.code == 404
+        exc.value.close()
+        assert backend.responses == [
+            ("GET", "/repo/" + rpm_probe._RPM_NAME, 200),
+            ("GET", "/repo/withdrawn", 404)]
+    finally:
+        backend.close()
