@@ -5849,19 +5849,26 @@ def test_fixed_loaded_policy_readback_refuses_unbound_module(tmp_path, monkeypat
     def inventory_text():
         return "\n".join(" ".join(map(str, row)) for row in sorted(inventory))
     monkeypatch.setattr(guest, "guard", lambda: None)
-    monkeypatch.setattr(guest, "installed_modules", lambda: (
-        "base\n" if fault == "absent" else f"base\n{guest.FIXED_MODULE}\n"))
+    # The guest now delegates to the installer. Simulate only the native
+    # authority/command seams, not the descriptor and digest checks.
+    monkeypatch.setattr(installer, "_native_distro", lambda: "almalinux")
+    monkeypatch.setattr(installer, "require_native_host_preconditions", lambda: None)
+    monkeypatch.setattr(installer, "_Labels", lambda *args, **kw:
+                        SimpleNamespace(finish=lambda: None))
     original_temp = tempfile.TemporaryDirectory
-    monkeypatch.setattr(guest.tempfile, "TemporaryDirectory",
+    monkeypatch.setattr(installer.tempfile, "TemporaryDirectory",
                         lambda **kw: original_temp(prefix=kw["prefix"], dir=tmp_path))
-    def command(*args, **kwargs):
+    def command(args, **kwargs):
         calls.append(args)
-        if args == ("/usr/sbin/semodule", "-lfull"):
-            if fault == "inventory-drift" and len(calls) > 1:
-                inventory.add((100, "unexpected", "pp"))
-            return SimpleNamespace(stdout=inventory_text())
-        assert args == ("/usr/sbin/semodule", "-X", "400", "--hll", "-E", guest.FIXED_MODULE)
         assert kwargs["timeout"] == 120
+        if args == ("/usr/sbin/semodule", "-lfull"):
+            if fault == "inventory-drift" and calls.count(args) > 1:
+                inventory.add((100, "unexpected", "pp"))
+            return SimpleNamespace(stdout=inventory_text().encode("ascii"), returncode=0)
+        if args == ("/usr/sbin/semodule", "-l"):
+            output = "base\n" if fault == "absent" else f"base\n{guest.FIXED_MODULE}\n"
+            return SimpleNamespace(stdout=output.encode("ascii"), returncode=0)
+        assert args == ("/usr/sbin/semodule", "-X", "400", "--hll", "-E", guest.FIXED_MODULE)
         root = Path(kwargs["cwd"])
         leaf = root / (guest.FIXED_MODULE + ".pp")
         if fault == "symlink":
@@ -5873,8 +5880,8 @@ def test_fixed_loaded_policy_readback_refuses_unbound_module(tmp_path, monkeypat
             leaf.chmod(0o666 if fault == "write-mode" else 0o600)
         if fault == "extra-file":
             (root / "extra").touch()
-        return SimpleNamespace(stdout="")
-    monkeypatch.setattr(guest, "command", command)
+        return SimpleNamespace(stdout=b"", returncode=0)
+    monkeypatch.setattr(installer.subprocess, "run", command)
     if fault == "inode-drift":
         original_read = stage._asset_bytes
         def replace_after_read(fd, name, *args, **kwargs):
@@ -5892,8 +5899,8 @@ def test_fixed_loaded_policy_readback_refuses_unbound_module(tmp_path, monkeypat
     else:
         with pytest.raises(AssertionError):
             guest.verify_fixed_loaded_policy(expected)
-    assert len(calls) == (1 if fault in ("alternate", "disabled", "absent") else
-                          3 if fault in ("none", "inventory-drift") else 2)
+    assert len(calls) == (2 if fault in ("alternate", "disabled", "absent") else
+                          5 if fault in ("none", "inventory-drift") else 3)
     assert not list(tmp_path.glob("repocache-policy-readback-*"))
 
 
