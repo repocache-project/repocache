@@ -453,14 +453,25 @@ def _observe_fixed_dedicated_policy(expected_sha256: str) -> dict:
                 directory = os.open(place, stage._DIRECTORY)
                 stack.callback(os.close, directory)
                 original = os.fstat(directory)
-                if (original.st_uid != 0 or original.st_gid != 0
-                        or stat.S_IMODE(original.st_mode) != 0o700
-                        or os.listdir(directory)):
+
+                def check_workspace():
+                    current = os.fstat(directory)
+                    named = os.lstat(place)
+                    if (not stat.S_ISDIR(current.st_mode)
+                            or current.st_uid != 0 or current.st_gid != 0
+                            or stat.S_IMODE(current.st_mode) != 0o700
+                            or _identity(current) != _identity(original)
+                            or _identity(named) != _identity(current)
+                            or (named.st_mode, named.st_uid, named.st_gid) !=
+                               (current.st_mode, current.st_uid, current.st_gid)):
+                        _reject("DEDICATED_POLICY_WORKSPACE_REFUSED")
+
+                check_workspace()
+                if os.listdir(directory):
                     _reject("DEDICATED_POLICY_WORKSPACE_REFUSED")
                 observe("-X", "400", "--hll", "-E", module, cwd=place)
-                if (os.listdir(directory) != [leaf]
-                        or _identity(os.lstat(place)) != _identity(original)
-                        or stat.S_IMODE(os.fstat(directory).st_mode) != 0o700):
+                check_workspace()
+                if os.listdir(directory) != [leaf]:
                     _reject("DEDICATED_POLICY_WORKSPACE_REFUSED")
                 info = os.stat(leaf, dir_fd=directory, follow_symlinks=False)
                 if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
@@ -470,9 +481,9 @@ def _observe_fixed_dedicated_policy(expected_sha256: str) -> dict:
                 raw = stage._asset_bytes(directory, leaf, 4 * 1024 * 1024,
                                          installed_mode=stat.S_IMODE(info.st_mode))
                 after = os.stat(leaf, dir_fd=directory, follow_symlinks=False)
+                check_workspace()
                 if (_identity(after) != _identity(info) or after.st_ctime_ns != info.st_ctime_ns
                         or os.listdir(directory) != [leaf]
-                        or _identity(os.lstat(place)) != _identity(original)
                         or hashlib.sha256(raw).hexdigest() != expected_sha256):
                     _reject("DEDICATED_POLICY_MODULE_REFUSED")
     except OSError:

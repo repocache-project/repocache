@@ -1459,7 +1459,7 @@ def test_initial_pending_installer_pins_phase_and_successor(monkeypatch, tmp_pat
 @pytest.mark.parametrize("fault", [
     "none", "invalid-digest", "debian", "disabled", "alternate-priority",
     "missing-enabled", "duplicate", "digest", "extra", "symlink", "writable",
-    "inventory-drift", "failed-command", "timeout", "label-drift",
+    "inventory-drift", "failed-command", "timeout", "label-drift", "workspace-drift",
 ])
 def test_installer_compiled_policy_observation_is_readonly_and_exact(monkeypatch, fault):
     from types import SimpleNamespace
@@ -1512,6 +1512,8 @@ def test_installer_compiled_policy_observation_is_readonly_and_exact(monkeypatch
                 leaf.chmod(0o666 if fault == "writable" else 0o600)
             if fault == "extra":
                 (path / "foreign").touch()
+            if fault == "workspace-drift":
+                path.chmod(0o755)
         if fault == "timeout":
             raise subprocess.TimeoutExpired(argv, 120)
         return SimpleNamespace(stdout=output, returncode=1 if fault == "failed-command" else 0)
@@ -1535,4 +1537,3 @@ def test_installer_compiled_policy_observation_is_readonly_and_exact(monkeypatch
             assert not calls and not hosts
         elif fault in ("disabled", "alternate-priority", "missing-enabled", "duplicate"):
             assert not any("-E" in args for args in calls)
-
