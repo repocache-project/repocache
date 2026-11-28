@@ -4173,7 +4173,7 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
                 inspect_effective_owned_nginx_unit,
             )
             from repocache.server_native_egress_candidate_v1 import (
-                _BOOT_EGRESS_RECEIPT, _BOOT_EGRESS_HISTORY_PREFIX, _BOOT_EGRESS_ROLLOVER,
+                _BOOT_EGRESS_RECEIPT,
             )
             if doc["deployment"]["listen"]["bind_address"] != "127.0.0.1":
                 _deny("OWNED_DEDICATED_INSTALLER_PIN_REFUSED")
@@ -4189,8 +4189,8 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
                 prefix = _NAMESPACE_PROFILE_RECEIPT.removesuffix(".json")
                 expected = {_NAMESPACE_PROFILE_RECEIPT} if placed else set()
                 if ({name for name in names if name.startswith(prefix)} != expected
-                        or any(name.startswith(_BOOT_EGRESS_HISTORY_PREFIX) for name in names)
-                        or _BOOT_EGRESS_RECEIPT in names or _BOOT_EGRESS_ROLLOVER in names
+                        or any(name.startswith(_BOOT_EGRESS_RECEIPT.removesuffix(".json"))
+                               for name in names)
                         or os.path.lexists(_NAMESPACE_PATH)):
                     _deny("OWNED_DEDICATED_INSTALLER_BOOT_REFUSED")
                 with _owned_layout_locked(root, state, recovering=False) as layout:
