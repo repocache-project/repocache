@@ -96,9 +96,9 @@ threading.Event().wait()
 """
 
 
-def command(*argv, timeout=60, input_text=None, check=True):
+def command(*argv, timeout=60, input_text=None, check=True, cwd=None):
     result = subprocess.run(argv, input=input_text, capture_output=True,
-                            text=True, env=ENV, timeout=timeout, check=False)
+                            text=True, env=ENV, timeout=timeout, check=False, cwd=cwd)
     if check and result.returncode:
         raise AssertionError("Isolated command failed: " + Path(argv[0]).name
                              + "\n" + result.stderr[-2500:])
@@ -219,6 +219,11 @@ def authenticated_fixed_policy():
     pins = json.loads((root / "pins.json").read_bytes())
     release = stage.verify_installed_worker(root / "assets", **pins)
     assert release["publisher_key_id"] == "pr237-synthetic"
+    # The release can be authenticated before worker placement. Require
+    # exact agreement with the separately observed installed archive.
+    payloads, receipt = stage._authenticated_payloads(root / "assets", **pins, system=None)
+    assert {**receipt, "status": "AUTHENTICATED_WORKER_FILES_MATCH"} == release
+    source_policy = stage._signed_owned_policy_from_worker(payloads[stage.WORKER])
     code = r"""
 import json,sys,zipimport
 sys.path.insert(0, "/usr/libexec/repocache/server-control-worker")
@@ -236,7 +241,52 @@ print(json.dumps(report))
     assert hashlib.sha256(raw).hexdigest() == report["policy_sha256"]
     assert not report["authorizes_policy_installation"]
     assert not report["runtime_selinux_policy_verified"] and not report["authorizes_nginx_activation"]
+    assert source_policy == {**report, "policy_bytes": raw}
     return raw, report
+
+
+def _fixed_policy_inventory():
+    """Full module inventory; disabled/alternate-priority modules count."""
+    rows = [tuple(line.split()) for line in
+            command("/usr/sbin/semodule", "-lfull").stdout.splitlines() if line.strip()]
+    assert rows and all(len(row) >= 3 and row[0].isascii() and row[0].isdecimal()
+                        for row in rows)
+    assert len(rows) == len(set(rows))
+    return set(rows)
+
+
+def verify_fixed_loaded_policy(expected_sha256):
+    """Read the exact stored HLL module, without installing/rebuilding policy.
+
+    This VM-only observation pins module bytes and enabled priority, not
+    the whole active kernel policy or a general production trust token.
+    """
+    guard()
+    assert re.fullmatch(r"[0-9a-f]{64}", expected_sha256)
+    before = _fixed_policy_inventory()
+    assert {row for row in before if row[1] == FIXED_MODULE} == {("400", FIXED_MODULE, "pp")}
+    assert FIXED_MODULE in {line.split()[0] for line in installed_modules().splitlines() if line}
+    from scripts import stage_native_root_worker as stage
+    with tempfile.TemporaryDirectory(prefix="repocache-policy-readback-", dir="/var/tmp") as place:
+        # semodule extracts HLL into cwd; the fixed local module name is
+        # never derived from a request. The private directory is new.
+        command("/usr/sbin/semodule", "-X", "400", "--hll", "-E", FIXED_MODULE,
+                cwd=place, timeout=120)
+        root = Path(place)
+        leaf = FIXED_MODULE + ".pp"
+        assert {p.name for p in root.iterdir()} == {leaf}
+        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            info = os.stat(leaf, dir_fd=fd, follow_symlinks=False)
+            assert (stat.S_ISREG(info.st_mode) and info.st_uid == info.st_gid == 0
+                    and not info.st_mode & 0o022 and info.st_nlink == 1)
+            raw = stage._asset_bytes(fd, leaf, 4 * 1024 * 1024)
+        finally:
+            os.close(fd)
+    assert hashlib.sha256(raw).hexdigest() == expected_sha256
+    assert _fixed_policy_inventory() == before
+    guard()
+    return expected_sha256
 
 
 def load_fixed_candidate_policy():
@@ -244,6 +294,8 @@ def load_fixed_candidate_policy():
     guard()
     raw, report = authenticated_fixed_policy()
     before = installed_modules()
+    before_full = _fixed_policy_inventory()
+    assert FIXED_MODULE not in {row[1] for row in before_full}
     assert FIXED_MODULE not in {line.split()[0] for line in before.splitlines() if line}
     booleans = command("/usr/sbin/getsebool", "-a").stdout
     vendor = (VENDOR.stat().st_ino, hashlib.sha256(VENDOR.read_bytes()).hexdigest(),
@@ -259,7 +311,22 @@ def load_fixed_candidate_policy():
         assert source.read_bytes() == raw
         command("/usr/bin/make", "-C", str(build), "-f",
                 "/usr/share/selinux/devel/Makefile", FIXED_MODULE + ".pp", timeout=120)
-        command("/usr/sbin/semodule", "-i", str(build / (FIXED_MODULE + ".pp")), timeout=120)
+        compiled = build / (FIXED_MODULE + ".pp")
+        info = compiled.lstat()
+        assert stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and 0 < info.st_size <= 4 * 1024 * 1024
+        digest = hashlib.sha256(compiled.read_bytes()).hexdigest()
+        assert _fixed_policy_inventory() == before_full
+        command("/usr/sbin/semodule", "-X", "400", "-i", str(compiled), timeout=120)
+        assert hashlib.sha256(compiled.read_bytes()).hexdigest() == digest
+    assert _fixed_policy_inventory() == before_full | {("400", FIXED_MODULE, "pp")}
+    assert verify_fixed_loaded_policy(digest) == digest
+    try:
+        verify_fixed_loaded_policy("0" * 64)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("Foreign compiled policy digest accepted")
+    assert verify_fixed_loaded_policy(digest) == digest
     after = installed_modules()
     assert FIXED_MODULE in {line.split()[0] for line in after.splitlines() if line}
     assert {line for line in after.splitlines() if line.split() and
@@ -269,7 +336,8 @@ def load_fixed_candidate_policy():
                       os.getxattr(VENDOR, "security.selinux"))
     guard()
     print("PASS: compiled authenticated dedicated policy; only dedicated module added in disposable guest", flush=True)
-    return report
+    print("PASS: exact compiled HLL module readback and foreign digest refusal; single enabled priority", flush=True)
+    return {**report, "compiled_policy_sha256": digest}
 
 
 def derive_signed_unit(raw, root, *, root_master=False, fixed_candidate=False):

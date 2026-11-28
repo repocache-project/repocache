@@ -34,9 +34,12 @@ from repocache.server_native_nginx_ownership_v1 import inspect_fresh_nginx_footp
 from repocache.server_native_nginx_package_journal_v1 import _retain_native_package_journal_lock_under_root
 from repocache.server_native_package_trust_v1 import _NATIVE, _native_install_commands, _run as _native_run, _trusted_key
 from repocache.server_native_nginx_service_unit_v1 import inspect_native_nginx_unit
-from repocache.server_protected_state_inspect_v1 import _FIXED_STATE_ROOT
+from repocache.server_protected_state_inspect_v1 import _FIXED_STATE_ROOT, _walk, _recheck
 from repocache.server_stock_nginx_package_owner_v1 import inspect_stock_nginx_package_owner, inspect_stock_nginx_package_file_integrity
-from repocache.server_protected_namespace_bootstrap_v1 import bootstrap_protected_namespace_under_root
+from repocache.server_protected_namespace_bootstrap_v1 import (
+    bootstrap_protected_namespace_under_root, _dedicated_ancestry,
+    _dedicated_public_directory,
+)
 from repocache.server_locked_manifest_reconcile_v1 import (
     _validate_proposed_v2_snapshot, preview_proposed_v2_state_transition,
 )
@@ -273,7 +276,18 @@ def _reject_conflicting_units(root: Path, unit_paths: tuple[str, ...]) -> None:
 def _place_worker_files(
     root: Path, payloads: dict[str, bytes], receipt: dict, *, unit_paths: tuple[str, ...],
     prepare_namespace: bool = False,
+    _dedicated_policy_sha256: str | None = None,
 ) -> None:
+    # Private candidate composition only. The caller independently verifies
+    # the release and loaded policy; the source digest is not that proof.
+    dedicated = _dedicated_policy_sha256 is not None
+    if dedicated and (prepare_namespace is not True
+                      or type(_dedicated_policy_sha256) is not str
+                      or signatures.HEX64.fullmatch(_dedicated_policy_sha256) is None
+                      or stage._signed_owned_policy_from_worker(payloads.get(stage.WORKER))[
+                          "policy_sha256"] != _dedicated_policy_sha256):
+        _reject("NATIVE_WORKER_DEDICATED_POLICY_REFUSED")
+    labels = _Labels("almalinux", dedicated=True) if dedicated else None
     receipt_raw = stage._json_line(receipt)
     digest = hashlib.sha256(receipt_raw).hexdigest()
     pending = _MARKER + "pending-" + digest
@@ -298,8 +312,22 @@ def _place_worker_files(
                             for name in (stage.WORKER, _TEMP + stage.WORKER)))
                         or os.path.lexists(root / "run/repocache/server-control.sock")):
                     _reject("FOREIGN_EXISTING_DESTINATION")
-            bootstrap_protected_namespace_under_root(fd, owner_uid=0, public_catalog=True)
+            namespace = bootstrap_protected_namespace_under_root(
+                fd, owner_uid=0, public_catalog=True, **({"_dedicated_public": True} if dedicated else {}))
+            if dedicated and namespace.get("dedicated_public_label_verified") is not True:
+                _reject("NATIVE_WORKER_DEDICATED_PUBLIC_REFUSED")
         with _locked(fd, 0) as state:
+            if dedicated:
+                public, public_chain = _walk(fd, ("var", "lib", "repocache", "public"), stack, 0)
+
+            def check_public():
+                if dedicated:
+                    labels.finish()
+                    _recheck(public_chain, 0)
+                    _dedicated_ancestry(fd, public_chain)
+                    _dedicated_public_directory(public)
+
+            check_public()
             markers = {name for name in os.listdir(state) if name.startswith(_MARKER)}
             if markers - {pending, complete}:
                 _reject("OTHER_CANDIDATE")
@@ -345,11 +373,13 @@ def _place_worker_files(
                 stage._audit_worker_files(root, payloads)
                 _place_file(state, _RUNTIME_RECEIPT, receipt_raw, 0o600)
                 _create_marker(state, complete)
+            check_public()
             final_pending = _named(state, pending)
             if final_pending is not None:
                 _check_marker(final_pending)
                 os.unlink(pending, dir_fd=state)
                 os.fsync(state)
+            check_public()
 
 
 def install_authenticated_worker(
@@ -593,7 +623,6 @@ def _stage_authenticated_native_executable_candidate(
     from repocache.server_native_nginx_executable_v1 import (
         NativeExecutableCandidateError, stage_nginx_candidate_with_receipt,
         _identity as executable_identity, _verify_leaf, _read_executable_receipt,
-        _policy_candidate, _POLICY_MEMBER,
     )
     from repocache.server_protected_state_store_v1 import _read_file
     distribution = _native_distro()
@@ -605,18 +634,12 @@ def _stage_authenticated_native_executable_candidate(
     policy_digest = None
     labels = None
     if dedicated_selinux:
-        import io
-        import zipfile
         labels = _Labels(distribution)
-        # No caller-provided policy bytes or digest. The verified release
-        # archive determines the exact policy embedded in the worker.
+        # Read the fixed member of the authenticated candidate before any
+        # native effect. Use the same bounded parser as fresh placement.
         try:
-            with zipfile.ZipFile(io.BytesIO(payloads[stage.WORKER])) as archive:
-                if (archive.namelist().count(_POLICY_MEMBER) != 1
-                        or not 0 < archive.getinfo(_POLICY_MEMBER).file_size <= 16384):
-                    _reject("NATIVE_EXECUTABLE_DEDICATED_POLICY_REFUSED")
-                policy_digest = _policy_candidate(archive.read(_POLICY_MEMBER))["policy_sha256"]
-        except (KeyError, zipfile.BadZipFile, NativeExecutableCandidateError):
+            policy_digest = stage._signed_owned_policy_from_worker(payloads[stage.WORKER])["policy_sha256"]
+        except (KeyError, stage.WorkerStageError):
             _reject("NATIVE_EXECUTABLE_DEDICATED_POLICY_REFUSED")
     expected = stage._json_line(receipt)
     completed = _MARKER + "complete-" + hashlib.sha256(expected).hexdigest()

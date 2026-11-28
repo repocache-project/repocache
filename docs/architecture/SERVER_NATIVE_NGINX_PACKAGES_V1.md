@@ -1909,3 +1909,30 @@ authenticated installed worker exercises this in a detached enforcing
 VM root using the already loaded dedicated policy. This is a fresh
 placement component, not the real host installer composition, managed
 generation commit, automatic policy installation or activation.
+
+### Fresh signed worker placement and native policy readback
+
+The private worker-placement candidate can request the fresh dedicated
+public-directory context, using a policy-source digest checked against
+the fixed member of the independently authenticated worker archive.
+The normal installer remains unchanged. Before and after worker/receipt
+placement under the existing lock, recheck the exact public-directory
+ancestry, mount, label and enforcing state. Existing legacy-labelled
+directories are refused, never relabelled.
+
+The guarded enforcing VM authenticates the policy source independently
+from the signed release and compares it with the installed archive.
+Reject every preexisting module with the dedicated name at any
+priority, compile the exact source, install only the fixed module at
+priority 400 in the disposable VM, and read the stored HLL package
+back with semodule's extraction operation. Require its SHA-256 to
+match the freshly compiled package, a single enabled priority, and
+unchanged other modules and booleans. Read back the same package
+after reboot. This is module-store evidence, not an attestation of the
+entire active kernel policy or production installation authority.
+
+The detached-root fresh configuration witness now uses the same
+authenticated worker placement, independently verified source and
+native module readback, and runs the configuration primitive from the
+newly placed archive in an isolated interpreter. No actual host
+configuration, service, operator TLS material, or public CLI changes.

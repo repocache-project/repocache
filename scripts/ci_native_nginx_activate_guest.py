@@ -2173,65 +2173,96 @@ print(json.dumps(report))
         capture_output=True, text=True, timeout=30).stdout)
 
 
-def verify_fresh_dedicated_bootstrap_candidate():
-    """Exercise fresh labelled namespace and inert config in a detached root."""
+def verify_fresh_dedicated_bootstrap_candidate(native, assets, pins, policy):
+    """Compose signed worker, labelled namespace and inert config in a detached root."""
+    import tempfile
+    from scripts import ci_selinux_nginx_egress_guest as isolated
+
+    payloads, receipt = native.stage._authenticated_payloads(assets, **pins, system=None)
+    assert receipt["publisher_key_id"] == "pr237-synthetic"
+    assert native.stage._signed_owned_policy_from_worker(payloads[native.stage.WORKER])[
+        "policy_sha256"] == policy["policy_sha256"]
+    assert isolated.verify_fixed_loaded_policy(policy["compiled_policy_sha256"]) == policy["compiled_policy_sha256"]
     code = """
-import os,stat,sys,tempfile,zipimport
+import os,stat,sys,zipimport
 from pathlib import Path
-sys.path.insert(0, "/usr/libexec/repocache/server-control-worker")
+root=Path(sys.argv[1])
+worker=str(root/"usr/libexec/repocache/server-control-worker")
+sys.path.insert(0,worker)
 from repocache import server_native_v2_transaction_v1 as tx
 from repocache import server_protected_namespace_bootstrap_v1 as bootstrap
 from repocache.server_protected_state_store_v1 import _locked
 assert isinstance(tx.__loader__,zipimport.zipimporter)
-assert tx.__loader__.archive=="/usr/libexec/repocache/server-control-worker"
+assert tx.__loader__.archive==worker
 assert os.getresuid()==os.getresgid()==(0,0,0)
-with tempfile.TemporaryDirectory(prefix="repocache-fresh-label-",dir="/var/tmp") as directory:
-    root=Path(directory)
-    for path in ("etc/nginx/conf.d","var/lib"):
-        (root/path).mkdir(parents=True,mode=0o755)
-    fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
-    try:
-        report=bootstrap.bootstrap_protected_namespace_under_root(fd,owner_uid=0,public_catalog=True,
-                                                                 _dedicated_public=True)
-        assert report["dedicated_public_label_verified"] and report["state_directory_created"]
-        public=root/"var/lib/repocache/public"
-        assert os.getxattr(public,"security.selinux").rstrip(b"\\0")==tx._DEDICATED_PUBLIC_CONTEXT
-        assert not list(public.iterdir())
-        def guard():
-            assert root.is_dir() and root.stat().st_uid==0 and not root.is_symlink()
-        with _locked(fd,0) as state:
-            first=tx._prepare_owned_dedicated_bootstrap_locked(fd,state,recheck_owned=guard)
-            assert not first["authorizes_nginx_activation"] and not first["authorizes_catalog_publication"]
-            assert tx._prepare_owned_dedicated_bootstrap_locked(fd,state,recheck_owned=guard)==first
-            config=root/"etc/nginx/repocache.d"
-            main=config/tx._OWNED_MAIN
-            assert main.read_bytes()==tx._OWNED_BOOTSTRAP_CONFIG
-            for path in (config,main):
-                assert os.getxattr(path,"security.selinux").rstrip(b"\\0")==tx._DEDICATED_PUBLIC_CONTEXT
-            assert stat.S_IMODE(config.stat().st_mode)==0o755
-            assert stat.S_IMODE(main.stat().st_mode)==0o644
-            assert not list(public.iterdir()) and not list((root/"etc/nginx/conf.d").iterdir())
-            original=(main.stat().st_dev,main.stat().st_ino)
-            # Change only a disposable fixture label. Never repair it.
-            foreign=os.getxattr(root/"etc/nginx","security.selinux")
-            assert foreign.rstrip(b"\\0")!=tx._DEDICATED_PUBLIC_CONTEXT
-            os.setxattr(main,"security.selinux",foreign)
-            try:
-                tx._prepare_owned_dedicated_bootstrap_locked(fd,state,recheck_owned=guard)
-            except tx.NativeV2TransactionError:
-                pass
-            else:
-                raise AssertionError("Foreign bootstrap label adopted")
-            assert (main.stat().st_dev,main.stat().st_ino)==original
-            assert main.read_bytes()==tx._OWNED_BOOTSTRAP_CONFIG
-        assert bootstrap.bootstrap_protected_namespace_under_root(
-            fd,owner_uid=0,public_catalog=True,_dedicated_public=True)["dedicated_public_label_verified"]
-    finally:
-        os.close(fd)
+fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+try:
+    report=bootstrap.bootstrap_protected_namespace_under_root(fd,owner_uid=0,public_catalog=True,
+                                                             _dedicated_public=True)
+    assert report["dedicated_public_label_verified"] and not report["state_directory_created"]
+    public=root/"var/lib/repocache/public"
+    assert os.getxattr(public,"security.selinux").rstrip(b"\\0")==tx._DEDICATED_PUBLIC_CONTEXT
+    assert not list(public.iterdir())
+    def guard():
+        assert root.is_dir() and root.stat().st_uid==0 and not root.is_symlink()
+    with _locked(fd,0) as state:
+        first=tx._prepare_owned_dedicated_bootstrap_locked(fd,state,recheck_owned=guard)
+        assert not first["authorizes_nginx_activation"] and not first["authorizes_catalog_publication"]
+        assert tx._prepare_owned_dedicated_bootstrap_locked(fd,state,recheck_owned=guard)==first
+        config=root/"etc/nginx/repocache.d"
+        main=config/tx._OWNED_MAIN
+        assert main.read_bytes()==tx._OWNED_BOOTSTRAP_CONFIG
+        for path in (config,main):
+            assert os.getxattr(path,"security.selinux").rstrip(b"\\0")==tx._DEDICATED_PUBLIC_CONTEXT
+        assert stat.S_IMODE(config.stat().st_mode)==0o755
+        assert stat.S_IMODE(main.stat().st_mode)==0o644
+        assert not list(public.iterdir()) and not list((root/"etc/nginx/conf.d").iterdir())
+        original=(main.stat().st_dev,main.stat().st_ino)
+        # Change only a disposable fixture label. Never repair it.
+        foreign=os.getxattr(root/"etc/nginx","security.selinux")
+        assert foreign.rstrip(b"\\0")!=tx._DEDICATED_PUBLIC_CONTEXT
+        os.setxattr(main,"security.selinux",foreign)
+        try:
+            tx._prepare_owned_dedicated_bootstrap_locked(fd,state,recheck_owned=guard)
+        except tx.NativeV2TransactionError:
+            pass
+        else:
+            raise AssertionError("Foreign bootstrap label adopted")
+        assert (main.stat().st_dev,main.stat().st_ino)==original
+        assert main.read_bytes()==tx._OWNED_BOOTSTRAP_CONFIG
+    assert bootstrap.bootstrap_protected_namespace_under_root(
+        fd,owner_uid=0,public_catalog=True,_dedicated_public=True)["dedicated_public_label_verified"]
+finally:
+    os.close(fd)
 """
-    subprocess.run(["/usr/bin/python3", "-IS", "-B", "-c", code],
-                   check=True, timeout=60)
+    with tempfile.TemporaryDirectory(prefix="repocache-fresh-label-", dir="/var/tmp") as directory:
+        root = Path(directory)
+        for path in ("etc/nginx/conf.d", "var/lib", "usr", "etc/systemd/system"):
+            (root / path).mkdir(parents=True, mode=0o755)
+        options = dict(unit_paths=("/etc/systemd/system", "/usr/lib/systemd/system"),
+                       prepare_namespace=True, _dedicated_policy_sha256=policy["policy_sha256"])
+        native._place_worker_files(root, payloads, receipt, **options)
+        native.stage._audit_worker_files(root, payloads)
+        worker = root / "usr/libexec/repocache/server-control-worker"
+        public = root / "var/lib/repocache/public"
+        state = public.parent / "server"
+        # All placed worker/unit/receipt identities and the public inode
+        # must remain unchanged across a fresh authenticated repeat.
+        tracked = (worker, public, state / native._RUNTIME_RECEIPT,
+                   *(root / "etc/systemd/system" / unit for unit in native.stage.UNITS))
+        def identity(path):
+            info = path.stat()
+            return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+                    info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        before = [identity(path) for path in tracked]
+        native._place_worker_files(root, payloads, receipt, **options)
+        assert [identity(path) for path in tracked] == before
+        subprocess.run(["/usr/bin/python3", "-IS", "-B", "-c", code, str(root)],
+                       check=True, timeout=60)
+        native.stage._audit_worker_files(root, payloads)
+        assert isolated.verify_fixed_loaded_policy(policy["compiled_policy_sha256"]) == policy["compiled_policy_sha256"]
     print("PASS: signed worker fresh detached namespace and inert configuration labels, repeat and foreign-label refusal", flush=True)
+    print("PASS: authenticated fresh worker placement creates labelled public directory before any config effect", flush=True)
 
 
 def verify_fixed_executable_candidate(native, assets, pins, distribution):
@@ -2258,12 +2289,13 @@ def verify_fixed_executable_candidate(native, assets, pins, distribution):
     if distribution == "almalinux":
         from scripts import ci_selinux_nginx_egress_guest as isolated
         policy = isolated.load_fixed_candidate_policy()
-        verify_fresh_dedicated_bootstrap_candidate()
+        verify_fresh_dedicated_bootstrap_candidate(native, assets, pins, policy)
     result = native._stage_authenticated_native_executable_candidate(
         assets, **pins, dedicated_selinux=policy is not None)
     if policy is not None:
         assert result["dedicated_executable_label_observed"]
         assert result["dedicated_policy_sha256"] == policy["policy_sha256"]
+        result["fixture_compiled_policy_sha256"] = policy["compiled_policy_sha256"]
         assert os.getxattr(target, "security.selinux").rstrip(b"\0") == policy["executable_context"].encode("ascii")
     else:
         assert not result["dedicated_executable_label_observed"]
@@ -2351,9 +2383,11 @@ with ExitStack() as stack:
                    input=json.dumps([expected,pins]),text=True,check=True,timeout=30)
     if expected["dedicated_policy_sha256"] is not None:
         assert run("/usr/sbin/getenforce").stdout.strip() == "Enforcing"
-        modules = run("/usr/sbin/semodule", "-l").stdout.splitlines()
-        assert "repocache_nginx" in {line.split()[0] for line in modules if line}
-        print("PASS: dedicated executable label and signed policy identity retained across reboot", flush=True)
+        from scripts import ci_selinux_nginx_egress_guest as isolated
+        _, source_policy = isolated.authenticated_fixed_policy()
+        assert source_policy["policy_sha256"] == expected["dedicated_policy_sha256"]
+        assert isolated.verify_fixed_loaded_policy(expected["fixture_compiled_policy_sha256"]) == expected["fixture_compiled_policy_sha256"]
+        print("PASS: dedicated executable label and exact compiled policy identity retained across reboot", flush=True)
     assert signed_namespace_unit_candidate() == expected["namespace_unit_candidate"]
     print("PASS: exact fixed executable and authenticated release receipt survive real reboot; no activation authority", flush=True)
     print("PASS: authenticated namespace unit candidate digest is unchanged after reboot", flush=True)
