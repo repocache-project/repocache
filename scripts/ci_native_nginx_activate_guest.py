@@ -799,6 +799,28 @@ def prepare_and_interrupt_live_wal(distribution: str, native, assets, pins) -> N
                   "compiled_policy_sha256": recorded["fixture_compiled_policy_sha256"]}
         verify_fresh_dedicated_bootstrap_candidate(
             native, assets, pins, policy, initial=True)
+        # This existing legacy bootstrap is genuinely active. The new
+        # installer-only stopped transaction must not stop, relabel, adopt
+        # or mutate it even with an authenticated release and correct proposal.
+        before = live_wal_resource_hashes()
+        pid = native._own_service_observation(active=True)["main_pid_observed"]
+        before_intake = hashlib.sha256((STATE / ".admin-candidate-v2.json").read_bytes()).hexdigest()
+        try:
+            native._stage_authenticated_initial_dedicated_generation(
+                assets, **pins, executable_receipt_sha256=recorded["receipt_sha256"],
+                proposal_sha256=prepared["proposed_state_sha256"])
+        except native.stage.WorkerStageError:
+            pass
+        else:
+            raise AssertionError("Active bootstrap adopted by stopped initial installer")
+        assert live_wal_resource_hashes() == before
+        assert hashlib.sha256((STATE / ".admin-candidate-v2.json").read_bytes()).hexdigest() == before_intake
+        assert native._own_service_observation(active=True)["main_pid_observed"] == pid
+        assert not (STATE / ".state-v2-owned-nginx.pending").exists()
+        require_status(OWN, True, True)
+        require_status(VENDOR, False, False)
+        loopback_response()
+        print("PASS: authenticated initial installer refuses active bootstrap without WAL or service mutation", flush=True)
     bootstrap = OWN_CONFIG.read_bytes()
     def vendor_temp_identity():
         if distribution == "debian":
