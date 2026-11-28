@@ -2184,9 +2184,10 @@ def verify_fresh_dedicated_bootstrap_candidate(native, assets, pins, policy):
         "policy_sha256"] == policy["policy_sha256"]
     assert isolated.verify_fixed_loaded_policy(policy["compiled_policy_sha256"]) == policy["compiled_policy_sha256"]
     code = """
-import os,stat,sys,zipimport
+import hashlib,os,stat,sys,zipimport
 from pathlib import Path
 root=Path(sys.argv[1])
+expected_worker=sys.argv[2]
 worker=str(root/"usr/libexec/repocache/server-control-worker")
 sys.path.insert(0,worker)
 from repocache import server_native_v2_transaction_v1 as tx
@@ -2205,6 +2206,8 @@ try:
     assert not list(public.iterdir())
     def guard():
         assert root.is_dir() and root.stat().st_uid==0 and not root.is_symlink()
+        assert hashlib.sha256(Path(worker).read_bytes()).hexdigest()==expected_worker
+    guard()
     with _locked(fd,0) as state:
         first=tx._prepare_owned_dedicated_bootstrap_locked(fd,state,recheck_owned=guard)
         assert not first["authorizes_nginx_activation"] and not first["authorizes_catalog_publication"]
@@ -2257,8 +2260,8 @@ finally:
         before = [identity(path) for path in tracked]
         native._place_worker_files(root, payloads, receipt, **options)
         assert [identity(path) for path in tracked] == before
-        subprocess.run(["/usr/bin/python3", "-IS", "-B", "-c", code, str(root)],
-                       check=True, timeout=60)
+        subprocess.run(["/usr/bin/python3", "-IS", "-B", "-c", code, str(root),
+                        receipt["files"][native.stage.WORKER]], check=True, timeout=60)
         native.stage._audit_worker_files(root, payloads)
         assert isolated.verify_fixed_loaded_policy(policy["compiled_policy_sha256"]) == policy["compiled_policy_sha256"]
     print("PASS: signed worker fresh detached namespace and inert configuration labels, repeat and foreign-label refusal", flush=True)

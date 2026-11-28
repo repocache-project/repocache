@@ -1936,3 +1936,11 @@ authenticated worker placement, independently verified source and
 native module readback, and runs the configuration primitive from the
 newly placed archive in an isolated interpreter. No actual host
 configuration, service, operator TLS material, or public CLI changes.
+
+The private fresh placement selector is explicitly detached-root-only
+until the initial host orchestration is accepted. Verify the public
+label before each worker/unit/receipt write and before the completion
+marker. If it drifts during placement, retain the pending claim, refuse
+the remaining writes, and never silently create the completion marker.
+The root-container recovery suite exercises this boundary as well as
+same-inode repeats, wrong pins and actual-root refusal.

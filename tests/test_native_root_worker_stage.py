@@ -1198,15 +1198,12 @@ def test_signed_worker_policy_member_is_bounded_and_unique(fault):
     data = io.BytesIO()
     with zipfile.ZipFile(data, "w") as archive:
         if fault != "missing":
-            archive.writestr(_POLICY_MEMBER, raw if fault != "oversize" else b"a" * 16385)
+            value = (b"a" * 16385 if fault == "oversize" else
+                     b"unrelated policy\n" if fault == "malformed" else raw)
+            archive.writestr(_POLICY_MEMBER, value)
         if fault == "duplicate":
             with pytest.warns(UserWarning):
                 archive.writestr(_POLICY_MEMBER, raw)
-        if fault == "malformed":
-            data = io.BytesIO()
-    if fault == "malformed":
-        with zipfile.ZipFile(data, "w") as archive:
-            archive.writestr(_POLICY_MEMBER, b"unrelated policy\n")
     if fault == "none":
         result = stage._signed_owned_policy_from_worker(data.getvalue())
         assert result["policy_bytes"] == raw
@@ -1218,60 +1215,23 @@ def test_signed_worker_policy_member_is_bounded_and_unique(fault):
             stage._signed_owned_policy_from_worker(data.getvalue())
 
 
-@pytest.mark.skipif(os.geteuid() != 0, reason="requires disposable root-owned filesystem")
-@pytest.mark.parametrize("fault", ["none", "wrong-pin", "legacy-public", "label-drift", "no-namespace"])
-def test_dedicated_worker_placement_pins_fresh_public(tmp_path, monkeypatch, fault):
-    import io
-    import zipfile
-    from repocache.server_native_nginx_executable_v1 import _POLICY_MEMBER
-    from repocache.server_protected_namespace_bootstrap_v1 import _DEDICATED_PUBLIC_CONTEXT
-    root, state = _placement_root(tmp_path, worker_parent=False, protected_state=False)
-    raw = b"policy_module(repocache_nginx, 1.0.0)\n"
-    data = io.BytesIO()
-    with zipfile.ZipFile(data, "w") as archive:
-        archive.writestr(_POLICY_MEMBER, raw)
-    payloads = {name: b"fixed signed payload" for name in stage.UNITS}
-    payloads[stage.WORKER] = data.getvalue()
-    receipt = {"source_sha": "a" * 40}
-    context = _DEDICATED_PUBLIC_CONTEXT + b"\0"
-    foreign = b"system_u:object_r:var_lib_t:s0\0"
-    labels, writes = {}, []
-    public = state.parent / "public"
-    monkeypatch.setattr(install._Labels, "_command", staticmethod(lambda *a: b"Enforcing"))
-    monkeypatch.setattr(os, "listxattr", lambda fd: ["security.selinux"])
-    monkeypatch.setattr(os, "getxattr", lambda fd, name: labels.get(os.fstat(fd).st_ino, foreign))
-    def set_label(fd, name, value):
-        assert os.fstat(fd).st_ino == public.stat().st_ino and value == context
-        assert stat.S_IMODE(os.fstat(fd).st_mode) == 0o700
-        labels[os.fstat(fd).st_ino] = value
-        writes.append(os.fstat(fd).st_ino)
-    monkeypatch.setattr(os, "setxattr", set_label)
-    options = dict(unit_paths=_UNIT_PATHS, prepare_namespace=fault != "no-namespace",
-                   _dedicated_policy_sha256="0"*64 if fault == "wrong-pin" else hashlib.sha256(raw).hexdigest())
-    if fault == "legacy-public":
-        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            install.bootstrap_protected_namespace_under_root(fd, owner_uid=0, public_catalog=True)
-        finally:
-            os.close(fd)
-    if fault in ("none", "label-drift"):
-        install._place_worker_files(root, payloads, receipt, **options)
-        worker = root / "usr/libexec/repocache" / stage.WORKER
-        original = worker.stat()
-        assert writes == [public.stat().st_ino]
-        if fault == "label-drift":
-            labels[public.stat().st_ino] = foreign
-            with pytest.raises(ValueError):
-                install._place_worker_files(root, payloads, receipt, **options)
-        else:
-            install._place_worker_files(root, payloads, receipt, **options)
-        assert writes == [public.stat().st_ino]
-        assert worker.stat().st_ino == original.st_ino
-        assert worker.stat().st_mtime_ns == original.st_mtime_ns
-        stage._audit_worker_files(root, payloads)
+@pytest.mark.parametrize("raw,accepted", [
+    ("100 base pp\n400 repocache_nginx pp\n", True),
+    ("400 repocache_nginx pp disabled\n", True),
+    ("100 repocache_nginx cil\n400 repocache_nginx pp\n", True),
+    ("400 repocache_nginx pp\n400 repocache_nginx pp\n", False),
+    ("unexpected row\n", False),
+    ("", False),
+])
+def test_fixed_policy_full_inventory_preserves_priority_and_disabled_state(monkeypatch, raw, accepted):
+    from types import SimpleNamespace
+    from scripts import ci_selinux_nginx_egress_guest as guest
+    def command(*args, **kwargs):
+        assert args == ("/usr/sbin/semodule", "-lfull") and not kwargs
+        return SimpleNamespace(stdout=raw)
+    monkeypatch.setattr(guest, "command", command)
+    if accepted:
+        assert guest._fixed_policy_inventory() == {tuple(line.split()) for line in raw.splitlines()}
     else:
-        with pytest.raises(ValueError):
-            install._place_worker_files(root, payloads, receipt, **options)
-        assert not writes and not (root / "usr/libexec").exists()
-        assert not list((root / "etc/systemd/system").iterdir())
-        assert public.exists() is (fault == "legacy-public")
+        with pytest.raises(AssertionError):
+            guest._fixed_policy_inventory()

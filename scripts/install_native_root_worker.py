@@ -296,6 +296,10 @@ def _place_worker_files(
         fd = os.open(root, stage._DIRECTORY)
         stack.callback(os.close, fd)
         stage._protected_directory(fd)
+        if dedicated and _identity(os.fstat(fd)) == _identity(os.stat("/")):
+            # The current fresh composition is detached-root only. Actual
+            # first-install policy/activation orchestration is separate.
+            _reject("NATIVE_WORKER_DEDICATED_HOST_PLACEMENT_REFUSED")
         usr = _open_directory(fd, "usr", stack)
         units = fd
         for component in _UNIT_DIRECTORY:
@@ -350,6 +354,7 @@ def _place_worker_files(
                 stage._audit_worker_files(root, payloads)
                 # Only an independently authenticated identical installation
                 # can fill the local receipt on an older completed placement.
+                check_public()
                 _place_file(state, _RUNTIME_RECEIPT, receipt_raw, 0o600)
             else:
                 try:
@@ -365,13 +370,19 @@ def _place_worker_files(
                     for directory, name in targets:
                         if _named(directory, name) is not None or _named(directory, _TEMP + name) is not None:
                             _reject("FOREIGN_EXISTING_DESTINATION")
+                    check_public()
                     _create_marker(state, pending)
+                check_public()
                 worker = _worker_directory(usr, stack, create=True)
+                check_public()
                 _place_file(worker, stage.WORKER, payloads[stage.WORKER], 0o755)
                 for unit in stage.UNITS:
+                    check_public()
                     _place_file(units, unit, payloads[unit], 0o644)
                 stage._audit_worker_files(root, payloads)
+                check_public()
                 _place_file(state, _RUNTIME_RECEIPT, receipt_raw, 0o600)
+                check_public()
                 _create_marker(state, complete)
             check_public()
             final_pending = _named(state, pending)

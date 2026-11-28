@@ -5713,3 +5713,95 @@ def test_prepare_dedicated_bootstrap_fresh_only(tmp_path, monkeypatch, fault):
         assert not (state / native._OWNED_WAL).exists()
     finally:
         os.close(fd)
+
+
+@pytest.mark.parametrize("fault", ["none", "wrong-pin", "legacy-public", "label-drift",
+                                   "no-namespace", "mid-placement-label-drift", "host-root"])
+def test_dedicated_worker_placement_pins_fresh_public(tmp_path, monkeypatch, fault):
+    import io
+    import zipfile
+    from repocache.server_native_nginx_executable_v1 import _POLICY_MEMBER
+    from repocache.server_protected_namespace_bootstrap_v1 import _DEDICATED_PUBLIC_CONTEXT
+    from scripts import stage_native_root_worker as stage
+    from scripts import install_native_root_worker as install
+    root = tmp_path / "dedicated-worker"
+    root.mkdir(mode=0o700)
+    for path in ("var/lib", "usr", "etc/systemd/system"):
+        (root / path).mkdir(parents=True)
+    state = root / "var/lib/repocache/server"
+    raw = b"policy_module(repocache_nginx, 1.0.0)\n"
+    data = io.BytesIO()
+    with zipfile.ZipFile(data, "w") as archive:
+        archive.writestr(_POLICY_MEMBER, raw)
+    payloads = {name: b"fixed signed payload" for name in stage.UNITS}
+    payloads[stage.WORKER] = data.getvalue()
+    receipt = {"source_sha": "a" * 40}
+    context = _DEDICATED_PUBLIC_CONTEXT + b"\0"
+    foreign = b"system_u:object_r:var_lib_t:s0\0"
+    labels, writes = {}, []
+    public = state.parent / "public"
+    monkeypatch.setattr(install._Labels, "_command", staticmethod(lambda *a: b"Enforcing"))
+    monkeypatch.setattr(os, "listxattr", lambda fd: ["security.selinux"])
+    monkeypatch.setattr(os, "getxattr", lambda fd, name: labels.get(os.fstat(fd).st_ino, foreign))
+    def set_label(fd, name, value):
+        assert os.fstat(fd).st_ino == public.stat().st_ino and value == context
+        assert stat.S_IMODE(os.fstat(fd).st_mode) == 0o700
+        labels[os.fstat(fd).st_ino] = value
+        writes.append(os.fstat(fd).st_ino)
+    monkeypatch.setattr(os, "setxattr", set_label)
+    options = dict(unit_paths=("/etc/systemd/system", "/usr/lib/systemd/system"),
+                   prepare_namespace=fault != "no-namespace",
+                   _dedicated_policy_sha256="0"*64 if fault == "wrong-pin" else hashlib.sha256(raw).hexdigest())
+    if fault == "legacy-public":
+        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            install.bootstrap_protected_namespace_under_root(fd, owner_uid=0, public_catalog=True)
+        finally:
+            os.close(fd)
+    if fault == "host-root":
+        # Refuse the actual-root identity before opening any target.
+        actual_open = os.open
+        with monkeypatch.context() as point:
+            point.setattr(os, "open", lambda path, *a, **kw: (
+                actual_open("/", *a, **kw) if path == root else
+                pytest.fail("actual-root target lookup reached")))
+            with pytest.raises(stage.WorkerStageError, match="HOST_PLACEMENT_REFUSED"):
+                install._place_worker_files(root, payloads, receipt, **options)
+        assert not public.exists() and not writes
+        return
+    if fault == "mid-placement-label-drift":
+        original = install._place_file
+        def drift(directory, name, content, mode):
+            original(directory, name, content, mode)
+            assert name == stage.WORKER
+            labels[public.stat().st_ino] = foreign
+        monkeypatch.setattr(install, "_place_file", drift)
+        with pytest.raises(ValueError):
+            install._place_worker_files(root, payloads, receipt, **options)
+        assert list(state.glob(".native-worker-placement.pending-*"))
+        assert not list(state.glob(".native-worker-placement.complete-*"))
+        assert not (state / install._RUNTIME_RECEIPT).exists()
+        assert not list((root / "etc/systemd/system").iterdir())
+        assert writes == [public.stat().st_ino]
+        return
+    if fault in ("none", "label-drift"):
+        install._place_worker_files(root, payloads, receipt, **options)
+        worker = root / "usr/libexec/repocache" / stage.WORKER
+        original = worker.stat()
+        assert writes == [public.stat().st_ino]
+        if fault == "label-drift":
+            labels[public.stat().st_ino] = foreign
+            with pytest.raises(ValueError):
+                install._place_worker_files(root, payloads, receipt, **options)
+        else:
+            install._place_worker_files(root, payloads, receipt, **options)
+        assert writes == [public.stat().st_ino]
+        assert worker.stat().st_ino == original.st_ino
+        assert worker.stat().st_mtime_ns == original.st_mtime_ns
+        stage._audit_worker_files(root, payloads)
+    else:
+        with pytest.raises(ValueError):
+            install._place_worker_files(root, payloads, receipt, **options)
+        assert not writes and not (root / "usr/libexec").exists()
+        assert not list((root / "etc/systemd/system").iterdir())
+        assert public.exists() is (fault == "legacy-public")
