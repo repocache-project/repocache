@@ -833,7 +833,7 @@ def test_executable_candidate_selects_retained_native_effects_lock(
                                    "profile-load-manifest", "profile-load-report",
                                    "profile-load-authority", "storage", "storage-wal",
                                    "storage-boot", "storage-manifest", "storage-report",
-                                   "storage-authority"])
+                                   "storage-authority", "storage-int-report"])
 def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, tmp_path, fault):
     from contextlib import contextmanager
     from types import SimpleNamespace
@@ -1002,7 +1002,7 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
                       **{key: data[key] for key in ("generation_manifest_sha256",
                             "boot_receipt_sha256", "profile_receipt_sha256", "executable_receipt_sha256")},
                       "storage": {"repository_cache_roots_verified": [], "metrics_file_verified": False,
-                                  "selinux_enforcing_labels_verified": True,
+                                  "selinux_enforcing_labels_verified": 1 if fault == "storage-int-report" else True,
                                   "actual_service_write_verified": fault == "storage-report"},
                       "authorizes_systemctl": fault == "storage-authority",
                       "authorizes_nginx_activation": False, "authorizes_catalog_publication": False}

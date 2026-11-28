@@ -4477,7 +4477,8 @@ def test_installed_dedicated_recovery_refuses_source_loader_before_host_access(m
                                    "profile-load-observation-drift",
                                    "storage", "storage-wal", "storage-boot", "storage-service",
                                    "storage-policy", "storage-drift", "storage-result",
-                                   "storage-readback"])
+                                   "storage-readback", "storage-int-report",
+                                   "storage-int-readback"])
 def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, monkeypatch, fault):
     """Actual protected files and flock; loader/host/package/runtime observations simulated."""
     import fcntl
@@ -4763,7 +4764,10 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
             if fault == "storage-drift":
                 resources[native._CATALOG] = b"changed"
             return {"repository_cache_roots_verified": [], "metrics_file_verified": False,
-                    "selinux_enforcing_labels_verified": not (fault == "storage-readback" and not allow_create),
+                    "selinux_enforcing_labels_verified": (
+                        1 if fault == "storage-int-report" or (
+                            fault == "storage-int-readback" and not allow_create)
+                        else not (fault == "storage-readback" and not allow_create)),
                     "actual_service_write_verified": fault == "storage-result"}
         monkeypatch.setattr(storage, "prepare_dedicated_candidate_storage", prepare_storage)
         if fault == "storage":
@@ -4779,6 +4783,8 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
             "storage-policy": ["policy"], "storage-drift": ["policy", "create"],
             "storage-result": ["policy", "create"],
             "storage-readback": ["policy", "create", "read"],
+            "storage-int-report": ["policy", "create"],
+            "storage-int-readback": ["policy", "create", "read"],
         }[fault]
         assert (state_path / egress._BOOT_EGRESS_RECEIPT).read_bytes() == boot
         with real_locked(rootfd, 0):

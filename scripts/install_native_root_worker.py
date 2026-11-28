@@ -2010,12 +2010,12 @@ def _authenticated_prepared_dedicated_bridge(
                     or (resume_boot and report["receipt_sha256"] != recovery_pins["boot_receipt_sha256"])):
                 _reject("NATIVE_DEDICATED_RECOVERY_CHILD_REFUSED")
         elif prepare_storage:
+            from repocache.server_native_v2_transaction_v1 import (
+                _closed_committed_dedicated_storage_report,
+            )
             if (report.get("status") != "OWNED_DEDICATED_COMMITTED_STORAGE_PREPARED"
                     or any(report.get(key) != recovery_pins[key] for key in fields)
-                    or report.get("storage") != {
-                        "repository_cache_roots_verified": [], "metrics_file_verified": False,
-                        "selinux_enforcing_labels_verified": True,
-                        "actual_service_write_verified": False}
+                    or not _closed_committed_dedicated_storage_report(report.get("storage"))
                     or report.get("authorizes_systemctl") is not False
                     or report.get("authorizes_nginx_activation") is not False
                     or report.get("authorizes_catalog_publication") is not False):

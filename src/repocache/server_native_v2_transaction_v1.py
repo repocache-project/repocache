@@ -3963,6 +3963,18 @@ def _rollover_installed_prepared_wal_dedicated(pins: dict) -> dict:
                                           pending_prepare=True)
 
 
+def _closed_committed_dedicated_storage_report(report) -> bool:
+    """Require exact typed evidence; booleans must not be integer lookalikes."""
+    return (type(report) is dict
+            and set(report) == {"repository_cache_roots_verified", "metrics_file_verified",
+                                "selinux_enforcing_labels_verified", "actual_service_write_verified"}
+            and type(report["repository_cache_roots_verified"]) is list
+            and not report["repository_cache_roots_verified"]
+            and report["metrics_file_verified"] is False
+            and report["selinux_enforcing_labels_verified"] is True
+            and report["actual_service_write_verified"] is False)
+
+
 def _prepare_installed_committed_dedicated_storage(pins: dict) -> dict:
     """Private authenticated storage preparation; no migration or activation."""
     return _installed_dedicated_lifecycle(pins, prepare=False, prepare_storage=True)
@@ -4476,11 +4488,11 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
             storage_owner()
             created = prepare_dedicated_candidate_storage("almalinux", doc, allow_create=True)
             storage_owner()
-            if (created != {"repository_cache_roots_verified": [], "metrics_file_verified": False,
-                            "selinux_enforcing_labels_verified": True,
-                            "actual_service_write_verified": False}
-                    or prepare_dedicated_candidate_storage("almalinux", doc, allow_create=False) != created
-                    or policy() != before):
+            if not _closed_committed_dedicated_storage_report(created):
+                _deny("OWNED_DEDICATED_INSTALLER_RESULT_REFUSED")
+            readback = prepare_dedicated_candidate_storage("almalinux", doc, allow_create=False)
+            if (not _closed_committed_dedicated_storage_report(readback)
+                    or readback != created or policy() != before):
                 _deny("OWNED_DEDICATED_INSTALLER_RESULT_REFUSED")
             storage_owner()
             return {"status": "OWNED_DEDICATED_COMMITTED_STORAGE_PREPARED", "storage": created,
