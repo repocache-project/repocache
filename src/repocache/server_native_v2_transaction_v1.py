@@ -2689,7 +2689,8 @@ def _owned_prepared_wal_boot_egress_generation_locked(
                         or (_dedicated_readonly_config_labels(
                             nginx, public, catalog_present=False),
                             _owned_initial_private_targets_proof(state, withdrawn, labels)[1:]) !=
-                           (initial_identity[0], initial_identity[1][1:])):
+                           (initial_identity[0], initial_identity[1][1:])
+                        or _identity(os.fstat(state))[:6] != initial_identity[1][0][:6]):
                     _deny("OWNED_BOOT_EGRESS_GENERATION_CHANGED")
             _owned_live_guard(state, nginx, public, check_layout,
                               expected_wal, withdrawn)

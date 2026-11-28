@@ -3721,7 +3721,7 @@ def test_dedicated_health_child_timeout_and_preflight_do_not_signal_foreign_pid(
         assert not calls
 
 
-@pytest.mark.parametrize("prepared", [False, True, "repeat"])
+@pytest.mark.parametrize("prepared", [False, True, "repeat", "initial"])
 @pytest.mark.parametrize("fault", ["none", "active-route", "nonloopback", "pending",
                                     "policy", "policy-drift", "storage-drift", "scratch-drift", "scratch-service",
                                     "config-label", "config-label-drift", "tls-label", "tls-label-drift", "enabled", "start", "health",
@@ -3735,7 +3735,8 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
     from repocache import server_root_control_host_preflight_v1 as host
 
     repeat = prepared == "repeat"
-    prepared = prepared is True
+    initial_generation = prepared == "initial"
+    prepared = prepared is True or initial_generation
     if repeat and fault in ("start", "selected-drift"):
         pytest.skip("Start failure and stopped identity do not apply to observation")
     rootfd, state, _, _, _ = filesystem
@@ -3762,7 +3763,9 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
                native._INCLUDE: next_include, native._CATALOG: next_catalog,
                native._OWNED_MANIFEST:
                    native._owned_manifest_for(next_raw, next_main, next_include, next_catalog)}
-        wal = native._owned_wal_record(resources, new, live=True)
+        wal = native._owned_wal_record(
+            _owned_bootstrap_resources() if initial_generation else resources,
+            resources if initial_generation else new, live=True)
         resources = {**resources, native._CATALOG: None}
     paths = _owned_fixture_paths(filesystem, resources)
     if fault == "pending" or prepared:
@@ -3889,6 +3892,12 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
         return ("changed",) if fault == "config-label-drift" and label_reads > 1 else ("exact",)
 
     monkeypatch.setattr(native, "_dedicated_readonly_config_labels", config_labels)
+    if initial_generation:
+        # Reconstruction and private identity have separate filesystem tests.
+        monkeypatch.setattr(native, "_read_owned_initial_dedicated_prepared_locked",
+                            lambda *a, **kw: {**resources, native._CATALOG: catalog})
+        monkeypatch.setattr(native, "_owned_initial_private_targets_proof", lambda *a: ("exact",))
+        monkeypatch.setattr(native._Labels, "_command", staticmethod(lambda *a: b"Enforcing"))
 
     def tls_labels(root, document):
         nonlocal tls_label_reads
@@ -3917,13 +3926,15 @@ def test_committed_dedicated_start_is_fixed_and_compensates_only_owned_master(
                 {"main_pid_observed": 0, "private_unit_identity": (51, 62),
                  "private_dropin_identity": (71, 81)} if fault == "selected-drift" else None)}
                 if prepared else {}),
+            **({"initial_generation": True} if initial_generation else {}),
             profile_receipt_sha256="a"*64, executable_receipt_sha256="b"*64,
             recheck_authenticated_owner=lambda: None)
     if fault == "selected-drift" and not prepared:
         pytest.skip("Only the composed prepared-WAL path supplies the stopped identity")
     if fault == "none":
         result = invoke()
-        assert result["status"] == ("OWNED_DEDICATED_PREPARED_WAL_START_OBSERVED" if prepared
+        assert result["status"] == ("OWNED_DEDICATED_INITIAL_WAL_START_OBSERVED" if initial_generation
+                                    else "OWNED_DEDICATED_PREPARED_WAL_START_OBSERVED" if prepared
                                     else "OWNED_DEDICATED_COMMITTED_ACTIVE_VERIFIED" if repeat
                                     else "OWNED_DEDICATED_COMMITTED_START_OBSERVED")
         if prepared:
@@ -4103,8 +4114,9 @@ def test_dedicated_withdrawn_catalog_requires_fresh_pinned_tls_404(monkeypatch, 
                                    "published-pre-health", "initial-foreign-catalog",
                                    "tls-label", "tls-label-drift", "config-label",
                                    "config-label-after-publish", "config-inode-drift"])
+@pytest.mark.parametrize("initial_generation", [False, True])
 def test_dedicated_wal_finalization_publishes_only_verified_prior(
-        filesystem, monkeypatch, fault):
+        filesystem, monkeypatch, fault, initial_generation):
     """Real owned WAL/resource filesystem; mocked runtime and policy only."""
     from types import SimpleNamespace
     from repocache import server_native_nginx_effective_unit_v1 as unit
@@ -4135,7 +4147,9 @@ def test_dedicated_wal_finalization_publishes_only_verified_prior(
                if fault == "initial-foreign-catalog" else withdrawn)
     paths = _owned_fixture_paths(filesystem, initial)
     catalog = paths[native._CATALOG]
-    wal = native._owned_wal_record(old, new, live=True)
+    wal = native._owned_wal_record(
+        _owned_bootstrap_resources() if initial_generation else old,
+        old if initial_generation else new, live=True)
     pending = state / native._OWNED_WAL
     pending.write_bytes(wal if fault != "wrong-wal" else b"foreign WAL")
     pending.chmod(0o600)
@@ -4229,17 +4243,20 @@ def test_dedicated_wal_finalization_publishes_only_verified_prior(
     monkeypatch.setattr(native.os, "listxattr", lambda fd: ["security.selinux"])
     monkeypatch.setattr(native.os, "getxattr", label)
     monkeypatch.setattr(native.os, "setxattr", set_label)
+    monkeypatch.setattr(native._Labels, "_command", staticmethod(lambda *a: b"Enforcing"))
 
     def invoke():
         with native._locked(root, 0) as state_fd:
             return native._finish_owned_prepared_wal_dedicated_locked(
                 root, state_fd, namespace_identity=ns, executable_identity=exe,
                 expected_wal=wal, profile_receipt_sha256="a"*64,
-                executable_receipt_sha256="b"*64, recheck_authenticated_owner=auth)
+                executable_receipt_sha256="b"*64, recheck_authenticated_owner=auth,
+                initial_generation=initial_generation)
 
     if fault in ("none", "published-retry"):
         result = invoke()
-        assert result["status"] == "OWNED_DEDICATED_WAL_ROLLBACK_OBSERVED"
+        assert result["status"] == ("OWNED_DEDICATED_INITIAL_WAL_COMMIT_OBSERVED"
+                                    if initial_generation else "OWNED_DEDICATED_WAL_ROLLBACK_OBSERVED")
         assert result["catalog_observed"] and not result["recovery_required"]
         assert result["wal_sha256"] == hashlib.sha256(wal).hexdigest()
         assert calls == [False, True]
@@ -6602,4 +6619,56 @@ def test_installed_initial_generation_retains_stopped_authority(filesystem, monk
                 native._stage_installed_initial_dedicated_generation(pins)
         assert not calls
     assert _fixture_resource_bytes(paths) == old
+    assert not filesystem[-1]
+
+
+@pytest.mark.parametrize("fault", ["none", "wrong-mode", "foreign-public", "state-inode-drift",
+                                   "manifest-drift", "catalog", "expired"])
+def test_initial_wal_boot_plan_retains_successor(filesystem, monkeypatch, fault):
+    old = _owned_bootstrap_resources()
+    new = _owned_generation(active=False, distribution="almalinux")
+    withdrawn = {**new, native._CATALOG: None}
+    paths = _owned_fixture_paths(filesystem, withdrawn)
+    root, state = filesystem[:2]
+    wal = native._owned_wal_record(old, new, live=True)
+    pending = state / native._OWNED_WAL
+    pending.write_bytes(wal)
+    pending.chmod(0o600)
+    label = native._DEDICATED_PUBLIC_CONTEXT + b"\0"
+    monkeypatch.setattr(os, "listxattr", lambda fd: ["security.selinux"])
+    monkeypatch.setattr(os, "getxattr", lambda fd, name: label)
+    monkeypatch.setattr(native._Labels, "_command", staticmethod(lambda *a: b"Enforcing"))
+    monkeypatch.setattr(native, "_dedicated_readonly_tls_labels", lambda *a: ("tls",))
+    if fault == "catalog":
+        paths[native._CATALOG].write_bytes(new[native._CATALOG])
+        paths[native._CATALOG].chmod(0o644)
+    if fault == "foreign-public":
+        (paths[native._CATALOG].parent / "foreign").touch()
+    with native._locked(root, 0) as state_fd:
+        def scope():
+            return native._owned_prepared_wal_boot_egress_generation_locked(
+                root, state_fd, distribution="almalinux", worker_uid=33,
+                expected_wal=wal, initial_generation=fault != "wrong-mode")
+        if fault in ("none", "expired"):
+            with scope() as (plan, recheck):
+                assert plan["generation"] == 1
+                assert plan["generation_manifest_sha256"] == native._hash(new[native._OWNED_MANIFEST])
+                assert not plan["destinations"]
+                recheck()
+            with pytest.raises(native.NativeV2TransactionError, match="SCOPE_EXPIRED"):
+                recheck()
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                with scope() as (plan, recheck):
+                    if fault == "wrong-mode":
+                        pytest.fail("prior recovery adopted a successor")
+                    if fault == "state-inode-drift":
+                        replacement = state / "replacement"
+                        replacement.write_bytes(new[V2_STATE])
+                        replacement.chmod(0o600)
+                        os.replace(replacement, paths[V2_STATE])
+                    if fault == "manifest-drift":
+                        paths[native._OWNED_MANIFEST].write_bytes(b"foreign")
+                    recheck()
+    assert pending.read_bytes() == wal
     assert not filesystem[-1]
