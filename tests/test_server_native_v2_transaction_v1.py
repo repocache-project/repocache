@@ -3066,6 +3066,48 @@ def test_committed_boot_egress_retains_generation_and_excludes_pending(
         assert _fixture_resource_bytes(paths) == old
 
 
+@pytest.mark.parametrize("fault", ["none", "empty", "type", "verify-only", "rollover", "drift"])
+def test_committed_boot_resume_forwards_exact_receipt_and_generation_guard(
+        filesystem, monkeypatch, fault):
+    rootfd, _, _, _, _ = filesystem
+    old = _owned_generation(active=False)
+    paths = _owned_fixture_paths(filesystem, old)
+    saved = b"exact retained intent"
+    calls = []
+
+    def prepare(root, state, rules, **kw):
+        assert root == rootfd and state == statefd
+        assert kw["expected_previous_receipt"] == saved
+        assert kw["allow_prepare"] is True and kw["allow_boot_rollover"] is False
+        assert kw["generation_manifest_sha256"] == hashlib.sha256(
+            old[native._OWNED_MANIFEST]).hexdigest()
+        calls.append("prepare")
+        kw["recheck_owned"]()
+        if fault == "drift":
+            paths[native._OWNED_MAIN].write_bytes(b"foreign")
+            kw["recheck_owned"]()
+        return {"status": "NATIVE_EGRESS_BOOT_RECEIPT_VERIFIED"}
+
+    monkeypatch.setattr(native, "_prepare_boot_egress_locked", prepare)
+    with native._locked(rootfd, 0) as statefd:
+        def invoke():
+            return native._prepare_owned_committed_boot_egress_locked(
+                rootfd, statefd, distribution="debian", worker_uid=33,
+                namespace_identity=(17, 29), profile_receipt_sha256="a"*64,
+                executable_receipt_sha256="b"*64, recheck_namespace_owner=lambda: None,
+                allow_prepare=fault != "verify-only", allow_boot_rollover=fault == "rollover",
+                expected_existing_receipt=b"" if fault == "empty" else
+                "foreign type" if fault == "type" else saved)
+        if fault == "none":
+            assert invoke()["committed_resources_verified"] is True
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                invoke()
+        assert calls == (["prepare"] if fault in ("none", "drift") else [])
+    if fault != "drift":
+        assert _fixture_resource_bytes(paths) == old
+
+
 def test_committed_boot_egress_generation_recheck_expires(filesystem):
     rootfd, _, _, _, _ = filesystem
     old = _owned_bootstrap_resources()
