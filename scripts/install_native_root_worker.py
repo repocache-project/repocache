@@ -2250,7 +2250,8 @@ def _authenticated_prepared_dedicated_bridge(
                         or report.get("recovery_required") is not True
                         or report.get("catalog_withdrawn") is not True
                         or report.get("wal_sha256") != recovery_pins["wal_sha256"]
-                        or "committed_resources_verified" in report))
+                        or "committed_resources_verified" in report
+                        or (initial_pending and "prior_resources_verified" in report)))
                     or report.get("authorizes_nginx_activation") is not False
                     or report.get("authorizes_catalog_publication") is not False
                     or type(report.get("receipt_sha256")) is not str
@@ -2305,7 +2306,8 @@ def _authenticated_prepared_dedicated_bridge(
                 _reject("NATIVE_DEDICATED_RECOVERY_CHILD_REFUSED")
         elif initial_pending:
             if (report.get("status") != "OWNED_DEDICATED_INITIAL_WAL_COMMIT_OBSERVED"
-                    or report.get("generation") != 1
+                    or type(report.get("generation")) is not int
+                    or report["generation"] != 1
                     or report.get("generation_manifest_sha256") != recovery_pins["generation_manifest_sha256"]
                     or report.get("wal_sha256") != recovery_pins["wal_sha256"]
                     or report.get("recovery_required") is not False

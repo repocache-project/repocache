@@ -2100,3 +2100,19 @@ initial commit from restoration of a prior managed generation. Private
 state/manifest and configuration identities remain pinned across the
 operations. The signed lifecycle still has to select these paths with
 explicit initial-generation pins; ordinary recovery retains prior semantics.
+
+
+The private authenticated initial-pending bridge has separate fixed phases for
+profile placement/load, boot preparation/resume/rollover, storage/runtime
+preparation, start and finalization. Every phase binds the exact initial WAL
+and successor manifest; profile and boot receipts are required where applicable.
+These phases do not accept a prior-generation rollback as an initial commit.
+Start retains the withdrawn catalog and WAL; finalization requires live health
+before and after publication. Interrupted publication is rechecked, not treated
+as committed solely because the catalog exists.
+
+Fresh actual-root dedicated placement remains deliberately refused until an
+authenticated SELinux policy and fresh ownership boundary are established.
+The existing detached-root witness and stopped-worker entrypoints do not prove
+that a fresh installed host completes the whole lifecycle. No CLI or socket
+activation route is added by these private phases.

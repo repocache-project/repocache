@@ -6672,3 +6672,10 @@ def test_initial_wal_boot_plan_retains_successor(filesystem, monkeypatch, fault)
                     recheck()
     assert pending.read_bytes() == wal
     assert not filesystem[-1]
+
+
+@pytest.mark.parametrize("action", ["profile", "load", "boot", "boot-resume", "boot-rollover",
+                                    "storage", "runtime", "start", "finish"])
+def test_initial_pending_worker_requires_signed_loader(action):
+    with pytest.raises(native.NativeV2TransactionError):
+        native._installed_initial_dedicated_pending({}, action=action)

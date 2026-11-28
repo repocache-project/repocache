@@ -1335,3 +1335,122 @@ def test_initial_installer_bridge_pins_proposal_and_stopped_result(monkeypatch, 
         with pytest.raises(stage.WorkerStageError):
             invoke()
     assert calls == (["child"] if fault in ("stage", "restore", "authority", "child") else [])
+
+
+@pytest.mark.parametrize("action", ["profile", "load", "boot", "boot-resume", "boot-rollover",
+                                    "storage", "runtime", "start", "finish"])
+@pytest.mark.parametrize("fault", ["none", "wal", "manifest", "child-report"])
+def test_initial_pending_installer_pins_phase_and_successor(monkeypatch, tmp_path, action, fault):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from repocache import server_native_v2_transaction_v1 as tx
+    from repocache import server_native_egress_candidate_v1 as egress
+    receipt = {"source_sha": "a"*40}
+    raw = stage._json_line(receipt)
+    marker = install._MARKER + "complete-" + hashlib.sha256(raw).hexdigest()
+    (tmp_path / marker).touch()
+    wal, manifest, boot = b"exact wal", b"exact manifest", b"exact boot"
+    locked = False
+    calls = []
+    @contextmanager
+    def lock(root, owner, **kw):
+        nonlocal locked
+        assert owner == 0 and kw == {"allow_native_package_parent_changes": True}
+        fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+        locked = True
+        try:
+            yield fd
+        finally:
+            locked = False
+            os.close(fd)
+    monkeypatch.setattr(install, "_locked", lock)
+    monkeypatch.setattr(install, "_native_distro", lambda: "almalinux")
+    monkeypatch.setattr(install, "require_native_host_preconditions", lambda: None)
+    monkeypatch.setattr(stage, "_authenticated_payloads", lambda *a, **kw:
+                        ({stage.CONFIG: install._BOOTSTRAP_CONFIG, stage.WORKER: b"worker"}, receipt))
+    monkeypatch.setattr(stage, "_audit_worker_files", lambda *a: None)
+    def read(fd, name, uid, limit):
+        assert locked
+        if name == install._RUNTIME_RECEIPT:
+            return raw
+        if name == marker:
+            return b""
+        if name == tx._OWNED_WAL:
+            return wal
+        if name == tx._OWNED_MANIFEST:
+            return manifest
+        assert name == tx._OWNED_WAL_TMP
+        return None
+    monkeypatch.setattr(install, "_read_file", read)
+    monkeypatch.setattr(egress, "_read_boot_egress_receipt", lambda *a:
+                        None if action in ("profile", "load", "boot") else boot)
+    monkeypatch.setattr(install, "_require_audited_native_package_for_activation", lambda *a, **kw: None)
+    monkeypatch.setattr(install, "_native_workspace_is_root_owned", lambda *a: True)
+    @contextmanager
+    def work(**kw):
+        yield str(tmp_path)
+    monkeypatch.setattr(install.tempfile, "TemporaryDirectory", work)
+    monkeypatch.setattr(install, "_candidate_native_identity", lambda *a: "nginx-core-0:1.2-3.x86_64")
+    monkeypatch.setattr(install, "_authenticate_candidate_rpm", lambda *a: ("e"*64, "f"*64))
+    pins = dict(executable_receipt_sha256="c"*64,
+                generation_manifest_sha256=hashlib.sha256(manifest).hexdigest(),
+                wal_sha256=hashlib.sha256(wal).hexdigest())
+    if action != "profile":
+        pins["profile_receipt_sha256"] = "d"*64
+    if action == "boot-rollover":
+        pins["previous_boot_receipt_sha256"] = hashlib.sha256(boot).hexdigest()
+    elif action in ("boot-resume", "storage", "runtime", "start", "finish"):
+        pins["boot_receipt_sha256"] = hashlib.sha256(boot).hexdigest()
+
+    def child(argv, **kw):
+        assert not locked
+        assert argv[-1] == install._DEDICATED_INITIAL_PENDING_CHILDREN[action]
+        compile(argv[-1], "<initial-pending-child>", "exec")
+        assert "transaction._installed_initial_dedicated_pending(pins, " + repr(action) + ")" in argv[-1]
+        data = json.loads(kw["input"])
+        assert all(data[key] == value for key, value in pins.items())
+        calls.append(action)
+        report = dict(pins, initial_resources_verified=True, catalog_withdrawn=True,
+                      recovery_required=True, authorizes_systemctl=False,
+                      authorizes_nginx_activation=False, authorizes_catalog_publication=False)
+        if action in ("profile", "load"):
+            report.update(status=("OWNED_DEDICATED_PROFILE_STAGED" if action == "profile"
+                                  else "OWNED_DEDICATED_PROFILE_LOADED"),
+                          receipt_sha256="d"*64, receipt_matches_owned_dropin=True,
+                          profile_loaded=True, daemon_reloaded=True)
+        elif action.startswith("boot"):
+            report.update(status="NATIVE_EGRESS_BOOT_RECEIPT_VERIFIED",
+                          receipt_sha256=(pins["boot_receipt_sha256"] if action == "boot-resume" else "1"*64))
+        elif action in ("storage", "runtime"):
+            report.update(status=("OWNED_DEDICATED_INITIAL_WAL_STORAGE_PREPARED" if action == "storage"
+                                  else "OWNED_DEDICATED_INITIAL_WAL_RUNTIME_PREPARED"))
+            report["storage"] = dict(selinux_enforcing_labels_verified=True)
+            if action == "runtime":
+                report["scratch_count"] = 5
+        elif action == "start":
+            report.update(status="OWNED_DEDICATED_INITIAL_WAL_START_OBSERVED",
+                          catalog_observed=False, service_storage_mounts_verified=True,
+                          service_scratch_mounts_verified=True, enablement_changed=False,
+                          main_pid=43, listener_inode=47)
+        else:
+            report.update(status="OWNED_DEDICATED_INITIAL_WAL_COMMIT_OBSERVED",
+                          generation=1, recovery_required=False, catalog_observed=True)
+        if fault == "child-report":
+            report["wal_sha256"] = "0"*64
+        return SimpleNamespace(returncode=0, stdout=json.dumps(report).encode(), stderr=b"")
+    monkeypatch.setattr(install.subprocess, "run", child)
+    monkeypatch.setattr(tx, "_closed_committed_dedicated_storage_report",
+                        lambda report: report == {"selinux_enforcing_labels_verified": True})
+    if fault == "wal":
+        pins["wal_sha256"] = "0"*64
+    elif fault == "manifest":
+        pins["generation_manifest_sha256"] = "0"*64
+    def invoke():
+        return install._authenticated_initial_dedicated_pending(
+            tmp_path, commit="a"*40, archive_sha256="b"*64, action=action, recovery_pins=pins)
+    if fault == "none":
+        assert invoke()["wal_sha256"] == pins["wal_sha256"]
+    else:
+        with pytest.raises(stage.WorkerStageError):
+            invoke()
+    assert calls == ([action] if fault in ("none", "child-report") else [])
