@@ -6,6 +6,7 @@ test-only signed archive assets, not an authorized production deployment.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -28,6 +29,45 @@ OWN = "repocache-nginx.service"
 def run(*cmd: str) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output=True, text=True, timeout=45,
                           check=False)
+
+
+@contextmanager
+def fixture_hold_stopped_profile_unit():
+    """Pin the inactive unit on a private system-bus connection, VM only.
+
+    RefUnit prevents PID1 garbage collection without starting the unit or
+    creating another unit or changing its dependencies. Disconnect releases
+    the reference, including when the signed load or a test assertion fails.
+    """
+    import ctypes as c
+
+    lib = c.CDLL("libsystemd.so.0")
+    lib.sd_bus_open_system.argtypes = [c.POINTER(c.c_void_p)]
+    lib.sd_bus_open_system.restype = c.c_int
+    lib.sd_bus_set_method_call_timeout.argtypes = [c.c_void_p, c.c_uint64]
+    lib.sd_bus_set_method_call_timeout.restype = c.c_int
+    lib.sd_bus_call_method.argtypes = [
+        c.c_void_p, c.c_char_p, c.c_char_p, c.c_char_p, c.c_char_p,
+        c.c_void_p, c.c_void_p, c.c_char_p,
+    ]
+    lib.sd_bus_call_method.restype = c.c_int
+    lib.sd_bus_close_unref.argtypes = [c.c_void_p]
+    lib.sd_bus_close_unref.restype = c.c_void_p
+    bus = c.c_void_p()
+    try:
+        result = lib.sd_bus_open_system(c.byref(bus))
+        assert result >= 0 and bus.value, ("Open fixture system bus", result)
+        result = lib.sd_bus_set_method_call_timeout(bus, 5_000_000)
+        assert result >= 0, ("Set fixture bus timeout", result)
+        result = lib.sd_bus_call_method(
+            bus, b"org.freedesktop.systemd1", b"/org/freedesktop/systemd1",
+            b"org.freedesktop.systemd1.Manager", b"RefUnit", None, None,
+            b"s", c.c_char_p(b"repocache-nginx.service"))
+        assert result >= 0, ("Pin stopped fixture unit", result)
+        yield
+    finally:
+        if bus.value:
+            lib.sd_bus_close_unref(bus)
 
 
 def fixture_stopped_profile_loaded(raw: str) -> bool:
@@ -2841,90 +2881,82 @@ finally:
             require_prior_resources()
         if pending:
             profile = signed("place")
-        else:
-            profile_pins = dict(
-                **pins, executable_receipt_sha256=executable_proof["receipt_sha256"],
-                generation_manifest_sha256=state_before[str(STATE / ".state-v2-owned-nginx.manifest")])
-            for field in ("executable_receipt_sha256", "generation_manifest_sha256"):
-                try:
-                    native._stage_authenticated_committed_dedicated_profile(
-                        assets, **{**profile_pins, field: "0"*64})
-                except native.stage.WorkerStageError:
-                    pass
-                else:
-                    raise AssertionError("Foreign profile placement pin accepted")
-                assert not os.path.lexists(dropdir) and not os.path.lexists(profile_receipt)
-                require_prior_resources()
-                require_status(OWN, False, False)
-            profile = native._stage_authenticated_committed_dedicated_profile(assets, **profile_pins)
-            assert profile["status"] == "OWNED_DEDICATED_PROFILE_STAGED"
-            assert not profile["authorizes_systemctl"] and not profile["authorizes_nginx_activation"]
-            assert not profile["authorizes_catalog_publication"]
-            saved_profile = profile_receipt.read_bytes()
-            assert digest(profile_receipt) == profile["receipt_sha256"]
-            try:
-                native._stage_authenticated_committed_dedicated_profile(assets, **profile_pins)
-            except native.stage.WorkerStageError:
-                pass
-            else:
-                raise AssertionError("Existing profile placement adopted")
-            assert profile_receipt.read_bytes() == saved_profile
-            assert not os.path.lexists(ns) and not os.path.lexists(boot_receipt)
-            require_prior_resources()
-            require_status(OWN, False, False)
-            print("PASS: authenticated installer stages fixed committed profile; foreign pins and repeat refused without activation", flush=True)
-        if pending:
             require("/usr/bin/systemctl", "daemon-reload")
         else:
-            load_pins = dict(**profile_pins, profile_receipt_sha256=profile["receipt_sha256"])
-
-            def observed_profile_loaded():
-                shown = run("/usr/bin/systemctl", "show", "--no-pager",
-                            "--property=DropInPaths", "--property=NeedDaemonReload", OWN)
-                assert shown.returncode == 0, shown.stderr
-                return fixture_stopped_profile_loaded(shown.stdout)
-
-            # PID1 may discard an unreferenced inactive unit and load its
-            # new on-disk drop-in on the next observation. Do not assume
-            # every freshly placed profile requires a manager reload.
-            was_loaded = observed_profile_loaded()
-            for field in ("executable_receipt_sha256", "profile_receipt_sha256",
-                          "generation_manifest_sha256"):
+            with fixture_hold_stopped_profile_unit():
+                require_status(OWN, False, False)
+                profile_pins = dict(
+                    **pins, executable_receipt_sha256=executable_proof["receipt_sha256"],
+                    generation_manifest_sha256=state_before[str(STATE / ".state-v2-owned-nginx.manifest")])
+                for field in ("executable_receipt_sha256", "generation_manifest_sha256"):
+                    try:
+                        native._stage_authenticated_committed_dedicated_profile(
+                            assets, **{**profile_pins, field: "0"*64})
+                    except native.stage.WorkerStageError:
+                        pass
+                    else:
+                        raise AssertionError("Foreign profile placement pin accepted")
+                    assert not os.path.lexists(dropdir) and not os.path.lexists(profile_receipt)
+                    require_prior_resources()
+                    require_status(OWN, False, False)
+                profile = native._stage_authenticated_committed_dedicated_profile(assets, **profile_pins)
+                assert profile["status"] == "OWNED_DEDICATED_PROFILE_STAGED"
+                assert not profile["authorizes_systemctl"] and not profile["authorizes_nginx_activation"]
+                assert not profile["authorizes_catalog_publication"]
+                saved_profile = profile_receipt.read_bytes()
+                assert digest(profile_receipt) == profile["receipt_sha256"]
                 try:
-                    native._load_authenticated_committed_dedicated_profile(
-                        assets, **{**load_pins, field: "0"*64})
+                    native._stage_authenticated_committed_dedicated_profile(assets, **profile_pins)
                 except native.stage.WorkerStageError:
                     pass
                 else:
-                    raise AssertionError("Foreign profile load pin accepted")
+                    raise AssertionError("Existing profile placement adopted")
                 assert profile_receipt.read_bytes() == saved_profile
+                assert not os.path.lexists(ns) and not os.path.lexists(boot_receipt)
                 require_prior_resources()
                 require_status(OWN, False, False)
-                now_loaded = observed_profile_loaded()
-                assert not was_loaded or now_loaded
-                was_loaded = now_loaded
-            loaded = native._load_authenticated_committed_dedicated_profile(assets, **load_pins)
-            assert loaded["status"] == "OWNED_DEDICATED_PROFILE_LOADED"
-            assert loaded["profile_loaded"] is True
-            assert type(loaded["daemon_reloaded"]) is bool
-            assert not was_loaded or loaded["daemon_reloaded"] is False
-            assert observed_profile_loaded() is True
-            if loaded["daemon_reloaded"]:
+                print("PASS: authenticated installer stages fixed committed profile; foreign pins and repeat refused without activation", flush=True)
+                load_pins = dict(**profile_pins, profile_receipt_sha256=profile["receipt_sha256"])
+
+                def observed_profile_loaded():
+                    shown = run("/usr/bin/systemctl", "show", "--no-pager",
+                                "--property=DropInPaths", "--property=NeedDaemonReload", OWN)
+                    assert shown.returncode == 0, shown.stderr
+                    return fixture_stopped_profile_loaded(shown.stdout)
+
+                # The private D-Bus connection deliberately retains the old
+                # loaded unit. The on-disk drop-in must now require a reload.
+                assert observed_profile_loaded() is False
+                for field in ("executable_receipt_sha256", "profile_receipt_sha256",
+                              "generation_manifest_sha256"):
+                    try:
+                        native._load_authenticated_committed_dedicated_profile(
+                            assets, **{**load_pins, field: "0"*64})
+                    except native.stage.WorkerStageError:
+                        pass
+                    else:
+                        raise AssertionError("Foreign profile load pin accepted")
+                    assert profile_receipt.read_bytes() == saved_profile
+                    require_prior_resources()
+                    require_status(OWN, False, False)
+                    assert observed_profile_loaded() is False
+                loaded = native._load_authenticated_committed_dedicated_profile(assets, **load_pins)
+                assert loaded["status"] == "OWNED_DEDICATED_PROFILE_LOADED"
+                assert loaded["profile_loaded"] is True
+                assert loaded["daemon_reloaded"] is True
+                assert observed_profile_loaded() is True
                 print("PASS: signed stopped profile required actual manager reload", flush=True)
-            else:
-                print("PASS: signed stopped profile already loaded; no manager reload; "
-                      "native stale-profile reload not exercised in this phase", flush=True)
-            assert loaded["receipt_sha256"] == profile["receipt_sha256"]
-            assert loaded["authorizes_nginx_activation"] is False
-            assert loaded["authorizes_catalog_publication"] is False
-            again = native._load_authenticated_committed_dedicated_profile(assets, **load_pins)
-            assert again == {**loaded, "daemon_reloaded": False}
-            assert profile_receipt.read_bytes() == saved_profile
-            assert not os.path.lexists(ns) and not os.path.lexists(boot_receipt)
-            require_prior_resources()
-            require_status(OWN, False, False)
-            require_status(VENDOR, False, False)
-            print("PASS: authenticated installer loads exact stopped committed profile; foreign pins refused, repeat read-only", flush=True)
+                assert loaded["receipt_sha256"] == profile["receipt_sha256"]
+                assert loaded["authorizes_nginx_activation"] is False
+                assert loaded["authorizes_catalog_publication"] is False
+                again = native._load_authenticated_committed_dedicated_profile(assets, **load_pins)
+                assert again == {**loaded, "daemon_reloaded": False}
+                assert profile_receipt.read_bytes() == saved_profile
+                assert not os.path.lexists(ns) and not os.path.lexists(boot_receipt)
+                require_prior_resources()
+                require_status(OWN, False, False)
+                require_status(VENDOR, False, False)
+                print("PASS: authenticated installer loads exact stopped committed profile; foreign pins refused, repeat read-only", flush=True)
         if pending and finalize:
             # Real fixture fault injection leaves a durable intent but no
             # policy. Resume it through the actual signed installer, not an

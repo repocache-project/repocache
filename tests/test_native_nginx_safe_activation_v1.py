@@ -1224,3 +1224,67 @@ def test_fixture_stopped_profile_loaded_requires_exact_pair(raw, expected):
             fixture_stopped_profile_loaded(raw)
     else:
         assert fixture_stopped_profile_loaded(raw) is expected
+
+
+@pytest.mark.parametrize("fault", [None, "open", "timeout", "ref", "body"])
+def test_fixture_stopped_unit_reference_is_fixed_and_closed(monkeypatch, fault):
+    import ctypes as c
+    from types import SimpleNamespace
+    from scripts.ci_native_nginx_activate_guest import fixture_hold_stopped_profile_unit
+
+    calls = []
+
+    def open_bus(out):
+        calls.append("open")
+        if fault == "open":
+            return -1
+        out._obj.value = 123
+        return 0
+
+    def timeout(bus, usec):
+        assert bus.value == 123 and usec == 5_000_000
+        calls.append("timeout")
+        return -1 if fault == "timeout" else 0
+
+    def ref(bus, *args):
+        assert bus.value == 123
+        assert args[:-1] == (b"org.freedesktop.systemd1",
+                             b"/org/freedesktop/systemd1",
+                             b"org.freedesktop.systemd1.Manager",
+                             b"RefUnit", None, None, b"s")
+        assert args[-1].value == b"repocache-nginx.service"
+        calls.append("ref")
+        return -1 if fault == "ref" else 0
+
+    def close(bus):
+        assert bus.value == 123
+        calls.append("close")
+
+    lib = SimpleNamespace(sd_bus_open_system=open_bus,
+                          sd_bus_set_method_call_timeout=timeout,
+                          sd_bus_call_method=ref, sd_bus_close_unref=close)
+
+    def load(name):
+        assert name == "libsystemd.so.0"
+        return lib
+
+    monkeypatch.setattr(c, "CDLL", load)
+
+    def exercise():
+        with fixture_hold_stopped_profile_unit():
+            calls.append("body")
+            if fault == "body":
+                raise ValueError("fixture body failed")
+
+    if fault is None:
+        exercise()
+    else:
+        with pytest.raises(ValueError if fault == "body" else AssertionError):
+            exercise()
+    assert calls == {
+        None: ["open", "timeout", "ref", "body", "close"],
+        "open": ["open"],
+        "timeout": ["open", "timeout", "close"],
+        "ref": ["open", "timeout", "ref", "close"],
+        "body": ["open", "timeout", "ref", "body", "close"],
+    }[fault]

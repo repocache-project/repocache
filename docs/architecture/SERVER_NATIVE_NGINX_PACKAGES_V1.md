@@ -1765,5 +1765,11 @@ inactive unit may be garbage-collected and reloaded by PID1 on demand,
 so the native fixture classifies both exact states rather than requiring
 NeedDaemonReload=yes unconditionally. Evidence distinguishes an actual
 manager reload from an already-loaded read-only observation; an unexercised
-native reload branch is not a PASS. The installed worker's exact-state
-refusals and authentication requirements are unchanged.
+native reload branch is not a PASS. For the committed booted fixture, a
+private system-bus RefUnit connection now retains the stopped base unit
+through profile placement, foreign-pin refusals and the first signed load.
+Require the exact stale state before the load and a true daemon-reload
+result, then repeat with no reload. The connection closes on all paths;
+no service is started, enabled or changed by the fixture reference. This
+is test-only, not an additional installed authority. The installed worker's
+exact-state refusals and authentication requirements are unchanged.
