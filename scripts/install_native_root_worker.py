@@ -1739,7 +1739,9 @@ def _authenticated_prepared_dedicated_bridge(
             or type(resume_boot) is not bool or (resume_boot and (not prepare or rollover))
             or type(pending_start) is not bool or (pending_start and not start)
             or (prepare and start) or (rollover and not prepare)
-            or ((prepare or start) and recovery_pins is None)):
+            or (prepare and recovery_pins is None)
+            or (start and recovery_pins is None and
+                (pending_start or expected_rolled_pins is None))):
         _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
     fields = {"executable_receipt_sha256", "profile_receipt_sha256"} | (
         {"generation_manifest_sha256"} if prepare else
@@ -1785,8 +1787,11 @@ def _authenticated_prepared_dedicated_bridge(
             if recovery_pins is None:
                 from repocache.server_native_v2_transaction_v1 import (
                     _retained_rolled_dedicated_recovery_pins_locked,
+                    _retained_rolled_committed_dedicated_pins_locked,
                 )
-                recovery_pins = _retained_rolled_dedicated_recovery_pins_locked(root, state)
+                select = (_retained_rolled_committed_dedicated_pins_locked if start else
+                          _retained_rolled_dedicated_recovery_pins_locked)
+                recovery_pins = select(root, state)
                 if expected_rolled_pins is not None and recovery_pins != expected_rolled_pins:
                     _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
             validate_pins(recovery_pins)
@@ -1932,6 +1937,7 @@ def _select_rolled_activation_recovery_locked(root: int, state: int, distributio
     )
     from repocache.server_native_v2_transaction_v1 import (
         _retained_rolled_dedicated_recovery_pins_locked,
+        _retained_rolled_committed_dedicated_pins_locked,
     )
 
     names = set(os.listdir(state))
@@ -1940,7 +1946,7 @@ def _select_rolled_activation_recovery_locked(root: int, state: int, distributio
     if not any(name.startswith(prefixes) for name in names):
         return None
     if (distribution != "almalinux"
-            or not {_NAMESPACE_PROFILE_RECEIPT, _BOOT_EGRESS_RECEIPT, _OWNED_WAL} <= names
+            or not {_NAMESPACE_PROFILE_RECEIPT, _BOOT_EGRESS_RECEIPT} <= names
             or _BOOT_EGRESS_ROLLOVER in names
             or not any(name.startswith(_BOOT_EGRESS_HISTORY_PREFIX) for name in names)
             or any(name.startswith(prefixes) and name not in
@@ -1949,15 +1955,20 @@ def _select_rolled_activation_recovery_locked(root: int, state: int, distributio
         _reject("NATIVE_DEDICATED_ACTIVATION_RECOVERY_REFUSED")
     # No following symlinks, including dangling dedicated markers. Full
     # ownership, byte and label verification is still required downstream.
-    for name in (_NAMESPACE_PROFILE_RECEIPT, _BOOT_EGRESS_RECEIPT, _OWNED_WAL):
+    pending = _OWNED_WAL in names
+    for name in (_NAMESPACE_PROFILE_RECEIPT, _BOOT_EGRESS_RECEIPT,
+                 *([_OWNED_WAL] if pending else [])):
         info = _named(state, name)
         if info is None or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             _reject("NATIVE_DEDICATED_ACTIVATION_RECOVERY_REFUSED")
     _require_audited_native_package_for_activation(state, distribution=distribution)
-    selected = _retained_rolled_dedicated_recovery_pins_locked(root, state)
+    select = (_retained_rolled_dedicated_recovery_pins_locked if pending else
+              _retained_rolled_committed_dedicated_pins_locked)
+    selected = select(root, state)
+    fields = {"executable_receipt_sha256", "profile_receipt_sha256",
+              "boot_receipt_sha256", "wal_sha256" if pending else "generation_manifest_sha256"}
     if (type(selected) is not dict
-            or set(selected) != {"executable_receipt_sha256", "profile_receipt_sha256",
-                                 "boot_receipt_sha256", "wal_sha256"}
+            or set(selected) != fields
             or any(type(value) is not str or signatures.HEX64.fullmatch(value) is None
                    for value in selected.values())):
         _reject("NATIVE_DEDICATED_ACTIVATION_RECOVERY_REFUSED")
@@ -2008,8 +2019,13 @@ def activate_authenticated_native_nginx(
     # The signed bridge reconstructs the selection again under its own
     # lock and the installed child independently rechecks the exact pins.
     # A changed or failed selection never falls through to legacy start.
-    report = _recover_authenticated_rolled_dedicated_nginx(
-        assets, commit=commit, archive_sha256=archive_sha256, expected_pins=selected)
+    if "wal_sha256" in selected:
+        report = _recover_authenticated_rolled_dedicated_nginx(
+            assets, commit=commit, archive_sha256=archive_sha256, expected_pins=selected)
+    else:
+        report = _authenticated_prepared_dedicated_bridge(
+            assets, commit=commit, archive_sha256=archive_sha256,
+            recovery_pins=None, start=True, expected_rolled_pins=selected)
     return {**report, "nginx_active_verified": True,
             "nginx_enabled_verified": False, "enablement_changed": False}
 

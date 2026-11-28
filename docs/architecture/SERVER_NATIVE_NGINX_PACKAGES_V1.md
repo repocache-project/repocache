@@ -1703,3 +1703,17 @@ enablement or catalog mutation is authorized. The native committed boot
 scenario checks repeat and foreign pins against the actual installer;
 interrupted initialization on this committed-specific path still requires
 separate native evidence before full lifecycle acceptance.
+
+### Explicit rolled committed activation dispatch
+
+The signed activation entry also selects a committed prepared post-reboot
+profile without a WAL, reconstructing the current closed-policy receipt from
+independent protected prior-boot history and exact committed generation.
+The signed parent reconstructs those pins again before the fixed installed
+start child. Missing or changed history, boot intent, generation, pending
+WAL or any unverified service state refuses; no legacy fallback or unit
+enablement is permitted. The booted committed scenario uses the existing
+signed activation entry and observes exact TLS catalog, storage and scratch
+mounts; active replay remains refused until authenticated read-only active
+verification is wired. First-boot and automatic namespace provisioning remain
+separate prerequisites.

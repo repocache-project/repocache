@@ -3755,28 +3755,43 @@ def _recover_owned_prepared_dedicated_locked(
 
 def _retained_rolled_dedicated_recovery_pins_locked(root_fd: int, state_fd: int) -> dict:
     """Resolve only already prepared post-reboot recovery; no writes or effects."""
+    return _retained_rolled_dedicated_pins_locked(root_fd, state_fd, pending=True)
+
+
+def _retained_rolled_committed_dedicated_pins_locked(root_fd: int, state_fd: int) -> dict:
+    """Resolve already prepared committed post-reboot start without a WAL."""
+    return _retained_rolled_dedicated_pins_locked(root_fd, state_fd, pending=False)
+
+
+def _retained_rolled_dedicated_pins_locked(root_fd: int, state_fd: int, *, pending: bool) -> dict:
+    """Reconstruct exact pins from independent history and retained resources."""
     from repocache.server_native_egress_candidate_v1 import (
         _BOOT_EGRESS_HISTORY_PREFIX, _BOOT_EGRESS_ROLLOVER, _BOOT_EGRESS_RECEIPT_MAX,
         _current_boot_id, _fixed_namespace_scope, _read_namespace_rules,
         _reconstruct_rolled_boot_receipt, verify_namespace_egress_readback,
     )
 
+    if type(pending) is not bool:
+        _deny("OWNED_DEDICATED_INSTALLER_PIN_REFUSED")
     _verify_current_root_fd(root_fd)
-    with _owned_layout_locked(root_fd, state_fd, recovering=True) as layout:
+    with _owned_layout_locked(root_fd, state_fd, recovering=pending) as layout:
         state, nginx, public, check_layout = layout
         wal = _read_file(state, _OWNED_WAL, 0, _MAX_WAL)
-        if wal is None:
+        if (wal is not None) != pending:
             _deny("OWNED_WAL_CHANGED")
-        old, _ = _decode_owned_wal(wal, distribution="almalinux")
-        if _json(wal, limit=_MAX_WAL)["version"] != 3:
-            _deny("OWNED_WAL_CHANGED")
+        current = _read_owned_resources(state, nginx, public)
+        if pending:
+            old, _ = _decode_owned_wal(wal, distribution="almalinux")
+            if _json(wal, limit=_MAX_WAL)["version"] != 3:
+                _deny("OWNED_WAL_CHANGED")
+            if current not in (old, {**old, _CATALOG: None}):
+                _deny("OWNED_LIVE_RESOURCE_DRIFT")
+        else:
+            old = current
         snapshot = _validate_owned_resources(old, distribution="almalinux")
         if snapshot is None:
             _deny("OWNED_DEDICATED_FINISH_MANAGED_REQUIRED")
         _owned_socket_require_inactive_routes(snapshot)
-        current = _read_owned_resources(state, nginx, public)
-        if current not in (old, {**old, _CATALOG: None}):
-            _deny("OWNED_LIVE_RESOURCE_DRIFT")
         plan = _owned_boot_egress_plan(
             old, distribution="almalinux", worker_uid=pwd.getpwnam("nginx").pw_uid)
 
@@ -3798,7 +3813,13 @@ def _retained_rolled_dedicated_recovery_pins_locked(root_fd: int, state_fd: int)
                 generation_manifest_sha256=plan["generation_manifest_sha256"])
 
             def guard():
-                _owned_live_guard(state, nginx, public, check_layout, wal, current)
+                if pending:
+                    _owned_live_guard(state, nginx, public, check_layout, wal, current)
+                else:
+                    check_layout()
+                    _no_conflicting_owned_wal_pending(state)
+                    if _read_owned_resources(state, nginx, public) != current:
+                        _deny("OWNED_LIVE_RESOURCE_DRIFT")
                 _owned_check_stages_absent(state, nginx, public)
                 recheck_namespace()
                 if (_current_boot_id() != boot or history() != retained
@@ -3815,7 +3836,8 @@ def _retained_rolled_dedicated_recovery_pins_locked(root_fd: int, state_fd: int)
             return {key: record[key] for key in
                     ("profile_receipt_sha256", "executable_receipt_sha256")} | {
                 "boot_receipt_sha256": hashlib.sha256(expected).hexdigest(),
-                "wal_sha256": hashlib.sha256(wal).hexdigest(),
+                **({"wal_sha256": hashlib.sha256(wal).hexdigest()} if pending else
+                   {"generation_manifest_sha256": plan["generation_manifest_sha256"]}),
             }
 
 

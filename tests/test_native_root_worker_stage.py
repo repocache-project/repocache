@@ -823,7 +823,8 @@ def test_executable_candidate_selects_retained_native_effects_lock(
                                    "pending-start", "pending-start-wal", "pending-start-boot",
                                    "pending-start-report", "pending-start-missing-wal",
                                    "committed-resume", "committed-resume-boot",
-                                   "committed-resume-wal", "committed-resume-digest"])
+                                   "committed-resume-wal", "committed-resume-digest",
+                                   "rolled-start", "rolled-start-changed", "rolled-start-wal"])
 def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, tmp_path, fault):
     from contextlib import contextmanager
     from types import SimpleNamespace
@@ -867,7 +868,8 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
     pending_start = fault.startswith("pending-start")
     pending = pending_first or pending_rolling or (resuming and not committed_resume) or pending_start
     preparing = fault.startswith("prepare") or rolling or pending_first or resuming
-    starting = fault.startswith("start") or pending_start
+    rolled_start = fault.startswith("rolled-start")
+    starting = fault.startswith("start") or pending_start or rolled_start
     manifest = b"committed manifest"
     boot = b"exact boot"
     monkeypatch.setattr(egress, "_read_boot_egress_receipt",
@@ -886,7 +888,7 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
                 return (None if fault.endswith("-missing-wal") else
                         b"foreign WAL" if fault.endswith("-wal") else wal)
             return None if (fault == "wal" or (preparing and fault not in ("prepare-wal", "rollover-wal", "committed-resume-wal"))
-                            or (starting and fault != "start-wal")) else wal
+                            or (starting and fault not in ("start-wal", "rolled-start-wal"))) else wal
         assert name == marker
         return b""
     monkeypatch.setattr(install, "_read_file", read)
@@ -1012,7 +1014,24 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
             start_pins["wal_sha256"] = hashlib.sha256(wal).hexdigest()
         invoke = (install._start_authenticated_prepared_wal_dedicated_nginx if pending_start
                   else install._start_authenticated_committed_dedicated_nginx)
-        if fault in ("start", "pending-start"):
+        if rolled_start:
+            release = {key: start_pins.pop(key) for key in ("commit", "archive_sha256")}
+            def retain_committed(root, fd):
+                assert locked
+                calls.append("history")
+                return {**start_pins, **({"boot_receipt_sha256": "0"*64}
+                                        if fault == "rolled-start-changed" else {})}
+            monkeypatch.setattr(tx, "_retained_rolled_committed_dedicated_pins_locked", retain_committed)
+            def invoke_rolled():
+                return install._authenticated_prepared_dedicated_bridge(
+                    tmp_path, **release, recovery_pins=None, start=True,
+                    expected_rolled_pins=start_pins)
+            if fault == "rolled-start":
+                assert invoke_rolled()["catalog_observed"] is True
+            else:
+                with pytest.raises(stage.WorkerStageError):
+                    invoke_rolled()
+        elif fault in ("start", "pending-start"):
             assert invoke(tmp_path, **start_pins)["catalog_observed"] is (not pending_start)
         else:
             with pytest.raises(stage.WorkerStageError):
@@ -1056,7 +1075,8 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
                                                "pending-start-missing-wal",
                                                "committed-resume-boot", "committed-resume-wal") else
                      ["release", "rpm"] if fault == "package" else
-                     ["release", "history"] if fault in ("rolled-refusal", "rolled-pins-changed") else
-                     ["release", "history", "rpm", "child"] if fault in ("rolled", "rolled-pins-match") else
+                     ["release", "history"] if fault in ("rolled-refusal", "rolled-pins-changed",
+                                                           "rolled-start-changed", "rolled-start-wal") else
+                     ["release", "history", "rpm", "child"] if fault in ("rolled", "rolled-pins-match", "rolled-start") else
                      ["release", "rpm", "child"])
     assert not locked

@@ -1083,7 +1083,8 @@ def test_fixture_preserves_only_exact_stopped_runtime(tmp_path, monkeypatch, fau
 
 @pytest.mark.parametrize("fault", ["legacy", "rolled", "partial", "foreign",
                                     "rollover", "no-wal", "debian", "selection",
-                                    "bridge", "symlink", "bad-selection"])
+                                    "bridge", "symlink", "bad-selection",
+                                    "committed", "committed-bridge", "committed-selection"])
 def test_authenticated_activation_selects_dedicated_only_from_retained_evidence(
         monkeypatch, tmp_path, fault):
     import os
@@ -1106,8 +1107,11 @@ def test_authenticated_activation_selects_dedicated_only_from_retained_evidence(
         names.append(egress._BOOT_EGRESS_RECEIPT + ".foreign")
     elif fault == "rollover":
         names.append(egress._BOOT_EGRESS_ROLLOVER)
-    elif fault == "no-wal":
+    elif fault == "no-wal" or fault.startswith("committed"):
         names.remove(host._OWNED_WAL)
+        if fault.startswith("committed"):
+            del selected["wal_sha256"]
+            selected["generation_manifest_sha256"] = "f"*64
     for name in names:
         (tmp_path / name).touch()
     if fault == "symlink":
@@ -1148,6 +1152,13 @@ def test_authenticated_activation_selects_dedicated_only_from_retained_evidence(
             raise tx.NativeV2TransactionError("OWNED_BOOT_REFUSED")
         return None if fault == "bad-selection" else selected
     monkeypatch.setattr(tx, "_retained_rolled_dedicated_recovery_pins_locked", retain)
+    def retain_committed(root, state):
+        assert locked
+        calls.append("select")
+        if fault in ("no-wal", "committed-selection"):
+            raise tx.NativeV2TransactionError("OWNED_BOOT_REFUSED")
+        return selected
+    monkeypatch.setattr(tx, "_retained_rolled_committed_dedicated_pins_locked", retain_committed)
     def legacy(*a, **kw):
         assert locked and fault == "legacy"
         calls.append("legacy")
@@ -1160,6 +1171,14 @@ def test_authenticated_activation_selects_dedicated_only_from_retained_evidence(
             raise stage.WorkerStageError("RECOVERY_REFUSED")
         return {"status": "OWNED_DEDICATED_WAL_ROLLBACK_OBSERVED"}
     monkeypatch.setattr(host, "_recover_authenticated_rolled_dedicated_nginx", recover)
+    def start(assets, **kw):
+        assert not locked and kw == {**release, "expected_rolled_pins": selected,
+                                     "recovery_pins": None, "start": True}
+        calls.append("start")
+        if fault == "committed-bridge":
+            raise stage.WorkerStageError("START_REFUSED")
+        return {"status": "OWNED_DEDICATED_COMMITTED_START_OBSERVED"}
+    monkeypatch.setattr(host, "_authenticated_prepared_dedicated_bridge", start)
     if fault == "legacy":
         assert host.activate_authenticated_native_nginx(tmp_path, **release) == {"status": "LEGACY"}
         assert calls == ["audit", "legacy"]
@@ -1169,10 +1188,18 @@ def test_authenticated_activation_selects_dedicated_only_from_retained_evidence(
             "nginx_active_verified": True, "nginx_enabled_verified": False,
             "enablement_changed": False}
         assert calls == ["audit", "select", "audit", "recover"]
+    elif fault == "committed":
+        assert host.activate_authenticated_native_nginx(tmp_path, **release) == {
+            "status": "OWNED_DEDICATED_COMMITTED_START_OBSERVED",
+            "nginx_active_verified": True, "nginx_enabled_verified": False,
+            "enablement_changed": False}
+        assert calls == ["audit", "select", "audit", "start"]
     else:
         with pytest.raises((stage.WorkerStageError, tx.NativeV2TransactionError)):
             host.activate_authenticated_native_nginx(tmp_path, **release)
         assert calls == (["audit", "select", "audit", "recover"] if fault == "bridge"
-                         else ["audit", "select"] if fault in ("selection", "bad-selection")
+                         else ["audit", "select", "audit", "start"] if fault == "committed-bridge"
+                         else ["audit", "select"] if fault in ("selection", "bad-selection",
+                                                               "no-wal", "committed-selection")
                          else ["audit"])
     assert not locked and sorted(os.listdir(tmp_path)) == before
