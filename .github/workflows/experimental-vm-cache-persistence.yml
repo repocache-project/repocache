@@ -1,0 +1,57 @@
+name: Isolated VM cache persistence probe (#19)
+on:
+  push:
+    branches: [perf/experimental-vm-benchmark]
+    paths: ['.github/workflows/experimental-vm-cache-persistence.yml']
+permissions:
+  contents: read
+concurrency:
+  group: experimental-vm-benchmark-only
+  cancel-in-progress: false
+jobs:
+  persistence:
+    name: Cross-run restore / ${{ matrix.platform }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - platform: debian13
+            image_sha512: f46f0671a6e5bdec5291ab8972bae2f10e5408c2f64a74078f11efc2f06a436a9d0313ed50e0472542eeabf780e9f7c792ac0a314c6c20507fcd9fd81b468c3d
+            image_sha256: ''
+          - platform: almalinux10
+            image_sha512: ''
+            image_sha256: 845d3a4e41fde973bdbf9763b62a88538c1a1fadc2332a89f6ea01e2c17c78ee
+    env:
+      PR237_PLATFORM: ${{ matrix.platform }}
+      PR237_IMAGE_SHA512: ${{ matrix.image_sha512 }}
+      PR237_IMAGE_SHA256: ${{ matrix.image_sha256 }}
+      BENCH_IMAGE: ${{ runner.temp }}/benchmark-image/base.qcow2
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Require clean local path and start timer
+        run: |
+          set -Eeuo pipefail
+          mkdir -m 700 "$RUNNER_TEMP/benchmark-image"
+          test ! -e "$BENCH_IMAGE" && test ! -L "$BENCH_IMAGE"
+          echo "CACHE_START=$(date +%s)" >> "$GITHUB_ENV"
+      - name: Restore previously saved exact digest without writing
+        id: cache
+        uses: actions/cache/restore@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3, Node.js 24
+        with:
+          path: ${{ runner.temp }}/benchmark-image/base.qcow2
+          key: experimental-vm-only-v1-${{ matrix.platform }}-${{ matrix.image_sha256 || matrix.image_sha512 }}
+          fail-on-cache-miss: true
+      - name: Verify exact digest and cross-run reuse
+        env:
+          CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+        run: |
+          set -Eeuo pipefail
+          test "$CACHE_HIT" = true
+          bash experiment/verify-image.sh
+          echo "Cross-run exact hit: $CACHE_HIT; restore + verify: $(($(date +%s)-CACHE_START)) s"
+          echo "PASS: previously saved pristine $PR237_PLATFORM image restored and verified in independent run $GITHUB_RUN_ID" >> "$GITHUB_STEP_SUMMARY"
