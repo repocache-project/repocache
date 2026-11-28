@@ -4469,7 +4469,7 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
                     _deny("OWNED_DEDICATED_RECOVERY_SERVICE_REFUSED")
                 stopped_storage_owner()
 
-            def policy():
+            def storage_policy():
                 result = _prepare_owned_committed_boot_egress_locked(
                     root, state, distribution="almalinux", worker_uid=pwd.getpwnam("nginx").pw_uid,
                     namespace_identity=namespace_identity,
@@ -4484,7 +4484,7 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
                     _deny("OWNED_DEDICATED_INSTALLER_BOOT_REFUSED")
                 return result
 
-            before = policy()
+            before = storage_policy()
             storage_owner()
             created = prepare_dedicated_candidate_storage("almalinux", doc, allow_create=True)
             storage_owner()
@@ -4492,7 +4492,7 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
                 _deny("OWNED_DEDICATED_INSTALLER_RESULT_REFUSED")
             readback = prepare_dedicated_candidate_storage("almalinux", doc, allow_create=False)
             if (not _closed_committed_dedicated_storage_report(readback)
-                    or readback != created or policy() != before):
+                    or readback != created or storage_policy() != before):
                 _deny("OWNED_DEDICATED_INSTALLER_RESULT_REFUSED")
             storage_owner()
             return {"status": "OWNED_DEDICATED_COMMITTED_STORAGE_PREPARED", "storage": created,
