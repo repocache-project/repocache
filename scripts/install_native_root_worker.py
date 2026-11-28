@@ -802,31 +802,59 @@ def _authenticate_candidate_deb(work: Path, identity: str) -> tuple[str, str]:
     return expected, debian_nginx_tar_digest(data.read_bytes())
 
 
-def _authenticate_candidate_rpm(work: Path, identity: str) -> tuple[str, str]:
+# Fixed distro payload members, never a request-controlled package or path.
+_FIXED_ALMA_RPM_MEMBERS = {
+    "nginx-core": ("/usr/sbin/nginx", "x86_64", 0o755),
+    "make": ("/usr/bin/make", "x86_64", 0o755),
+    "selinux-policy-devel": ("/usr/share/selinux/devel/Makefile", "noarch", 0o644),
+    "policycoreutils": ("/usr/sbin/semodule", "x86_64", 0o755),
+}
+_FIXED_POLICY_PACKAGES = frozenset(("make", "selinux-policy-devel", "policycoreutils"))
+
+
+def _fixed_alma_rpm_identity(package: str, identity: str) -> None:
+    if (type(package) is not str or package not in _FIXED_ALMA_RPM_MEMBERS
+            or type(identity) is not str or not 1 <= len(identity) <= 256):
+        _reject("NATIVE_EXECUTABLE_RPM_IDENTITY_REFUSED")
+    arch = _FIXED_ALMA_RPM_MEMBERS[package][1]
+    if re.fullmatch(re.escape(package) + r"-[0-9]+:[A-Za-z0-9._+~-]+-"
+                    r"[A-Za-z0-9._+~-]+\." + re.escape(arch), identity) is None:
+        _reject("NATIVE_EXECUTABLE_RPM_IDENTITY_REFUSED")
+
+
+def _fixed_alma_rpm_member_digest(package: str, rows: str) -> str:
+    if type(package) is not str or package not in _FIXED_ALMA_RPM_MEMBERS:
+        _reject("NATIVE_EXECUTABLE_RPM_MEMBER_REFUSED")
+    member = _FIXED_ALMA_RPM_MEMBERS[package][0]
+    if type(rows) is not str or len(rows) > 64 * 1024:
+        _reject("NATIVE_EXECUTABLE_RPM_MEMBER_REFUSED")
+    matching = [row.split("\t", 1)[1] for row in rows.splitlines()
+                if row.startswith(member + "\t")]
+    if len(matching) != 1 or re.fullmatch(r"[0-9a-f]{64}", matching[0]) is None:
+        _reject("NATIVE_EXECUTABLE_RPM_MEMBER_REFUSED")
+    return matching[0]
+
+
+def _authenticate_fixed_alma_rpm_members(work: Path, identities: dict[str, str]) -> dict:
+    """Independently verify fixed RPM members using the native distro anchor.
+
+    Reuse one isolated DNF metadata view and one isolated RPMDB per bounded
+    candidate. No package installation, extraction or host trust change.
+    """
+    if (type(identities) is not dict
+            or set(identities) not in ({"nginx-core"}, _FIXED_POLICY_PACKAGES)):
+        _reject("NATIVE_EXECUTABLE_RPM_IDENTITY_REFUSED")
+    for package, identity in identities.items():
+        _fixed_alma_rpm_identity(package, identity)
     from repocache.server_native_package_trust_v1 import _dnf_commands
     update, query = _dnf_commands(work)
     if query[-4:] != ["repoquery", "--available", "--queryformat=%{name}", "nginx"]:
         _reject("NATIVE_EXECUTABLE_DNF_PROFILE_CHANGED")
     _native_package_command(update, work)
-    urls = set(_native_package_command(
-        [*query[:-4], "-q", "repoquery", "--available", "--location", identity], work).splitlines())
-    if len(urls) != 1:
-        _reject("NATIVE_EXECUTABLE_RPM_LOCATION_REFUSED")
-    url = urls.pop()
-    if re.fullmatch(
-        r"https://repo\.almalinux\.org/almalinux/10/(?:AppStream|BaseOS)/"
-        r"x86_64/os/Packages/(?:[A-Za-z0-9._+~-]+/)*nginx-core-[A-Za-z0-9._+~-]+\.rpm",
-        url,
-    ) is None:
-        _reject("NATIVE_EXECUTABLE_RPM_LOCATION_REFUSED")
-    payload = work / "nginx-core.rpm"
-    _native_package_command(["/usr/bin/curl", "--fail", "--silent", "--show-error",
-                             "--proto", "=https", "--tlsv1.2", "--max-filesize", "33554432",
-                             "--max-time", "90", "--output", str(payload), url], work)
-    archive_digest = _candidate_payload_sha256(payload)
     key = _NATIVE["almalinux"][2]
     if not _trusted_key(key):
         _reject("NATIVE_EXECUTABLE_TRUST_ANCHOR_REFUSED")
+    results = {}
     # The private verification database is a new root-owned scratch inode,
     # not the native system database or a new system trust anchor. Match
     # its existing distro RPMDB label, never change a policy or host path.
@@ -849,27 +877,135 @@ def _authenticate_candidate_rpm(work: Path, identity: str) -> tuple[str, str]:
                 _reject("NATIVE_EXECUTABLE_RPMDB_LABEL_REFUSED")
         for action in (["--initdb"], ["--import", key]):
             _native_package_command(["/usr/bin/rpm", "--dbpath", str(db), *action], work)
-        verified = _native_package_command(
-            ["/usr/bin/rpmkeys", "--dbpath", str(db), "--checksig", str(payload)], work)
-        if verified != str(payload) + ": digests signatures OK":
-            _reject("NATIVE_EXECUTABLE_RPM_SIGNATURE_REFUSED")
-        if _candidate_payload_sha256(payload) != archive_digest:
-            _reject("NATIVE_EXECUTABLE_PAYLOAD_CHANGED")
-        def query_rpm(fmt):
-            return _native_package_command(
-                ["/usr/bin/rpm", "--dbpath", str(db), "-qp", "--queryformat=" + fmt,
-                 str(payload)], work)
-        if (query_rpm("%{NAME}-%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}") != identity
-                or query_rpm("%{FILEDIGESTALGO}") != "8"):
-            _reject("NATIVE_EXECUTABLE_RPM_IDENTITY_REFUSED")
-        rows = query_rpm("[%{FILENAMES}\\t%{FILEDIGESTS}\\n]").splitlines()
-        matching = [row.split("\t", 1)[1] for row in rows
-                    if row.startswith("/usr/sbin/nginx\t")]
-        if len(matching) != 1 or re.fullmatch(r"[0-9a-f]{64}", matching[0]) is None:
-            _reject("NATIVE_EXECUTABLE_RPM_MEMBER_REFUSED")
-        if _candidate_payload_sha256(payload) != archive_digest:
-            _reject("NATIVE_EXECUTABLE_PAYLOAD_CHANGED")
-        return archive_digest, matching[0]
+        for package, identity in sorted(identities.items()):
+            urls = set(_native_package_command(
+                [*query[:-4], "-q", "repoquery", "--available", "--location", identity], work).splitlines())
+            if len(urls) != 1:
+                _reject("NATIVE_EXECUTABLE_RPM_LOCATION_REFUSED")
+            url = urls.pop()
+            if re.fullmatch(
+                r"https://repo\.almalinux\.org/almalinux/10/(?:AppStream|BaseOS)/"
+                r"x86_64/os/Packages/(?:[A-Za-z0-9._+~-]+/)*" + re.escape(package)
+                + r"-[A-Za-z0-9._+~-]+\.rpm", url,
+            ) is None:
+                _reject("NATIVE_EXECUTABLE_RPM_LOCATION_REFUSED")
+            payload = work / (package + ".rpm")
+            if os.path.lexists(payload):
+                _reject("NATIVE_EXECUTABLE_PAYLOAD_UNSAFE")
+            _native_package_command(["/usr/bin/curl", "--fail", "--silent", "--show-error",
+                                     "--proto", "=https", "--tlsv1.2", "--max-filesize", "33554432",
+                                     "--max-time", "90", "--output", str(payload), url], work)
+            archive_digest = _candidate_payload_sha256(payload)
+            verified = _native_package_command(
+                ["/usr/bin/rpmkeys", "--dbpath", str(db), "--checksig", str(payload)], work)
+            if verified != str(payload) + ": digests signatures OK":
+                _reject("NATIVE_EXECUTABLE_RPM_SIGNATURE_REFUSED")
+            if _candidate_payload_sha256(payload) != archive_digest:
+                _reject("NATIVE_EXECUTABLE_PAYLOAD_CHANGED")
+
+            def query_rpm(fmt):
+                return _native_package_command(
+                    ["/usr/bin/rpm", "--dbpath", str(db), "-qp", "--queryformat=" + fmt,
+                     str(payload)], work)
+
+            if (query_rpm("%{NAME}-%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}") != identity
+                    or query_rpm("%{FILEDIGESTALGO}") != "8"):
+                _reject("NATIVE_EXECUTABLE_RPM_IDENTITY_REFUSED")
+            member = _fixed_alma_rpm_member_digest(
+                package, query_rpm("[%{FILENAMES}\\t%{FILEDIGESTS}\\n]"))
+            if _candidate_payload_sha256(payload) != archive_digest:
+                _reject("NATIVE_EXECUTABLE_PAYLOAD_CHANGED")
+            results[package] = (archive_digest, member)
+    return results
+
+
+def _authenticate_candidate_rpm(work: Path, identity: str) -> tuple[str, str]:
+    return _authenticate_fixed_alma_rpm_members(work, {"nginx-core": identity})["nginx-core"]
+
+
+def _fixed_policy_tool_snapshot() -> dict:
+    """Read only fixed top-level compiler and policy-store native files."""
+    result = {}
+    with ExitStack() as stack:
+        root = os.open("/", stage._DIRECTORY)
+        stack.callback(os.close, root)
+        stage._protected_directory(root)
+        for package in sorted(_FIXED_POLICY_PACKAGES):
+            path, _, mode = _FIXED_ALMA_RPM_MEMBERS[package]
+            parent = root
+            chain = []
+            for component in path.strip("/").split("/")[:-1]:
+                child = _open_directory(parent, component, stack)
+                chain.append((parent, component, child, os.fstat(child)))
+                parent = child
+            leaf = path.rsplit("/", 1)[1]
+            info = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
+            raw = stage._asset_bytes(parent, leaf, 32 * 1024 * 1024, installed_mode=mode)
+
+            def identity(st):
+                return (st.st_dev, st.st_ino, st.st_uid, st.st_gid, st.st_mode,
+                        st.st_nlink, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+            if identity(os.stat(leaf, dir_fd=parent, follow_symlinks=False)) != identity(info):
+                _reject("DEDICATED_POLICY_NATIVE_TOOL_CHANGED")
+            for directory, name, child, original in chain:
+                current = os.fstat(child)
+                named = os.stat(name, dir_fd=directory, follow_symlinks=False)
+                stage._protected_directory(child)
+                if identity(current)[:5] != identity(original)[:5] or identity(named)[:5] != identity(current)[:5]:
+                    _reject("DEDICATED_POLICY_NATIVE_TOOL_CHANGED")
+            result[package] = (identity(info), hashlib.sha256(raw).hexdigest())
+    return result
+
+
+def _authenticate_fixed_policy_tools() -> dict:
+    """Verify exact top-level installed tool bytes against signed native RPMs.
+
+    This is necessary evidence, not proof of the entire transitive toolchain,
+    effective SELinux policy, permission to install policy or host authority.
+    """
+    if _native_distro() != "almalinux":
+        _reject("DEDICATED_POLICY_TARGET_REFUSED")
+    require_native_host_preconditions()
+    labels = _Labels("almalinux", dedicated=True)
+    before = _fixed_policy_tool_snapshot()
+    with tempfile.TemporaryDirectory(prefix="repocache-policy-native-tools-", dir="/var/tmp") as place:
+        work = Path(place)
+        if not _native_workspace_is_root_owned(work) or any(work.iterdir()):
+            _reject("DEDICATED_POLICY_WORKSPACE_REFUSED")
+
+        def owners():
+            result = {}
+            for package in sorted(_FIXED_POLICY_PACKAGES):
+                path = _FIXED_ALMA_RPM_MEMBERS[package][0]
+                identity = _native_package_command(
+                    ["/usr/bin/rpm", "-qf", "--queryformat=%{NAME}-%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}",
+                     path], work)
+                _fixed_alma_rpm_identity(package, identity)
+                result[package] = identity
+            return result
+
+        identities = owners()
+        members = _authenticate_fixed_alma_rpm_members(work, identities)
+        if (set(members) != _FIXED_POLICY_PACKAGES or owners() != identities
+                or _fixed_policy_tool_snapshot() != before):
+            _reject("DEDICATED_POLICY_NATIVE_TOOL_CHANGED")
+        for package, (_, digest) in before.items():
+            if members[package][1] != digest:
+                _reject("DEDICATED_POLICY_NATIVE_TOOL_PAYLOAD_REFUSED")
+    labels.finish()
+    require_native_host_preconditions()
+    return {
+        "native_fixed_tool_payloads_verified": True,
+        "native_toolchain_provenance_verified": False,
+        "packages": {package: {"identity": identities[package],
+                               "rpm_sha256": members[package][0],
+                               "file_sha256": members[package][1]}
+                     for package in sorted(identities)},
+        "authorizes_policy_installation": False,
+        "authorizes_host_installation": False,
+        "authorizes_nginx_activation": False,
+    }
 
 
 def _stage_authenticated_native_executable_candidate(
