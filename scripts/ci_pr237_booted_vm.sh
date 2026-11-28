@@ -257,6 +257,19 @@ if test "$scenario" = native-installer || test "$scenario" = native-package-inte
       printf 'before=%s\nafter=%s\n' "$pending_boot_before" "$pending_boot_after" > "$out/pending-boot-intent-reboot-ids.txt"
       set_stage pending-wal-boot-intent-after-reboot
       sshguest 'sudo /usr/bin/python3 -B /home/pr237ci/source/scripts/ci_native_nginx_activate_guest.py almalinux pending-boot-intent-after' > "$out/native-pending-boot-intent-after-reboot.txt" 2>&1 || { cat "$out/native-pending-boot-intent-after-reboot.txt"; exit 1; }
+      # Preserve the previous legacy recovery witness; use a fresh real WAL.
+      set_stage finalize-wal-boot-intent-prepare
+      sshguest 'sudo /usr/bin/python3 -B /home/pr237ci/source/scripts/ci_native_nginx_activate_guest.py almalinux finalize-boot-intent-prepare' > "$out/native-finalize-boot-intent-before-reboot.txt" 2>&1 || { cat "$out/native-finalize-boot-intent-before-reboot.txt"; exit 1; }
+      set_stage finalize-wal-boot-intent-real-reboot
+      finalize_boot_before="$(sshguest 'cat /proc/sys/kernel/random/boot_id')"
+      test "$finalize_boot_before" = "$pending_boot_after"
+      sshguest 'sudo systemctl reboot' >/dev/null 2>&1 || true
+      waitssh "$finalize_boot_before"
+      finalize_boot_after="$(sshguest 'cat /proc/sys/kernel/random/boot_id')"
+      test "$finalize_boot_after" != "$finalize_boot_before"
+      printf 'before=%s\nafter=%s\n' "$finalize_boot_before" "$finalize_boot_after" > "$out/finalize-boot-intent-reboot-ids.txt"
+      set_stage finalize-wal-boot-intent-after-reboot
+      sshguest 'sudo /usr/bin/python3 -B /home/pr237ci/source/scripts/ci_native_nginx_activate_guest.py almalinux finalize-boot-intent-after' > "$out/native-finalize-boot-intent-after-reboot.txt" 2>&1 || { cat "$out/native-finalize-boot-intent-after-reboot.txt"; exit 1; }
     fi
     set_stage complete
     exit 0

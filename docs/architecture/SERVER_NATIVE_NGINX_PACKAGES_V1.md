@@ -1448,3 +1448,15 @@ missing authority is not adopted. This internal increment does not wire
 installed dispatch, start/stop, automatic boot or production activation.
 Booted finalization and interruption/retry acceptance remain necessary;
 the earlier prepared-start witness is not finalization evidence.
+
+A separate native AlmaLinux enforcing scenario extends the existing boot
+campaign without replacing the legacy recovery scenario. It creates a fresh
+real interrupted WAL, prepares the prior state, reboots, and starts the
+signed dedicated service with the catalog withdrawn. The test injects a
+failure only after actual published HTTPS health/catalog observation, requires
+the exact WAL and withdrawal to survive compensation, retries, observes
+the same listener and exact prior catalog, and refuses completed-WAL replay.
+The original service and labels are restored only after successful exact
+readback. The new boot IDs and phase logs are distinct from the earlier
+legacy recovery witness. Execution evidence is required; the scenario itself
+does not certify installed dispatch or automatic boot.

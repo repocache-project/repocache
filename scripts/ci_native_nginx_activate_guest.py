@@ -2299,7 +2299,7 @@ def fixture_preserve_stopped_runtime(expected, archive_name):
           + ("archived without replacement" if archived else "removed by PID1"), flush=True)
 
 
-def verify_committed_boot_namespace_reboot_fixture(native, assets, pins, *, after, pending=False):
+def verify_committed_boot_namespace_reboot_fixture(native, assets, pins, *, after, pending=False, finalize=False):
     """Disposable Alma VM: preserve exact committed or prepared prior policy.
 
     This is a separate manual lifecycle witness, not a boot-time service
@@ -2325,12 +2325,17 @@ def verify_committed_boot_namespace_reboot_fixture(native, assets, pins, *, afte
     verify_fixed_executable_after_reboot(pins)
     wal = STATE / ".state-v2-owned-nginx.pending"
     catalog = Path("/var/lib/repocache/public/catalog.json")
-    evidence_path = ROOT / ("pending-wal-boot-egress-reboot-fixture.json" if pending
+    assert not finalize or pending
+    evidence_path = ROOT / ("finalize-wal-boot-egress-reboot-fixture.json" if finalize
+                            else "pending-wal-boot-egress-reboot-fixture.json" if pending
                             else "committed-boot-egress-reboot-fixture.json")
     saved = json.loads(evidence_path.read_bytes()) if after else None
     state_before = saved["resources"] if after and pending else live_wal_resource_hashes()
     wal_hash = saved["wal_sha256"] if after and pending else None
     wal_inode = saved["wal_inode"] if after and pending else None
+    legacy_catalog_label = (bytes.fromhex(saved["legacy_catalog_label"])
+                            if after and finalize else None)
+    finalized = False
     current = json.loads((STATE / "state-v2.json").read_bytes())
     document = json.loads(base64.b64decode(current["configuration_base64"], validate=True))
     assert all(repo["desired_state"] == "disabled" for repo in document["repositories"])
@@ -2354,7 +2359,7 @@ def verify_committed_boot_namespace_reboot_fixture(native, assets, pins, *, afte
         return hashlib.sha256(path.read_bytes()).hexdigest()
 
     def require_prior_resources():
-        if pending:
+        if pending and not finalized:
             assert wal_hash and wal_inode
             assert digest(wal) == wal_hash and wal.stat().st_ino == wal_inode
             assert not catalog.exists()
@@ -2573,6 +2578,47 @@ try:
                     profile_receipt_sha256=observed_profile["receipt_sha256"],
                     executable_receipt_sha256=hashlib.sha256(receipt).hexdigest(),
                     recheck_authenticated_owner=receipts)
+            elif action in ("finish-dedicated","finish-dedicated-fault"):
+                assert pending
+                def finish():
+                    return tx._finish_owned_prepared_wal_dedicated_locked(
+                        root,state,namespace_identity=namespace_identity(),
+                        executable_identity=identity[:2],expected_wal=pending_raw,
+                        profile_receipt_sha256=observed_profile["receipt_sha256"],
+                        executable_receipt_sha256=hashlib.sha256(receipt).hexdigest(),
+                        recheck_authenticated_owner=receipts)
+                if action=="finish-dedicated-fault":
+                    # Fault only after real published TLS/catalog readback.
+                    actual=tx._owned_dedicated_live_health_bound
+                    observed=[]
+                    def fail_after_health(*args,**kw):
+                        witness=actual(*args,**kw)
+                        observed.append(witness["catalog_observed"])
+                        if kw["publish"]:
+                            raise tx.NativeV2TransactionError("DISPOSABLE_FINALIZE_POST_HEALTH")
+                        return witness
+                    tx._owned_dedicated_live_health_bound=fail_after_health
+                    try:
+                        try:
+                            finish()
+                        except tx.NativeV2TransactionError as exc:
+                            assert str(exc)=="DISPOSABLE_FINALIZE_POST_HEALTH",str(exc)
+                        else:
+                            raise AssertionError("Injected publication failure committed")
+                    finally:
+                        tx._owned_dedicated_live_health_bound=actual
+                    assert observed==[False,True]
+                    assert tx._read_file(state,tx._OWNED_WAL,0,tx._MAX_WAL)==pending_raw
+                    result={"compensated":True,"authorizes_nginx_activation":False}
+                else:
+                    result=finish()
+                    assert tx._read_file(state,tx._OWNED_WAL,0,tx._MAX_WAL) is None
+                    try:
+                        finish()
+                    except tx.NativeV2TransactionError as exc:
+                        assert "OWNED_WAL_CHANGED" in str(exc)
+                    else:
+                        raise AssertionError("Completed WAL was adopted again")
             elif action in ("prepare-committed-storage","verify-committed-active"):
                 # Exercise exact committed or prepared prior resources,
                 # never a rewritten synthetic include or pending publication.
@@ -2636,11 +2682,13 @@ finally:
     os.close(root)
 """
 
-    def signed(action, prior=None):
+    def signed(action, prior=None, *, pending_mode=None):
         result = isolated.command("/usr/bin/python3", "-IS", "-B", "-c", code,
                                   input_text=json.dumps([action, uid, pins, executable_proof, prior,
-                                                         pending, wal_hash]),
-                                  timeout=300 if action in ("start-committed", "verify-committed-active") else 180)
+                                                         pending if pending_mode is None else pending_mode,
+                                                         wal_hash]),
+                                  timeout=300 if action in ("start-committed", "verify-committed-active",
+                                                            "finish-dedicated", "finish-dedicated-fault") else 180)
         return json.loads(result.stdout)
 
     assert not os.path.lexists(ns) and not os.path.lexists(rollover)
@@ -2653,6 +2701,13 @@ finally:
         # for the second scenario. Stop/disable the fixture before preparing
         # the old files; no synthetic journal or automatic activation.
         if pending:
+            if finalize:
+                # Capture the real legacy label before the WAL withdraws it.
+                info = catalog.lstat()
+                assert stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+                assert info.st_uid == info.st_gid == 0 and stat.S_IMODE(info.st_mode) == 0o644
+                assert set(os.listxattr(catalog, follow_symlinks=False)) == {"security.selinux"}
+                legacy_catalog_label = os.getxattr(catalog, "security.selinux", follow_symlinks=False)
             run_live_wal("almalinux", "interrupt")
             wal_hash, wal_inode = digest(wal), wal.stat().st_ino
             assert not catalog.exists()
@@ -2687,6 +2742,9 @@ finally:
                   "host_booleans_sha256": hashlib.sha256(host_booleans.encode("utf-8")).hexdigest()}
         if pending:
             report.update(wal_sha256=wal_hash, wal_inode=wal_inode)
+        if finalize:
+            assert legacy_catalog_label
+            report["legacy_catalog_label"] = legacy_catalog_label.hex()
         with evidence_path.open("xb") as stream:
             os.fchmod(stream.fileno(), 0o600)
             stream.write(json.dumps(report, sort_keys=True).encode("ascii"))
@@ -2750,7 +2808,8 @@ finally:
         runtime = Path("/run/repocache-nginx")
         fixed = (cache, cache.parent / ".repocache-managed.owner-v1",
                  log, log.parent / ".repocache-managed.owner-v1")
-        prefix = ".ci-pending-boot-" if pending else ".ci-boot-"
+        prefix = (".ci-finalize-boot-" if finalize else
+                  ".ci-pending-boot-" if pending else ".ci-boot-")
         backups = tuple(p.with_name(prefix + "legacy-" + p.name) for p in fixed)
         archived = tuple(p.with_name(prefix + "dedicated-" + p.name) for p in fixed)
         assert not any(os.path.lexists(p) for p in (*backups, *archived, runtime))
@@ -2814,27 +2873,71 @@ finally:
                 assert started["catalog_withdrawn"] and started["recovery_required"]
                 # Independently prove a fresh TLS client cannot retrieve
                 # a catalog even though the exact prior master is healthy.
-                response = subprocess.run(
-                    ["/usr/sbin/ip", "netns", "exec", "repocache-nginx",
-                     "/usr/bin/python3", "-IS", "-B", "-c",
-                     "import sys;sys.path.insert(0,'/home/pr237ci/combined');"
-                     "from scripts.ci_pr237_native_socket_guest import https_response;"
-                     "sys.stdout.buffer.write(https_response('/.well-known/repocache/catalog.json'))"],
-                    check=True, capture_output=True, timeout=15).stdout
+                def fresh_catalog():
+                    return subprocess.run(
+                        ["/usr/sbin/ip", "netns", "exec", "repocache-nginx",
+                         "/usr/bin/python3", "-IS", "-B", "-c",
+                         "import sys;sys.path.insert(0,'/home/pr237ci/combined');"
+                         "from scripts.ci_pr237_native_socket_guest import https_response;"
+                         "sys.stdout.buffer.write(https_response('/.well-known/repocache/catalog.json'))"],
+                        check=True, capture_output=True, timeout=15).stdout
+                response = fresh_catalog()
                 assert response.startswith(b"HTTP/1.1 404 "), response.split(b"\r\n")[0]
                 witnessed = started
+                if finalize:
+                    require_prior_resources()
+                    fault = signed("finish-dedicated-fault")
+                    assert fault["compensated"]
+                    require_prior_resources()
+                    assert fresh_catalog().startswith(b"HTTP/1.1 404 ")
+                    require_status(OWN, True, False)
+                    finished = signed("finish-dedicated")
+                    assert finished["status"] == "OWNED_DEDICATED_WAL_ROLLBACK_OBSERVED"
+                    assert finished["wal_sha256"] == wal_hash
+                    assert not finished["recovery_required"] and finished["catalog_observed"]
+                    assert finished["main_pid"] == started["main_pid"]
+                    assert finished["listener_inode"] == started["listener_inode"]
+                    assert finished["generation"] == current["state_generation"]
+                    assert finished["storage"] == prepared_storage
+                    finalized = True
+                    require_prior_resources()
+                    response = fresh_catalog()
+                    assert response.startswith(b"HTTP/1.1 200 ") and response.endswith(catalog.read_bytes())
+                    witnessed = signed("verify-committed-active", pending_mode=False)
+                    assert witnessed["main_pid"] == finished["main_pid"]
+                    assert witnessed["listener_inode"] == finished["listener_inode"]
+                    # Retain the newly published leaf for exact label restoration.
+                    fd = os.open(catalog, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                    stack.callback(os.close, fd)
+                    info = os.fstat(fd)
+                    ident = file_identity(catalog)
+                    assert (info.st_dev, info.st_ino) == ident
+                    assert stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+                    assert info.st_uid == info.st_gid == 0 and stat.S_IMODE(info.st_mode) == 0o644
+                    assert set(os.listxattr(fd)) == {"security.selinux"}
+                    assert os.getxattr(fd, "security.selinux").rstrip(b"\0") == b"system_u:object_r:repocache_nginx_ro_t:s0"
+                    assert legacy_catalog_label
+                    labels.append((catalog, fd, ident, legacy_catalog_label))
+                    print("PASS: actual dedicated WAL publication fault compensates to HTTP 404; retry publishes exact prior TLS catalog, removes WAL and refuses replay", flush=True)
             else:
                 witnessed = signed("verify-committed-active")
                 assert witnessed["main_pid"] == started["main_pid"]
                 assert witnessed["listener_inode"] == started["listener_inode"]
             assert witnessed["storage"] == prepared_storage
-            assert witnessed["catalog_observed"] == (not pending)
+            assert witnessed["catalog_observed"] == (not pending or finalized)
             assert witnessed["generation"] == current["state_generation"]
             assert witnessed["listener_inode"] > 0
             require_prior_resources()
             require("/usr/bin/systemctl", "stop", OWN)
             require_status(OWN, False, False)
-            assert signed("verify") == result
+            if finalized:
+                committed = signed("verify", pending_mode=False)
+                assert committed["committed_resources_verified"]
+                for key in ("receipt_sha256", "generation", "generation_manifest_sha256",
+                            "ruleset_sha256", "namespace_device", "namespace_inode", "boot_id"):
+                    assert committed[key] == result[key]
+            else:
+                assert signed("verify") == result
             fixture_preserve_stopped_runtime(
                 runtime_snapshot, ".ci-boot-dedicated-runtime")
             # Success-only restoration of the isolated fixture. Failed
@@ -2851,7 +2954,9 @@ finally:
                 fixture_move_same_parent_noreplace(backup, source)
             assert not os.path.lexists(runtime)
         require_prior_resources()
-        if pending:
+        if finalized:
+            print("PASS: signed dedicated prior-generation finalization after real namespace reboot, then stops with committed exact resources", flush=True)
+        elif pending:
             print("PASS: actual signed dedicated unit starts exact prepared prior generation after namespace reboot rollover; pinned TLS, catalog HTTP 404, exact WAL retained, then stops", flush=True)
         else:
             print("PASS: actual signed dedicated unit starts exact committed generation after namespace reboot rollover; pinned TLS and exact catalog served, then stops without changing prior bytes", flush=True)
@@ -2876,7 +2981,7 @@ finally:
     dropdir.rmdir()
     sync_dir(dropdir.parent)
     require("/usr/bin/systemctl", "daemon-reload")
-    if pending:
+    if pending and not finalized:
         require_prior_resources()
         # Restore the fixture's enablement without starting. Only the
         # authenticated inactive-WAL recovery may publish the old catalog.
@@ -2898,7 +3003,9 @@ finally:
     assert digest(VENDOR_CONFIG) == prior["vendor_sha256"]
     assert digest(STATE / ".native-nginx-v1.completed") == prior["package_completion_sha256"]
     print("PASS: exact fixture cleanup and original enabled service, generation, vendor and host policy restored", flush=True)
-    if pending:
+    if finalized:
+        print("PASS: dedicated finalization retained exact prior catalog through fixture-only legacy restoration", flush=True)
+    elif pending:
         print("PASS: real interrupted WAL survives dedicated namespace reboot rollover; signed legacy recovery restores prior TLS/catalog after fixture-only cleanup", flush=True)
     print("NOT VERIFIED: automatic dedicated service boot activation, active upstream ingress or installed dedicated pending-WAL dispatch", flush=True)
 
@@ -3083,11 +3190,13 @@ def verify_guest(distribution: str, phase: str) -> None:
         print("PASS: separate REPOCACHE service survives real reboot with vendor service disabled and package integrity intact", flush=True)
         print("NOT VERIFIED: authoritative active repository transaction/catalog, installed dedicated namespace pending-WAL recovery, final publisher-signed release", flush=True)
     elif phase in ("boot-intent-prepare", "boot-intent-after",
-                   "pending-boot-intent-prepare", "pending-boot-intent-after"):
+                   "pending-boot-intent-prepare", "pending-boot-intent-after",
+                   "finalize-boot-intent-prepare", "finalize-boot-intent-after"):
         assert distribution == "almalinux"
         verify_committed_boot_namespace_reboot_fixture(
             native, assets, pins, after=phase.endswith("-after"),
-            pending=phase.startswith("pending-"))
+            pending=phase.startswith(("pending-", "finalize-")),
+            finalize=phase.startswith("finalize-"))
         assert hashlib.sha256(completion.read_bytes()).hexdigest() == receipt
         assert hashlib.sha256(VENDOR_CONFIG.read_bytes()).hexdigest() == vendor_conf
         assert inspect_stock_nginx_package_file_integrity()[
@@ -3099,6 +3208,7 @@ def verify_guest(distribution: str, phase: str) -> None:
 if __name__ == "__main__":
     if (len(sys.argv) != 3 or sys.argv[1] not in ("debian", "almalinux")
             or sys.argv[2] not in ("activate", "after", "boot-intent-prepare", "boot-intent-after",
-                                   "pending-boot-intent-prepare", "pending-boot-intent-after")):
-        raise SystemExit("Usage: ci_native_nginx_activate_guest.py debian|almalinux activate|after|boot-intent-prepare|boot-intent-after|pending-boot-intent-prepare|pending-boot-intent-after")
+                                   "pending-boot-intent-prepare", "pending-boot-intent-after",
+                                   "finalize-boot-intent-prepare", "finalize-boot-intent-after")):
+        raise SystemExit("Usage: ci_native_nginx_activate_guest.py debian|almalinux activate|after|boot-intent-prepare|boot-intent-after|pending-boot-intent-prepare|pending-boot-intent-after|finalize-boot-intent-prepare|finalize-boot-intent-after")
     verify_guest(sys.argv[1], sys.argv[2])
