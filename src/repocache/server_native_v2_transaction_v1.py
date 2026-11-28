@@ -56,7 +56,9 @@ from repocache.server_native_installed_storage_v1 import (
     InstalledStorageError, verify_control_storage, verify_service_storage_mounts, _mount, _Labels,
     _rename_directory_noreplace,
 )
-from repocache.server_protected_namespace_bootstrap_v1 import _DEDICATED_PUBLIC_CONTEXT
+from repocache.server_protected_namespace_bootstrap_v1 import (
+    _DEDICATED_PUBLIC_CONTEXT, _dedicated_public_directory, _dedicated_ancestry,
+)
 from repocache.server_native_nginx_package_journal_v1 import (
     _read_completed_native_install_under_lock, NativePackageJournalError,
 )
@@ -1861,6 +1863,162 @@ def _owned_alma_runtime_temps(root_fd: int, *, dedicated: bool,
     except NativeV2TransactionError:
         raise
     except (InstalledStorageError, OSError, ValueError, KeyError, TypeError):
+        _deny(code)
+
+
+def _prepare_owned_dedicated_bootstrap_locked(root_fd: int, state_fd: int, *, recheck_owned) -> dict:
+    """Fresh signed inert config only; caller holds the authenticated state lock.
+
+    Requires a previously prepared, exactly labelled public directory and
+    enforcing dedicated policy. No legacy adoption, service or TLS effects.
+    An interrupted partial claim is preserved and refused.
+    """
+    code = "OWNED_DEDICATED_BOOTSTRAP_REFUSED"
+    if not callable(recheck_owned):
+        _deny(code)
+    marker = (OWNED_NGINX_CONFIG_MARKER_PREFIX
+              + hashlib.sha256(b"/etc/nginx/repocache.d/\0" + _OWNED_BOOTSTRAP_CONFIG).hexdigest())
+
+    def named(parent, name):
+        try:
+            return os.stat(name, dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+
+    try:
+        labels = _Labels("almalinux", dedicated=True)
+        recheck_owned()
+        with ExitStack() as stack:
+            shared, chain = _walk(root_fd, _OWNED_DIR[:-1], stack, 0)
+            vendor, vendor_chain = _walk(root_fd, _INCLUDE_DIR, stack, 0)
+            public, public_chain = _walk(root_fd, _PUBLIC_DIR, stack, 0)
+            state, state_chain = _walk(root_fd, ("var", "lib", "repocache", "server"), stack, 0)
+            shared_before = _identity(os.fstat(shared))[:5]
+            mount = _mount(shared)
+            state_before = _identity(os.fstat(state_fd))[:6]
+            if (_identity(os.fstat(state))[:6] != state_before or _mount(state_fd) != _mount(state)
+                    or (os.fstat(state_fd).st_uid, os.fstat(state_fd).st_gid,
+                        stat.S_IMODE(os.fstat(state_fd).st_mode)) != (0, 0, 0o700)):
+                _deny(code)
+
+            def boundary():
+                recheck_owned()
+                for paths in (chain, vendor_chain, public_chain, state_chain):
+                    _dedicated_ancestry(root_fd, paths)
+                _recheck(chain[:-1], 0)
+                parent, name, _, _ = chain[-1]
+                if (_identity(os.fstat(shared))[:5] != shared_before
+                        or _identity(os.stat(name, dir_fd=parent, follow_symlinks=False))[:5] != shared_before
+                        or _mount(shared) != mount):
+                    _deny(code)
+                # The shared NGINX parent changes only during our mkdir;
+                # the vendor conf.d child itself must remain unchanged.
+                _recheck(vendor_chain[:-2], 0)
+                if (_identity(os.fstat(vendor)) != vendor_chain[-1][3]
+                        or _identity(os.stat(_INCLUDE_DIR[-1], dir_fd=shared,
+                                             follow_symlinks=False)) != vendor_chain[-1][3]):
+                    _deny(code)
+                _recheck(public_chain, 0)
+                _recheck_after_mutation(state_chain, 0)
+                if (_identity(os.fstat(state_fd))[:6] != state_before
+                        or _mount(state_fd) != _mount(state)):
+                    _deny(code)
+                _dedicated_public_directory(public)
+                if os.listdir(public):
+                    _deny(code)
+                _no_conflicting_owned_wal_pending(state_fd)
+                if (_read_v2(state_fd, 0)[0] is not None
+                        or _read_file(state_fd, _OWNED_MANIFEST, 0, _OWNED_LIMIT[_OWNED_MANIFEST]) is not None
+                        or _read_file(state_fd, _MANIFEST, 0, _LIMIT[_MANIFEST]) is not None
+                        or _read_public(vendor, _INCLUDE, _LIMIT[_INCLUDE]) is not None):
+                    _deny(code)
+                for leaf in (_OWNED_MAIN, _INCLUDE, *_OWNED_STAGES.values(), _STAGE):
+                    _owned_require_absent(shared, leaf)
+                _owned_require_absent(vendor, _STAGE)
+
+            boundary()
+            claims = {name for name in os.listdir(state_fd)
+                      if name.startswith(OWNED_NGINX_CONFIG_MARKER_PREFIX)}
+            existing = named(shared, _OWNED_DIR[-1])
+            fresh = existing is None
+            if fresh:
+                if claims:
+                    _deny(code)
+                # A durable claim precedes any NGINX leaf. Any ambiguous
+                # interruption is retained and must not be silently adopted.
+                fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                             | os.O_CLOEXEC, 0o600, dir_fd=state_fd)
+                try:
+                    info = _metadata_no_acl(fd)
+                    if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                            or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size != 0
+                            or _mount(fd) != _mount(state_fd)
+                            or _identity(os.stat(marker, dir_fd=state_fd, follow_symlinks=False)) != _identity(info)):
+                        _deny(code)
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+                os.fsync(state_fd)
+                claim = _owned_config_marker_identity(state_fd)
+                boundary()
+                os.mkdir(_OWNED_DIR[-1], 0o700, dir_fd=shared)
+            else:
+                if claims != {marker}:
+                    _deny(code)
+                claim = _owned_config_marker_identity(state_fd)
+            nginx = os.open(_OWNED_DIR[-1], _DIRECTORY_FLAGS, dir_fd=shared)
+            stack.callback(os.close, nginx)
+            initial = _identity(os.fstat(nginx))[:2]
+
+            def check_config_dir():
+                boundary()
+                info = os.fstat(nginx)
+                if (_identity(info)[:2] != initial or _mount(nginx) != mount
+                        or _identity(os.stat(_OWNED_DIR[-1], dir_fd=shared,
+                                             follow_symlinks=False)) != _identity(info)
+                        or _owned_config_marker_identity(state_fd) != claim):
+                    _deny(code)
+
+            check_config_dir()
+            if fresh:
+                _dedicated_public_directory(nginx, fresh=True)
+                check_config_dir()
+                os.fchmod(nginx, 0o755)
+                os.fsync(nginx)
+                os.fsync(shared)
+                check_config_dir()
+                _dedicated_public_directory(nginx)
+                _write_dedicated_fresh_public(nginx, _OWNED_MAIN, _OWNED_BOOTSTRAP_CONFIG)
+            check_config_dir()
+            _dedicated_public_directory(nginx)
+            if set(os.listdir(nginx)) != {_OWNED_MAIN}:
+                _deny(code)
+            main = os.open(_OWNED_MAIN, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                           dir_fd=nginx)
+            stack.callback(os.close, main)
+            identity = _identity(os.fstat(main))
+            _require_dedicated_public_label(main)
+            if (_mount(main) != mount or _read_public(nginx, _OWNED_MAIN, _OWNED_LIMIT[_OWNED_MAIN])
+                    != _OWNED_BOOTSTRAP_CONFIG):
+                _deny(code)
+            with _owned_layout_locked(root_fd, state_fd, recovering=False) as layout:
+                if _validate_owned_resources(_read_owned_resources(*layout[:3])) is not None:
+                    _deny(code)
+                layout[3]()
+            check_config_dir()
+            if (_identity(os.fstat(main)) != identity
+                    or _identity(os.stat(_OWNED_MAIN, dir_fd=nginx,
+                                         follow_symlinks=False)) != identity):
+                _deny(code)
+            _require_dedicated_public_label(main)
+            labels.finish()
+            return {"status": "OWNED_DEDICATED_BOOTSTRAP_PREPARED",
+                    "config_directory_identity": initial, "main_identity": identity[:2],
+                    "bootstrap_sha256": hashlib.sha256(_OWNED_BOOTSTRAP_CONFIG).hexdigest(),
+                    "authorizes_nginx_activation": False, "authorizes_catalog_publication": False}
+    except NativeV2TransactionError:
+        raise
+    except (OSError, ValueError, TypeError, InstalledStorageError, RootControlWorkerError):
         _deny(code)
 
 

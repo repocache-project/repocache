@@ -2173,6 +2173,65 @@ print(json.dumps(report))
         capture_output=True, text=True, timeout=30).stdout)
 
 
+def verify_fresh_dedicated_bootstrap_candidate():
+    """Exercise fresh labelled namespace and inert config in a detached root."""
+    code = """
+import os,stat,sys,tempfile,zipimport
+from pathlib import Path
+sys.path.insert(0, "/usr/libexec/repocache/server-control-worker")
+from repocache import server_native_v2_transaction_v1 as tx
+from repocache import server_protected_namespace_bootstrap_v1 as bootstrap
+from repocache.server_protected_state_store_v1 import _locked
+assert isinstance(tx.__loader__,zipimport.zipimporter)
+assert tx.__loader__.archive=="/usr/libexec/repocache/server-control-worker"
+assert os.getresuid()==os.getresgid()==(0,0,0)
+with tempfile.TemporaryDirectory(prefix="repocache-fresh-label-",dir="/var/tmp") as directory:
+    root=Path(directory)
+    for path in ("etc/nginx/conf.d","var/lib"):
+        (root/path).mkdir(parents=True,mode=0o755)
+    fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    try:
+        report=bootstrap.bootstrap_protected_namespace_under_root(fd,owner_uid=0,public_catalog=True,
+                                                                 _dedicated_public=True)
+        assert report["dedicated_public_label_verified"] and report["state_directory_created"]
+        public=root/"var/lib/repocache/public"
+        assert os.getxattr(public,"security.selinux").rstrip(b"\\\\0")==tx._DEDICATED_PUBLIC_CONTEXT
+        assert not list(public.iterdir())
+        def guard():
+            assert root.is_dir() and root.stat().st_uid==0 and not root.is_symlink()
+        with _locked(fd,0) as state:
+            first=tx._prepare_owned_dedicated_bootstrap_locked(fd,state,recheck_owned=guard)
+            assert not first["authorizes_nginx_activation"] and not first["authorizes_catalog_publication"]
+            assert tx._prepare_owned_dedicated_bootstrap_locked(fd,state,recheck_owned=guard)==first
+            config=root/"etc/nginx/repocache.d"
+            main=config/tx._OWNED_MAIN
+            assert main.read_bytes()==tx._OWNED_BOOTSTRAP_CONFIG
+            for path in (config,main):
+                assert os.getxattr(path,"security.selinux").rstrip(b"\\\\0")==tx._DEDICATED_PUBLIC_CONTEXT
+            assert stat.S_IMODE(config.stat().st_mode)==0o755
+            assert stat.S_IMODE(main.stat().st_mode)==0o644
+            assert not list(public.iterdir()) and not list((root/"etc/nginx/conf.d").iterdir())
+            original=(main.stat().st_dev,main.stat().st_ino)
+            # Change only a disposable fixture label. Never repair it.
+            os.setxattr(main,"security.selinux",os.getxattr(root/"etc/nginx","security.selinux"))
+            try:
+                tx._prepare_owned_dedicated_bootstrap_locked(fd,state,recheck_owned=guard)
+            except tx.NativeV2TransactionError:
+                pass
+            else:
+                raise AssertionError("Foreign bootstrap label adopted")
+            assert (main.stat().st_dev,main.stat().st_ino)==original
+            assert main.read_bytes()==tx._OWNED_BOOTSTRAP_CONFIG
+        assert bootstrap.bootstrap_protected_namespace_under_root(
+            fd,owner_uid=0,public_catalog=True,_dedicated_public=True)["dedicated_public_label_verified"]
+    finally:
+        os.close(fd)
+"""
+    subprocess.run(["/usr/bin/python3", "-IS", "-B", "-c", code],
+                   check=True, timeout=60)
+    print("PASS: signed worker fresh detached namespace and inert configuration labels, repeat and foreign-label refusal", flush=True)
+
+
 def verify_fixed_executable_candidate(native, assets, pins, distribution):
     """Exercise the actual fixed installer candidate in the guarded VM."""
     import stat
@@ -2197,6 +2256,7 @@ def verify_fixed_executable_candidate(native, assets, pins, distribution):
     if distribution == "almalinux":
         from scripts import ci_selinux_nginx_egress_guest as isolated
         policy = isolated.load_fixed_candidate_policy()
+        verify_fresh_dedicated_bootstrap_candidate()
     result = native._stage_authenticated_native_executable_candidate(
         assets, **pins, dedicated_selinux=policy is not None)
     if policy is not None:

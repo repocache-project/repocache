@@ -5643,3 +5643,74 @@ def test_dedicated_fresh_public_noreplace_and_label(tmp_path, monkeypatch, name,
                 assert staged.exists() and not target.exists()
     finally:
         os.close(fd)
+
+
+@pytest.mark.parametrize("fault", ["none", "foreign-directory", "legacy", "partial-claim",
+                                   "foreign-public-label", "foreign-main-label", "orphan-stage"])
+def test_prepare_dedicated_bootstrap_fresh_only(tmp_path, monkeypatch, fault):
+    from repocache import server_protected_namespace_bootstrap_v1 as bootstrap
+    root = tmp_path / "fresh"
+    root.mkdir(mode=0o700)
+    for path in ("etc/nginx/conf.d", "var/lib"):
+        (root / path).mkdir(parents=True, mode=0o755)
+    context = native._DEDICATED_PUBLIC_CONTEXT + b"\0"
+    foreign = b"system_u:object_r:var_lib_t:s0\0"
+    labels = {}
+    writes = []
+    monkeypatch.setattr(os, "listxattr", lambda fd: ["security.selinux"])
+    monkeypatch.setattr(os, "getxattr", lambda fd, name: labels.get(os.fstat(fd).st_ino, foreign))
+    def set_label(fd, name, value):
+        assert value == context and stat.S_IMODE(os.fstat(fd).st_mode) == 0o700 or (
+            value == context and stat.S_IMODE(os.fstat(fd).st_mode) == 0o600)
+        labels[os.fstat(fd).st_ino] = value
+        writes.append(os.fstat(fd).st_ino)
+    monkeypatch.setattr(os, "setxattr", set_label)
+    monkeypatch.setattr(native._Labels, "_command", staticmethod(lambda *a: b"Enforcing"))
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        bootstrap.bootstrap_protected_namespace_under_root(fd, owner_uid=0, public_catalog=True,
+                                                            _dedicated_public=True)
+        public = root / "var/lib/repocache/public"
+        state = public.parent / "server"
+        shared = root / "etc/nginx"
+        config = shared / "repocache.d"
+        main = config / native._OWNED_MAIN
+        if fault == "foreign-directory":
+            config.mkdir(mode=0o755)
+            labels[config.stat().st_ino] = context
+        if fault == "legacy":
+            (shared / native._OWNED_MAIN).write_bytes(native._OWNED_BOOTSTRAP_CONFIG)
+        if fault == "partial-claim":
+            (state / installer._CONFIG_MARKER).touch(mode=0o600)
+        if fault == "foreign-public-label":
+            labels[public.stat().st_ino] = foreign
+        def invoke():
+            with native._locked(fd, 0) as state_fd:
+                return native._prepare_owned_dedicated_bootstrap_locked(
+                    fd, state_fd, recheck_owned=lambda: None)
+        if fault in ("none", "foreign-main-label", "orphan-stage"):
+            first = invoke()
+            assert first == invoke()
+            assert first["status"] == "OWNED_DEDICATED_BOOTSTRAP_PREPARED"
+            assert main.read_bytes() == native._OWNED_BOOTSTRAP_CONFIG
+            assert labels[main.stat().st_ino] == labels[config.stat().st_ino] == context
+            assert writes == [public.stat().st_ino, config.stat().st_ino, main.stat().st_ino]
+            original = main.stat().st_ino
+            if fault == "foreign-main-label":
+                labels[original] = foreign
+            if fault == "orphan-stage":
+                (config / native._OWNED_STAGES[native._OWNED_MAIN]).touch(mode=0o600)
+            if fault != "none":
+                with pytest.raises(native.NativeV2TransactionError):
+                    invoke()
+                assert main.stat().st_ino == original and len(writes) == 3
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                invoke()
+            assert not main.exists() and writes == [public.stat().st_ino]
+        assert not list(public.iterdir())
+        assert not list((shared / "conf.d").iterdir())
+        assert not (state / V2_STATE).exists()
+        assert not (state / native._OWNED_WAL).exists()
+    finally:
+        os.close(fd)

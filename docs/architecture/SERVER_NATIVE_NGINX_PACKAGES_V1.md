@@ -1895,3 +1895,17 @@ primitive accepts only the fixed signed inert main bootstrap bytes for
 future fresh configuration placement. Legacy writes and replacement
 semantics remain unchanged. No existing object is relabelled, and no
 new service, policy, migration or public command authority is introduced.
+
+The dedicated inert bootstrap preparation reuses the original ownership
+claim and exclusive state lock. Before any effect it requires the fresh
+public label, empty public directory, no state generation or WAL, no
+legacy owned filenames/vendor include, and fixed root-owned same-mount
+ancestry. It assigns the read-only context only to the exclusively
+created 0700 config directory, publishes mode 0755, and installs only
+the exact inert signed bootstrap through the no-replace publisher.
+Complete claimed repeats verify without changes; orphan stages,
+incomplete claims and existing wrong labels are refused. The
+authenticated installed worker exercises this in a detached enforcing
+VM root using the already loaded dedicated policy. This is a fresh
+placement component, not the real host installer composition, managed
+generation commit, automatic policy installation or activation.
