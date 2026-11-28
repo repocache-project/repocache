@@ -6049,7 +6049,8 @@ def test_dedicated_labelled_leaf_replacement(tmp_path, monkeypatch, fault):
 
 @pytest.mark.parametrize("fault", ["none", "wal-drift", "unpublished", "foreign-after",
                                    "catalog", "actual-root", "main-first",
-                                   "remove-first", "foreign-other-label", "orphan-stage"])
+                                   "remove-first", "foreign-other-label", "orphan-stage",
+                                   "foreign-public-repeat"])
 def test_initial_dedicated_config_wal_writer(filesystem, monkeypatch, fault):
     old = _owned_bootstrap_resources()
     new = _owned_generation(active=False, distribution="almalinux")
@@ -6091,11 +6092,18 @@ def test_initial_dedicated_config_wal_writer(filesystem, monkeypatch, fault):
             write(native._INCLUDE, None)
             assert expected == old and _fixture_resource_bytes(paths) == old
             assert wal_path.read_bytes() == wal
-        elif fault == "remove-first":
+        elif fault in ("remove-first", "foreign-public-repeat"):
             write(native._INCLUDE, new[native._INCLUDE])
             write(native._OWNED_MAIN, new[native._OWNED_MAIN])
-            with pytest.raises(native.NativeV2TransactionError):
-                write(native._INCLUDE, None)
+            if fault == "foreign-public-repeat":
+                foreign = paths[native._CATALOG].parent / "foreign"
+                foreign.write_bytes(b"preserve")
+                with pytest.raises(native.NativeV2TransactionError):
+                    write(native._OWNED_MAIN, new[native._OWNED_MAIN])
+                assert foreign.read_bytes() == b"preserve"
+            else:
+                with pytest.raises(native.NativeV2TransactionError):
+                    write(native._INCLUDE, None)
             assert _fixture_resource_bytes(paths) == expected
             assert wal_path.read_bytes() == wal
         else:

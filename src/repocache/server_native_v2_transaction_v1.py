@@ -5249,10 +5249,14 @@ def _write_owned_initial_dedicated_config_locked(
         labels.finish()
 
     def proof(*, allow_stage=False):
+        # Require a closed namespace even with both managed config leaves.
+        # The optional fixed stage may exist only during our guarded write.
+        if not allow_stage:
+            _owned_check_stages_absent(state_fd, nginx_fd, public_fd)
         return _dedicated_readonly_config_labels(
             nginx_fd, public_fd, catalog_present=False,
             bootstrap=expected[_INCLUDE] is None,
-            allowed_stage=_OWNED_STAGES[name] if allow_stage else None)
+            allowed_stage=_OWNED_STAGES[name])
 
     def unchanged(proven):
         parents, mounts, files = proven
