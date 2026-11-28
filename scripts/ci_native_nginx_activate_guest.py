@@ -2909,14 +2909,40 @@ finally:
     old_receipt = boot_receipt.read_bytes()
     assert hashlib.sha256(old_receipt).hexdigest() == prior["policy"]["receipt_sha256"]
     assert not any(p.name.startswith(history_prefix) for p in STATE.iterdir())
+    rollover_pins = dict(
+        **pins, executable_receipt_sha256=executable_proof["receipt_sha256"],
+        profile_receipt_sha256=prior["profile"]["receipt_sha256"],
+        generation_manifest_sha256=prior["policy"]["generation_manifest_sha256"],
+        previous_boot_receipt_sha256=prior["policy"]["receipt_sha256"])
     if pending:
-        result = signed("rollover", prior)
+        try:
+            native._rollover_authenticated_committed_dedicated_nginx(assets, **rollover_pins)
+        except native.stage.WorkerStageError:
+            pass
+        else:
+            raise AssertionError("Committed rollover adopted a pending WAL")
+        assert not os.path.lexists(ns) and boot_receipt.read_bytes() == old_receipt
+        pending_pins = {**rollover_pins, "wal_sha256": wal_hash}
+        for field in ("wal_sha256", "previous_boot_receipt_sha256"):
+            try:
+                native._rollover_authenticated_prepared_wal_dedicated_nginx(
+                    assets, **{**pending_pins, field: "0"*64})
+            except native.stage.WorkerStageError:
+                pass
+            else:
+                raise AssertionError("Foreign pending rollover pin accepted")
+            assert not os.path.lexists(ns) and boot_receipt.read_bytes() == old_receipt
+            require_prior_resources()
+        result = native._rollover_authenticated_prepared_wal_dedicated_nginx(assets, **pending_pins)
+        try:
+            native._rollover_authenticated_prepared_wal_dedicated_nginx(assets, **pending_pins)
+        except native.stage.WorkerStageError:
+            pass
+        else:
+            raise AssertionError("Completed pending rollover adopted twice")
+        assert signed("verify") == result
+        print("PASS: authenticated installer recreates exact pending-WAL namespace after real reboot; foreign pins and replay refused", flush=True)
     else:
-        rollover_pins = dict(
-            **pins, executable_receipt_sha256=executable_proof["receipt_sha256"],
-            profile_receipt_sha256=prior["profile"]["receipt_sha256"],
-            generation_manifest_sha256=prior["policy"]["generation_manifest_sha256"],
-            previous_boot_receipt_sha256=prior["policy"]["receipt_sha256"])
         try:
             native._rollover_authenticated_committed_dedicated_nginx(
                 assets, **{**rollover_pins, "previous_boot_receipt_sha256": "0"*64})

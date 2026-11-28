@@ -1608,3 +1608,20 @@ selection, enablement, automatic boot ordering, public CLI or new
 ingress authority is introduced. The native committed reboot fixture
 uses the actual installer bridge, refuses a foreign prior pin before
 namespace creation, and refuses replay after completion.
+
+### Authenticated rollover of a prepared pending WAL
+
+An explicit private signed-installer operation now recreates the absent
+namespace after reboot for a prepared, withdrawn prior generation.
+The WAL digest is independently pinned in addition to the committed
+manifest, previous boot receipt, executable and profile. The committed
+selector still refuses any pending WAL. The isolated installed child
+retains the exact WAL and withdrawn resources under its own lock and
+rechecks absence of stages, inactive routes, both disabled/stopped
+units, signed placement and authenticated native package. Only the
+existing v3 WAL prior-generation creation and read-only verification
+primitives run; the old boot bytes must be archived exactly. No catalog
+publication, WAL removal, source repair, service start or new authority
+is implied. The native reboot fixture uses the authenticated pending
+selector and refuses wrong WAL/boot pins and completed rollover replay.
+This does not replace automatic boot or complete installed recovery.
