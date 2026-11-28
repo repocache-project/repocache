@@ -2586,21 +2586,20 @@ try:
                         assert "BOOT_POLICY_PENDING" in str(exc)
                     else:
                         raise AssertionError("Verify-only initialized pending WAL policy")
-                    result=tx._resume_owned_prepared_wal_boot_egress_locked(
-                        root,state,distribution="almalinux",worker_uid=uid,
-                        expected_wal=pending_raw,namespace_identity=net_identity,
-                        profile_receipt_sha256=observed_profile["receipt_sha256"],
-                        executable_receipt_sha256=hashlib.sha256(receipt).hexdigest(),
-                        recheck_stopped_owner=stopped)
                     assert egress._read_boot_egress_receipt(state,0,0)==saved
-                    assert result["receipt_sha256"]==hashlib.sha256(saved).hexdigest()
+                    # Return only the interruption witness; release this fixture
+                    # lock before invoking the actual authenticated installer.
+                    result={"receipt_sha256":hashlib.sha256(saved).hexdigest(),
+                            "namespace_device":net_identity[0],"namespace_inode":net_identity[1],
+                            "authorizes_nginx_activation":False}
                 else:
                     result=fresh()
                 net_identity=namespace_identity()
                 assert (result["namespace_device"],result["namespace_inode"])==net_identity
-                assert result==policy(False)
-                assert result==policy(False if pending else True)
-                assert result["boot_id"]==egress._current_boot_id()
+                if not (action=="prepare" and pending):
+                    assert result==policy(False)
+                    assert result==policy(False if pending else True)
+                    assert result["boot_id"]==egress._current_boot_id()
             elif action=="verify":
                 net_identity=namespace_identity()
                 result=policy(False)
@@ -2832,8 +2831,43 @@ finally:
         profile = signed("place")
         require("/usr/bin/systemctl", "daemon-reload")
         if pending and finalize:
-            # Preserve the real SIGKILL/verify-only/same-boot resume witness.
-            policy = signed("prepare")
+            # Real fixture fault injection leaves a durable intent but no
+            # policy. Resume it through the actual signed installer, not an
+            # internal direct call under the fixture lock.
+            interrupted = signed("prepare")
+            retained = boot_receipt.read_bytes()
+            identity = ns.stat()
+            assert digest(boot_receipt) == interrupted["receipt_sha256"]
+            assert (identity.st_dev, identity.st_ino) == (
+                interrupted["namespace_device"], interrupted["namespace_inode"])
+            resume_pins = dict(
+                **pins, executable_receipt_sha256=executable_proof["receipt_sha256"],
+                profile_receipt_sha256=profile["receipt_sha256"],
+                generation_manifest_sha256=state_before[str(STATE / ".state-v2-owned-nginx.manifest")],
+                wal_sha256=wal_hash, boot_receipt_sha256=interrupted["receipt_sha256"])
+            for field in ("boot_receipt_sha256", "wal_sha256"):
+                try:
+                    native._resume_authenticated_prepared_wal_dedicated_nginx(
+                        assets, **{**resume_pins, field: "0"*64})
+                except native.stage.WorkerStageError:
+                    pass
+                else:
+                    raise AssertionError("Foreign same-boot resume pin accepted")
+                assert boot_receipt.read_bytes() == retained
+                assert (ns.stat().st_dev, ns.stat().st_ino) == (identity.st_dev, identity.st_ino)
+                require_prior_resources()
+                try:
+                    signed("verify")
+                except subprocess.CalledProcessError:
+                    pass
+                else:
+                    raise AssertionError("Foreign pin initialized pending policy")
+            policy = native._resume_authenticated_prepared_wal_dedicated_nginx(assets, **resume_pins)
+            assert signed("verify") == policy
+            assert native._resume_authenticated_prepared_wal_dedicated_nginx(assets, **resume_pins) == policy
+            assert boot_receipt.read_bytes() == retained
+            assert (ns.stat().st_dev, ns.stat().st_ino) == (identity.st_dev, identity.st_ino)
+            print("PASS: authenticated installer resumes exact same-boot pending-WAL intent; foreign pins refused, repeated verification unchanged", flush=True)
         elif pending:
             boot_pins = dict(
                 **pins, executable_receipt_sha256=executable_proof["receipt_sha256"],

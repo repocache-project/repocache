@@ -816,7 +816,9 @@ def test_executable_candidate_selects_retained_native_effects_lock(
                                    "pending-rollover-wal", "pending-rollover-report",
                                    "pending-prepare", "pending-prepare-missing-wal",
                                    "pending-prepare-wal", "pending-prepare-boot",
-                                   "pending-prepare-report"])
+                                   "pending-prepare-report", "pending-resume",
+                                   "pending-resume-wal", "pending-resume-boot",
+                                   "pending-resume-report", "pending-resume-digest"])
 def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, tmp_path, fault):
     from contextlib import contextmanager
     from types import SimpleNamespace
@@ -855,14 +857,15 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
     pending_rolling = fault.startswith("pending-rollover")
     rolling = fault.startswith("rollover") or pending_rolling
     pending_first = fault.startswith("pending-prepare")
-    pending = pending_first or pending_rolling
-    preparing = fault.startswith("prepare") or rolling or pending_first
+    resuming = fault.startswith("pending-resume")
+    pending = pending_first or pending_rolling or resuming
+    preparing = fault.startswith("prepare") or rolling or pending_first or resuming
     starting = fault.startswith("start")
     manifest = b"committed manifest"
     boot = b"exact boot"
     monkeypatch.setattr(egress, "_read_boot_egress_receipt",
-                        lambda *a, **kw: b"existing boot" if fault in ("prepare-boot", "start-boot", "rollover-boot", "pending-prepare-boot")
-                        else boot if starting or rolling else None)
+                        lambda *a, **kw: b"existing boot" if fault in ("prepare-boot", "start-boot", "rollover-boot", "pending-prepare-boot", "pending-resume-boot")
+                        else boot if starting or rolling or resuming else None)
     def read(fd, name, uid, limit):
         assert locked
         if name == tx._OWNED_MANIFEST:
@@ -897,6 +900,7 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
     def child(argv, **kw):
         assert not locked
         assert argv == ("/usr/bin/python3", "-IS", "-B", "-c",
+                        install._DEDICATED_PENDING_RESUME_CHILD if resuming else
                         install._DEDICATED_PENDING_ROLLOVER_CHILD if pending_rolling else
                         install._DEDICATED_PENDING_PREPARE_CHILD if pending_first else
                         install._DEDICATED_ROLLOVER_CHILD if rolling else
@@ -913,7 +917,10 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
         calls.append("child")
         if preparing:
             assert data["generation_manifest_sha256"] == hashlib.sha256(manifest).hexdigest()
-            assert "boot_receipt_sha256" not in data
+            if resuming:
+                assert data["boot_receipt_sha256"] == hashlib.sha256(boot).hexdigest()
+            else:
+                assert "boot_receipt_sha256" not in data
             if pending:
                 assert data["wal_sha256"] == hashlib.sha256(wal).hexdigest()
             else:
@@ -933,6 +940,8 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
                 report.update(prior_resources_verified=True, recovery_required=True,
                               catalog_withdrawn=not fault.endswith("-report"),
                               wal_sha256=data["wal_sha256"])
+                if resuming and fault != "pending-resume-digest":
+                    report["receipt_sha256"] = data["boot_receipt_sha256"]
         elif starting:
             assert data["generation_manifest_sha256"] == hashlib.sha256(manifest).hexdigest()
             assert data["boot_receipt_sha256"] == hashlib.sha256(boot).hexdigest()
@@ -963,11 +972,14 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
             boot_pins["previous_boot_receipt_sha256"] = hashlib.sha256(boot).hexdigest()
         if pending:
             boot_pins["wal_sha256"] = hashlib.sha256(wal).hexdigest()
-        invoke = (install._rollover_authenticated_prepared_wal_dedicated_nginx if pending_rolling
+        if resuming:
+            boot_pins["boot_receipt_sha256"] = hashlib.sha256(boot).hexdigest()
+        invoke = (install._resume_authenticated_prepared_wal_dedicated_nginx if resuming
+                  else install._rollover_authenticated_prepared_wal_dedicated_nginx if pending_rolling
                   else install._prepare_authenticated_prepared_wal_dedicated_nginx if pending_first
                   else install._rollover_authenticated_committed_dedicated_nginx if rolling
                   else install._prepare_authenticated_committed_dedicated_nginx)
-        if fault in ("prepare", "rollover", "pending-rollover", "pending-prepare"):
+        if fault in ("prepare", "rollover", "pending-rollover", "pending-prepare", "pending-resume"):
             assert invoke(tmp_path, **boot_pins)[
                 "prior_resources_verified" if pending else "committed_resources_verified"]
         else:
@@ -1010,7 +1022,8 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
                                                "start-wal", "start-boot", "rollover-wal",
                                                "rollover-boot", "pending-rollover-missing-wal",
                                                "pending-rollover-wal", "pending-prepare-missing-wal",
-                                               "pending-prepare-wal", "pending-prepare-boot") else
+                                               "pending-prepare-wal", "pending-prepare-boot",
+                                               "pending-resume-wal", "pending-resume-boot") else
                      ["release", "rpm"] if fault == "package" else
                      ["release", "history"] if fault == "rolled-refusal" else
                      ["release", "history", "rpm", "child"] if fault == "rolled" else

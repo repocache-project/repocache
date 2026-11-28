@@ -1639,3 +1639,18 @@ bridge, including foreign pins and repeated invocation refusal; the
 separate finalization scenario retains the existing SIGKILL and same-boot
 resume witness. No public command, automated boot dispatch or active route
 authority is introduced.
+
+### Authenticated same-boot pending intent resume
+
+A distinct private signed installer selector accepts the exact existing
+boot-intent digest in addition to the manifest, WAL, executable and
+profile pins. It opens only the retained fixed namespace, acquires the
+worker's fresh lock, and rechecks the exact intent bytes, stopped units,
+withdrawn catalog and prior resources before and after initializing the
+closed policy. The underlying primitive independently binds the canonical
+intent to the current boot and namespace inode. No new namespace, archive,
+WAL deletion, service start or catalog publication is allowed. A repeat
+with the same verified policy is read-only. The native SIGKILL fixture
+leaves the actual uninitialized intent, releases its fixture lock, and
+resumes through this signed bridge; verify-only and foreign pins refuse
+before policy initialization, then exact resume and readback succeed.

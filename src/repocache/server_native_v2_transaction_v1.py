@@ -3839,6 +3839,12 @@ def _prepare_installed_prepared_wal_dedicated(pins: dict) -> dict:
     return _installed_dedicated_lifecycle(pins, prepare=True, pending_prepare=True)
 
 
+def _resume_installed_prepared_wal_dedicated(pins: dict) -> dict:
+    """Private same-boot pending intent resume; no service or catalog effects."""
+    return _installed_dedicated_lifecycle(pins, prepare=True, pending_prepare=True,
+                                          resume_pending=True)
+
+
 def _rollover_installed_prepared_wal_dedicated(pins: dict) -> dict:
     """Recreate the pinned prior namespace without recovering or publishing WAL."""
     return _installed_dedicated_lifecycle(pins, prepare=True, rollover=True,
@@ -3851,7 +3857,8 @@ def _start_installed_committed_dedicated(pins: dict) -> dict:
 
 
 def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = False,
-                                   rollover: bool = False, pending_prepare: bool = False) -> dict:
+                                   rollover: bool = False, pending_prepare: bool = False,
+                                   resume_pending: bool = False) -> dict:
     import zipimport
     from repocache.server_native_nginx_executable_v1 import (
         signed_owned_nginx_policy_candidate, verify_nginx_candidate_receipt,
@@ -3877,8 +3884,11 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
         digests.add("previous_boot_receipt_sha256")
     if pending_prepare:
         digests.add("wal_sha256")
+    if resume_pending:
+        digests.add("boot_receipt_sha256")
     if (type(prepare) is not bool or type(start) is not bool or type(rollover) is not bool
             or type(pending_prepare) is not bool or (pending_prepare and not prepare)
+            or type(resume_pending) is not bool or (resume_pending and (not pending_prepare or rollover))
             or (prepare and start) or (rollover and not prepare)
             or not isinstance(__loader__, zipimport.zipimporter)
             or __loader__.archive != worker or not sys.flags.isolated
@@ -4067,6 +4077,36 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
                            profile_receipt_sha256=pins["profile_receipt_sha256"],
                            executable_receipt_sha256=pins["executable_receipt_sha256"])
             stopped_owner()
+            if resume_pending:
+                # Never create a namespace or replace a receipt in this path.
+                # The lower-level primitive independently binds the exact saved
+                # canonical intent to the current boot, inode and closed policy.
+                saved = _read_boot_egress_receipt(state, 0, 0)
+                if saved is None or hashlib.sha256(saved).hexdigest() != pins["boot_receipt_sha256"]:
+                    _deny("OWNED_DEDICATED_INSTALLER_BOOT_REFUSED")
+                _, identity, recheck_namespace = stack.enter_context(_fixed_namespace_scope())
+
+                def resume_owner():
+                    stopped_owner()
+                    recheck_namespace()
+                    if _read_boot_egress_receipt(state, 0, 0) != saved:
+                        _deny("OWNED_DEDICATED_INSTALLER_BOOT_REFUSED")
+                    recheck_namespace()
+
+                resume_owner()
+                result = _resume_owned_prepared_wal_boot_egress_locked(
+                    root, state, **options, namespace_identity=identity,
+                    expected_wal=wal, recheck_stopped_owner=resume_owner)
+                resume_owner()
+                package()
+                observed = _verify_owned_prepared_wal_boot_egress_locked(
+                    root, state, **options, namespace_identity=identity,
+                    expected_wal=wal, recheck_stopped_owner=resume_owner)
+                if (observed != result or result.get("receipt_sha256") != pins["boot_receipt_sha256"]
+                        or result.get("generation_manifest_sha256") != pins["generation_manifest_sha256"]):
+                    _deny("OWNED_DEDICATED_INSTALLER_RESULT_REFUSED")
+                resume_owner()
+                return result
             previous_pin = ({"expected_previous_receipt_sha256": pins["previous_boot_receipt_sha256"]}
                             if rollover else {})
             if pending_prepare:
