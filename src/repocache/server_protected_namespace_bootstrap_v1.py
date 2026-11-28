@@ -9,15 +9,17 @@ from __future__ import annotations
 
 from contextlib import ExitStack
 import fcntl
+import json
 import os
+import re
 import stat
 from typing import Any, Callable
 
 from repocache.server_protected_state_inspect_v1 import (
     _DIRECTORY_FLAGS, _identity, _recheck, _safe_directory, _walk,
 )
-from repocache.server_protected_state_store_v1 import LOCK_NAME, _locked
-from repocache.server_native_installed_storage_v1 import _mount
+from repocache.server_protected_state_store_v1 import LOCK_NAME, _locked, _read_file
+from repocache.server_native_installed_storage_v1 import _mount, _rename_directory_noreplace
 
 _PARENT = ("var", "lib")
 _ROOT_NAME = "repocache"
@@ -248,3 +250,192 @@ def bootstrap_protected_namespace_under_root(
         raise
     except (OSError, ValueError, TypeError):
         _deny("UNVERIFIED_STATE")
+
+# Private signed-worker placement composition. The ordinary bootstrap above
+# remains unchanged: neither helper authenticates a release or a host.
+_DEDICATED_WORKER_CLAIM = ".native-worker-dedicated-namespace-v1.json"
+_DEDICATED_WORKER_STAGE = ".repocache-worker-namespace.stage-"
+_WORKER_PLACEMENT_PREFIX = ".native-worker-placement."
+
+
+def _dedicated_worker_claim_bytes(root, anchor, state, public, receipt_sha256):
+    def inode(fd):
+        info = os.fstat(fd)
+        return [info.st_dev, info.st_ino]
+
+    return (json.dumps({
+        "schema": 1,
+        "worker_receipt_sha256": receipt_sha256,
+        "root": inode(root),
+        "namespace": inode(anchor),
+        "state": inode(state),
+        "public": inode(public),
+        "lock": list(_lock_identity(state, 0)[:2]),
+    }, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+
+
+def _require_dedicated_worker_claim(root, anchor, state, public, receipt_sha256, *, staged=False):
+    """Require the exact durable claim and placement marker, never infer ownership."""
+    if (type(receipt_sha256) is not str or re.fullmatch(r"[0-9a-f]{64}", receipt_sha256) is None
+            or type(staged) is not bool):
+        _deny("DEDICATED_WORKER_CLAIM_INVALID")
+    for fd in (root, anchor, state, public):
+        _dedicated_ancestry(root, [(None, None, fd, ())])
+    if (stat.S_IMODE(os.fstat(anchor).st_mode) not in ((0o700, 0o711) if staged else (0o711,))
+            or stat.S_IMODE(os.fstat(state).st_mode) != 0o700
+            or _structural(os.stat(_STATE_NAME, dir_fd=anchor, follow_symlinks=False))
+               != _structural(os.fstat(state))
+            or _structural(os.stat(_PUBLIC_NAME, dir_fd=anchor, follow_symlinks=False))
+               != _structural(os.fstat(public))):
+        _deny("DEDICATED_WORKER_NAMESPACE_CHANGED")
+    _dedicated_public_directory(public)
+    expected = _dedicated_worker_claim_bytes(root, anchor, state, public, receipt_sha256)
+    if (_read_file(state, _DEDICATED_WORKER_CLAIM, 0, 1024) != expected
+            or os.stat(_DEDICATED_WORKER_CLAIM, dir_fd=state, follow_symlinks=False).st_gid != 0):
+        _deny("DEDICATED_WORKER_CLAIM_REFUSED")
+    pending = _WORKER_PLACEMENT_PREFIX + "pending-" + receipt_sha256
+    complete = _WORKER_PLACEMENT_PREFIX + "complete-" + receipt_sha256
+    names = set(os.listdir(state))
+    markers = {name for name in names if name.startswith(_WORKER_PLACEMENT_PREFIX)}
+    if not markers or markers - {pending, complete}:
+        _deny("DEDICATED_WORKER_MARKER_REFUSED")
+    for marker in markers:
+        if (_read_file(state, marker, 0, 0) != b""
+                or os.stat(marker, dir_fd=state, follow_symlinks=False).st_gid != 0):
+            _deny("DEDICATED_WORKER_MARKER_REFUSED")
+    if staged or complete not in markers:
+        allowed = {LOCK_NAME, _DEDICATED_WORKER_CLAIM, pending}
+        if not staged:
+            allowed |= {".native-worker-receipt-v1.json",
+                        ".repocache-worker-part-.native-worker-receipt-v1.json"}
+        if (names - allowed or os.listdir(public)
+                or set(os.listdir(anchor)) != {_STATE_NAME, _PUBLIC_NAME}
+                or markers != {pending}):
+            _deny("DEDICATED_WORKER_FOREIGN_NAMESPACE")
+
+
+def _prepare_dedicated_worker_namespace_under_root(root_fd, *, receipt_sha256, inject_fault=None):
+    """Atomically publish a fresh labelled namespace with its durable receipt claim.
+
+    A complete staged namespace can resume publication. An incomplete or
+    foreign stage, legacy namespace or unmatched claim is never adopted,
+    relabelled, replaced or removed. Actual host/release/policy authentication
+    belongs to the caller; this private descriptor seam grants no authority.
+    """
+    if (type(root_fd) is not int or root_fd < 0
+            or type(receipt_sha256) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", receipt_sha256) is None
+            or (inject_fault is not None and not callable(inject_fault))):
+        _deny("ARGUMENT_INVALID")
+    stage = _DEDICATED_WORKER_STAGE + receipt_sha256
+    pending = _WORKER_PLACEMENT_PREFIX + "pending-" + receipt_sha256
+
+    def point(step):
+        if inject_fault is not None:
+            inject_fault(step)
+
+    def write_private(directory, name, raw):
+        fd = os.open(name, _CREATE_LOCK, _LOCK_MODE, dir_fd=directory)
+        try:
+            os.fchmod(fd, _LOCK_MODE)
+            if os.write(fd, raw) != len(raw):
+                _deny("DEDICATED_WORKER_CLAIM_WRITE_FAILED")
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.fsync(directory)
+
+    try:
+        with ExitStack() as stack:
+            lib, chain = _walk(root_fd, _PARENT, stack, 0)
+            original_lib = _structural(os.fstat(lib))
+
+            def recheck_lib():
+                _recheck(chain[:-1], 0)
+                _dedicated_ancestry(root_fd, chain)
+                parent, name, _, _ = chain[-1]
+                if (_structural(os.fstat(lib))[:5] != original_lib[:5]
+                        or _structural(os.stat(name, dir_fd=parent, follow_symlinks=False))[:5]
+                           != original_lib[:5]):
+                    _deny("DEDICATED_WORKER_PARENT_CHANGED")
+
+            recheck_lib()
+            names = set(os.listdir(lib))
+            stages = {name for name in names if name.startswith(_DEDICATED_WORKER_STAGE)}
+            if stages - {stage} or (stages and _ROOT_NAME in names):
+                _deny("DEDICATED_WORKER_STAGE_CONFLICT")
+            published = _ROOT_NAME in names
+            selected = _ROOT_NAME if published else stage
+            if not published and not stages:
+                os.mkdir(stage, 0o700, dir_fd=lib)
+                os.fsync(lib)
+                point("stage_directory_durable")
+                anchor, _ = _verified_directory(lib, stage, 0, stack, mode=0o700)
+                _dedicated_ancestry(root_fd, [*chain, (lib, stage, anchor, ())])
+                os.mkdir(_STATE_NAME, 0o700, dir_fd=anchor)
+                os.fsync(anchor)
+                state, _ = _verified_directory(anchor, _STATE_NAME, 0, stack, mode=0o700)
+                _dedicated_ancestry(root_fd, [*chain, (lib, stage, anchor, ()),
+                                             (anchor, _STATE_NAME, state, ())])
+                _publish_directory_mode(anchor, _PUBLIC_NAME, 0, stack,
+                                        mode=0o755, dedicated_public=True)
+                public, _ = _verified_directory(anchor, _PUBLIC_NAME, 0, stack, mode=0o755)
+                write_private(state, LOCK_NAME, b"")
+                write_private(state, pending, b"")
+                write_private(state, _DEDICATED_WORKER_CLAIM, _dedicated_worker_claim_bytes(
+                    root_fd, anchor, state, public, receipt_sha256))
+                os.fsync(anchor)
+                point("stage_claim_durable")
+            else:
+                mode = stat.S_IMODE(os.stat(selected, dir_fd=lib, follow_symlinks=False).st_mode)
+                if mode not in ((0o711,) if published else (0o700, 0o711)):
+                    _deny("DEDICATED_WORKER_STAGE_MODE_REFUSED")
+                anchor, _ = _verified_directory(lib, selected, 0, stack, mode=mode)
+                state, _ = _verified_directory(anchor, _STATE_NAME, 0, stack, mode=0o700)
+                public, _ = _verified_directory(anchor, _PUBLIC_NAME, 0, stack, mode=0o755)
+
+            lock = os.open(LOCK_NAME, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK |
+                           os.O_CLOEXEC, dir_fd=state)
+            stack.callback(os.close, lock)
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            stack.callback(fcntl.flock, lock, fcntl.LOCK_UN)
+            if _structural(os.fstat(lock)) != _lock_identity(state, 0):
+                _deny("DEDICATED_WORKER_LOCK_CHANGED")
+
+            def verify(name, *, staged):
+                recheck_lib()
+                if (_structural(os.stat(name, dir_fd=lib, follow_symlinks=False))
+                        != _structural(os.fstat(anchor))
+                        or _structural(os.fstat(lock)) != _lock_identity(state, 0)):
+                    _deny("DEDICATED_WORKER_NAMESPACE_CHANGED")
+                _require_dedicated_worker_claim(root_fd, anchor, state, public,
+                                                receipt_sha256, staged=staged)
+
+            verify(selected, staged=not published)
+            if not published:
+                # Set the final traversal mode only after verifying the
+                # complete private claim. No existing unclaimed inode changes.
+                if stat.S_IMODE(os.fstat(anchor).st_mode) != 0o711:
+                    os.fchmod(anchor, 0o711)
+                    os.fsync(anchor)
+                verify(stage, staged=True)
+                point("before_namespace_publish")
+                verify(stage, staged=True)
+                _rename_directory_noreplace(lib, stage, lib, _ROOT_NAME)
+                os.fsync(lib)
+                point("namespace_published")
+                if stage in os.listdir(lib):
+                    _deny("DEDICATED_WORKER_STAGE_CONFLICT")
+            verify(_ROOT_NAME, staged=False)
+            return {
+                "status": ("EXISTING_DEDICATED_WORKER_NAMESPACE_VERIFIED" if published
+                           else "FRESH_DEDICATED_WORKER_NAMESPACE_DURABLE"),
+                "dedicated_public_label_verified": True,
+                "worker_receipt_claim_verified": True,
+                "authorizes_host_installation": False,
+                "authorizes_nginx_activation": False,
+            }
+    except ProtectedBootstrapError:
+        raise
+    except (OSError, ValueError, TypeError):
+        _deny("DEDICATED_WORKER_NAMESPACE_REFUSED")
