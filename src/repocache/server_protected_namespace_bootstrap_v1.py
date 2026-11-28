@@ -95,6 +95,7 @@ def _dedicated_public_directory(fd: int, *, fresh: bool = False) -> None:
         if os.getxattr(fd, "security.selinux").rstrip(b"\0") != _DEDICATED_PUBLIC_CONTEXT:
             os.setxattr(fd, "security.selinux", _DEDICATED_PUBLIC_CONTEXT + b"\0")
     if (set(os.listxattr(fd)) != {"security.selinux"}
+            or (fresh and os.listdir(fd))
             or os.getxattr(fd, "security.selinux").rstrip(b"\0") != _DEDICATED_PUBLIC_CONTEXT):
         _deny("DEDICATED_PUBLIC_LABEL_UNVERIFIED")
 

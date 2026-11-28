@@ -2195,7 +2195,7 @@ with tempfile.TemporaryDirectory(prefix="repocache-fresh-label-",dir="/var/tmp")
                                                                  _dedicated_public=True)
         assert report["dedicated_public_label_verified"] and report["state_directory_created"]
         public=root/"var/lib/repocache/public"
-        assert os.getxattr(public,"security.selinux").rstrip(b"\\\\0")==tx._DEDICATED_PUBLIC_CONTEXT
+        assert os.getxattr(public,"security.selinux").rstrip(b"\\0")==tx._DEDICATED_PUBLIC_CONTEXT
         assert not list(public.iterdir())
         def guard():
             assert root.is_dir() and root.stat().st_uid==0 and not root.is_symlink()
@@ -2207,13 +2207,15 @@ with tempfile.TemporaryDirectory(prefix="repocache-fresh-label-",dir="/var/tmp")
             main=config/tx._OWNED_MAIN
             assert main.read_bytes()==tx._OWNED_BOOTSTRAP_CONFIG
             for path in (config,main):
-                assert os.getxattr(path,"security.selinux").rstrip(b"\\\\0")==tx._DEDICATED_PUBLIC_CONTEXT
+                assert os.getxattr(path,"security.selinux").rstrip(b"\\0")==tx._DEDICATED_PUBLIC_CONTEXT
             assert stat.S_IMODE(config.stat().st_mode)==0o755
             assert stat.S_IMODE(main.stat().st_mode)==0o644
             assert not list(public.iterdir()) and not list((root/"etc/nginx/conf.d").iterdir())
             original=(main.stat().st_dev,main.stat().st_ino)
             # Change only a disposable fixture label. Never repair it.
-            os.setxattr(main,"security.selinux",os.getxattr(root/"etc/nginx","security.selinux"))
+            foreign=os.getxattr(root/"etc/nginx","security.selinux")
+            assert foreign.rstrip(b"\\0")!=tx._DEDICATED_PUBLIC_CONTEXT
+            os.setxattr(main,"security.selinux",foreign)
             try:
                 tx._prepare_owned_dedicated_bootstrap_locked(fd,state,recheck_owned=guard)
             except tx.NativeV2TransactionError:

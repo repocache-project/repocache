@@ -5660,8 +5660,7 @@ def test_prepare_dedicated_bootstrap_fresh_only(tmp_path, monkeypatch, fault):
     monkeypatch.setattr(os, "listxattr", lambda fd: ["security.selinux"])
     monkeypatch.setattr(os, "getxattr", lambda fd, name: labels.get(os.fstat(fd).st_ino, foreign))
     def set_label(fd, name, value):
-        assert value == context and stat.S_IMODE(os.fstat(fd).st_mode) == 0o700 or (
-            value == context and stat.S_IMODE(os.fstat(fd).st_mode) == 0o600)
+        assert value == context and stat.S_IMODE(os.fstat(fd).st_mode) in (0o700, 0o600)
         labels[os.fstat(fd).st_ino] = value
         writes.append(os.fstat(fd).st_ino)
     monkeypatch.setattr(os, "setxattr", set_label)
