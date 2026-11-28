@@ -6679,3 +6679,49 @@ def test_initial_wal_boot_plan_retains_successor(filesystem, monkeypatch, fault)
 def test_initial_pending_worker_requires_signed_loader(action):
     with pytest.raises(native.NativeV2TransactionError):
         native._installed_initial_dedicated_pending({}, action=action)
+
+
+@pytest.mark.parametrize("fault", ["none", "same-bytes", "label", "wrong-identity", "no-identity"])
+def test_initial_dedicated_catalog_withdrawal_requires_exact_owned_inode(tmp_path, monkeypatch, fault):
+    if os.geteuid() != 0:
+        pytest.skip("requires root-owned fixture")
+    raw = b"exact catalog"
+    tmp_path.chmod(0o755)
+    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    label = native._DEDICATED_PUBLIC_CONTEXT + b"\0"
+    bad = set()
+    monkeypatch.setattr(os, "listxattr", lambda fd: ["security.selinux"])
+    monkeypatch.setattr(os, "getxattr", lambda fd, name:
+                        b"foreign" if os.fstat(fd).st_ino in bad else label)
+    monkeypatch.setattr(os, "setxattr", lambda *a: pytest.fail("never relabel"))
+    path = tmp_path / native._CATALOG
+    try:
+        identity = native._write_dedicated_public_leaf(
+            fd, native._CATALOG, None, raw, recheck=lambda: None)
+        assert identity == native._identity(path.stat())
+        if fault == "same-bytes":
+            replacement = tmp_path / "replacement"
+            replacement.write_bytes(raw)
+            replacement.chmod(0o644)
+            os.replace(replacement, path)
+        elif fault == "label":
+            bad.add(path.stat().st_ino)
+        elif fault == "wrong-identity":
+            identity = ()
+        elif fault == "no-identity":
+            identity = None
+        before = path.stat()
+        def withdraw():
+            native._write_dedicated_public_leaf(
+                fd, native._CATALOG, raw, None, recheck=lambda: None,
+                withdraw_identity=identity)
+        if fault == "none":
+            withdraw()
+            assert not path.exists()
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                withdraw()
+            assert path.read_bytes() == raw
+            assert native._identity(path.stat()) == native._identity(before)
+    finally:
+        os.close(fd)

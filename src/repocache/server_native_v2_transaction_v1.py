@@ -589,19 +589,24 @@ def _write_dedicated_fresh_public(parent: int, name: str, raw: bytes) -> None:
 
 
 def _write_dedicated_public_leaf(parent: int, name: str, prior: bytes | None,
-                                 raw: bytes | None, *, recheck) -> None:
+                                 raw: bytes | None, *, recheck,
+                                 withdraw_identity: tuple | None = None) -> tuple | None:
     """Labelled fresh staging and exact-target replacement under a trusted lock.
 
     No existing inode is relabelled. Only initial configuration rollback may
-    remove a managed include. Existing-file replacement assumes the original
+    remove a managed include; catalog withdrawal requires an exact retained
+    identity from the authenticated finalizer. Existing-file replacement assumes the original
     root-only ownership boundary and cooperating state lock, not hostile root.
     """
     code = ("OWNED_DEDICATED_FRESH_PUBLIC_REFUSED" if prior is None
             and name in (_CATALOG, _OWNED_MAIN) else "OWNED_DEDICATED_PUBLIC_WRITE_REFUSED")
+    catalog_withdrawal = (name == _CATALOG and prior is not None and raw is None
+                          and type(withdraw_identity) is tuple)
     if (name not in (_CATALOG, _OWNED_MAIN, _INCLUDE)
             or not callable(recheck) or prior == raw
-            or (raw is None and name != _INCLUDE)
-            or (name == _CATALOG and prior is not None)
+            or (withdraw_identity is not None and not catalog_withdrawal)
+            or (raw is None and name != _INCLUDE and not catalog_withdrawal)
+            or (name == _CATALOG and prior is not None and not catalog_withdrawal)
             or any(value is not None and
                    (type(value) is not bytes or not 1 <= len(value) <= _OWNED_LIMIT[name])
                    for value in (prior, raw))):
@@ -628,6 +633,8 @@ def _write_dedicated_public_leaf(parent: int, name: str, prior: bytes | None,
             target = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
                              | os.O_CLOEXEC, dir_fd=parent)
             target_identity = _identity(os.fstat(target))
+            if catalog_withdrawal and target_identity != withdraw_identity:
+                _deny(code)
 
         def check_target():
             if prior is None:
@@ -719,6 +726,7 @@ def _write_dedicated_public_leaf(parent: int, name: str, prior: bytes | None,
             if (_read_public(parent, name, _OWNED_LIMIT[name]) != raw
                     or _identity(os.fstat(fd)) != current):
                 _deny(code)
+            return current
         finally:
             os.close(fd)
     except NativeV2TransactionError:
@@ -4194,9 +4202,13 @@ def _finish_owned_prepared_wal_dedicated_locked(
         config_identity = _dedicated_recovery_config_identity(
             nginx, public, catalog_present=published_before_retry)
 
+        catalog_identity = None
         if initial_generation:
             initial_labels = _Labels("almalinux", dedicated=True)
             initial_private = _owned_initial_private_targets_proof(state, expected, initial_labels)
+            if published_before_retry:
+                catalog_identity = _dedicated_readonly_config_labels(
+                    nginx, public, catalog_present=True)[2][-1]
 
         def exact():
             _owned_live_guard(state, nginx, public, check_layout, expected_wal, expected)
@@ -4208,6 +4220,10 @@ def _finish_owned_prepared_wal_dedicated_locked(
                     _owned_initial_private_targets_proof(state, expected, initial_labels) != initial_private
                     or set(os.listdir(public)) != ({_CATALOG} if expected[_CATALOG] is not None else set())):
                 _deny("OWNED_DEDICATED_FINISH_CONFIG_CHANGED")
+            if initial_generation and expected[_CATALOG] is not None:
+                if (_dedicated_readonly_config_labels(
+                        nginx, public, catalog_present=True)[2][-1] != catalog_identity):
+                    _deny("OWNED_DEDICATED_FINISH_CATALOG_CHANGED")
 
         exact()
         recheck_authenticated_owner()
@@ -4278,15 +4294,40 @@ def _finish_owned_prepared_wal_dedicated_locked(
         # exact 200 are still mandatory; prior publication is not proof.
         if published_before_retry:
             guarded()
-            _owned_live_write(state, nginx, public, guarded, expected_wal,
-                              expected, _CATALOG, None)
+            if initial_generation:
+                _write_dedicated_public_leaf(public, _CATALOG, old[_CATALOG], None,
+                                             recheck=guarded, withdraw_identity=catalog_identity)
+                expected[_CATALOG] = None
+                catalog_identity = None
+                guarded()
+            else:
+                _owned_live_write(state, nginx, public, guarded, expected_wal,
+                                  expected, _CATALOG, None)
         before = health(False)
         if expected_listener is not None and before["listener_inode"] != expected_listener:
             _deny("OWNED_DEDICATED_RECOVERY_MASTER_CHANGED")
         guarded()
         try:
-            _owned_live_write(state, nginx, public, guarded, expected_wal,
-                              expected, _CATALOG, old[_CATALOG], dedicated_catalog=True)
+            if initial_generation:
+                # Allow only our fixed stage during descriptor-pinned publication.
+                # Recheck durable authority and the unchanged private targets;
+                # the full runtime proof runs immediately before and after.
+                def publish_boundary():
+                    _owned_live_guard(state, nginx, public, check_layout,
+                                      expected_wal, expected)
+                    if (_owned_initial_private_targets_proof(state, expected, initial_labels)
+                            != initial_private
+                            or _dedicated_recovery_config_identity(
+                                nginx, public, catalog_present=False) != config_identity
+                            or set(os.listdir(public)) - {_OWNED_STAGES[_CATALOG]}):
+                        _deny("OWNED_DEDICATED_FINISH_CONFIG_CHANGED")
+                catalog_identity = _write_dedicated_public_leaf(
+                    public, _CATALOG, None, old[_CATALOG], recheck=publish_boundary)
+                expected[_CATALOG] = old[_CATALOG]
+                guarded()
+            else:
+                _owned_live_write(state, nginx, public, guarded, expected_wal,
+                                  expected, _CATALOG, old[_CATALOG], dedicated_catalog=True)
             after = health(True)
             if before["listener_inode"] != after["listener_inode"] or expected != old:
                 _deny("OWNED_DEDICATED_FINISH_LISTENER_CHANGED")
@@ -4298,8 +4339,18 @@ def _finish_owned_prepared_wal_dedicated_locked(
             check_layout()
             if (_read_file(state, _OWNED_WAL, 0, _MAX_WAL) == expected_wal
                     and _read_owned_resources(state, nginx, public) == old):
-                _owned_live_write(state, nginx, public, check_layout, expected_wal,
-                                  dict(old), _CATALOG, None)
+                if initial_generation:
+                    # No identity returned (for example an interrupted rename)
+                    # means uncertainty, not authority to remove a named inode.
+                    if catalog_identity is not None:
+                        _write_dedicated_public_leaf(
+                            public, _CATALOG, old[_CATALOG], None,
+                            recheck=lambda: _owned_live_guard(
+                                state, nginx, public, check_layout, expected_wal, old),
+                            withdraw_identity=catalog_identity)
+                else:
+                    _owned_live_write(state, nginx, public, check_layout, expected_wal,
+                                      dict(old), _CATALOG, None)
             raise
         return {**after, "status": ("OWNED_DEDICATED_INITIAL_WAL_COMMIT_OBSERVED" if initial_generation
                                    else "OWNED_DEDICATED_WAL_ROLLBACK_OBSERVED"),
