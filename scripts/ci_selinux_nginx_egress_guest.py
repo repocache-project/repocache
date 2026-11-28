@@ -280,7 +280,11 @@ def verify_fixed_loaded_policy(expected_sha256):
             info = os.stat(leaf, dir_fd=fd, follow_symlinks=False)
             assert (stat.S_ISREG(info.st_mode) and info.st_uid == info.st_gid == 0
                     and not info.st_mode & 0o022 and info.st_nlink == 1)
-            raw = stage._asset_bytes(fd, leaf, 4 * 1024 * 1024)
+            raw = stage._asset_bytes(fd, leaf, 4 * 1024 * 1024,
+                                     installed_mode=stat.S_IMODE(info.st_mode))
+            after = os.stat(leaf, dir_fd=fd, follow_symlinks=False)
+            assert (after.st_dev, after.st_ino, after.st_ctime_ns) == (
+                info.st_dev, info.st_ino, info.st_ctime_ns)
         finally:
             os.close(fd)
     assert hashlib.sha256(raw).hexdigest() == expected_sha256

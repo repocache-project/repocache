@@ -5805,3 +5805,70 @@ def test_dedicated_worker_placement_pins_fresh_public(tmp_path, monkeypatch, fau
         assert not writes and not (root / "usr/libexec").exists()
         assert not list((root / "etc/systemd/system").iterdir())
         assert public.exists() is (fault == "legacy-public")
+
+
+@pytest.mark.parametrize("fault", ["none", "digest", "alternate", "disabled", "absent",
+                                   "inventory-drift", "symlink", "extra-file", "write-mode",
+                                   "inode-drift"])
+def test_fixed_loaded_policy_readback_refuses_unbound_module(tmp_path, monkeypatch, fault):
+    from types import SimpleNamespace
+    from scripts import ci_selinux_nginx_egress_guest as guest
+    from scripts import stage_native_root_worker as stage
+    raw = b"compiled policy fixture"
+    expected = hashlib.sha256(raw).hexdigest()
+    calls = []
+    inventory = {(100, "base", "pp"), (400, guest.FIXED_MODULE, "pp")}
+    if fault == "alternate":
+        inventory.add((100, guest.FIXED_MODULE, "cil"))
+    if fault == "disabled":
+        inventory.remove((400, guest.FIXED_MODULE, "pp"))
+        inventory.add((400, guest.FIXED_MODULE, "pp", "disabled"))
+    def inventory_text():
+        return "\n".join(" ".join(map(str, row)) for row in sorted(inventory))
+    monkeypatch.setattr(guest, "guard", lambda: None)
+    monkeypatch.setattr(guest, "installed_modules", lambda: (
+        "base\n" if fault == "absent" else f"base\n{guest.FIXED_MODULE}\n"))
+    original_temp = tempfile.TemporaryDirectory
+    monkeypatch.setattr(guest.tempfile, "TemporaryDirectory",
+                        lambda **kw: original_temp(prefix=kw["prefix"], dir=tmp_path))
+    def command(*args, **kwargs):
+        calls.append(args)
+        if args == ("/usr/sbin/semodule", "-lfull"):
+            if fault == "inventory-drift" and len(calls) > 1:
+                inventory.add((100, "unexpected", "pp"))
+            return SimpleNamespace(stdout=inventory_text())
+        assert args == ("/usr/sbin/semodule", "-X", "400", "--hll", "-E", guest.FIXED_MODULE)
+        assert kwargs["timeout"] == 120
+        root = Path(kwargs["cwd"])
+        leaf = root / (guest.FIXED_MODULE + ".pp")
+        if fault == "symlink":
+            target = tmp_path / "foreign.pp"
+            target.write_bytes(raw)
+            leaf.symlink_to(target)
+        else:
+            leaf.write_bytes(raw if fault != "digest" else b"foreign")
+            leaf.chmod(0o666 if fault == "write-mode" else 0o600)
+        if fault == "extra-file":
+            (root / "extra").touch()
+        return SimpleNamespace(stdout="")
+    monkeypatch.setattr(guest, "command", command)
+    if fault == "inode-drift":
+        original_read = stage._asset_bytes
+        def replace_after_read(fd, name, *args, **kwargs):
+            data = original_read(fd, name, *args, **kwargs)
+            os.unlink(name, dir_fd=fd)
+            new = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=fd)
+            try:
+                os.write(new, data)
+            finally:
+                os.close(new)
+            return data
+        monkeypatch.setattr(stage, "_asset_bytes", replace_after_read)
+    if fault == "none":
+        assert guest.verify_fixed_loaded_policy(expected) == expected
+    else:
+        with pytest.raises(AssertionError):
+            guest.verify_fixed_loaded_policy(expected)
+    assert len(calls) == (1 if fault in ("alternate", "disabled", "absent") else
+                          3 if fault in ("none", "inventory-drift") else 2)
+    assert not list(tmp_path.glob("repocache-policy-readback-*"))
