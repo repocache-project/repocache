@@ -2341,6 +2341,22 @@ try:
                 assert not include.exists() and not stage.exists()
                 assert not (root/"var/lib/repocache/server"/tx._OWNED_WAL).exists()
                 assert prepare()==(old,new,report)
+                wal,prepared=tx._stage_owned_initial_dedicated_generation_fixture_locked(
+                    fd,state,nginx,pub,boundary)
+                assert prepared==new
+                assert tx._read_owned_initial_dedicated_prepared_locked(
+                    fd,state,nginx,pub,boundary,expected_wal=wal)==new
+                assert tx._read_owned_resources(state,nginx,pub)=={**new,tx._CATALOG:None}
+                for name in tx._OWNED_PRIVATE:
+                    private=root/"var/lib/repocache/server"/name
+                    assert stat.S_IMODE(private.stat().st_mode)==0o600
+                result=tx._restore_owned_initial_dedicated_generation_fixture_locked(
+                    fd,state,nginx,pub,boundary,expected_wal=wal)
+                assert result["status"]=="OWNED_INITIAL_GENERATION_FIXTURE_RESTORED"
+                assert tx._read_owned_resources(state,nginx,pub)==old
+                assert not os.listdir(pub)
+                assert not (root/"var/lib/repocache/server"/tx._OWNED_WAL).exists()
+                assert prepare()==(old,new,report)
                 original=(main.stat().st_dev,main.stat().st_ino)
         # Change only a disposable fixture label. Never repair it.
         foreign=os.getxattr(root/"etc/nginx","security.selinux")
@@ -2417,6 +2433,7 @@ finally:
     if initial:
         print("PASS: enforcing signed worker generation-one read-only CAS and TLS preflight, exact repeat and foreign-key-label refusal", flush=True)
         print("PASS: signed detached initial configuration WAL, labelled replacement, interrupted stage recovery and foreign-label refusal", flush=True)
+        print("PASS: signed detached complete initial generation with withdrawn catalog, exact WAL reconstruction and private rollback", flush=True)
 
 
 def verify_fixed_executable_candidate(native, assets, pins, distribution):

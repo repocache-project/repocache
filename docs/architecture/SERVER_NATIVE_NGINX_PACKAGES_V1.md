@@ -2036,5 +2036,13 @@ atomic no-replace publication. Publish state before manifest; keep the
 catalog absent. Reconstruct the complete prepared generation under the
 same lock before returning its exact WAL and bytes. The actual host root
 is refused, interrupted private stages are retained, and no service or
-boot-policy operation is performed. Full private-stage rollback and
-installed lifecycle composition remain required before host activation.
+boot-policy operation is performed. Detached private-stage rollback verifies all retained root-only state,
+manifest and stage descriptors before any removal, refuses impossible
+phases, checks exact hashes and reconstructs the inactive candidate when
+state is published. It removes only the single validated private stage,
+then manifest and state in reverse order; configuration proof and catalog
+withdrawal remain unchanged before ordered configuration reversal.
+Manifest staging requires a prefix of the exact reconstructed bytes.
+The signed enforcing guest also exercises complete prepared-byte
+reconstruction and detached reversal. The installed lifecycle, boot-policy
+binding and health-gated publication remain required before host activation.

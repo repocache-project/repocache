@@ -6337,3 +6337,74 @@ def test_stage_initial_dedicated_generation_fixture(filesystem, monkeypatch, fau
                 assert _fixture_resource_bytes(paths) == old
     assert not paths[native._CATALOG].exists()
     assert not filesystem[-1]
+
+
+@pytest.mark.parametrize("fault", [
+    "none", "state-only", "state-stage", "manifest-stage", "manifest-bad-prefix",
+    "manifest-without-state", "foreign-state", "stage-hardlink", "two-stages",
+    "foreign-public", "foreign-catalog", "wal-drift",
+])
+def test_restore_initial_dedicated_generation_fixture(filesystem, monkeypatch, fault):
+    old = _owned_bootstrap_resources()
+    new = _owned_generation(active=False, distribution="almalinux")
+    paths = _owned_fixture_paths(filesystem, old)
+    root_fd, state = filesystem[:2]
+    label = native._DEDICATED_PUBLIC_CONTEXT + b"\0"
+    monkeypatch.setattr(os, "listxattr", lambda fd: ["security.selinux"])
+    monkeypatch.setattr(os, "getxattr", lambda fd, name: label)
+    monkeypatch.setattr(os, "setxattr", lambda *a: pytest.fail("unexpected relabel"))
+    monkeypatch.setattr(native._Labels, "_command", staticmethod(lambda *a: b"Enforcing"))
+    with native._owned_fixture_layout(root_fd, recovering=False) as layout:
+        wal = native._publish_owned_wal_locked(*layout[:3], old, new, layout[3], live=True)
+        expected = dict(old)
+        for name in (native._INCLUDE, native._OWNED_MAIN):
+            native._write_owned_initial_dedicated_config_locked(
+                root_fd, *layout, wal, expected, name, new[name])
+        if fault not in ("state-stage", "manifest-without-state", "two-stages", "stage-hardlink"):
+            native._write_owned_initial_private_fixture_locked(
+                root_fd, *layout, wal, expected, V2_STATE, new[V2_STATE])
+        if fault in ("none", "foreign-state", "foreign-public", "foreign-catalog", "wal-drift"):
+            native._write_owned_initial_private_fixture_locked(
+                root_fd, *layout, wal, expected, native._OWNED_MANIFEST, new[native._OWNED_MANIFEST])
+    stage_paths = []
+    if fault in ("state-stage", "two-stages", "stage-hardlink"):
+        stage = state / native._OWNED_STAGES[V2_STATE]
+        stage.write_bytes(new[V2_STATE][:13])
+        stage.chmod(0o600)
+        stage_paths.append(stage)
+        if fault == "stage-hardlink":
+            os.link(stage, state / "foreign-link")
+    if fault in ("manifest-stage", "manifest-bad-prefix", "two-stages"):
+        stage = state / native._OWNED_STAGES[native._OWNED_MANIFEST]
+        stage.write_bytes(b"foreign" if fault == "manifest-bad-prefix" else new[native._OWNED_MANIFEST][:13])
+        stage.chmod(0o600)
+        stage_paths.append(stage)
+    if fault == "manifest-without-state":
+        paths[native._OWNED_MANIFEST].write_bytes(new[native._OWNED_MANIFEST])
+        paths[native._OWNED_MANIFEST].chmod(0o600)
+    if fault == "foreign-state":
+        paths[V2_STATE].write_bytes(b"foreign")
+    if fault == "foreign-public":
+        (paths[native._CATALOG].parent / "foreign").touch()
+    if fault == "foreign-catalog":
+        paths[native._CATALOG].write_bytes(new[native._CATALOG])
+        paths[native._CATALOG].chmod(0o644)
+    if fault == "wal-drift":
+        (state / native._OWNED_WAL).write_bytes(b"foreign")
+    before = _fixture_resource_bytes(paths)
+    stages_before = [native._identity(path.lstat()) for path in stage_paths]
+    with native._owned_fixture_layout(root_fd, recovering=True) as layout:
+        def restore():
+            return native._restore_owned_initial_dedicated_generation_fixture_locked(
+                root_fd, *layout, expected_wal=wal)
+        if fault in ("none", "state-only", "state-stage", "manifest-stage"):
+            assert restore()["status"] == "OWNED_INITIAL_GENERATION_FIXTURE_RESTORED"
+            assert _fixture_resource_bytes(paths) == old
+            _assert_owned_fixture_clean(filesystem, paths)
+        else:
+            with pytest.raises((native.NativeV2TransactionError, OSError, ValueError)):
+                restore()
+            assert _fixture_resource_bytes(paths) == before
+            assert [native._identity(path.lstat()) for path in stage_paths] == stages_before
+            assert (state / native._OWNED_WAL).exists()
+    assert not filesystem[-1]

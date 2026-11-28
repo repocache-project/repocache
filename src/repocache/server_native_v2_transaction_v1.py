@@ -5624,6 +5624,156 @@ def _stage_owned_initial_dedicated_generation_fixture_locked(
     return wal, reconstructed
 
 
+def _restore_owned_initial_dedicated_generation_fixture_locked(
+        root_fd: int, state_fd: int, nginx_fd: int, public_fd: int,
+        check_layout, *, expected_wal: bytes) -> dict:
+    """Detached initial rollback, including interrupted private publication.
+
+    Validate every private target/stage before removing any. Keep the
+    configuration and catalog withdrawal pinned until private reversal is
+    complete, then reuse the existing ordered configuration-only recovery.
+    """
+    _refuse_actual_root_fixture_write(root_fd)
+    code = "OWNED_INITIAL_PRIVATE_RECOVERY_REFUSED"
+    labels = _Labels("almalinux", dedicated=True)
+    check_layout()
+    _owned_require_exact_wal(state_fd, expected_wal)
+    old, hashes = _decode_owned_wal(expected_wal, distribution="almalinux")
+    if (_json(expected_wal, limit=_MAX_WAL)["version"] != 3
+            or _validate_owned_resources(old, distribution="almalinux") is not None):
+        _deny(code)
+    current = _read_owned_resources(state_fd, nginx_fd, public_fd)
+    _owned_wal_resource_drift(old, hashes, current, unpublished=False)
+    if current[_CATALOG] is not None:
+        _deny(code)
+    stages = []
+    for name in _OWNED_PRIVATE:
+        try:
+            os.stat(_OWNED_STAGES[name], dir_fd=state_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        stages.append(name)
+    if not stages and all(current[name] is None for name in _OWNED_PRIVATE):
+        result = _restore_owned_initial_dedicated_config_fixture_locked(
+            root_fd, state_fd, nginx_fd, public_fd, check_layout,
+            expected_wal=expected_wal)
+        return {**result, "status": "OWNED_INITIAL_GENERATION_FIXTURE_RESTORED"}
+    if (len(stages) > 1
+            or any(_hash(current[name]) != hashes[name] for name in (_OWNED_MAIN, _INCLUDE))
+            or (current[V2_STATE] is None and current[_OWNED_MANIFEST] is not None)
+            or any(current[name] is not None for name in stages)
+            or (_OWNED_MANIFEST in stages and current[V2_STATE] is None)):
+        _deny(code)
+    # When state was published, reconstruct the exact deterministic inactive
+    # candidate without trusting mutable intake or operator TLS at rollback.
+    if current[V2_STATE] is not None:
+        snapshot = _json(current[V2_STATE], limit=_LIMIT[V2_STATE])
+        _owned_socket_require_inactive_routes(snapshot)
+        if snapshot["state_generation"] != 1:
+            _deny(code)
+        document = parse_install_bytes(
+            base64.b64decode(snapshot["configuration_base64"], validate=True), for_apply=True)
+        main, include, catalog = _render_owned_managed_candidate(document, 1, "almalinux", {})
+        new = {V2_STATE: current[V2_STATE], _OWNED_MAIN: main, _INCLUDE: include,
+               _CATALOG: catalog,
+               _OWNED_MANIFEST: _owned_manifest_for(current[V2_STATE], main, include, catalog)}
+        if (_owned_wal_record(old, new, live=True) != expected_wal
+                or any(current[name] is not None and current[name] != new[name]
+                       for name in _OWNED_ORDER)):
+            _deny(code)
+    mount = _mount(state_fd)
+    parent_identity = _identity(os.fstat(state_fd))[:6]
+    permitted_stages = {_OWNED_STAGES[name] for name in stages}
+    held = {}
+
+    def guard():
+        _owned_live_guard(state_fd, nginx_fd, public_fd, check_layout,
+                          expected_wal, current)
+        _owned_wal_resource_drift(old, hashes, current, unpublished=False)
+        parent = _metadata_no_acl(state_fd, directory=True)
+        if (_identity(parent)[:6] != parent_identity
+                or stat.S_IMODE(parent.st_mode) != 0o700 or _mount(state_fd) != mount
+                or os.fstatvfs(state_fd).f_flag & os.ST_RDONLY):
+            _deny(code)
+        labels.check(state_fd)
+        labels.finish()
+        for name in _OWNED_ORDER:
+            if _OWNED_STAGES[name] not in permitted_stages:
+                directory = _owned_resource_parent(name, state_fd, nginx_fd, public_fd)
+                _owned_require_absent(directory, _OWNED_STAGES[name])
+        return _dedicated_readonly_config_labels(
+            nginx_fd, public_fd, catalog_present=False,
+            allowed_stage=_OWNED_STAGES[_OWNED_MAIN])
+
+    config = guard()
+    with ExitStack() as stack:
+        def observe(name, maximum):
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                         | os.O_CLOEXEC, dir_fd=state_fd)
+            stack.callback(os.close, fd)
+            info = _metadata_no_acl(fd)
+            identity = _identity(info)
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                    or stat.S_IMODE(info.st_mode) != 0o600
+                    or not 0 <= info.st_size <= maximum or _mount(fd) != mount
+                    or _identity(os.stat(name, dir_fd=state_fd,
+                                         follow_symlinks=False)) != identity):
+                _deny(code)
+            labels.check(fd)
+            raw = os.pread(fd, maximum + 1, 0)
+            if (len(raw) != info.st_size or _identity(os.fstat(fd)) != identity
+                    or _identity(os.stat(name, dir_fd=state_fd,
+                                         follow_symlinks=False)) != identity):
+                _deny(code)
+            return fd, identity, raw
+
+        for name in _OWNED_PRIVATE:
+            if current[name] is not None:
+                held[name] = observe(name, _OWNED_LIMIT[name])
+                if held[name][2] != current[name]:
+                    _deny(code)
+            if name in stages:
+                stage = _OWNED_STAGES[name]
+                held[stage] = observe(stage, _OWNED_LIMIT[name])
+                # All private stages remain mode 0600 even when completed.
+                # Never interpret partial bytes as authority. If manifest
+                # bytes can be reconstructed, require a genuine prefix.
+                if name == _OWNED_MANIFEST and not new[name].startswith(held[stage][2]):
+                    _deny(code)
+
+        def exact():
+            if guard() != config:
+                _deny(code)
+            for name, (fd, identity, raw) in held.items():
+                info = _metadata_no_acl(fd)
+                if (_identity(info) != identity or _mount(fd) != mount
+                        or _identity(os.stat(name, dir_fd=state_fd,
+                                             follow_symlinks=False)) != identity
+                        or os.pread(fd, len(raw) + 1, 0) != raw
+                        or _identity(os.fstat(fd)) != identity):
+                    _deny(code)
+                labels.check(fd)
+
+        exact()
+        order = [*permitted_stages, _OWNED_MANIFEST, V2_STATE]
+        for name in order:
+            if name not in held:
+                continue
+            exact()
+            os.unlink(name, dir_fd=state_fd)
+            os.fsync(state_fd)
+            _owned_require_absent(state_fd, name)
+            del held[name]
+            if name in permitted_stages:
+                permitted_stages.remove(name)
+            else:
+                current[name] = None
+            exact()
+    result = _restore_owned_initial_dedicated_config_fixture_locked(
+        root_fd, state_fd, nginx_fd, public_fd, check_layout, expected_wal=expected_wal)
+    return {**result, "status": "OWNED_INITIAL_GENERATION_FIXTURE_RESTORED"}
+
+
 def _owned_live_finish(state_fd: int, nginx_fd: int, public_fd: int,
                        check_layout, wal: bytes, expected: dict) -> None:
     _owned_live_guard(state_fd, nginx_fd, public_fd, check_layout, wal, expected)
