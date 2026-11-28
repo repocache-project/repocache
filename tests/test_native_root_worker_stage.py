@@ -808,7 +808,8 @@ def test_executable_candidate_selects_retained_native_effects_lock(
 
 @pytest.mark.parametrize("fault", ["invalid-pin", "debian", "release", "placement",
                                    "wal", "package", "child", "wrong-report", "none",
-                                   "rolled", "rolled-refusal", "prepare", "prepare-wal",
+                                   "rolled", "rolled-refusal", "rolled-pins-changed",
+                                   "rolled-pins-match", "prepare", "prepare-wal",
                                    "prepare-manifest", "prepare-boot", "prepare-report",
                                    "start", "start-wal", "start-boot", "start-report",
                                    "rollover", "rollover-wal", "rollover-boot", "rollover-report",
@@ -1010,7 +1011,7 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
         else:
             with pytest.raises(stage.WorkerStageError):
                 invoke(tmp_path, **start_pins)
-    elif fault in ("rolled", "rolled-refusal"):
+    elif fault in ("rolled", "rolled-refusal", "rolled-pins-changed", "rolled-pins-match"):
         def retained(root, fd):
             assert locked
             calls.append("history")
@@ -1020,7 +1021,13 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
                     if key not in ("commit", "archive_sha256")}
         monkeypatch.setattr(tx, "_retained_rolled_dedicated_recovery_pins_locked", retained)
         release = {key: options[key] for key in ("commit", "archive_sha256")}
-        if fault == "rolled":
+        if fault.startswith("rolled-pins"):
+            expected_pins = {key: value for key, value in options.items()
+                             if key not in ("commit", "archive_sha256")}
+            if fault == "rolled-pins-changed":
+                expected_pins["wal_sha256"] = "0"*64
+            release["expected_pins"] = expected_pins
+        if fault in ("rolled", "rolled-pins-match"):
             assert install._recover_authenticated_rolled_dedicated_nginx(
                 tmp_path, **release)["catalog_observed"]
         else:
@@ -1042,7 +1049,7 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
                                                "pending-start-wal", "pending-start-boot",
                                                "pending-start-missing-wal") else
                      ["release", "rpm"] if fault == "package" else
-                     ["release", "history"] if fault == "rolled-refusal" else
-                     ["release", "history", "rpm", "child"] if fault == "rolled" else
+                     ["release", "history"] if fault in ("rolled-refusal", "rolled-pins-changed") else
+                     ["release", "history", "rpm", "child"] if fault in ("rolled", "rolled-pins-match") else
                      ["release", "rpm", "child"])
     assert not locked

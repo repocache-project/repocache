@@ -3215,9 +3215,13 @@ finally:
                     # Select from durable prior-boot intent without fixture
                     # receipt digests; the signed child independently verifies
                     # the recovered pins and retains its own exclusive lock.
-                    finished = native._recover_authenticated_rolled_dedicated_nginx(
-                        assets, **pins)
+                    finished = native.activate_authenticated_native_nginx(assets, **pins)
                     assert finished["status"] == "OWNED_DEDICATED_WAL_ROLLBACK_OBSERVED"
+                    assert finished["nginx_active_verified"] is True
+                    assert finished["nginx_enabled_verified"] is False
+                    assert finished["enablement_changed"] is False
+                    require_status(OWN, True, False)
+                    print("PASS: explicit authenticated installer dispatches retained dedicated WAL recovery, without enablement or legacy fallback", flush=True)
                     try:
                         native._recover_authenticated_prepared_dedicated_nginx(
                             assets, **recovery_pins)

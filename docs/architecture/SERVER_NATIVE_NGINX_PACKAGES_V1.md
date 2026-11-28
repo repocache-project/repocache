@@ -1669,3 +1669,23 @@ scenario uses the authenticated selector and requires fresh TLS HTTP 404,
 foreign pin refusal, committed selector refusal and active replay refusal.
 The independent finalization fault and SIGKILL scenario remains intact.
 No public CLI or automatic boot dispatch is introduced.
+
+### Explicit authenticated activation recovery dispatch
+
+The existing signed installer activation selects an already rolled,
+prepared dedicated pending-WAL profile from protected state under its
+lock, never from a CLI path or a caller-provided receipt. Incomplete,
+foreign or cross-distribution dedicated evidence refuses before legacy
+activation. The retained prior-boot record reconstructs the exact
+current boot intent; the signed bridge repeats selection under a fresh
+lock and refuses changed pins before running the installed worker. The
+worker independently verifies package, executable, profile, namespace,
+WAL and runtime and performs the existing guarded recovery. A distinct
+recovery result reports the observed active service and unchanged disabled
+enablement; it is not a claim of enabled service or automatic boot.
+No fallback to the legacy start path on a dedicated recovery refusal.
+The booted finalization scenario now invokes the existing signed installer
+entry after actual SIGKILL and checks exact prior TLS publication and WAL
+removal, while preserving the disabled unit state. First-boot dispatch,
+committed dedicated activation, automatic boot and active route authority
+remain separate prerequisites.

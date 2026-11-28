@@ -1079,3 +1079,101 @@ def test_fixture_preserves_only_exact_stopped_runtime(tmp_path, monkeypatch, fau
                 assert (runtime / names[0] / "retain").read_bytes() == b"foreign"
     finally:
         os.close(fd)
+
+
+
+@pytest.mark.parametrize("fault", ["legacy", "rolled", "partial", "foreign",
+                                    "rollover", "no-wal", "debian", "selection",
+                                    "bridge", "symlink"])
+def test_authenticated_activation_selects_dedicated_only_from_retained_evidence(
+        monkeypatch, tmp_path, fault):
+    import os
+    from contextlib import contextmanager
+    from repocache import server_native_nginx_effective_unit_v1 as unit
+    from repocache import server_native_egress_candidate_v1 as egress
+    from repocache import server_native_v2_transaction_v1 as tx
+
+    release = dict(commit="a"*40, archive_sha256="b"*64)
+    selected = dict(executable_receipt_sha256="c"*64, profile_receipt_sha256="d"*64,
+                    boot_receipt_sha256="e"*64, wal_sha256="f"*64)
+    names = [unit._NAMESPACE_PROFILE_RECEIPT, egress._BOOT_EGRESS_RECEIPT,
+             egress._BOOT_EGRESS_HISTORY_PREFIX + "11111111-1111-1111-1111-111111111111",
+             host._OWNED_WAL]
+    if fault == "legacy":
+        names = []
+    elif fault == "partial":
+        names = names[:1]
+    elif fault == "foreign":
+        names.append(egress._BOOT_EGRESS_RECEIPT + ".foreign")
+    elif fault == "rollover":
+        names.append(egress._BOOT_EGRESS_ROLLOVER)
+    elif fault == "no-wal":
+        names.remove(host._OWNED_WAL)
+    for name in names:
+        (tmp_path / name).touch()
+    if fault == "symlink":
+        (tmp_path / unit._NAMESPACE_PROFILE_RECEIPT).unlink()
+        (tmp_path / unit._NAMESPACE_PROFILE_RECEIPT).symlink_to(tmp_path / "missing")
+    before = sorted(os.listdir(tmp_path))
+    locked = False
+    calls = []
+    monkeypatch.setattr(host, "_native_distro", lambda: "debian" if fault == "debian" else "almalinux")
+    monkeypatch.setattr(host, "require_native_host_preconditions", lambda: None)
+    monkeypatch.setattr(stage, "verify_installed_worker", lambda *a, **kw: {
+        "status": "AUTHENTICATED_WORKER_FILES_MATCH", "source_sha": release["commit"],
+        "archive_sha256": release["archive_sha256"], "authorizes_host_installation": False,
+        "authorizes_service_activation": False})
+    monkeypatch.setattr(stage, "_authenticated_payloads", lambda *a, **kw: (
+        {stage.CONFIG: host._BOOTSTRAP_CONFIG, host._OWN_UNIT: b"signed unit"}, {}))
+    def audit(*a):
+        assert locked
+        calls.append("audit")
+    monkeypatch.setattr(stage, "_audit_worker_files", audit)
+
+    @contextmanager
+    def lock(root, owner):
+        nonlocal locked
+        fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+        locked = True
+        try:
+            yield fd
+        finally:
+            locked = False
+            os.close(fd)
+    monkeypatch.setattr(host, "_locked", lock)
+    monkeypatch.setattr(host, "_require_audited_native_package_for_activation", lambda *a, **kw: None)
+    def retain(root, state):
+        assert locked
+        calls.append("select")
+        if fault in ("selection", "symlink"):
+            raise tx.NativeV2TransactionError("OWNED_BOOT_REFUSED")
+        return selected
+    monkeypatch.setattr(tx, "_retained_rolled_dedicated_recovery_pins_locked", retain)
+    def legacy(*a, **kw):
+        assert locked and fault == "legacy"
+        calls.append("legacy")
+        return {"status": "LEGACY"}
+    monkeypatch.setattr(host, "_activate_audited_native_nginx_under_lock", legacy)
+    def recover(assets, **kw):
+        assert not locked and kw == {**release, "expected_pins": selected}
+        calls.append("recover")
+        if fault == "bridge":
+            raise stage.WorkerStageError("RECOVERY_REFUSED")
+        return {"status": "OWNED_DEDICATED_WAL_ROLLBACK_OBSERVED"}
+    monkeypatch.setattr(host, "_recover_authenticated_rolled_dedicated_nginx", recover)
+    if fault == "legacy":
+        assert host.activate_authenticated_native_nginx(tmp_path, **release) == {"status": "LEGACY"}
+        assert calls == ["audit", "legacy"]
+    elif fault == "rolled":
+        assert host.activate_authenticated_native_nginx(tmp_path, **release) == {
+            "status": "OWNED_DEDICATED_WAL_ROLLBACK_OBSERVED",
+            "nginx_active_verified": True, "nginx_enabled_verified": False,
+            "enablement_changed": False}
+        assert calls == ["audit", "select", "audit", "recover"]
+    else:
+        with pytest.raises((stage.WorkerStageError, tx.NativeV2TransactionError)):
+            host.activate_authenticated_native_nginx(tmp_path, **release)
+        assert calls == (["audit", "select", "audit", "recover"] if fault == "bridge"
+                         else ["audit", "select"] if fault in ("selection", "symlink")
+                         else ["audit"])
+    assert not locked and sorted(os.listdir(tmp_path)) == before

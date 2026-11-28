@@ -1561,10 +1561,12 @@ def _recover_authenticated_prepared_dedicated_nginx(
 
 def _recover_authenticated_rolled_dedicated_nginx(
     assets: Path, *, commit: str, archive_sha256: str,
+    expected_pins: dict | None = None,
 ) -> dict:
     """Select already prepared recovery from protected prior-boot intent."""
     return _authenticated_prepared_dedicated_bridge(
-        assets, commit=commit, archive_sha256=archive_sha256, recovery_pins=None)
+        assets, commit=commit, archive_sha256=archive_sha256, recovery_pins=None,
+        expected_rolled_pins=expected_pins)
 
 
 _DEDICATED_PREPARE_CHILD = _DEDICATED_RECOVERY_CHILD.replace(
@@ -1709,9 +1711,10 @@ def _authenticated_prepared_dedicated_bridge(
     assets: Path, *, commit: str, archive_sha256: str, recovery_pins: dict | None,
     prepare: bool = False, start: bool = False, rollover: bool = False,
     pending_prepare: bool = False, resume_pending: bool = False,
-    pending_start: bool = False,
+    pending_start: bool = False, expected_rolled_pins: dict | None = None,
 ) -> dict:
-    if (type(prepare) is not bool or type(start) is not bool or type(rollover) is not bool
+    if (expected_rolled_pins is not None and recovery_pins is not None
+            or type(prepare) is not bool or type(start) is not bool or type(rollover) is not bool
             or type(pending_prepare) is not bool or (pending_prepare and not prepare)
             or type(resume_pending) is not bool or (resume_pending and (not pending_prepare or rollover))
             or type(pending_start) is not bool or (pending_start and not start)
@@ -1737,6 +1740,8 @@ def _authenticated_prepared_dedicated_bridge(
 
     if recovery_pins is not None:
         validate_pins(recovery_pins)
+    if expected_rolled_pins is not None:
+        validate_pins(expected_rolled_pins)
     if (type(archive_sha256) is not str or signatures.HEX64.fullmatch(archive_sha256) is None
             or type(commit) is not str or signatures.HEX40.fullmatch(commit) is None
             or _native_distro() != "almalinux"):
@@ -1762,6 +1767,8 @@ def _authenticated_prepared_dedicated_bridge(
                     _retained_rolled_dedicated_recovery_pins_locked,
                 )
                 recovery_pins = _retained_rolled_dedicated_recovery_pins_locked(root, state)
+                if expected_rolled_pins is not None and recovery_pins != expected_rolled_pins:
+                    _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
             validate_pins(recovery_pins)
             if prepare or start:
                 from repocache.server_native_v2_transaction_v1 import (
@@ -1892,10 +1899,41 @@ def _authenticated_prepared_dedicated_bridge(
         _reject("NATIVE_DEDICATED_RECOVERY_CHILD_REFUSED")
 
 
+def _select_rolled_activation_recovery_locked(root: int, state: int, distribution: str) -> dict | None:
+    """Recognize dedicated intent without adopting or repairing any resource.
+
+    The signed caller retains the lock. Presence of incomplete dedicated
+    evidence is a refusal, not permission to try legacy activation.
+    """
+    from repocache.server_native_nginx_effective_unit_v1 import _NAMESPACE_PROFILE_RECEIPT
+    from repocache.server_native_egress_candidate_v1 import (
+        _BOOT_EGRESS_RECEIPT, _BOOT_EGRESS_HISTORY_PREFIX, _BOOT_EGRESS_ROLLOVER,
+    )
+    from repocache.server_native_v2_transaction_v1 import (
+        _retained_rolled_dedicated_recovery_pins_locked,
+    )
+
+    names = set(os.listdir(state))
+    prefixes = (_NAMESPACE_PROFILE_RECEIPT.removesuffix(".json"),
+                _BOOT_EGRESS_RECEIPT.removesuffix(".json"))
+    if not any(name.startswith(prefixes) for name in names):
+        return None
+    if (distribution != "almalinux"
+            or not {_NAMESPACE_PROFILE_RECEIPT, _BOOT_EGRESS_RECEIPT, _OWNED_WAL} <= names
+            or _BOOT_EGRESS_ROLLOVER in names
+            or not any(name.startswith(_BOOT_EGRESS_HISTORY_PREFIX) for name in names)
+            or any(name.startswith(prefixes) and name not in
+                   (_NAMESPACE_PROFILE_RECEIPT, _BOOT_EGRESS_RECEIPT)
+                   and not name.startswith(_BOOT_EGRESS_HISTORY_PREFIX) for name in names)):
+        _reject("NATIVE_DEDICATED_ACTIVATION_RECOVERY_REFUSED")
+    _require_audited_native_package_for_activation(state, distribution=distribution)
+    return _retained_rolled_dedicated_recovery_pins_locked(root, state)
+
+
 def activate_authenticated_native_nginx(
     assets: Path, *, commit: str, archive_sha256: str,
 ) -> dict:
-    """Explicit signed-release activation of REPOCACHE's independent unit."""
+    """Explicit signed activation; dedicated recovery never enables a unit."""
     distribution = _native_distro()
     require_native_host_preconditions()
     attested = stage.verify_installed_worker(
@@ -1920,16 +1958,26 @@ def activate_authenticated_native_nginx(
             def recheck_signed_worker():
                 stage._audit_worker_files(Path("/"), payloads)
             recheck_signed_worker()
-            result = _activate_audited_native_nginx_under_lock(
-                state, distribution, payloads[stage.CONFIG], root_fd=root,
-                unit_bytes=payloads[_OWN_UNIT],
-                recheck_signed_worker=recheck_signed_worker,
-            )
-            if "state_generation" in result:
-                stage._audit_worker_files(Path("/"), payloads)
-            return result
+            selected = _select_rolled_activation_recovery_locked(root, state, distribution)
+            if selected is None:
+                result = _activate_audited_native_nginx_under_lock(
+                    state, distribution, payloads[stage.CONFIG], root_fd=root,
+                    unit_bytes=payloads[_OWN_UNIT],
+                    recheck_signed_worker=recheck_signed_worker,
+                )
+                if "state_generation" in result:
+                    stage._audit_worker_files(Path("/"), payloads)
+                return result
+            recheck_signed_worker()
     finally:
         os.close(root)
+    # The signed bridge reconstructs the selection again under its own
+    # lock and the installed child independently rechecks the exact pins.
+    # A changed or failed selection never falls through to legacy start.
+    report = _recover_authenticated_rolled_dedicated_nginx(
+        assets, commit=commit, archive_sha256=archive_sha256, expected_pins=selected)
+    return {**report, "nginx_active_verified": True,
+            "nginx_enabled_verified": False, "enablement_changed": False}
 
 
 def _execute_native_nginx_install_locked(
