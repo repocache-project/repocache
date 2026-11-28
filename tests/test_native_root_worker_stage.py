@@ -1567,3 +1567,100 @@ def test_compile_authenticated_policy_refuses_before_native_build(monkeypatch, t
         install._compile_authenticated_fixed_dedicated_policy(
             tmp_path, commit="a"*40, archive_sha256="b"*64)
     assert calls == ([] if fault == "debian" else ["signature"])
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="requires disposable root-owned workspace")
+@pytest.mark.parametrize("fault", [
+    "none", "missing-tool", "tool-symlink", "tool-writable", "tool-drift",
+    "source-drift", "output-symlink", "output-hardlink", "output-writable",
+    "output-empty", "workspace-drift", "failed-build", "timeout", "label-drift",
+])
+def test_authenticated_policy_compilation_pins_native_inputs_and_output(monkeypatch, tmp_path, fault):
+    from types import SimpleNamespace
+    worker = b"exact signed worker fixture"
+    raw = b"policy_module(repocache_nginx, 1.0.0)\n"
+    compiled = b"exact compiled module fixture"
+    root = tmp_path / "native-root"
+    make = root / "usr/bin/make"
+    makefile = root / "usr/share/selinux/devel/Makefile"
+    for leaf in (make, makefile):
+        leaf.parent.mkdir(parents=True, exist_ok=True)
+        leaf.write_bytes(b"native build input")
+        leaf.chmod(0o644)
+    make.chmod(0o755)
+    if fault == "missing-tool":
+        makefile.unlink()
+    if fault == "tool-symlink":
+        makefile.unlink()
+        makefile.symlink_to(make)
+    if fault == "tool-writable":
+        makefile.chmod(0o666)
+    original_open = os.open
+
+    def open_root(name, flags, mode=0o777, *, dir_fd=None):
+        if name == "/" and dir_fd is None:
+            name = root
+        return original_open(name, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(install.os, "open", open_root)
+    monkeypatch.setattr(install, "_native_distro", lambda: "almalinux")
+    monkeypatch.setattr(install, "require_native_host_preconditions", lambda: None)
+
+    def finish():
+        if fault == "label-drift":
+            raise stage.WorkerStageError("fixture label drift")
+
+    monkeypatch.setattr(install, "_Labels", lambda *args, **kw: SimpleNamespace(finish=finish))
+    monkeypatch.setattr(stage, "_authenticated_payloads", lambda *args, **kw: (
+        {stage.WORKER: worker}, {"source_sha": "a"*40, "archive_sha256": "b"*64,
+                                "files": {stage.WORKER: hashlib.sha256(worker).hexdigest()}}))
+    monkeypatch.setattr(stage, "_signed_owned_policy_from_worker",
+                        lambda value: {"policy_bytes": raw} if value == worker else pytest.fail("wrong worker"))
+    calls = []
+
+    def run(argv, **kw):
+        place = Path(kw["cwd"])
+        assert argv == ("/usr/bin/make", "-C", str(place), "-f",
+                        "/usr/share/selinux/devel/Makefile", "repocache_nginx.pp")
+        assert kw["env"] == {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"}
+        assert kw["timeout"] == 120
+        source = place / "repocache_nginx.te"
+        output = place / "repocache_nginx.pp"
+        assert source.read_bytes() == raw and stat.S_IMODE(source.stat().st_mode) == 0o600
+        assert not output.exists() and stat.S_IMODE(place.stat().st_mode) == 0o700
+        calls.append(place)
+        if fault == "tool-drift":
+            makefile.write_bytes(b"changed")
+        if fault == "source-drift":
+            source.write_bytes(raw + b"\n")
+        if fault == "workspace-drift":
+            place.chmod(0o755)
+        if fault == "output-symlink":
+            output.symlink_to(source)
+        elif fault == "output-hardlink":
+            os.link(source, output)
+        else:
+            output.write_bytes(b"" if fault == "output-empty" else compiled)
+            output.chmod(0o666 if fault == "output-writable" else 0o600)
+        if fault == "timeout":
+            raise subprocess.TimeoutExpired(argv, 120)
+        return SimpleNamespace(returncode=1 if fault == "failed-build" else 0)
+
+    monkeypatch.setattr(install.subprocess, "run", run)
+    if fault == "none":
+        value, report = install._compile_authenticated_fixed_dedicated_policy(
+            tmp_path, commit="a"*40, archive_sha256="b"*64)
+        assert value == compiled
+        assert report["policy_sha256"] == hashlib.sha256(raw).hexdigest()
+        assert report["compiled_policy_sha256"] == hashlib.sha256(compiled).hexdigest()
+        assert report["signed_source_compilation_observed"] is True
+        assert all(value is False for key, value in report.items()
+                   if key.startswith("authorizes_") or key in (
+                       "runtime_selinux_policy_verified", "native_toolchain_provenance_verified"))
+    else:
+        with pytest.raises(stage.WorkerStageError):
+            install._compile_authenticated_fixed_dedicated_policy(
+                tmp_path, commit="a"*40, archive_sha256="b"*64)
+    if fault in ("missing-tool", "tool-symlink", "tool-writable"):
+        assert not calls
+    else:
+        assert len(calls) == 1 and not calls[0].exists()
