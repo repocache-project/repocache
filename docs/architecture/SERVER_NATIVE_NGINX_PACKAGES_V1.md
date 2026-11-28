@@ -1531,3 +1531,25 @@ private prepared-profile recovery, not a public installer selector,
 automatic boot, ingress, provisioning or pre-existing storage migration.
 A failed or lost child reply does not imply rollback; inspect retained
 authoritative state and WAL before any retry.
+
+### Retained post-reboot recovery selection
+
+The private installer can also select an already prepared managed v3 WAL
+after explicit boot rollover without a fixture proof file. Under the same
+protected lock it requires exact prior resources (catalog withdrawn or
+exactly republished), inactive routes, a fixed namespace and canonical
+prior-boot archives. It reconstructs the current boot intent from the WAL
+generation/manifest, canonical loopback-only rules, live kernel boot and
+namespace identities, and the independent archived executable/profile
+bindings. All retained archives (bounded to 64) must agree; an incomplete
+rollover, missing history, mismatched current receipt or rule readback
+refuses. The selector writes nothing. It does not adopt first-boot intent
+or authorize creation, public activation, storage migration or new routes.
+
+Archived intent is root-owned installation-local evidence, not a release
+signature. The authenticated parent still verifies source and native RPM;
+the isolated installed child independently checks the exact reconstructed
+pins, package, signed unit, runtime and WAL under its fresh lock before
+recovery. The VM SIGKILL retry invokes this selection with release identity
+only; the explicit old-WAL replay test remains. Native acceptance requires
+successful execution at the exact reviewed revision.

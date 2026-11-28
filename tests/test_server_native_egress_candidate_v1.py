@@ -935,7 +935,6 @@ def test_fresh_boot_intent_refuses_nonloopback_or_upstream_before_state_read(
             allow_boot_rollover=False)
 
 
-
 @pytest.mark.parametrize("fault", ["none", "missing", "same-boot", "wrong-name",
                                     "different-pin", "wrong-generation", "wrong-policy",
                                     "noncanonical", "duplicate", "active"])

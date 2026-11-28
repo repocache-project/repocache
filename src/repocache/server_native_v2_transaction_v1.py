@@ -3748,9 +3748,11 @@ def _retained_rolled_dedicated_recovery_pins_locked(root_fd: int, state_fd: int)
     with _owned_layout_locked(root_fd, state_fd, recovering=True) as layout:
         state, nginx, public, check_layout = layout
         wal = _read_file(state, _OWNED_WAL, 0, _MAX_WAL)
-        if wal is None or _json(wal, limit=_MAX_WAL).get("version") != 3:
+        if wal is None:
             _deny("OWNED_WAL_CHANGED")
         old, _ = _decode_owned_wal(wal, distribution="almalinux")
+        if _json(wal, limit=_MAX_WAL)["version"] != 3:
+            _deny("OWNED_WAL_CHANGED")
         snapshot = _validate_owned_resources(old, distribution="almalinux")
         if snapshot is None:
             _deny("OWNED_DEDICATED_FINISH_MANAGED_REQUIRED")
@@ -3785,6 +3787,7 @@ def _retained_rolled_dedicated_recovery_pins_locked(root_fd: int, state_fd: int)
                 if (_current_boot_id() != boot or history() != retained
                         or _read_boot_egress_receipt(state, 0, 0) != expected):
                     _deny("OWNED_DEDICATED_INSTALLER_BOOT_REFUSED")
+                recheck_namespace()
 
             for _ in range(2):
                 guard()
