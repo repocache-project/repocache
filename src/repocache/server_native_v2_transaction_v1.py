@@ -3809,6 +3809,15 @@ def _recover_installed_prepared_dedicated(pins: dict) -> dict:
     our own exclusive lock and recheck the exact prepared profile before
     any mutation. Never derive a receipt's expected digest from itself.
     """
+    return _installed_dedicated_lifecycle(pins, prepare=False)
+
+
+def _prepare_installed_committed_dedicated(pins: dict) -> dict:
+    """Private signed-installer first-boot namespace preparation; no service start."""
+    return _installed_dedicated_lifecycle(pins, prepare=True)
+
+
+def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool) -> dict:
     import zipimport
     from repocache.server_native_nginx_executable_v1 import (
         signed_owned_nginx_policy_candidate, verify_nginx_candidate_receipt,
@@ -3826,8 +3835,9 @@ def _recover_installed_prepared_dedicated(pins: dict) -> dict:
     worker = "/usr/libexec/repocache/server-control-worker"
     digests = {"worker_sha256", "placement_sha256", "archive_sha256",
                "native_payload_sha256", "binary_sha256", "executable_receipt_sha256",
-               "profile_receipt_sha256", "boot_receipt_sha256", "wal_sha256"}
-    if (not isinstance(__loader__, zipimport.zipimporter)
+               "profile_receipt_sha256"} | (
+        {"generation_manifest_sha256"} if prepare else {"boot_receipt_sha256", "wal_sha256"})
+    if (type(prepare) is not bool or not isinstance(__loader__, zipimport.zipimporter)
             or __loader__.archive != worker or not sys.flags.isolated
             or os.getresuid() != (0, 0, 0) or os.getresgid() != (0, 0, 0)
             or type(pins) is not dict
@@ -3902,10 +3912,18 @@ def _recover_installed_prepared_dedicated(pins: dict) -> dict:
 
         placement()
         package()
-        wal = _read_file(state, _OWNED_WAL, 0, _MAX_WAL)
-        if wal is None or hashlib.sha256(wal).hexdigest() != pins["wal_sha256"]:
-            _deny("OWNED_WAL_CHANGED")
-        old, _ = _decode_owned_wal(wal, distribution="almalinux")
+        if prepare:
+            with _owned_layout_locked(root, state, recovering=False) as layout:
+                old = _read_owned_resources(*layout[:3])
+                manifest = old[_OWNED_MANIFEST]
+                if (manifest is None or hashlib.sha256(manifest).hexdigest() !=
+                        pins["generation_manifest_sha256"]):
+                    _deny("OWNED_DEDICATED_INSTALLER_PIN_REFUSED")
+        else:
+            wal = _read_file(state, _OWNED_WAL, 0, _MAX_WAL)
+            if wal is None or hashlib.sha256(wal).hexdigest() != pins["wal_sha256"]:
+                _deny("OWNED_WAL_CHANGED")
+            old, _ = _decode_owned_wal(wal, distribution="almalinux")
         snapshot = _validate_owned_resources(old, distribution="almalinux")
         if snapshot is None:
             _deny("OWNED_DEDICATED_FINISH_MANAGED_REQUIRED")
@@ -3935,6 +3953,53 @@ def _recover_installed_prepared_dedicated(pins: dict) -> dict:
 
         executable_before = executable()
         profile_before = profile()
+        if prepare:
+            from repocache.server_native_nginx_effective_unit_v1 import (
+                inspect_signed_owned_namespace_unit, _safe_native_systemctl,
+            )
+            if doc["deployment"]["listen"]["bind_address"] != "127.0.0.1":
+                _deny("OWNED_DEDICATED_INSTALLER_PIN_REFUSED")
+            stopped = inspect_signed_owned_namespace_unit(https_port=port, active=False)
+
+            def stopped_owner():
+                placement()
+                if executable() != executable_before or profile() != profile_before:
+                    _deny("OWNED_DEDICATED_INSTALLER_PROFILE_REFUSED")
+                _safe_native_systemctl()
+                for unit in (_UNIT, _OWNED_WAL_DOMAIN):
+                    for action, code, output in (
+                            ("is-active", 3, b"inactive\n"), ("is-enabled", 1, b"disabled\n")):
+                        observed = subprocess.run(
+                            (_SYSTEMCTL, action, unit), shell=False, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, cwd="/",
+                            env=_ENV, timeout=5, close_fds=True, start_new_session=True, check=False)
+                        if (observed.returncode, observed.stdout) != (code, output):
+                            _deny("OWNED_DEDICATED_RECOVERY_SERVICE_REFUSED")
+                if (stopped["main_pid_observed"] != 0
+                        or inspect_signed_owned_namespace_unit(https_port=port, active=False) != stopped):
+                    _deny("OWNED_DEDICATED_RECOVERY_SERVICE_REFUSED")
+                with _owned_layout_locked(root, state, recovering=False) as layout:
+                    if _read_owned_resources(*layout[:3]) != old:
+                        _deny("OWNED_LIVE_RESOURCE_DRIFT")
+
+            options = dict(distribution="almalinux", worker_uid=pwd.getpwnam("nginx").pw_uid,
+                           profile_receipt_sha256=pins["profile_receipt_sha256"],
+                           executable_receipt_sha256=pins["executable_receipt_sha256"])
+            stopped_owner()
+            result = _create_owned_committed_boot_egress_locked(
+                root, state, **options, recheck_stopped_owner=stopped_owner,
+                allow_boot_rollover=False)
+            stopped_owner()
+            package()
+            identity = (result["namespace_device"], result["namespace_inode"])
+            observed = _prepare_owned_committed_boot_egress_locked(
+                root, state, **options, namespace_identity=identity,
+                recheck_namespace_owner=stopped_owner, allow_prepare=False)
+            if (observed != result or result.get("generation_manifest_sha256") !=
+                    pins["generation_manifest_sha256"]):
+                _deny("OWNED_DEDICATED_INSTALLER_RESULT_REFUSED")
+            return result
+
         _, namespace_identity, recheck_namespace = stack.enter_context(_fixed_namespace_scope())
 
         def guard():

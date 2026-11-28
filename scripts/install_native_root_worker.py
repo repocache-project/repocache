@@ -1567,13 +1567,35 @@ def _recover_authenticated_rolled_dedicated_nginx(
         assets, commit=commit, archive_sha256=archive_sha256, recovery_pins=None)
 
 
+_DEDICATED_PREPARE_CHILD = _DEDICATED_RECOVERY_CHILD.replace(
+    "transaction._recover_installed_prepared_dedicated(pins)",
+    "transaction._prepare_installed_committed_dedicated(pins)")
+
+
+def _prepare_authenticated_committed_dedicated_nginx(
+    assets: Path, *, commit: str, archive_sha256: str,
+    executable_receipt_sha256: str, profile_receipt_sha256: str,
+    generation_manifest_sha256: str,
+) -> dict:
+    """Prepare only an absent first-boot namespace for an exact managed profile."""
+    return _authenticated_prepared_dedicated_bridge(
+        assets, commit=commit, archive_sha256=archive_sha256, prepare=True,
+        recovery_pins=dict(executable_receipt_sha256=executable_receipt_sha256,
+                           profile_receipt_sha256=profile_receipt_sha256,
+                           generation_manifest_sha256=generation_manifest_sha256))
+
+
 def _authenticated_prepared_dedicated_bridge(
     assets: Path, *, commit: str, archive_sha256: str, recovery_pins: dict | None,
+    prepare: bool = False,
 ) -> dict:
+    if type(prepare) is not bool or (prepare and recovery_pins is None):
+        _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
+    fields = {"executable_receipt_sha256", "profile_receipt_sha256"} | (
+        {"generation_manifest_sha256"} if prepare else {"boot_receipt_sha256", "wal_sha256"})
+
     def validate_pins(pins):
-        if (type(pins) is not dict or set(pins) != {
-                "executable_receipt_sha256", "profile_receipt_sha256",
-                "boot_receipt_sha256", "wal_sha256"}
+        if (type(pins) is not dict or set(pins) != fields
                 or any(type(value) is not str or signatures.HEX64.fullmatch(value) is None
                        for value in pins.values())):
             _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
@@ -1606,10 +1628,27 @@ def _authenticated_prepared_dedicated_bridge(
                 )
                 recovery_pins = _retained_rolled_dedicated_recovery_pins_locked(root, state)
             validate_pins(recovery_pins)
-            wal_sha256 = recovery_pins["wal_sha256"]
-            wal = _read_file(state, _OWNED_WAL, 0, _MAX_WAL)
-            if wal is None or hashlib.sha256(wal).hexdigest() != wal_sha256:
-                _reject("NATIVE_DEDICATED_RECOVERY_WAL_REFUSED")
+            if prepare:
+                from repocache.server_native_v2_transaction_v1 import (
+                    _OWNED_MANIFEST, _OWNED_LIMIT, _OWNED_WAL_TMP,
+                )
+                from repocache.server_native_egress_candidate_v1 import (
+                    _read_boot_egress_receipt, _BOOT_EGRESS_HISTORY_PREFIX, _BOOT_EGRESS_ROLLOVER,
+                )
+                manifest = _read_file(state, _OWNED_MANIFEST, 0, _OWNED_LIMIT[_OWNED_MANIFEST])
+                if (manifest is None or hashlib.sha256(manifest).hexdigest() !=
+                        recovery_pins["generation_manifest_sha256"]
+                        or _read_file(state, _OWNED_WAL, 0, _MAX_WAL) is not None
+                        or _read_file(state, _OWNED_WAL_TMP, 0, _MAX_WAL) is not None
+                        or _read_boot_egress_receipt(state, 0, 0) is not None
+                        or any(name.startswith(_BOOT_EGRESS_HISTORY_PREFIX)
+                               or name == _BOOT_EGRESS_ROLLOVER for name in os.listdir(state))):
+                    _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
+            else:
+                wal_sha256 = recovery_pins["wal_sha256"]
+                wal = _read_file(state, _OWNED_WAL, 0, _MAX_WAL)
+                if wal is None or hashlib.sha256(wal).hexdigest() != wal_sha256:
+                    _reject("NATIVE_DEDICATED_RECOVERY_WAL_REFUSED")
             _require_audited_native_package_for_activation(state, distribution="almalinux")
             with tempfile.TemporaryDirectory(prefix="repocache-native-recovery-", dir="/var/lib") as tmp:
                 work = Path(tmp)
@@ -1631,7 +1670,8 @@ def _authenticated_prepared_dedicated_bridge(
                 **recovery_pins)
     try:
         result = subprocess.run(
-            ("/usr/bin/python3", "-IS", "-B", "-c", _DEDICATED_RECOVERY_CHILD),
+            ("/usr/bin/python3", "-IS", "-B", "-c",
+             _DEDICATED_PREPARE_CHILD if prepare else _DEDICATED_RECOVERY_CHILD),
             input=json.dumps(pins, sort_keys=True).encode("ascii"),
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd="/",
             env={"PATH": "/usr/sbin:/usr/bin:/bin", "LC_ALL": "C"},
@@ -1647,8 +1687,19 @@ def _authenticated_prepared_dedicated_bridge(
                         print(prefix.decode("ascii") + code, file=sys.stderr)
             _reject("NATIVE_DEDICATED_RECOVERY_CHILD_REFUSED")
         report = json.loads(result.stdout)
-        if (type(report) is not dict
-                or report.get("status") != "OWNED_DEDICATED_WAL_ROLLBACK_OBSERVED"
+        if type(report) is not dict:
+            _reject("NATIVE_DEDICATED_RECOVERY_CHILD_REFUSED")
+        if prepare:
+            if (report.get("status") != "NATIVE_EGRESS_BOOT_RECEIPT_VERIFIED"
+                    or report.get("generation_manifest_sha256") !=
+                    recovery_pins["generation_manifest_sha256"]
+                    or report.get("committed_resources_verified") is not True
+                    or report.get("authorizes_nginx_activation") is not False
+                    or report.get("authorizes_catalog_publication") is not False
+                    or type(report.get("receipt_sha256")) is not str
+                    or signatures.HEX64.fullmatch(report["receipt_sha256"]) is None):
+                _reject("NATIVE_DEDICATED_RECOVERY_CHILD_REFUSED")
+        elif (report.get("status") != "OWNED_DEDICATED_WAL_ROLLBACK_OBSERVED"
                 or report.get("wal_sha256") != wal_sha256
                 or report.get("recovery_required") is not False
                 or report.get("catalog_observed") is not True):

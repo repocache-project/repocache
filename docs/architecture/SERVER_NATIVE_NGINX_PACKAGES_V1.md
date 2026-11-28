@@ -1553,3 +1553,20 @@ pins, package, signed unit, runtime and WAL under its fresh lock before
 recovery. The VM SIGKILL retry invokes this selection with release identity
 only; the explicit old-WAL replay test remains. Native acceptance requires
 successful execution at the exact reviewed revision.
+
+### Authenticated first-boot namespace preparation
+
+The private installer now uses its authenticated worker/RPM handoff for
+an absent namespace of an already prepared, managed committed generation.
+The trusted caller supplies the independent generation manifest,
+executable and profile pins. The parent refuses WAL or boot intent
+collisions before package scratch work. A separate fixed child entry
+reacquires the protected lock, rechecks the exact signed placement,
+RPM identity and digest, executable and profile receipts, exact
+committed resources, and both disabled/inactive units. It calls the
+existing closed loopback-only creation primitive, then verifies the
+same receipt and policy read-only. No same-boot adoption or rollover,
+service start, enablement, policy loading, storage migration, public
+CLI or new socket authority is introduced. The booted enforcing
+fixture uses this path for the committed first-boot namespace, including
+wrong-generation and repeat refusal, before the existing reboot witness.

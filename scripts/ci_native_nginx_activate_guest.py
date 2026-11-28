@@ -2831,7 +2831,31 @@ finally:
             require_prior_resources()
         profile = signed("place")
         require("/usr/bin/systemctl", "daemon-reload")
-        policy = signed("prepare")
+        if pending:
+            policy = signed("prepare")
+        else:
+            boot_pins = dict(
+                **pins, executable_receipt_sha256=executable_proof["receipt_sha256"],
+                profile_receipt_sha256=profile["receipt_sha256"],
+                generation_manifest_sha256=state_before[str(STATE / ".state-v2-owned-nginx.manifest")])
+            wrong = {**boot_pins, "generation_manifest_sha256": "0"*64}
+            try:
+                native._prepare_authenticated_committed_dedicated_nginx(assets, **wrong)
+            except native.stage.WorkerStageError:
+                pass
+            else:
+                raise AssertionError("Foreign generation pin prepared a namespace")
+            assert not os.path.lexists(ns) and not os.path.lexists(boot_receipt)
+            policy = native._prepare_authenticated_committed_dedicated_nginx(assets, **boot_pins)
+            assert signed("verify") == policy
+            try:
+                native._prepare_authenticated_committed_dedicated_nginx(assets, **boot_pins)
+            except native.stage.WorkerStageError:
+                pass
+            else:
+                raise AssertionError("Existing first-boot namespace adopted")
+            assert signed("verify") == policy
+            print("PASS: authenticated installer first-boot namespace preparation; wrong generation and repeat refused", flush=True)
         assert policy["boot_id"] == boot
         assert policy["generation"] == current["state_generation"]
         assert policy["generation_manifest_sha256"] == state_before[
