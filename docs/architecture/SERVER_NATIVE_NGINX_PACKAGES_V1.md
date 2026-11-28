@@ -1432,3 +1432,19 @@ actual start after namespace reboot rollover, a fresh TLS catalog 404,
 and preservation of the exact WAL and prior resources across stop.
 This is not installed pending-WAL dispatch or recovery finalization.
 Publication and journal removal remain a separate unverified phase.
+
+
+### Dedicated prepared-WAL finalization candidate
+
+The private lifecycle finalizer for a running AlmaLinux dedicated candidate
+re-establishes exact prepared prior resources, authenticated owner, signed
+namespace/master, boot policy, package, TLS, storage and scratch mounts
+under the original lock. It requires a disabled-route loopback generation
+and a fresh pinned HTTPS withdrawal witness before catalog publication.
+It then observes the same listener and exact prior catalog before unlinking
+the exact v3 WAL. On failure it may withdraw only the exact prior catalog
+under the still-published WAL and unchanged other resources; foreign or
+missing authority is not adopted. This internal increment does not wire
+installed dispatch, start/stop, automatic boot or production activation.
+Booted finalization and interruption/retry acceptance remain necessary;
+the earlier prepared-start witness is not finalization evidence.

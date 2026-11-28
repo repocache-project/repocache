@@ -3318,6 +3318,144 @@ def _start_owned_dedicated_generation_locked(
         _deny("OWNED_DEDICATED_START_UNVERIFIED")
 
 
+def _finish_owned_prepared_wal_dedicated_locked(
+    root_fd: int, state_fd: int, *, namespace_identity: tuple[int, int],
+    executable_identity: tuple[int, int], profile_receipt_sha256: str,
+    executable_receipt_sha256: str, expected_wal: bytes,
+    recheck_authenticated_owner,
+) -> dict:
+    """Finalize an already running, authenticated disabled-route candidate.
+
+    No process or policy changes, socket dispatch, or automatic boot authority.
+    The signed lifecycle caller retains the original state lock. Re-establish
+    the prior generation and exact namespace/master independently of start's
+    report, then publish the prior catalog before removing the exact v3 WAL.
+    """
+    from repocache.server_native_nginx_effective_unit_v1 import (
+        _inspect_signed_owned_namespace_runtime,
+    )
+    from repocache.server_native_installed_storage_v1 import prepare_dedicated_candidate_storage
+    from repocache.server_root_control_host_preflight_v1 import require_native_host_preconditions
+
+    if (not callable(recheck_authenticated_owner)
+            or type(expected_wal) is not bytes or not 1 <= len(expected_wal) <= _MAX_WAL
+            or not _valid_sha(profile_receipt_sha256)
+            or not _valid_sha(executable_receipt_sha256)
+            or any(type(pair) is not tuple or len(pair) != 2
+                   or any(type(value) is not int or value <= 0 for value in pair)
+                   for pair in (namespace_identity, executable_identity))):
+        _deny("OWNED_DEDICATED_FINISH_INPUT_INVALID")
+    require_native_host_preconditions()
+    _verify_current_root_fd(root_fd)
+    with _owned_layout_locked(root_fd, state_fd, recovering=True) as layout:
+        state, nginx, public, check_layout = layout
+        _owned_require_exact_wal(state, expected_wal)
+        old, _ = _decode_owned_wal(expected_wal, distribution="almalinux")
+        if _json(expected_wal, limit=_MAX_WAL)["version"] != 3:
+            _deny("OWNED_LIVE_WAL_REQUIRED")
+        snapshot = _validate_owned_resources(old, distribution="almalinux")
+        if snapshot is None:
+            _deny("OWNED_DEDICATED_FINISH_MANAGED_REQUIRED")
+        _owned_socket_require_inactive_routes(snapshot)
+        document = parse_install_bytes(base64.b64decode(
+            snapshot["configuration_base64"], validate=True), for_apply=True)
+        listen = document["deployment"]["listen"]
+        if listen["bind_address"] != "127.0.0.1":
+            _deny("OWNED_DEDICATED_FINISH_LOOPBACK_REQUIRED")
+        port = listen["https_port"]
+        plan = _owned_boot_egress_plan(old, distribution="almalinux",
+                                      worker_uid=pwd.getpwnam("nginx").pw_uid)
+        if plan["destinations"]:
+            _deny("OWNED_BOOT_EGRESS_ACTIVE_ROUTES_REFUSED")
+        expected = {**old, _CATALOG: None}
+
+        def exact():
+            _owned_live_guard(state, nginx, public, check_layout, expected_wal, expected)
+            _owned_check_stages_absent(state, nginx, public)
+
+        exact()
+        recheck_authenticated_owner()
+        _require_audited_native_package_for_activation(state, distribution="almalinux")
+        storage = prepare_dedicated_candidate_storage("almalinux", document, allow_create=False)
+        scratch = _owned_alma_runtime_temps(root_fd, dedicated=True)
+        leaf = _verify_tls_pair(root_fd, document, verify_identity=True)
+        context = (document, snapshot["state_generation"], leaf)
+
+        def runtime():
+            return _inspect_signed_owned_namespace_runtime(
+                https_port=port, namespace_identity=namespace_identity,
+                executable_identity=executable_identity)
+
+        master = runtime()
+
+        def owner():
+            exact()
+            recheck_authenticated_owner()
+            _require_audited_native_package_for_activation(state, distribution="almalinux")
+            if (runtime() != master
+                    or _verify_tls_pair(root_fd, document, verify_identity=True) != leaf
+                    or prepare_dedicated_candidate_storage(
+                        "almalinux", document, allow_create=False) != storage
+                    or _owned_alma_runtime_temps(root_fd, dedicated=True) != scratch):
+                _deny("OWNED_DEDICATED_FINISH_OWNER_CHANGED")
+            verify_service_storage_mounts(master["main_pid_observed"])
+            _verify_owned_alma_runtime_service_view(master["main_pid_observed"], scratch)
+            exact()
+
+        def policy():
+            return _prepare_boot_egress_locked(
+                root_fd, state, plan["nft_candidate"], namespace_identity=namespace_identity,
+                generation=plan["generation"],
+                generation_manifest_sha256=plan["generation_manifest_sha256"],
+                profile_receipt_sha256=profile_receipt_sha256,
+                executable_receipt_sha256=executable_receipt_sha256,
+                recheck_owned=owner, allow_prepare=False, allow_boot_rollover=False)
+
+        owner()
+        baseline = policy()
+
+        def guarded():
+            owner()
+            if policy() != baseline:
+                _deny("OWNED_DEDICATED_FINISH_POLICY_CHANGED")
+            owner()
+
+        def health(publish):
+            result = _owned_dedicated_live_health_bound(
+                root_fd, context, old[_CATALOG] if publish else None,
+                publish=publish, require_withdrawn=not publish,
+                namespace_identity=namespace_identity, executable_identity=executable_identity,
+                recheck_owned=guarded)
+            if (result["main_pid"] != master["main_pid_observed"]
+                    or result["generation"] != snapshot["state_generation"]
+                    or result["catalog_observed"] is not publish):
+                _deny("OWNED_DEDICATED_FINISH_HEALTH_CHANGED")
+            return result
+
+        before = health(False)
+        guarded()
+        try:
+            _owned_live_write(state, nginx, public, guarded, expected_wal,
+                              expected, _CATALOG, old[_CATALOG])
+            after = health(True)
+            if before["listener_inode"] != after["listener_inode"] or expected != old:
+                _deny("OWNED_DEDICATED_FINISH_LISTENER_CHANGED")
+            _owned_live_finish(state, nginx, public, guarded, expected_wal, expected)
+        except Exception:
+            # No journal or foreign bytes means no compensating authority.
+            # Even if runtime health was lost, withdraw only our exact catalog
+            # under the still-published WAL; never claim recovery on error.
+            check_layout()
+            if (_read_file(state, _OWNED_WAL, 0, _MAX_WAL) == expected_wal
+                    and _read_owned_resources(state, nginx, public) == old):
+                _owned_live_write(state, nginx, public, check_layout, expected_wal,
+                                  dict(old), _CATALOG, None)
+            raise
+        return {**after, "status": "OWNED_DEDICATED_WAL_ROLLBACK_OBSERVED",
+                "wal_sha256": hashlib.sha256(expected_wal).hexdigest(),
+                "recovery_required": False, "storage": storage}
+
+
 def _owned_live_wait_generation(root_fd: int, identity: tuple, context: tuple) -> None:
     """A graceful reload is asynchronous; bounded retries cannot change authority."""
     deadline = time.monotonic() + 12

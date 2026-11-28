@@ -3999,3 +3999,120 @@ def test_dedicated_withdrawn_catalog_requires_fresh_pinned_tls_404(monkeypatch, 
         with pytest.raises(native.NativeV2TransactionError, match="WITHDRAWAL_UNVERIFIED"):
             native._require_dedicated_catalog_withdrawn((doc, 1, leaf))
     assert calls == [("/.well-known/repocache/catalog.json", 8192)]
+
+
+@pytest.mark.parametrize("fault", ["none", "wrong-wal", "pre-health", "post-health",
+                                   "listener", "owner-drift", "foreign-catalog",
+                                   "wal-lost", "policy-drift", "active-route"])
+def test_dedicated_wal_finalization_publishes_only_verified_prior(
+        filesystem, monkeypatch, fault):
+    """Real owned WAL/resource filesystem; mocked runtime and policy only."""
+    from types import SimpleNamespace
+    from repocache import server_native_nginx_effective_unit_v1 as unit
+    from repocache import server_native_installed_storage_v1 as storage
+    from repocache import server_root_control_host_preflight_v1 as host
+
+    root, state, _, _, _ = filesystem
+
+    def generation(number, previous=None):
+        cfg = document(1, generation=number)
+        cfg["deployment"]["paths"]["generated_include"] = native._OWNED_INCLUDE_PATH
+        cfg["deployment"]["listen"]["bind_address"] = "127.0.0.1"
+        active = fault == "active-route"
+        cfg["repositories"][0]["desired_state"] = "active" if active else "disabled"
+        raw = _canon(snapshot(generation=number, previous=previous, doc=cfg))
+        main, include, catalog = native._render_owned_managed_candidate(
+            cfg, number, "almalinux",
+            {"repo-0": {"mirror0.example.invalid": ["8.8.8.8"]}} if active else {})
+        return {V2_STATE: raw, native._OWNED_MAIN: main, native._INCLUDE: include,
+                native._CATALOG: catalog, native._OWNED_MANIFEST:
+                    native._owned_manifest_for(raw, main, include, catalog)}
+
+    old = generation(1)
+    new = generation(2, json.loads(old[V2_STATE]))
+    withdrawn = {**old, native._CATALOG: None}
+    paths = _owned_fixture_paths(filesystem, withdrawn)
+    catalog = paths[native._CATALOG]
+    wal = native._owned_wal_record(old, new, live=True)
+    pending = state / native._OWNED_WAL
+    pending.write_bytes(wal if fault != "wrong-wal" else b"foreign WAL")
+    pending.chmod(0o600)
+    calls = []
+    ns, exe = (17, 29), (31, 41)
+
+    def auth():
+        if fault == "owner-drift" and catalog.exists():
+            raise native.NativeV2TransactionError("OWNER_CHANGED")
+
+    def runtime(**kwargs):
+        assert kwargs["namespace_identity"] == ns and kwargs["executable_identity"] == exe
+        return {"main_pid_observed": 123}
+
+    def policy(*args, **kwargs):
+        assert not kwargs["allow_prepare"] and not kwargs["allow_boot_rollover"]
+        kwargs["recheck_owned"]()
+        return {"receipt": "different" if fault == "policy-drift" and catalog.exists() else "exact"}
+
+    def health(root_fd, context, catalog_bytes, **kwargs):
+        publish = kwargs["publish"]
+        assert kwargs["require_withdrawn"] is not publish
+        kwargs["recheck_owned"]()
+        calls.append(publish)
+        assert pending.read_bytes() == wal
+        if fault == "foreign-catalog" and publish:
+            catalog.write_bytes(b"foreign catalog")
+            raise native.NativeV2TransactionError("FOREIGN_CATALOG")
+        if fault == "wal-lost" and publish:
+            pending.unlink()
+            raise native.NativeV2TransactionError("WAL_LOST")
+        if fault == ("post-health" if publish else "pre-health"):
+            raise native.NativeV2TransactionError("HEALTH_REFUSED")
+        assert (catalog.read_bytes() if catalog.exists() else None) == catalog_bytes
+        return {"main_pid": 123, "generation": 1, "catalog_observed": publish,
+                "listener_inode": 5678 if publish and fault == "listener" else 1234}
+
+    monkeypatch.setattr(host, "require_native_host_preconditions", lambda: None)
+    monkeypatch.setattr(native, "_verify_current_root_fd", lambda *a: None)
+    monkeypatch.setattr(native, "_require_audited_native_package_for_activation", lambda *a, **kw: None)
+    monkeypatch.setattr(native, "_verify_tls_pair", lambda *a, **kw: "c"*64)
+    monkeypatch.setattr(native, "_prepare_boot_egress_locked", policy)
+    monkeypatch.setattr(native, "_owned_dedicated_live_health_bound", health)
+    monkeypatch.setattr(unit, "_inspect_signed_owned_namespace_runtime", runtime)
+    monkeypatch.setattr(storage, "prepare_dedicated_candidate_storage", lambda *a, **kw: {})
+    monkeypatch.setattr(native, "_owned_alma_runtime_temps", lambda *a, **kw: ())
+    monkeypatch.setattr(native, "verify_service_storage_mounts", lambda *a: None)
+    monkeypatch.setattr(native, "_verify_owned_alma_runtime_service_view", lambda *a: None)
+    monkeypatch.setattr(native.pwd, "getpwnam", lambda name: SimpleNamespace(pw_uid=33))
+
+    def invoke():
+        with native._locked(root, 0) as state_fd:
+            return native._finish_owned_prepared_wal_dedicated_locked(
+                root, state_fd, namespace_identity=ns, executable_identity=exe,
+                expected_wal=wal, profile_receipt_sha256="a"*64,
+                executable_receipt_sha256="b"*64, recheck_authenticated_owner=auth)
+
+    if fault == "none":
+        result = invoke()
+        assert result["status"] == "OWNED_DEDICATED_WAL_ROLLBACK_OBSERVED"
+        assert result["catalog_observed"] and not result["recovery_required"]
+        assert result["wal_sha256"] == hashlib.sha256(wal).hexdigest()
+        assert calls == [False, True]
+        assert _fixture_resource_bytes(paths) == old
+        _assert_owned_fixture_clean(filesystem, paths)
+        with pytest.raises(native.NativeV2TransactionError):
+            invoke()
+        assert _fixture_resource_bytes(paths) == old
+    else:
+        with pytest.raises(native.NativeV2TransactionError):
+            invoke()
+        expected = ({**old, native._CATALOG: b"foreign catalog"} if fault == "foreign-catalog"
+                    else old if fault == "wal-lost" else withdrawn)
+        assert _fixture_resource_bytes(paths) == expected
+        if fault == "wal-lost":
+            assert not pending.exists()
+        else:
+            assert pending.read_bytes() == (b"foreign WAL" if fault == "wrong-wal" else wal)
+        if fault in ("wrong-wal", "active-route"):
+            assert not calls
+        assert not any((path.parent / native._OWNED_STAGES[name]).exists()
+                       for name, path in paths.items())
