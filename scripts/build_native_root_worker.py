@@ -43,6 +43,7 @@ MODULES = (
     "server_nginx_tls_listener_candidate_v1",
     "server_preflight_v1",
     "server_proposed_state_v2_store",
+    "server_protected_namespace_bootstrap_v1",
     "server_protected_state_inspect_v1",
     "server_protected_state_store_v1",
     "server_repository_plan_v1",

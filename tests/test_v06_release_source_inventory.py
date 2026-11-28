@@ -126,10 +126,14 @@ import sys, zipimport
 sys.path.insert(0, sys.argv[1])
 from repocache import server_nginx_metrics_bundle_join_v1 as joined
 from repocache import server_nginx_metrics_candidate_v1 as metrics
-for module in (joined, metrics):
+from repocache import server_protected_namespace_bootstrap_v1 as bootstrap
+from repocache import server_native_v2_transaction_v1 as transaction
+for module in (joined, metrics, bootstrap, transaction):
     assert isinstance(module.__loader__, zipimport.zipimporter)
     assert module.__loader__.archive == sys.argv[1]
 assert joined.render_nginx_metrics_candidate is metrics.render_nginx_metrics_candidate
+assert transaction._dedicated_public_directory is bootstrap._dedicated_public_directory
+assert transaction._DEDICATED_PUBLIC_CONTEXT == bootstrap._DEDICATED_PUBLIC_CONTEXT
 """
     result = subprocess.run(
         [sys.executable, "-IS", "-B", "-c", imports, str(target)],
