@@ -1574,6 +1574,36 @@ with ExitStack() as stack:
 """
 
 
+_DEDICATED_INITIAL_STAGE_CHILD = _DEDICATED_RECOVERY_CHILD.replace(
+    "transaction._recover_installed_prepared_dedicated(pins)",
+    "transaction._stage_installed_initial_dedicated_generation(pins)")
+_DEDICATED_INITIAL_RESTORE_CHILD = _DEDICATED_RECOVERY_CHILD.replace(
+    "transaction._recover_installed_prepared_dedicated(pins)",
+    "transaction._restore_installed_initial_dedicated_generation(pins)")
+
+
+def _stage_authenticated_initial_dedicated_generation(
+    assets: Path, *, commit: str, archive_sha256: str,
+    executable_receipt_sha256: str, proposal_sha256: str,
+) -> dict:
+    """Authenticated stopped first-generation staging, never start or publish."""
+    return _authenticated_prepared_dedicated_bridge(
+        assets, commit=commit, archive_sha256=archive_sha256, initial_action="stage",
+        recovery_pins=dict(executable_receipt_sha256=executable_receipt_sha256,
+                           proposal_sha256=proposal_sha256))
+
+
+def _restore_authenticated_initial_dedicated_generation(
+    assets: Path, *, commit: str, archive_sha256: str,
+    executable_receipt_sha256: str, wal_sha256: str,
+) -> dict:
+    """Restore only a stopped, pre-profile initial generation under its exact WAL."""
+    return _authenticated_prepared_dedicated_bridge(
+        assets, commit=commit, archive_sha256=archive_sha256, initial_action="restore",
+        recovery_pins=dict(executable_receipt_sha256=executable_receipt_sha256,
+                           wal_sha256=wal_sha256))
+
+
 def _recover_authenticated_prepared_dedicated_nginx(
     assets: Path, *, commit: str, archive_sha256: str,
     executable_receipt_sha256: str, profile_receipt_sha256: str,
@@ -1890,8 +1920,15 @@ def _authenticated_prepared_dedicated_bridge(
     stage_profile: bool = False, load_profile: bool = False,
     prepare_storage: bool = False, prepare_runtime: bool = False,
     pending_placement: bool = False,
+    initial_action: str | None = None,
 ) -> dict:
-    if (expected_rolled_pins is not None and recovery_pins is not None
+    if (initial_action not in (None, "stage", "restore")
+            or (initial_action is not None and (
+                recovery_pins is None or expected_rolled_pins is not None or any((
+                    prepare, start, rollover, pending_prepare, resume_boot, pending_start,
+                    stage_profile, load_profile, prepare_storage, prepare_runtime,
+                    pending_placement))))
+            or expected_rolled_pins is not None and recovery_pins is not None
             or type(prepare) is not bool or type(start) is not bool or type(rollover) is not bool
             or type(pending_prepare) is not bool or (pending_prepare and not prepare)
             or type(resume_boot) is not bool or (resume_boot and (not prepare or rollover))
@@ -1916,6 +1953,9 @@ def _authenticated_prepared_dedicated_bridge(
         {"generation_manifest_sha256"} if prepare else
         {"generation_manifest_sha256", "boot_receipt_sha256"} if start or prepare_storage or prepare_runtime else
         {"boot_receipt_sha256", "wal_sha256"})
+    if initial_action is not None:
+        fields = {"executable_receipt_sha256",
+                  "proposal_sha256" if initial_action == "stage" else "wal_sha256"}
     if stage_profile:
         fields.remove("profile_receipt_sha256")
     if rollover:
@@ -1966,7 +2006,32 @@ def _authenticated_prepared_dedicated_bridge(
                 if expected_rolled_pins is not None and recovery_pins != expected_rolled_pins:
                     _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
             validate_pins(recovery_pins)
-            if prepare or start or prepare_storage or prepare_runtime:
+            if initial_action is not None:
+                from repocache.server_native_v2_transaction_v1 import (
+                    _OWNED_WAL_TMP, _OWNED_MANIFEST, _OWNED_LIMIT,
+                    _owned_layout_locked, _read_owned_resources, _validate_owned_resources,
+                )
+                from repocache.server_root_control_fixed_candidate_v1 import _load_private_under_root
+                with _owned_layout_locked(root, state, recovering=initial_action == "restore") as layout:
+                    if initial_action == "stage":
+                        old = _read_owned_resources(*layout[:3])
+                        if (_validate_owned_resources(old, distribution="almalinux") is not None
+                                or _read_file(state, _OWNED_WAL, 0, _MAX_WAL) is not None
+                                or _read_file(state, _OWNED_WAL_TMP, 0, _MAX_WAL) is not None):
+                            _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
+                        report, proposal = _load_private_under_root(root, owner_uid=0, owner_gid=0)
+                        if (report["expected_generation"] != 0
+                                or report["expected_state_sha256"] is not None
+                                or hashlib.sha256(proposal).hexdigest() != recovery_pins["proposal_sha256"]):
+                            _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
+                    else:
+                        wal = _read_file(state, _OWNED_WAL, 0, _MAX_WAL)
+                        tmp = _read_file(state, _OWNED_WAL_TMP, 0, _MAX_WAL)
+                        if (wal is None) == (tmp is None):
+                            _reject("NATIVE_DEDICATED_RECOVERY_WAL_REFUSED")
+                        if hashlib.sha256(wal if wal is not None else tmp).hexdigest() != recovery_pins["wal_sha256"]:
+                            _reject("NATIVE_DEDICATED_RECOVERY_WAL_REFUSED")
+            elif prepare or start or prepare_storage or prepare_runtime:
                 from repocache.server_native_v2_transaction_v1 import (
                     _OWNED_MANIFEST, _OWNED_LIMIT, _OWNED_WAL_TMP,
                 )
@@ -2033,6 +2098,8 @@ def _authenticated_prepared_dedicated_bridge(
     try:
         result = subprocess.run(
             ("/usr/bin/python3", "-IS", "-B", "-c",
+             _DEDICATED_INITIAL_STAGE_CHILD if initial_action == "stage" else
+             _DEDICATED_INITIAL_RESTORE_CHILD if initial_action == "restore" else
              _DEDICATED_PROFILE_CHILD if stage_profile else
              _DEDICATED_PROFILE_LOAD_CHILD if load_profile else
              _DEDICATED_PENDING_RESUME_CHILD if resume_boot and pending_prepare else
@@ -2065,7 +2132,25 @@ def _authenticated_prepared_dedicated_bridge(
         report = json.loads(result.stdout)
         if type(report) is not dict:
             _reject("NATIVE_DEDICATED_RECOVERY_CHILD_REFUSED")
-        if stage_profile:
+        if initial_action is not None:
+            expected_status = ("OWNED_INITIAL_INSTALLED_GENERATION_STAGED" if initial_action == "stage"
+                               else "OWNED_INITIAL_INSTALLED_BOOTSTRAP_RESTORED")
+            required = {"status", "wal_sha256", "catalog_withdrawn", "recovery_required",
+                        "executable_receipt_sha256", "authorizes_systemctl",
+                        "authorizes_nginx_activation", "authorizes_catalog_publication"}
+            if initial_action == "stage":
+                required |= {"proposal_sha256", "generation_manifest_sha256"}
+            if (set(report) != required or report["status"] != expected_status
+                    or any(report.get(key) != recovery_pins[key] for key in fields)
+                    or any(type(report[key]) is not str or signatures.HEX64.fullmatch(report[key]) is None
+                           for key in required & {"wal_sha256", "generation_manifest_sha256"})
+                    or report["catalog_withdrawn"] is not True
+                    or report["recovery_required"] is not (initial_action == "stage")
+                    or any(report[key] is not False for key in (
+                        "authorizes_systemctl", "authorizes_nginx_activation",
+                        "authorizes_catalog_publication"))):
+                _reject("NATIVE_DEDICATED_RECOVERY_CHILD_REFUSED")
+        elif stage_profile:
             if (report.get("status") != "OWNED_DEDICATED_PROFILE_STAGED"
                     or report.get("generation_manifest_sha256") !=
                        recovery_pins["generation_manifest_sha256"]
