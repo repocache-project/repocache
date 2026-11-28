@@ -5156,7 +5156,8 @@ def test_retained_rolled_committed_selection_reconstructs_from_real_protected_by
 @pytest.mark.parametrize("fault", ["fresh", "repeat", "partial", "foreign-label",
                                    "symlink", "unsafe-run", "unsafe-parent", "xattr",
                                    "mount", "permissive", "label-failure", "drift",
-                                   "readback", "foreign-content"])
+                                   "readback", "foreign-content", "bad-child",
+                                   "partial-child", "child-content"])
 def test_prepare_owned_dedicated_runtime_parent_is_fresh_only(tmp_path, monkeypatch, fault):
     """Real descriptors and scratch creation; mock only labels and host observations."""
     from types import SimpleNamespace
@@ -5169,7 +5170,8 @@ def test_prepare_owned_dedicated_runtime_parent_is_fresh_only(tmp_path, monkeypa
     legacy = b"system_u:object_r:var_run_t:s0"
     names = sorted(name for _, name in native._OWNED_RUNTIME_TEMP_NAMES)
     existing = fault in ("repeat", "partial", "foreign-label", "unsafe-parent",
-                         "xattr", "mount", "foreign-content")
+                         "xattr", "mount", "foreign-content", "bad-child",
+                         "partial-child", "child-content")
     if existing:
         runtime.mkdir(mode=0o755)
         runtime.chmod(0o700 if fault == "partial" else 0o775 if fault == "unsafe-parent" else 0o755)
@@ -5180,12 +5182,20 @@ def test_prepare_owned_dedicated_runtime_parent_is_fresh_only(tmp_path, monkeypa
     if fault == "foreign-content":
         (runtime / "retain").write_bytes(b"foreign")
     values = {runtime.stat().st_ino: legacy if fault == "foreign-label" else pid_context} if existing else {}
-    if fault == "repeat":
+    if fault in ("repeat", "bad-child", "partial-child", "child-content"):
         for name in names:
             leaf = runtime / name
             leaf.mkdir(mode=0o700)
             os.chown(leaf, 33, 0)
             values[leaf.stat().st_ino] = rw_context
+        if fault == "bad-child":
+            values[(runtime / names[-1]).stat().st_ino] = legacy
+        elif fault == "partial-child":
+            os.chown(runtime / names[-1], 0, 0)
+        elif fault == "child-content":
+            (runtime / names[-1] / "retain").write_bytes(b"foreign")
+        if fault != "repeat":
+            (runtime / names[0]).rmdir()
     writes = []
 
     def labels(distribution, *, dedicated):
@@ -5249,5 +5259,9 @@ def test_prepare_owned_dedicated_runtime_parent_is_fresh_only(tmp_path, monkeypa
                 assert (runtime / "retain").read_bytes() == b"foreign"
             if fault == "partial":
                 assert stat.S_IMODE(runtime.stat().st_mode) == 0o700
+            if fault in ("bad-child", "partial-child", "child-content"):
+                assert not (runtime / names[0]).exists()
+            if fault == "child-content":
+                assert (runtime / names[-1] / "retain").read_bytes() == b"foreign"
     finally:
         os.close(fd)
