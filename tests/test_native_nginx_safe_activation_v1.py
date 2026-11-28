@@ -1203,3 +1203,24 @@ def test_authenticated_activation_selects_dedicated_only_from_retained_evidence(
                                                                "no-wal", "committed-selection")
                          else ["audit"])
     assert not locked and sorted(os.listdir(tmp_path)) == before
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("DropInPaths=\nNeedDaemonReload=yes\n", False),
+    ("NeedDaemonReload=yes\nDropInPaths=\n", False),
+    ("DropInPaths=/etc/systemd/system/repocache-nginx.service.d/90-repocache-dedicated.conf\nNeedDaemonReload=no\n", True),
+    ("NeedDaemonReload=no\nDropInPaths=/etc/systemd/system/repocache-nginx.service.d/90-repocache-dedicated.conf\n", True),
+    ("DropInPaths=\nNeedDaemonReload=no\n", None),
+    ("DropInPaths=/etc/systemd/system/repocache-nginx.service.d/90-repocache-dedicated.conf\nNeedDaemonReload=yes\n", None),
+    ("DropInPaths=/foreign.conf\nNeedDaemonReload=no\n", None),
+    ("DropInPaths=\nNeedDaemonReload=yes\nNeedDaemonReload=no\n", None),
+    ("NeedDaemonReload=yes\n", None),
+    ("", None),
+])
+def test_fixture_stopped_profile_loaded_requires_exact_pair(raw, expected):
+    from scripts.ci_native_nginx_activate_guest import fixture_stopped_profile_loaded
+    if expected is None:
+        with pytest.raises(AssertionError, match="Unexpected stopped profile state"):
+            fixture_stopped_profile_loaded(raw)
+    else:
+        assert fixture_stopped_profile_loaded(raw) is expected

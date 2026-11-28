@@ -1760,4 +1760,10 @@ failed/uncertain readback refuse without starting, stopping or enabling any
 service. Keep the profile receipt for explicit retry; never clean up an
 ambiguous load. This does not introduce a socket operation, automatic boot
 activation, namespace creation or catalog publication. The committed VM
-fixture now uses the actual signed load and read-only repeat paths.
+fixture now uses the actual signed load and read-only repeat paths. An
+inactive unit may be garbage-collected and reloaded by PID1 on demand,
+so the native fixture classifies both exact states rather than requiring
+NeedDaemonReload=yes unconditionally. Evidence distinguishes an actual
+manager reload from an already-loaded read-only observation; an unexercised
+native reload branch is not a PASS. The installed worker's exact-state
+refusals and authentication requirements are unchanged.

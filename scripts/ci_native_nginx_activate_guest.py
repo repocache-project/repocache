@@ -30,6 +30,19 @@ def run(*cmd: str) -> subprocess.CompletedProcess:
                           check=False)
 
 
+def fixture_stopped_profile_loaded(raw: str) -> bool:
+    """Classify only the two exact PID1 profile states in the disposable VM."""
+    fields = raw.splitlines()
+    pending = ["DropInPaths=", "NeedDaemonReload=yes"]
+    loaded = [
+        "DropInPaths=/etc/systemd/system/repocache-nginx.service.d/90-repocache-dedicated.conf",
+        "NeedDaemonReload=no",
+    ]
+    assert sorted(fields) in (sorted(pending), sorted(loaded)), (
+        "Unexpected stopped profile state", raw)
+    return sorted(fields) == sorted(loaded)
+
+
 def fixture_selinux_connect_denied(raw: str, worker_pids: set[int]) -> bool:
     """Match only an enforcing AVC for this disposable upstream fixture."""
     if len(raw) > 1024 * 1024 or not worker_pids:
@@ -2864,6 +2877,17 @@ finally:
             require("/usr/bin/systemctl", "daemon-reload")
         else:
             load_pins = dict(**profile_pins, profile_receipt_sha256=profile["receipt_sha256"])
+
+            def observed_profile_loaded():
+                shown = run("/usr/bin/systemctl", "show", "--no-pager",
+                            "--property=DropInPaths", "--property=NeedDaemonReload", OWN)
+                assert shown.returncode == 0, shown.stderr
+                return fixture_stopped_profile_loaded(shown.stdout)
+
+            # PID1 may discard an unreferenced inactive unit and load its
+            # new on-disk drop-in on the next observation. Do not assume
+            # every freshly placed profile requires a manager reload.
+            was_loaded = observed_profile_loaded()
             for field in ("executable_receipt_sha256", "profile_receipt_sha256",
                           "generation_manifest_sha256"):
                 try:
@@ -2876,11 +2900,20 @@ finally:
                 assert profile_receipt.read_bytes() == saved_profile
                 require_prior_resources()
                 require_status(OWN, False, False)
-                assert run("/usr/bin/systemctl", "show", "--property=NeedDaemonReload",
-                           "--value", OWN).stdout.strip() == "yes"
+                now_loaded = observed_profile_loaded()
+                assert not was_loaded or now_loaded
+                was_loaded = now_loaded
             loaded = native._load_authenticated_committed_dedicated_profile(assets, **load_pins)
             assert loaded["status"] == "OWNED_DEDICATED_PROFILE_LOADED"
-            assert loaded["profile_loaded"] is True and loaded["daemon_reloaded"] is True
+            assert loaded["profile_loaded"] is True
+            assert type(loaded["daemon_reloaded"]) is bool
+            assert not was_loaded or loaded["daemon_reloaded"] is False
+            assert observed_profile_loaded() is True
+            if loaded["daemon_reloaded"]:
+                print("PASS: signed stopped profile required actual manager reload", flush=True)
+            else:
+                print("PASS: signed stopped profile already loaded; no manager reload; "
+                      "native stale-profile reload not exercised in this phase", flush=True)
             assert loaded["receipt_sha256"] == profile["receipt_sha256"]
             assert loaded["authorizes_nginx_activation"] is False
             assert loaded["authorizes_catalog_publication"] is False
