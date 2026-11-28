@@ -156,6 +156,9 @@ def bootstrap_protected_namespace_under_root(
     try:
         with ExitStack() as stack:
             lib_fd, chain = _walk(root_fd, _PARENT, stack, owner_uid)
+            if not _dedicated_public and any(
+                    name.startswith(_DEDICATED_WORKER_STAGE) for name in os.listdir(lib_fd)):
+                _deny("DEDICATED_WORKER_STAGE_CONFLICT")
             if _dedicated_public:
                 _dedicated_ancestry(root_fd, chain)
             # Existing /var/lib is an owned, non-world-writable native anchor.
@@ -223,6 +226,8 @@ def bootstrap_protected_namespace_under_root(
             with _locked(root_fd, owner_uid):
                 if _lock_identity(state_fd, owner_uid) != lock:
                     _deny("LOCK_CHANGED")
+                if not _dedicated_public and _DEDICATED_WORKER_CLAIM in os.listdir(state_fd):
+                    _deny("DEDICATED_WORKER_CLAIM_REFUSED")
                 if _dedicated_public:
                     _dedicated_ancestry(root_fd, [*chain, (lib_fd, _ROOT_NAME, repocache_fd, ()),
                                                  (repocache_fd, _STATE_NAME, state_fd, ())])

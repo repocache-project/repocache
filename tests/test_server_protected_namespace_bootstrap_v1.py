@@ -291,3 +291,175 @@ def test_dedicated_public_namespace_is_fresh_only(isolated_root, monkeypatch, fa
             assert second["dedicated_public_label_verified"] and not second["state_directory_created"]
         assert writes == [original.st_ino] and public.stat().st_ino == original.st_ino
         assert lock.stat().st_ino == lock_inode
+
+@pytest.fixture
+def dedicated_claim_root(isolated_root, monkeypatch):
+    import stat
+    from repocache import server_protected_namespace_bootstrap_v1 as bootstrap
+    root_fd, root, lib, uid = isolated_root
+    if uid != 0:
+        pytest.skip("requires root-owned disposable namespace")
+    digest = "a" * 64
+    staged = lib / (bootstrap._DEDICATED_WORKER_STAGE + digest)
+    final = lib / "repocache"
+    labels = {}
+    writes = []
+    foreign = b"system_u:object_r:var_lib_t:s0\0"
+    context = bootstrap._DEDICATED_PUBLIC_CONTEXT + b"\0"
+
+    monkeypatch.setattr(os, "listxattr", lambda fd: ["security.selinux"])
+    monkeypatch.setattr(os, "getxattr", lambda fd, name: labels.get(os.fstat(fd).st_ino, foreign))
+
+    def set_label(fd, name, value):
+        assert name == "security.selinux" and value == context
+        assert stat.S_IMODE(os.fstat(fd).st_mode) == 0o700
+        assert not final.exists()
+        assert os.fstat(fd).st_ino == (staged / "public").stat().st_ino
+        labels[os.fstat(fd).st_ino] = value
+        writes.append(os.fstat(fd).st_ino)
+
+    monkeypatch.setattr(os, "setxattr", set_label)
+
+    def prepare(**kwargs):
+        return bootstrap._prepare_dedicated_worker_namespace_under_root(
+            root_fd, receipt_sha256=kwargs.pop("receipt_sha256", digest), **kwargs)
+
+    return bootstrap, root_fd, final, staged, digest, prepare, labels, writes
+
+
+def test_dedicated_claim_atomic_publication_and_exact_repeat(dedicated_claim_root):
+    bootstrap, root_fd, final, staged, digest, prepare, labels, writes = dedicated_claim_root
+    first = prepare()
+    assert first["status"] == "FRESH_DEDICATED_WORKER_NAMESPACE_DURABLE"
+    assert first["worker_receipt_claim_verified"] and first["dedicated_public_label_verified"]
+    assert not first["authorizes_host_installation"] and not first["authorizes_nginx_activation"]
+    assert not staged.exists()
+    state = final / "server"
+    pending = state / (bootstrap._WORKER_PLACEMENT_PREFIX + "pending-" + digest)
+    claim = state / bootstrap._DEDICATED_WORKER_CLAIM
+    assert pending.read_bytes() == b"" and claim.stat().st_mode & 0o777 == 0o600
+    tracked = (final, state, final / "public", state / LOCK_NAME, pending, claim)
+    before = [(path.stat().st_ino, path.stat().st_mtime_ns, path.stat().st_ctime_ns)
+              for path in tracked]
+    second = prepare()
+    assert second["status"] == "EXISTING_DEDICATED_WORKER_NAMESPACE_VERIFIED"
+    assert [(path.stat().st_ino, path.stat().st_mtime_ns, path.stat().st_ctime_ns)
+            for path in tracked] == before
+    assert writes == [(final / "public").stat().st_ino]
+    assert not list((final / "public").iterdir())
+    with _locked(root_fd, 0):
+        pass
+    with pytest.raises(ProtectedBootstrapError):
+        provision(root_fd, 0, public_catalog=True)
+    assert prepare() == second
+
+
+@pytest.mark.parametrize("point", ["stage_claim_durable", "before_namespace_publish", "namespace_published"])
+def test_dedicated_claim_interruption_resumes_same_inodes(dedicated_claim_root, point):
+    bootstrap, root_fd, final, staged, digest, prepare, labels, writes = dedicated_claim_root
+
+    def interrupt(step):
+        if step == point:
+            raise RuntimeError("interrupted")
+
+    with pytest.raises(RuntimeError, match="interrupted"):
+        prepare(inject_fault=interrupt)
+    retained = final if point == "namespace_published" else staged
+    assert retained.exists()
+    assert final.exists() is (point == "namespace_published")
+    before = [(retained / path).stat().st_ino for path in (
+        ".", "public", "server", "server/" + LOCK_NAME,
+        "server/" + bootstrap._DEDICATED_WORKER_CLAIM)]
+    assert prepare()["worker_receipt_claim_verified"]
+    assert [(final / path).stat().st_ino for path in (
+        ".", "public", "server", "server/" + LOCK_NAME,
+        "server/" + bootstrap._DEDICATED_WORKER_CLAIM)] == before
+    assert not staged.exists() and writes == [before[1]]
+
+
+@pytest.mark.parametrize("fault", ["early-interruption", "foreign-stage", "other-receipt", "legacy",
+                                   "labelled-unclaimed", "claim-drift", "lock-replaced", "public-replaced",
+                                   "extra-state", "extra-public", "stage-and-final", "marker-drift"])
+def test_dedicated_claim_refuses_unowned_or_changed_namespace(dedicated_claim_root, fault):
+    bootstrap, root_fd, final, staged, digest, prepare, labels, writes = dedicated_claim_root
+    if fault == "early-interruption":
+        def interrupt(step):
+            if step == "stage_directory_durable":
+                raise RuntimeError("interrupted")
+        with pytest.raises(RuntimeError):
+            prepare(inject_fault=interrupt)
+        assert staged.is_dir() and not final.exists()
+    elif fault == "foreign-stage":
+        staged.mkdir(mode=0o700)
+        (staged / "foreign").write_bytes(b"preserve")
+    elif fault == "other-receipt":
+        other = staged.with_name(bootstrap._DEDICATED_WORKER_STAGE + "b"*64)
+        other.mkdir(mode=0o700)
+    elif fault in ("legacy", "labelled-unclaimed"):
+        provision(root_fd, 0, public_catalog=True)
+        if fault == "labelled-unclaimed":
+            labels[(final / "public").stat().st_ino] = bootstrap._DEDICATED_PUBLIC_CONTEXT + b"\0"
+    else:
+        prepare()
+        state = final / "server"
+        if fault == "claim-drift":
+            (state / bootstrap._DEDICATED_WORKER_CLAIM).write_bytes(b"foreign")
+        elif fault == "lock-replaced":
+            lock = state / LOCK_NAME
+            lock.rename(state / "old-lock")
+            lock.touch(mode=0o600)
+        elif fault == "public-replaced":
+            public = final / "public"
+            public.rename(final / "old-public")
+            public.mkdir(mode=0o755)
+            labels[public.stat().st_ino] = bootstrap._DEDICATED_PUBLIC_CONTEXT + b"\0"
+        elif fault == "extra-state":
+            (state / "foreign").write_bytes(b"preserve")
+        elif fault == "extra-public":
+            (final / "public/catalog.json").write_bytes(b"foreign")
+        elif fault == "stage-and-final":
+            staged.mkdir(mode=0o700)
+        else:
+            (state / (bootstrap._WORKER_PLACEMENT_PREFIX + "pending-" + digest)).write_bytes(b"foreign")
+    before = list(writes)
+    present = final.exists()
+    snapshot = {str(path.relative_to(final.parent)): (path.lstat().st_ino, path.lstat().st_mode,
+                path.read_bytes() if path.is_file() else None)
+                for path in final.parent.rglob("*")}
+    with pytest.raises(ProtectedBootstrapError):
+        prepare()
+    assert final.exists() is present and writes == before
+    assert {str(path.relative_to(final.parent)): (path.lstat().st_ino, path.lstat().st_mode,
+            path.read_bytes() if path.is_file() else None)
+            for path in final.parent.rglob("*")} == snapshot
+
+
+def test_dedicated_claim_conflicting_publication_never_replaces(dedicated_claim_root):
+    bootstrap, root_fd, final, staged, digest, prepare, labels, writes = dedicated_claim_root
+
+    def conflict(step):
+        if step == "before_namespace_publish":
+            final.mkdir(mode=0o700)
+            (final / "foreign").write_bytes(b"preserve")
+
+    with pytest.raises(ProtectedBootstrapError):
+        prepare(inject_fault=conflict)
+    assert (final / "foreign").read_bytes() == b"preserve"
+    assert staged.is_dir()
+    with pytest.raises(ProtectedBootstrapError):
+        prepare()
+    assert (final / "foreign").read_bytes() == b"preserve"
+
+
+def test_dedicated_claim_legacy_bootstrap_refuses_staged_namespace(dedicated_claim_root):
+    bootstrap, root_fd, final, staged, digest, prepare, labels, writes = dedicated_claim_root
+    def interrupt(step):
+        if step == "stage_claim_durable":
+            raise RuntimeError("interrupted")
+    with pytest.raises(RuntimeError):
+        prepare(inject_fault=interrupt)
+    assert not final.exists()
+    with pytest.raises(ProtectedBootstrapError):
+        provision(root_fd, 0, public_catalog=True)
+    assert not final.exists() and staged.is_dir()
+    assert prepare()["worker_receipt_claim_verified"]

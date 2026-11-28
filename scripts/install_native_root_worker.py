@@ -39,7 +39,7 @@ from repocache.server_stock_nginx_package_owner_v1 import inspect_stock_nginx_pa
 from repocache.server_protected_namespace_bootstrap_v1 import (
     bootstrap_protected_namespace_under_root, _dedicated_ancestry,
     _dedicated_public_directory, _prepare_dedicated_worker_namespace_under_root,
-    _require_dedicated_worker_claim,
+    _require_dedicated_worker_claim, _DEDICATED_WORKER_CLAIM,
 )
 from repocache.server_locked_manifest_reconcile_v1 import (
     _validate_proposed_v2_snapshot, preview_proposed_v2_state_transition,
@@ -327,6 +327,8 @@ def _place_worker_files(
                 namespace = bootstrap_protected_namespace_under_root(
                     fd, owner_uid=0, public_catalog=True)
         with _locked(fd, 0) as state:
+            if not dedicated and _named(state, _DEDICATED_WORKER_CLAIM) is not None:
+                _reject("NATIVE_WORKER_DEDICATED_NAMESPACE_REFUSED")
             if dedicated:
                 public, public_chain = _walk(fd, ("var", "lib", "repocache", "public"), stack, 0)
 
@@ -2751,6 +2753,8 @@ def _select_rolled_activation_recovery_locked(root: int, state: int, distributio
     prefixes = (_NAMESPACE_PROFILE_RECEIPT.removesuffix(".json"),
                 _BOOT_EGRESS_RECEIPT.removesuffix(".json"))
     if not any(name.startswith(prefixes) for name in names):
+        if _DEDICATED_WORKER_CLAIM in names:
+            _reject("NATIVE_DEDICATED_ACTIVATION_RECOVERY_REFUSED")
         return None
     if (distribution != "almalinux"
             or not {_NAMESPACE_PROFILE_RECEIPT, _BOOT_EGRESS_RECEIPT} <= names

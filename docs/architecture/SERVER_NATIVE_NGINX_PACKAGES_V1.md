@@ -2147,3 +2147,15 @@ campaign compares the observed fixed tool file identities around actual
 compilation and policy loading. This proves only those fixed tool payloads,
 not every transitive tool or dependency, nor the active kernel policy or
 authority to install/activate on a real host.
+
+Dedicated worker placement now builds the protected namespace as a private
+sibling stage. The root-owned claim binds the exact authenticated placement
+receipt digest to the root, namespace, private state, public directory and
+lock inodes. The state lock and pending placement marker are durable before
+atomic no-replace publication. A fully claimed staged namespace can resume
+publication at the same inodes after interruption; an incomplete stage,
+unclaimed legacy namespace, changed identity, conflicting stage or foreign
+public entry is refused without relabelling or deletion. The signed worker
+placement rechecks this claim under the retained state lock. Legacy placement
+and activation cannot adopt the dedicated claim or staging path. This is
+still a detached-root composition; actual host placement remains refused.
