@@ -2858,8 +2858,8 @@ finally:
                 require_prior_resources()
                 try:
                     signed("verify")
-                except subprocess.CalledProcessError:
-                    pass
+                except AssertionError as exc:
+                    assert "BOOT_POLICY_PENDING" in str(exc), str(exc)
                 else:
                     raise AssertionError("Foreign pin initialized pending policy")
             policy = native._resume_authenticated_prepared_wal_dedicated_nginx(assets, **resume_pins)
