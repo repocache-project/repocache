@@ -289,21 +289,31 @@ def load_fixed_candidate_policy():
     booleans = command("/usr/sbin/getsebool", "-a").stdout
     vendor = (VENDOR.stat().st_ino, hashlib.sha256(VENDOR.read_bytes()).hexdigest(),
               os.getxattr(VENDOR, "security.selinux"))
+    from scripts import install_native_root_worker as native
+    root = Path("/root/pr237-synthetic-fixture")
+    pins = json.loads((root / "pins.json").read_bytes())
+    compiled_bytes, compilation = native._compile_authenticated_fixed_dedicated_policy(
+        root / "assets", **pins)
+    digest = hashlib.sha256(compiled_bytes).hexdigest()
+    assert compilation["policy_sha256"] == hashlib.sha256(raw).hexdigest() == report["policy_sha256"]
+    assert compilation["compiled_policy_sha256"] == digest
+    assert compilation["source_sha"] == pins["commit"]
+    assert compilation["archive_sha256"] == pins["archive_sha256"]
+    assert compilation["signed_source_compilation_observed"]
+    assert not compilation["native_toolchain_provenance_verified"]
+    assert not compilation["authorizes_policy_installation"]
+    assert not compilation["authorizes_host_installation"]
+    assert not compilation["authorizes_nginx_activation"]
+    assert not compilation["runtime_selinux_policy_verified"]
+    # Only this marked VM fixture installs the compiled module.
     with tempfile.TemporaryDirectory(prefix="repocache-signed-policy-", dir="/var/lib") as place:
-        build = Path(place)
-        source = build / (FIXED_MODULE + ".te")
-        with source.open("xb") as stream:
+        compiled = Path(place) / (FIXED_MODULE + ".pp")
+        with compiled.open("xb") as stream:
             os.fchmod(stream.fileno(), 0o600)
-            stream.write(raw)
+            stream.write(compiled_bytes)
             stream.flush()
             os.fsync(stream.fileno())
-        assert source.read_bytes() == raw
-        command("/usr/bin/make", "-C", str(build), "-f",
-                "/usr/share/selinux/devel/Makefile", FIXED_MODULE + ".pp", timeout=120)
-        compiled = build / (FIXED_MODULE + ".pp")
-        info = compiled.lstat()
-        assert stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and 0 < info.st_size <= 4 * 1024 * 1024
-        digest = hashlib.sha256(compiled.read_bytes()).hexdigest()
+        assert compiled.read_bytes() == compiled_bytes
         assert _fixed_policy_inventory() == before_full
         command("/usr/sbin/semodule", "-X", "400", "-i", str(compiled), timeout=120)
         assert hashlib.sha256(compiled.read_bytes()).hexdigest() == digest

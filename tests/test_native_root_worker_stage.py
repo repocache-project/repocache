@@ -1537,3 +1537,33 @@ def test_installer_compiled_policy_observation_is_readonly_and_exact(monkeypatch
             assert not calls and not hosts
         elif fault in ("disabled", "alternate-priority", "missing-enabled", "duplicate"):
             assert not any("-E" in args for args in calls)
+
+@pytest.mark.parametrize("fault", ["debian", "signature", "wrong-commit", "wrong-worker"])
+def test_compile_authenticated_policy_refuses_before_native_build(monkeypatch, tmp_path, fault):
+    from types import SimpleNamespace
+    calls = []
+    worker = b"exact signed worker fixture"
+    monkeypatch.setattr(install, "_native_distro",
+                        lambda: "debian" if fault == "debian" else "almalinux")
+    monkeypatch.setattr(install, "require_native_host_preconditions", lambda: None)
+    monkeypatch.setattr(install, "_Labels", lambda *args, **kw: SimpleNamespace(finish=lambda: None))
+
+    def authenticate(assets, *, commit, archive_sha256, system):
+        assert (assets, commit, archive_sha256, system) == (tmp_path, "a"*40, "b"*64, None)
+        calls.append("signature")
+        if fault == "signature":
+            raise stage.WorkerStageError("fixture unsigned release")
+        return {stage.WORKER: worker}, {
+            "source_sha": "c"*40 if fault == "wrong-commit" else commit,
+            "archive_sha256": archive_sha256,
+            "files": {stage.WORKER: "0"*64 if fault == "wrong-worker" else hashlib.sha256(worker).hexdigest()},
+        }
+
+    monkeypatch.setattr(stage, "_authenticated_payloads", authenticate)
+    monkeypatch.setattr(stage, "_signed_owned_policy_from_worker",
+                        lambda *args: pytest.fail("policy parser reached without signed identity"))
+    monkeypatch.setattr(install.subprocess, "run", lambda *args, **kw: pytest.fail("native build reached"))
+    with pytest.raises(stage.WorkerStageError):
+        install._compile_authenticated_fixed_dedicated_policy(
+            tmp_path, commit="a"*40, archive_sha256="b"*64)
+    assert calls == ([] if fault == "debian" else ["signature"])

@@ -2125,3 +2125,13 @@ extraction. Only fixed readback commands and a temporary root-only workspace
 are used. The observed compiled digest does not authenticate the source
 compilation, attest the whole kernel policy or authorize placement or
 activation. Fresh actual-root dedicated placement remains refused.
+
+The private compiler preparation authenticates the original release, checks
+the exact worker digest and fixed signed policy member, retains root-owned
+native make/Makefile identities and compiles only in a fresh private directory.
+It rechecks the signed source bytes and inode, build-input identity and compiled
+module metadata. The marked booted VM installs those bytes only under its
+existing disposable guard, then exercises the separate exact HLL readback.
+The compiler result does not attest all native toolchain dependencies, load a
+policy, authorize host placement or permit activation. Those gates remain
+separate; no stock labels or global SELinux policy are changed by compilation.

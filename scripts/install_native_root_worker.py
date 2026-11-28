@@ -504,6 +504,150 @@ def _observe_fixed_dedicated_policy(expected_sha256: str) -> dict:
     }
 
 
+def _compile_authenticated_fixed_dedicated_policy(
+    assets: Path, *, commit: str, archive_sha256: str,
+) -> tuple[bytes, dict]:
+    """Compile the fixed authenticated policy in a private native workspace.
+
+    No policy installation or existing inode relabeling. This does not
+    attest the compiler's complete native-package provenance or confer
+    permission to install the returned bytes.
+    """
+    if _native_distro() != "almalinux":
+        _reject("DEDICATED_POLICY_TARGET_REFUSED")
+    require_native_host_preconditions()
+    labels = _Labels("almalinux", dedicated=True)
+    payloads, receipt = stage._authenticated_payloads(
+        assets, commit=commit, archive_sha256=archive_sha256, system=None)
+    worker = payloads.get(stage.WORKER)
+    if (type(worker) is not bytes
+            or receipt.get("source_sha") != commit
+            or receipt.get("archive_sha256") != archive_sha256
+            or receipt.get("files", {}).get(stage.WORKER) != hashlib.sha256(worker).hexdigest()):
+        _reject("DEDICATED_POLICY_SIGNED_WORKER_REFUSED")
+    policy = stage._signed_owned_policy_from_worker(worker)
+    raw = policy["policy_bytes"]
+    source = "repocache_nginx.te"
+    target = "repocache_nginx.pp"
+
+    # Fixed distribution-supplied build inputs, never a caller's command,
+    # makefile or environment. Retain root-owned ancestry and leaf identities.
+    tools = ("/usr/bin/make", "/usr/share/selinux/devel/Makefile")
+    try:
+        with ExitStack() as stack:
+            root = os.open("/", stage._DIRECTORY)
+            stack.callback(os.close, root)
+            stage._protected_directory(root)
+            retained = []
+
+            def pin(path):
+                parent = root
+                for name in path.strip("/").split("/")[:-1]:
+                    child = _open_directory(parent, name, stack)
+                    retained.append((parent, name, child, os.fstat(child)))
+                    parent = child
+                name = path.rsplit("/", 1)[1]
+                fd = os.open(name, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+                stack.callback(os.close, fd)
+                info = os.fstat(fd)
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
+                        or info.st_gid != 0 or info.st_mode & 0o022
+                        or not 1 <= info.st_size <= 32 * 1024 * 1024):
+                    _reject("DEDICATED_POLICY_BUILD_INPUT_REFUSED")
+                retained.append((parent, name, fd, info))
+
+            for path in tools:
+                pin(path)
+
+            def identity(info):
+                return (info.st_dev, info.st_ino, info.st_uid, info.st_gid, info.st_mode,
+                        info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+            def check_tools():
+                for parent, name, fd, original in retained:
+                    current = os.fstat(fd)
+                    named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                    if stat.S_ISDIR(original.st_mode):
+                        # Directory entry timestamps may change through
+                        # unrelated native activity; ownership may not.
+                        stage._protected_directory(fd)
+                        if identity(current)[:5] != identity(original)[:5] or identity(named)[:5] != identity(current)[:5]:
+                            _reject("DEDICATED_POLICY_BUILD_INPUT_CHANGED")
+                    elif identity(current) != identity(original) or identity(named) != identity(current):
+                        _reject("DEDICATED_POLICY_BUILD_INPUT_CHANGED")
+
+            check_tools()
+            with tempfile.TemporaryDirectory(prefix="repocache-policy-build-", dir="/var/tmp") as place:
+                with ExitStack() as workspace:
+                    directory = os.open(place, stage._DIRECTORY)
+                    workspace.callback(os.close, directory)
+                    initial = os.fstat(directory)
+
+                    def check_workspace():
+                        current = os.fstat(directory)
+                        named = os.lstat(place)
+                        if (not stat.S_ISDIR(current.st_mode)
+                                or current.st_uid != 0 or current.st_gid != 0
+                                or stat.S_IMODE(current.st_mode) != 0o700
+                                or identity(current)[:5] != identity(initial)[:5]
+                                or identity(named)[:5] != identity(current)[:5]):
+                            _reject("DEDICATED_POLICY_WORKSPACE_REFUSED")
+
+                    check_workspace()
+                    if os.listdir(directory):
+                        _reject("DEDICATED_POLICY_WORKSPACE_REFUSED")
+                    stage._write(directory, source, raw, 0o600)
+                    source_info = os.stat(source, dir_fd=directory, follow_symlinks=False)
+
+                    def check_source():
+                        if (stage._asset_bytes(directory, source, 16384, installed_mode=0o600) != raw
+                                or identity(os.stat(source, dir_fd=directory, follow_symlinks=False))
+                                   != identity(source_info)):
+                            _reject("DEDICATED_POLICY_SOURCE_CHANGED")
+
+                    check_source()
+                    check_tools()
+                    result = subprocess.run(
+                        (tools[0], "-C", place, "-f", tools[1], target),
+                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL, cwd=place, timeout=120, check=False,
+                        env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"},
+                    )
+                    if result.returncode:
+                        _reject("DEDICATED_POLICY_COMPILATION_FAILED")
+                    check_workspace()
+                    check_tools()
+                    check_source()
+                    info = os.stat(target, dir_fd=directory, follow_symlinks=False)
+                    if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_gid != 0
+                            or info.st_mode & 0o022 or info.st_nlink != 1):
+                        _reject("DEDICATED_POLICY_COMPILED_MODULE_REFUSED")
+                    compiled = stage._asset_bytes(directory, target, 4 * 1024 * 1024,
+                                                  installed_mode=stat.S_IMODE(info.st_mode))
+                    if identity(os.stat(target, dir_fd=directory, follow_symlinks=False)) != identity(info):
+                        _reject("DEDICATED_POLICY_COMPILED_MODULE_REFUSED")
+                    check_workspace()
+                    check_source()
+                    check_tools()
+    except (OSError, subprocess.TimeoutExpired):
+        _reject("DEDICATED_POLICY_COMPILATION_FAILED")
+    labels.finish()
+    require_native_host_preconditions()
+    return compiled, {
+        "source_sha": commit,
+        "archive_sha256": archive_sha256,
+        "worker_sha256": hashlib.sha256(worker).hexdigest(),
+        "policy_sha256": hashlib.sha256(raw).hexdigest(),
+        "compiled_policy_sha256": hashlib.sha256(compiled).hexdigest(),
+        "signed_source_compilation_observed": True,
+        "native_toolchain_provenance_verified": False,
+        "runtime_selinux_policy_verified": False,
+        "authorizes_policy_installation": False,
+        "authorizes_host_installation": False,
+        "authorizes_nginx_activation": False,
+    }
+
+
 def install_authenticated_worker(
     assets: Path, *, commit: str, archive_sha256: str,
 ) -> dict:
