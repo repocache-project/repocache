@@ -2564,7 +2564,7 @@ try:
                     archive=egress._BOOT_EGRESS_HISTORY_PREFIX+prior["policy"]["boot_id"]
                     assert egress._read_boot_egress_receipt(state,0,0,name=archive)==saved
                     assert egress._read_boot_egress_receipt(state,0,0,name=egress._BOOT_EGRESS_ROLLOVER) is None
-                elif action=="prepare":
+                else:
                     # Real interruption after the committed or WAL-bound
                     # boot intent is durable, before nftables initialization.
                     import signal
@@ -2592,11 +2592,9 @@ try:
                     result={"receipt_sha256":hashlib.sha256(saved).hexdigest(),
                             "namespace_device":net_identity[0],"namespace_inode":net_identity[1],
                             "authorizes_nginx_activation":False}
-                else:
-                    result=fresh()
                 net_identity=namespace_identity()
                 assert (result["namespace_device"],result["namespace_inode"])==net_identity
-                if action!="prepare":
+                if action=="rollover":
                     assert result==policy(False)
                     assert result==policy(False if pending else True)
                     assert result["boot_id"]==egress._current_boot_id()
