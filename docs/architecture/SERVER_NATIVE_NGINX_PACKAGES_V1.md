@@ -1858,3 +1858,19 @@ publication use only the existing exact-byte compensation boundary.
 The disposable native fixture substitutes the old main-file label during
 the running prepared-WAL phase and requires signed refusal with HTTP 404
 and an unchanged WAL, then restores its own label. No new write authority.
+
+### Authenticated prepared-WAL storage and runtime placement
+
+The stopped, withdrawn prior generation can now use the same private
+signed installer placement boundaries as the committed generation.
+The prepared-WAL selectors additionally pin the exact live WAL digest and
+prior generation manifest, require exact withdrawn resources and no
+orphan stages under the original lock, and read back the exact closed
+prior-generation boot policy before and after placement. They return
+explicit recovery-required and catalog-withdrawn evidence; the installer
+checks these fields and all pins. No service, policy, WAL, catalog,
+enablement, existing-object relabel or migration authority is added.
+Runtime placement still requires already verified persistent storage.
+Both pending native guest phases now exercise the authenticated selectors,
+including foreign WAL/boot/profile pins, legacy and partial-root refusal,
+and exact-inode read-only repeats, replacing direct fixture-only placement.

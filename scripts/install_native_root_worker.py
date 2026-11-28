@@ -1769,6 +1769,46 @@ def _prepare_authenticated_committed_dedicated_runtime(
                            boot_receipt_sha256=boot_receipt_sha256))
 
 
+_DEDICATED_PENDING_STORAGE_CHILD = _DEDICATED_RECOVERY_CHILD.replace(
+    "transaction._recover_installed_prepared_dedicated(pins)",
+    "transaction._prepare_installed_prepared_wal_dedicated_storage(pins)")
+
+
+_DEDICATED_PENDING_RUNTIME_CHILD = _DEDICATED_RECOVERY_CHILD.replace(
+    "transaction._recover_installed_prepared_dedicated(pins)",
+    "transaction._prepare_installed_prepared_wal_dedicated_runtime(pins)")
+
+
+def _prepare_authenticated_prepared_wal_dedicated_storage(
+    assets: Path, *, commit: str, archive_sha256: str,
+    executable_receipt_sha256: str, profile_receipt_sha256: str,
+    generation_manifest_sha256: str, boot_receipt_sha256: str, wal_sha256: str,
+) -> dict:
+    """Private prior-generation storage placement; retain WAL and withdrawal."""
+    return _authenticated_prepared_dedicated_bridge(
+        assets, commit=commit, archive_sha256=archive_sha256,
+        prepare_storage=True, pending_placement=True,
+        recovery_pins=dict(executable_receipt_sha256=executable_receipt_sha256,
+                           profile_receipt_sha256=profile_receipt_sha256,
+                           generation_manifest_sha256=generation_manifest_sha256,
+                           boot_receipt_sha256=boot_receipt_sha256, wal_sha256=wal_sha256))
+
+
+def _prepare_authenticated_prepared_wal_dedicated_runtime(
+    assets: Path, *, commit: str, archive_sha256: str,
+    executable_receipt_sha256: str, profile_receipt_sha256: str,
+    generation_manifest_sha256: str, boot_receipt_sha256: str, wal_sha256: str,
+) -> dict:
+    """Private prior-generation runtime placement; retain WAL and withdrawal."""
+    return _authenticated_prepared_dedicated_bridge(
+        assets, commit=commit, archive_sha256=archive_sha256,
+        prepare_runtime=True, pending_placement=True,
+        recovery_pins=dict(executable_receipt_sha256=executable_receipt_sha256,
+                           profile_receipt_sha256=profile_receipt_sha256,
+                           generation_manifest_sha256=generation_manifest_sha256,
+                           boot_receipt_sha256=boot_receipt_sha256, wal_sha256=wal_sha256))
+
+
 def _start_authenticated_committed_dedicated_nginx(
     assets: Path, *, commit: str, archive_sha256: str,
     executable_receipt_sha256: str, profile_receipt_sha256: str,
@@ -1815,6 +1855,7 @@ def _authenticated_prepared_dedicated_bridge(
     pending_start: bool = False, expected_rolled_pins: dict | None = None,
     stage_profile: bool = False, load_profile: bool = False,
     prepare_storage: bool = False, prepare_runtime: bool = False,
+    pending_placement: bool = False,
 ) -> dict:
     if (expected_rolled_pins is not None and recovery_pins is not None
             or type(prepare) is not bool or type(start) is not bool or type(rollover) is not bool
@@ -1829,6 +1870,8 @@ def _authenticated_prepared_dedicated_bridge(
                 prepare or start or recovery_pins is None or expected_rolled_pins is not None))
             or type(prepare_runtime) is not bool or (prepare_runtime and (
                 prepare or start or prepare_storage or recovery_pins is None or expected_rolled_pins is not None))
+            or type(pending_placement) is not bool
+            or (pending_placement and not (prepare_storage or prepare_runtime))
             or (prepare and start) or (rollover and not prepare)
             or (prepare and recovery_pins is None)
             or (start and recovery_pins is None and
@@ -1843,7 +1886,7 @@ def _authenticated_prepared_dedicated_bridge(
         fields.remove("profile_receipt_sha256")
     if rollover:
         fields.add("previous_boot_receipt_sha256")
-    if pending_prepare or pending_start:
+    if pending_prepare or pending_start or pending_placement:
         fields.add("wal_sha256")
     if resume_boot:
         fields.add("boot_receipt_sha256")
@@ -1898,7 +1941,7 @@ def _authenticated_prepared_dedicated_bridge(
                 )
                 manifest = _read_file(state, _OWNED_MANIFEST, 0, _OWNED_LIMIT[_OWNED_MANIFEST])
                 wal = _read_file(state, _OWNED_WAL, 0, _MAX_WAL)
-                if pending_prepare or pending_start:
+                if pending_prepare or pending_start or pending_placement:
                     if wal is None or hashlib.sha256(wal).hexdigest() != recovery_pins["wal_sha256"]:
                         _reject("NATIVE_DEDICATED_RECOVERY_WAL_REFUSED")
                 elif wal is not None:
@@ -1966,6 +2009,8 @@ def _authenticated_prepared_dedicated_bridge(
              _DEDICATED_PREPARE_CHILD if prepare else
              _DEDICATED_PENDING_START_CHILD if pending_start else
              _DEDICATED_ROLLED_START_CHILD if rolled_start else
+             _DEDICATED_PENDING_STORAGE_CHILD if prepare_storage and pending_placement else
+             _DEDICATED_PENDING_RUNTIME_CHILD if prepare_runtime and pending_placement else
              _DEDICATED_STORAGE_CHILD if prepare_storage else
              _DEDICATED_RUNTIME_CHILD if prepare_runtime else
              _DEDICATED_START_CHILD if start else _DEDICATED_RECOVERY_CHILD),
@@ -2036,13 +2081,19 @@ def _authenticated_prepared_dedicated_bridge(
             from repocache.server_native_v2_transaction_v1 import (
                 _closed_committed_dedicated_storage_report,
             )
-            expected_status = ("OWNED_DEDICATED_COMMITTED_RUNTIME_PREPARED" if prepare_runtime
+            expected_status = ("OWNED_DEDICATED_PREPARED_WAL_RUNTIME_PREPARED" if prepare_runtime
+                               else "OWNED_DEDICATED_PREPARED_WAL_STORAGE_PREPARED") if pending_placement else (
+                               "OWNED_DEDICATED_COMMITTED_RUNTIME_PREPARED" if prepare_runtime
                                else "OWNED_DEDICATED_COMMITTED_STORAGE_PREPARED")
             if (report.get("status") != expected_status
                     or (prepare_runtime and (type(report.get("scratch_count")) is not int
                                              or report["scratch_count"] != 5))
                     or (prepare_storage and "scratch_count" in report)
                     or any(report.get(key) != recovery_pins[key] for key in fields)
+                    or (pending_placement and (
+                        report.get("catalog_withdrawn") is not True or report.get("recovery_required") is not True))
+                    or (not pending_placement and any(key in report for key in (
+                        "wal_sha256", "catalog_withdrawn", "recovery_required")))
                     or not _closed_committed_dedicated_storage_report(report.get("storage"))
                     or report.get("authorizes_systemctl") is not False
                     or report.get("authorizes_nginx_activation") is not False

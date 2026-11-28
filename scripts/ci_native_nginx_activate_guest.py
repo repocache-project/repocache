@@ -3273,105 +3273,109 @@ finally:
                 assert (opened.st_dev, opened.st_ino) == ident
                 assert set(os.listxattr(fd)) == {"security.selinux"}
                 labels.append((path, fd, ident, os.getxattr(fd, "security.selinux")))
-            if not pending:
-                storage_pins = dict(
-                    **pins, executable_receipt_sha256=executable_proof["receipt_sha256"],
-                    profile_receipt_sha256=prior["profile"]["receipt_sha256"],
-                    generation_manifest_sha256=result["generation_manifest_sha256"],
-                    boot_receipt_sha256=result["receipt_sha256"])
-                # The authenticated storage path must not reinterpret legacy
-                # roots as dedicated, even with otherwise valid pins.
+            storage_pins = dict(
+                **pins, executable_receipt_sha256=executable_proof["receipt_sha256"],
+                profile_receipt_sha256=prior["profile"]["receipt_sha256"],
+                generation_manifest_sha256=result["generation_manifest_sha256"],
+                boot_receipt_sha256=result["receipt_sha256"],
+                **({"wal_sha256": wal_hash} if pending else {}))
+            prepare_storage = (native._prepare_authenticated_prepared_wal_dedicated_storage if pending
+                               else native._prepare_authenticated_committed_dedicated_storage)
+            prepare_runtime = (native._prepare_authenticated_prepared_wal_dedicated_runtime if pending
+                               else native._prepare_authenticated_committed_dedicated_runtime)
+            placement_status = "OWNED_DEDICATED_PREPARED_WAL_" if pending else "OWNED_DEDICATED_COMMITTED_"
+            pin_fields = ("executable_receipt_sha256", "profile_receipt_sha256",
+                          "generation_manifest_sha256", "boot_receipt_sha256") + (("wal_sha256",) if pending else ())
+            # The authenticated storage path must not reinterpret legacy
+            # roots as dedicated, even with otherwise valid pins.
+            try:
+                native._prepare_authenticated_committed_dedicated_storage(assets, **storage_pins)
+            except native.stage.WorkerStageError:
+                pass
+            else:
+                raise AssertionError("Legacy storage adopted as dedicated")
+            assert tuple(file_identity(p) for p in fixed) == identities
+            require_prior_resources()
+            require_status(OWN, False, False)
+            for source, backup in zip(fixed, backups):
+                fixture_move_same_parent_noreplace(source, backup)
+            for field in pin_fields:
                 try:
-                    native._prepare_authenticated_committed_dedicated_storage(assets, **storage_pins)
+                    prepare_storage(
+                        assets, **{**storage_pins, field: "0"*64})
                 except native.stage.WorkerStageError:
                     pass
                 else:
-                    raise AssertionError("Legacy storage adopted as dedicated")
-                assert tuple(file_identity(p) for p in fixed) == identities
+                    raise AssertionError("Foreign storage pin accepted")
+                assert not any(os.path.lexists(p) for p in fixed)
                 require_prior_resources()
                 require_status(OWN, False, False)
-            for source, backup in zip(fixed, backups):
-                fixture_move_same_parent_noreplace(source, backup)
+            storage_report = prepare_storage(
+                assets, **storage_pins)
+            assert storage_report["status"] == placement_status + "STORAGE_PREPARED"
             if pending:
-                prepared_storage = signed("prepare-committed-storage")["storage"]
-            else:
-                for field in ("executable_receipt_sha256", "profile_receipt_sha256",
-                              "generation_manifest_sha256", "boot_receipt_sha256"):
-                    try:
-                        native._prepare_authenticated_committed_dedicated_storage(
-                            assets, **{**storage_pins, field: "0"*64})
-                    except native.stage.WorkerStageError:
-                        pass
-                    else:
-                        raise AssertionError("Foreign storage pin accepted")
-                    assert not any(os.path.lexists(p) for p in fixed)
-                    require_prior_resources()
-                    require_status(OWN, False, False)
-                storage_report = native._prepare_authenticated_committed_dedicated_storage(
-                    assets, **storage_pins)
-                assert storage_report["status"] == "OWNED_DEDICATED_COMMITTED_STORAGE_PREPARED"
-                prepared_storage = storage_report["storage"]
-                assert prepared_storage["selinux_enforcing_labels_verified"]
-                assert prepared_storage["actual_service_write_verified"] is False
-                dedicated_identities = tuple(file_identity(p) for p in fixed)
-                assert native._prepare_authenticated_committed_dedicated_storage(
-                    assets, **storage_pins) == storage_report
-                assert tuple(file_identity(p) for p in fixed) == dedicated_identities
-                assert tuple(file_identity(p) for p in backups) == identities
-                require_status(OWN, False, False)
-                require_status(VENDOR, False, False)
-                require_prior_resources()
-                print("PASS: authenticated committed storage placement and repeat; legacy roots and foreign pins refused", flush=True)
+                assert storage_report["wal_sha256"] == wal_hash and storage_report["catalog_withdrawn"]
+                assert storage_report["recovery_required"]
+            prepared_storage = storage_report["storage"]
+            assert prepared_storage["selinux_enforcing_labels_verified"]
+            assert prepared_storage["actual_service_write_verified"] is False
+            dedicated_identities = tuple(file_identity(p) for p in fixed)
+            assert prepare_storage(
+                assets, **storage_pins) == storage_report
+            assert tuple(file_identity(p) for p in fixed) == dedicated_identities
+            assert tuple(file_identity(p) for p in backups) == identities
+            require_status(OWN, False, False)
+            require_status(VENDOR, False, False)
+            require_prior_resources()
+            print("PASS: authenticated " + ("pending-WAL" if pending else "committed") +
+                  " storage placement and repeat; legacy roots and foreign pins refused", flush=True)
             for path, fd, ident, _ in labels:
                 assert file_identity(path) == ident
                 os.setxattr(fd, "security.selinux", b"system_u:object_r:repocache_nginx_ro_t:s0\0")
                 assert os.getxattr(fd, "security.selinux").rstrip(b"\0") == b"system_u:object_r:repocache_nginx_ro_t:s0"
-            if pending:
-                runtime.mkdir(mode=0o755)
-                require("/usr/bin/chcon", "-t", "repocache_nginx_pid_t", str(runtime))
-                assert signed("prepare-committed-runtime")=={
-                    "scratch_count":5,"authorizes_nginx_activation":False}
+            # Refuse an incomplete parent and preserve the exact inode.
+            runtime.mkdir(mode=0o700)
+            partial_identity = file_identity(runtime)
+            try:
+                native._prepare_authenticated_committed_dedicated_runtime(assets, **storage_pins)
+            except native.stage.WorkerStageError:
+                pass
             else:
-                # Refuse an incomplete parent and preserve the exact inode.
-                runtime.mkdir(mode=0o700)
-                partial_identity = file_identity(runtime)
+                raise AssertionError("Incomplete runtime parent adopted")
+            assert file_identity(runtime) == partial_identity and not list(runtime.iterdir())
+            assert stat.S_IMODE(runtime.stat().st_mode) == 0o700
+            runtime.rmdir()  # Only our empty disposable negative-test directory.
+            for field in pin_fields:
                 try:
-                    native._prepare_authenticated_committed_dedicated_runtime(assets, **storage_pins)
+                    prepare_runtime(
+                        assets, **{**storage_pins, field: "0"*64})
                 except native.stage.WorkerStageError:
                     pass
                 else:
-                    raise AssertionError("Incomplete runtime parent adopted")
-                assert file_identity(runtime) == partial_identity and not list(runtime.iterdir())
-                assert stat.S_IMODE(runtime.stat().st_mode) == 0o700
-                runtime.rmdir()  # Only our empty disposable negative-test directory.
-                for field in ("executable_receipt_sha256", "profile_receipt_sha256",
-                              "generation_manifest_sha256", "boot_receipt_sha256"):
-                    try:
-                        native._prepare_authenticated_committed_dedicated_runtime(
-                            assets, **{**storage_pins, field: "0"*64})
-                    except native.stage.WorkerStageError:
-                        pass
-                    else:
-                        raise AssertionError("Foreign runtime pin accepted")
-                    assert not os.path.lexists(runtime)
-                    require_prior_resources()
-                    require_status(OWN, False, False)
-                runtime_report = native._prepare_authenticated_committed_dedicated_runtime(
-                    assets, **storage_pins)
-                assert runtime_report["status"] == "OWNED_DEDICATED_COMMITTED_RUNTIME_PREPARED"
-                assert runtime_report["scratch_count"] == 5
-                assert runtime_report["storage"] == prepared_storage
-                assert runtime_report["authorizes_nginx_activation"] is False
-                assert runtime_report["authorizes_catalog_publication"] is False
-                assert runtime_report["authorizes_systemctl"] is False
-                original_runtime = fixture_snapshot_dedicated_runtime()
-                assert native._prepare_authenticated_committed_dedicated_runtime(
-                    assets, **storage_pins) == runtime_report
-                assert fixture_snapshot_dedicated_runtime() == original_runtime
+                    raise AssertionError("Foreign runtime pin accepted")
+                assert not os.path.lexists(runtime)
                 require_prior_resources()
                 require_status(OWN, False, False)
-                require_status(VENDOR, False, False)
-                print("PASS: authenticated committed runtime placement, exact scratch repeat and foreign/partial refusal", flush=True)
+            runtime_report = prepare_runtime(
+                assets, **storage_pins)
+            assert runtime_report["status"] == placement_status + "RUNTIME_PREPARED"
+            if pending:
+                assert runtime_report["wal_sha256"] == wal_hash and runtime_report["catalog_withdrawn"]
+                assert runtime_report["recovery_required"]
+            assert runtime_report["scratch_count"] == 5
+            assert runtime_report["storage"] == prepared_storage
+            assert runtime_report["authorizes_nginx_activation"] is False
+            assert runtime_report["authorizes_catalog_publication"] is False
+            assert runtime_report["authorizes_systemctl"] is False
+            original_runtime = fixture_snapshot_dedicated_runtime()
+            assert prepare_runtime(
+                assets, **storage_pins) == runtime_report
+            assert fixture_snapshot_dedicated_runtime() == original_runtime
+            require_prior_resources()
+            require_status(OWN, False, False)
+            require_status(VENDOR, False, False)
+            print("PASS: authenticated " + ("pending-WAL" if pending else "committed") +
+                  " runtime placement, exact scratch repeat and foreign/partial refusal", flush=True)
             runtime_snapshot = fixture_snapshot_dedicated_runtime()
             require_prior_resources()
             assert signed("verify") == result
