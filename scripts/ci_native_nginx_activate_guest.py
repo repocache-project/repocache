@@ -2909,7 +2909,31 @@ finally:
     old_receipt = boot_receipt.read_bytes()
     assert hashlib.sha256(old_receipt).hexdigest() == prior["policy"]["receipt_sha256"]
     assert not any(p.name.startswith(history_prefix) for p in STATE.iterdir())
-    result = signed("rollover", prior)
+    if pending:
+        result = signed("rollover", prior)
+    else:
+        rollover_pins = dict(
+            **pins, executable_receipt_sha256=executable_proof["receipt_sha256"],
+            profile_receipt_sha256=prior["profile"]["receipt_sha256"],
+            generation_manifest_sha256=prior["policy"]["generation_manifest_sha256"],
+            previous_boot_receipt_sha256=prior["policy"]["receipt_sha256"])
+        try:
+            native._rollover_authenticated_committed_dedicated_nginx(
+                assets, **{**rollover_pins, "previous_boot_receipt_sha256": "0"*64})
+        except native.stage.WorkerStageError:
+            pass
+        else:
+            raise AssertionError("Foreign prior boot pin accepted")
+        assert not os.path.lexists(ns) and boot_receipt.read_bytes() == old_receipt
+        result = native._rollover_authenticated_committed_dedicated_nginx(assets, **rollover_pins)
+        try:
+            native._rollover_authenticated_committed_dedicated_nginx(assets, **rollover_pins)
+        except native.stage.WorkerStageError:
+            pass
+        else:
+            raise AssertionError("Completed rollover adopted twice")
+        assert signed("verify") == result
+        print("PASS: authenticated installer recreates committed namespace after real reboot; foreign pin and replay refused", flush=True)
     assert result["boot_id"] == boot
     assert result["generation"] == prior["policy"]["generation"]
     assert result["generation_manifest_sha256"] == prior["policy"]["generation_manifest_sha256"]

@@ -1589,3 +1589,22 @@ before retry. The enforcing VM uses the actual authenticated start
 after reboot rollover and tests foreign pins and active replay.
 No public CLI or socket operation, automatic boot, active route,
 ingress, migration or production activation is added.
+
+### Authenticated committed boot rollover
+
+The private installer can explicitly recreate the absent namespace after
+a different boot for an already prepared committed loopback generation.
+In addition to release, executable, profile and manifest pins, its
+caller supplies the prior boot receipt digest. The parent refuses an
+unexpected receipt or WAL before native package authentication. The
+installed child verifies the prior receipt under its fresh lock; the
+creation primitive compares the independent digest with its exact
+preflight bytes before any namespace effect and retains that prior
+intent through creation and policy initialization. The existing
+boot-rollover rules require a different boot, exact bindings and a
+fresh empty namespace. Read-only verification and the byte-identical
+prior archive must both succeed. No same-boot adoption, pending-WAL
+selection, enablement, automatic boot ordering, public CLI or new
+ingress authority is introduced. The native committed reboot fixture
+uses the actual installer bridge, refuses a foreign prior pin before
+namespace creation, and refuses replay after completion.

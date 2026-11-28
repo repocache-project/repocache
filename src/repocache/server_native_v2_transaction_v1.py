@@ -2065,6 +2065,7 @@ def _create_owned_committed_boot_egress_locked(
     root_fd: int, state_fd: int, *, distribution: str, worker_uid: int,
     profile_receipt_sha256: str, executable_receipt_sha256: str,
     recheck_stopped_owner, allow_boot_rollover: bool = False,
+    expected_previous_receipt_sha256: str | None = None,
 ) -> dict:
     """Prepare a fresh loopback-only namespace from committed disabled state.
 
@@ -2086,7 +2087,8 @@ def _create_owned_committed_boot_egress_locked(
             profile_receipt_sha256=profile_receipt_sha256,
             executable_receipt_sha256=executable_receipt_sha256,
             recheck_stopped_owner=recheck_stopped_owner,
-            allow_boot_rollover=allow_boot_rollover),
+            allow_boot_rollover=allow_boot_rollover,
+            expected_previous_receipt_sha256=expected_previous_receipt_sha256),
             "committed_resources_verified": True}
 
 
@@ -2257,8 +2259,12 @@ def _create_owned_boot_egress_from_plan_locked(
     root_fd: int, state_fd: int, plan: dict, recheck, *,
     profile_receipt_sha256: str, executable_receipt_sha256: str,
     recheck_stopped_owner, allow_boot_rollover: bool,
+    expected_previous_receipt_sha256: str | None = None,
 ) -> dict:
     """Shared private creation sequence; caller retains exact generation scope."""
+    if (expected_previous_receipt_sha256 is not None
+            and (not allow_boot_rollover or not _valid_sha(expected_previous_receipt_sha256))):
+        _deny("OWNED_BOOT_EGRESS_INPUT_INVALID")
     if plan["destinations"]:
         _deny("OWNED_BOOT_EGRESS_ACTIVE_ROUTES_REFUSED")
 
@@ -2277,6 +2283,10 @@ def _create_owned_boot_egress_from_plan_locked(
 
     owned()
     before = intent()
+    if (expected_previous_receipt_sha256 is not None
+            and (before[1] is None or hashlib.sha256(before[1]).hexdigest() !=
+                 expected_previous_receipt_sha256)):
+        _deny("OWNED_BOOT_EGRESS_INTENT_CHANGED")
 
     def before_create():
         owned()
@@ -3817,12 +3827,18 @@ def _prepare_installed_committed_dedicated(pins: dict) -> dict:
     return _installed_dedicated_lifecycle(pins, prepare=True)
 
 
+def _rollover_installed_committed_dedicated(pins: dict) -> dict:
+    """Private signed-installer recreation of a pinned prior boot."""
+    return _installed_dedicated_lifecycle(pins, prepare=True, rollover=True)
+
+
 def _start_installed_committed_dedicated(pins: dict) -> dict:
     """Private signed-installer start of an independently prepared profile."""
     return _installed_dedicated_lifecycle(pins, prepare=False, start=True)
 
 
-def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = False) -> dict:
+def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = False,
+                                   rollover: bool = False) -> dict:
     import zipimport
     from repocache.server_native_nginx_executable_v1 import (
         signed_owned_nginx_policy_candidate, verify_nginx_candidate_receipt,
@@ -3844,7 +3860,10 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
         {"generation_manifest_sha256"} if prepare else
         {"generation_manifest_sha256", "boot_receipt_sha256"} if start else
         {"boot_receipt_sha256", "wal_sha256"})
-    if (type(prepare) is not bool or type(start) is not bool or (prepare and start)
+    if rollover:
+        digests.add("previous_boot_receipt_sha256")
+    if (type(prepare) is not bool or type(start) is not bool or type(rollover) is not bool
+            or (prepare and start) or (rollover and not prepare)
             or not isinstance(__loader__, zipimport.zipimporter)
             or __loader__.archive != worker or not sys.flags.isolated
             or os.getresuid() != (0, 0, 0) or os.getresgid() != (0, 0, 0)
@@ -3988,6 +4007,18 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
             if doc["deployment"]["listen"]["bind_address"] != "127.0.0.1":
                 _deny("OWNED_DEDICATED_INSTALLER_PIN_REFUSED")
             stopped = inspect_signed_owned_namespace_unit(https_port=port, active=False)
+            if rollover:
+                from repocache.server_native_egress_candidate_v1 import (
+                    _BOOT_EGRESS_HISTORY_PREFIX, _BOOT_EGRESS_RECEIPT_MAX, _current_boot_id,
+                )
+                previous_boot = _read_boot_egress_receipt(state, 0, 0)
+                if (previous_boot is None or hashlib.sha256(previous_boot).hexdigest() !=
+                        pins["previous_boot_receipt_sha256"]):
+                    _deny("OWNED_DEDICATED_INSTALLER_BOOT_REFUSED")
+                previous_record = _json(previous_boot, limit=_BOOT_EGRESS_RECEIPT_MAX)
+                if (type(previous_record) is not dict or
+                        previous_record.get("boot_id") == _current_boot_id()):
+                    _deny("OWNED_DEDICATED_INSTALLER_BOOT_REFUSED")
 
             def stopped_owner():
                 placement()
@@ -4006,7 +4037,9 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
             stopped_owner()
             result = _create_owned_committed_boot_egress_locked(
                 root, state, **options, recheck_stopped_owner=stopped_owner,
-                allow_boot_rollover=False)
+                allow_boot_rollover=rollover,
+                **({"expected_previous_receipt_sha256": pins["previous_boot_receipt_sha256"]}
+                   if rollover else {}))
             stopped_owner()
             package()
             identity = (result["namespace_device"], result["namespace_inode"])
@@ -4016,6 +4049,13 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
             if (observed != result or result.get("generation_manifest_sha256") !=
                     pins["generation_manifest_sha256"]):
                 _deny("OWNED_DEDICATED_INSTALLER_RESULT_REFUSED")
+            if rollover:
+                archive = _BOOT_EGRESS_HISTORY_PREFIX + previous_record["boot_id"]
+                if (_read_boot_egress_receipt(state, 0, 0, name=archive) != previous_boot
+                        or result.get("boot_id") == previous_record["boot_id"]
+                        or result.get("receipt_sha256") == pins["previous_boot_receipt_sha256"]):
+                    _deny("OWNED_DEDICATED_INSTALLER_BOOT_REFUSED")
+                stopped_owner()
             return result
 
         _, namespace_identity, recheck_namespace = stack.enter_context(_fixed_namespace_scope())

@@ -1585,6 +1585,25 @@ def _prepare_authenticated_committed_dedicated_nginx(
                            generation_manifest_sha256=generation_manifest_sha256))
 
 
+_DEDICATED_ROLLOVER_CHILD = _DEDICATED_RECOVERY_CHILD.replace(
+    "transaction._recover_installed_prepared_dedicated(pins)",
+    "transaction._rollover_installed_committed_dedicated(pins)")
+
+
+def _rollover_authenticated_committed_dedicated_nginx(
+    assets: Path, *, commit: str, archive_sha256: str,
+    executable_receipt_sha256: str, profile_receipt_sha256: str,
+    generation_manifest_sha256: str, previous_boot_receipt_sha256: str,
+) -> dict:
+    """Private explicit recreation after a different boot; never adopt a namespace."""
+    return _authenticated_prepared_dedicated_bridge(
+        assets, commit=commit, archive_sha256=archive_sha256, prepare=True, rollover=True,
+        recovery_pins=dict(executable_receipt_sha256=executable_receipt_sha256,
+                           profile_receipt_sha256=profile_receipt_sha256,
+                           generation_manifest_sha256=generation_manifest_sha256,
+                           previous_boot_receipt_sha256=previous_boot_receipt_sha256))
+
+
 _DEDICATED_START_CHILD = _DEDICATED_RECOVERY_CHILD.replace(
     "transaction._recover_installed_prepared_dedicated(pins)",
     "transaction._start_installed_committed_dedicated(pins)")
@@ -1606,15 +1625,18 @@ def _start_authenticated_committed_dedicated_nginx(
 
 def _authenticated_prepared_dedicated_bridge(
     assets: Path, *, commit: str, archive_sha256: str, recovery_pins: dict | None,
-    prepare: bool = False, start: bool = False,
+    prepare: bool = False, start: bool = False, rollover: bool = False,
 ) -> dict:
-    if (type(prepare) is not bool or type(start) is not bool or (prepare and start)
+    if (type(prepare) is not bool or type(start) is not bool or type(rollover) is not bool
+            or (prepare and start) or (rollover and not prepare)
             or ((prepare or start) and recovery_pins is None)):
         _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
     fields = {"executable_receipt_sha256", "profile_receipt_sha256"} | (
         {"generation_manifest_sha256"} if prepare else
         {"generation_manifest_sha256", "boot_receipt_sha256"} if start else
         {"boot_receipt_sha256", "wal_sha256"})
+    if rollover:
+        fields.add("previous_boot_receipt_sha256")
 
     def validate_pins(pins):
         if (type(pins) is not dict or set(pins) != fields
@@ -1665,7 +1687,11 @@ def _authenticated_prepared_dedicated_bridge(
                         or _BOOT_EGRESS_ROLLOVER in os.listdir(state)):
                     _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
                 boot = _read_boot_egress_receipt(state, 0, 0)
-                if prepare:
+                if rollover:
+                    if (boot is None or hashlib.sha256(boot).hexdigest() !=
+                            recovery_pins["previous_boot_receipt_sha256"]):
+                        _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
+                elif prepare:
                     if boot is not None or any(name.startswith(_BOOT_EGRESS_HISTORY_PREFIX)
                                                for name in os.listdir(state)):
                         _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
@@ -1698,6 +1724,7 @@ def _authenticated_prepared_dedicated_bridge(
     try:
         result = subprocess.run(
             ("/usr/bin/python3", "-IS", "-B", "-c",
+             _DEDICATED_ROLLOVER_CHILD if rollover else
              _DEDICATED_PREPARE_CHILD if prepare else
              _DEDICATED_START_CHILD if start else _DEDICATED_RECOVERY_CHILD),
             input=json.dumps(pins, sort_keys=True).encode("ascii"),
@@ -1725,7 +1752,9 @@ def _authenticated_prepared_dedicated_bridge(
                     or report.get("authorizes_nginx_activation") is not False
                     or report.get("authorizes_catalog_publication") is not False
                     or type(report.get("receipt_sha256")) is not str
-                    or signatures.HEX64.fullmatch(report["receipt_sha256"]) is None):
+                    or signatures.HEX64.fullmatch(report["receipt_sha256"]) is None
+                    or (rollover and report["receipt_sha256"] ==
+                        recovery_pins["previous_boot_receipt_sha256"])):
                 _reject("NATIVE_DEDICATED_RECOVERY_CHILD_REFUSED")
         elif start:
             if (report.get("status") != "OWNED_DEDICATED_COMMITTED_START_OBSERVED"

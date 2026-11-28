@@ -4369,6 +4369,8 @@ def test_installed_dedicated_recovery_refuses_source_loader_before_host_access(m
         native._prepare_installed_committed_dedicated({})
     with pytest.raises(native.NativeV2TransactionError, match="INSTALLER_PIN_REFUSED"):
         native._start_installed_committed_dedicated({})
+    with pytest.raises(native.NativeV2TransactionError, match="INSTALLER_PIN_REFUSED"):
+        native._rollover_installed_committed_dedicated({})
 
 
 @pytest.mark.parametrize("fault", ["none", "lock-held", "placement", "worker-drift",
@@ -4613,3 +4615,21 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
     # Whether successful or refused, the worker must release its lock.
     with real_locked(rootfd, 0):
         pass
+
+@pytest.mark.parametrize("previous, pin", [(None, "a"*64), (b"old", "a"*64)])
+def test_committed_rollover_pin_refusal_precedes_namespace_effect(monkeypatch, previous, pin):
+    calls = []
+    monkeypatch.setattr(native, "_fresh_boot_egress_intent_locked",
+                        lambda *a, **kw: ("new-boot", previous))
+    def create(**kw):
+        pytest.fail("mismatched prior boot reached namespace creation")
+    monkeypatch.setattr(native, "_create_fixed_loopback_namespace_locked", create)
+    plan = {"destinations": [], "nft_candidate": "test", "generation": 1,
+            "generation_manifest_sha256": "a"*64}
+    with pytest.raises(native.NativeV2TransactionError, match="INTENT_CHANGED"):
+        native._create_owned_boot_egress_from_plan_locked(
+            1, 2, plan, lambda: calls.append("state"),
+            profile_receipt_sha256="b"*64, executable_receipt_sha256="c"*64,
+            recheck_stopped_owner=lambda: calls.append("owner"),
+            allow_boot_rollover=True, expected_previous_receipt_sha256=pin)
+    assert calls == ["state", "owner", "state"]
