@@ -2328,14 +2328,14 @@ finally:
             from repocache.server_protected_namespace_bootstrap_v1 import _DEDICATED_PUBLIC_CONTEXT
             tls = root / "etc/repocache/tls"
             tls.mkdir(parents=True, mode=0o755)
-            os.setxattr(tls, "security.selinux", _DEDICATED_PUBLIC_CONTEXT + b"\\0")
+            os.setxattr(tls, "security.selinux", _DEDICATED_PUBLIC_CONTEXT + b"\0")
             for name, mode in (("example-chain.pem", 0o644), ("example-key.pem", 0o600)):
                 source = Path("/etc/repocache/tls") / name
                 target = tls / name
                 with target.open("xb") as out:
                     os.fchmod(out.fileno(), mode)
                     out.write(source.read_bytes())
-                    os.setxattr(out.fileno(), "security.selinux", _DEDICATED_PUBLIC_CONTEXT + b"\\0")
+                    os.setxattr(out.fileno(), "security.selinux", _DEDICATED_PUBLIC_CONTEXT + b"\0")
             intake = state / ".admin-candidate-v2.json"
             with intake.open("xb") as out:
                 os.fchmod(out.fileno(), 0o600)
