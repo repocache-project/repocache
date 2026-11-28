@@ -4836,3 +4836,91 @@ def test_committed_rollover_pin_refusal_precedes_namespace_effect(monkeypatch, p
             recheck_stopped_owner=lambda: calls.append("owner"),
             allow_boot_rollover=True, expected_previous_receipt_sha256=pin)
     assert calls == ["state", "owner", "state"]
+
+
+@pytest.mark.parametrize("fault", ["none", "missing-history", "foreign-history", "wrong-current",
+                                    "wal", "orphan", "rules", "drift", "history-drift"])
+def test_retained_rolled_committed_selection_reconstructs_from_real_protected_bytes(
+        filesystem, monkeypatch, fault):
+    """Real retained resources and history; only kernel namespace IO simulated."""
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from repocache import server_native_egress_candidate_v1 as egress
+    from repocache.server_protected_state_store_v1 import _canonical
+
+    rootfd, state, _, _, events = filesystem
+    cfg = document(1, generation=1)
+    cfg["deployment"]["paths"]["generated_include"] = native._OWNED_INCLUDE_PATH
+    cfg["deployment"]["listen"]["bind_address"] = "127.0.0.1"
+    cfg["repositories"][0]["desired_state"] = "disabled"
+    raw = _canon(snapshot(generation=1, previous=None, doc=cfg))
+    main, include, catalog = native._render_owned_managed_candidate(cfg, 1, "almalinux", {})
+    resources = {V2_STATE: raw, native._OWNED_MAIN: main, native._INCLUDE: include,
+                 native._CATALOG: catalog,
+                 native._OWNED_MANIFEST: native._owned_manifest_for(raw, main, include, catalog)}
+    paths = _owned_fixture_paths(filesystem, resources)
+    plan = native._owned_boot_egress_plan(resources, distribution="almalinux", worker_uid=987)
+    old_boot = "11111111-1111-1111-1111-111111111111"
+    current_boot = "22222222-2222-2222-2222-222222222222"
+    old_record = dict(schema_version=1, boot_id=old_boot, namespace_device=1,
+                      namespace_inode=2, generation=plan["generation"],
+                      generation_manifest_sha256=plan["generation_manifest_sha256"],
+                      profile_receipt_sha256="a"*64, executable_receipt_sha256="b"*64,
+                      ruleset_sha256=hashlib.sha256(egress._canonical_ruleset(
+                          plan["nft_candidate"]).encode("ascii")).hexdigest(),
+                      authorizes_nginx_activation=False)
+    now_record = dict(old_record, boot_id=current_boot, namespace_device=7, namespace_inode=8)
+    history_path = state / (egress._BOOT_EGRESS_HISTORY_PREFIX + old_boot)
+    receipt_path = state / egress._BOOT_EGRESS_RECEIPT
+    if fault == "foreign-history":
+        old_record["executable_receipt_sha256"] = "0"*64
+    if fault == "wrong-current":
+        now_record["namespace_inode"] = 9
+
+    def place(path, data):
+        path.write_bytes(data)
+        path.chmod(0o600)
+
+    if fault != "missing-history":
+        place(history_path, _canonical(old_record, limit=4096))
+    place(receipt_path, _canonical(now_record, limit=4096))
+    if fault == "wal":
+        place(state / native._OWNED_WAL, b"untrusted")
+    if fault == "orphan":
+        place(state / native._OWNED_WAL_TMP, b"untrusted")
+    before = {p.name: p.read_bytes() for p in state.iterdir()}
+    monkeypatch.setattr(native, "_verify_current_root_fd", lambda fd: None)
+    monkeypatch.setattr(native.pwd, "getpwnam", lambda name: SimpleNamespace(pw_uid=987))
+    monkeypatch.setattr(egress, "_current_boot_id", lambda: current_boot)
+
+    @contextmanager
+    def namespace():
+        yield 17, (7, 8), lambda: None
+    monkeypatch.setattr(egress, "_fixed_namespace_scope", namespace)
+    observed = []
+    def rules(fd):
+        assert fd == 17
+        observed.append(fd)
+        if fault == "drift":
+            paths[native._OWNED_MAIN].write_bytes(b"foreign")
+        elif fault == "history-drift":
+            place(history_path, b"foreign")
+        return "" if fault == "rules" else plan["nft_candidate"]
+    monkeypatch.setattr(egress, "_read_namespace_rules", rules)
+    with native._locked(rootfd, 0) as statefd:
+        def invoke():
+            return native._retained_rolled_committed_dedicated_pins_locked(rootfd, statefd)
+        if fault == "none":
+            assert invoke() == {
+                "profile_receipt_sha256": "a"*64, "executable_receipt_sha256": "b"*64,
+                "boot_receipt_sha256": hashlib.sha256(receipt_path.read_bytes()).hexdigest(),
+                "generation_manifest_sha256": plan["generation_manifest_sha256"]}
+            assert observed == [17, 17]
+        else:
+            with pytest.raises((native.NativeV2TransactionError, egress.NativeEgressCandidateError)):
+                invoke()
+    assert not events
+    if fault != "drift":
+        assert _fixture_resource_bytes(paths) == resources
+    if fault != "history-drift":
+        assert {p.name: p.read_bytes() for p in state.iterdir()} == before
