@@ -4217,6 +4217,10 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
                 # a service; retry may observe the exact already-loaded unit.
                 fresh_boundary(placed=True)
                 retained_profile = profile()
+                if (retained_profile.get("receipt_matches_owned_dropin") is not True
+                        or retained_profile.get("authorizes_systemctl") is not False
+                        or retained_profile.get("authorizes_nginx_activation") is not False):
+                    _deny("OWNED_DEDICATED_INSTALLER_PROFILE_REFUSED")
 
                 def load_boundary():
                     fresh_boundary(placed=True)
@@ -4234,6 +4238,8 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
                 if reloaded:
                     _safe_native_systemctl()
                     load_boundary()
+                    if _inspect_signed_owned_namespace_load_state(https_port=port) != before:
+                        _deny("OWNED_DEDICATED_RECOVERY_SERVICE_REFUSED")
                     try:
                         result = subprocess.run(
                             (_SYSTEMCTL, "daemon-reload"), shell=False,

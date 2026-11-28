@@ -4473,7 +4473,8 @@ def test_installed_dedicated_recovery_refuses_source_loader_before_host_access(m
                                    "profile-stage-drift", "profile-stage-result",
                                    "profile-load", "profile-load-repeat", "profile-load-wrong-pin",
                                    "profile-load-service", "profile-load-drift", "profile-load-failure",
-                                   "profile-load-readback"])
+                                   "profile-load-readback", "profile-load-timeout",
+                                   "profile-load-observation-drift"])
 def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, monkeypatch, fault):
     """Actual protected files and flock; loader/host/package/runtime observations simulated."""
     import fcntl
@@ -4599,6 +4600,8 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
             assert loading_profile
             assert kw["shell"] is False and kw["close_fds"] is True
             calls.append("daemon-reload")
+            if fault == "profile-load-timeout":
+                raise subprocess.TimeoutExpired(argv, 30)
             loaded = fault not in ("profile-load-failure", "profile-load-readback")
             if fault == "profile-load-drift":
                 resources[native._CATALOG] = b"changed"
@@ -4680,13 +4683,18 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
         assert kw["allow_create"] is False
         if loading_profile:
             return {"receipt_sha256": "2"*64, "receipt_matches_owned_dropin": True,
-                    "authorizes_nginx_activation": False}
+                    "authorizes_systemctl": False, "authorizes_nginx_activation": False}
         return {"receipt_sha256": "0"*64 if fault == "profile" else pins["profile_receipt_sha256"]}
     monkeypatch.setattr(unit, "_stage_namespace_dropin_under_lock", profile)
     if loading_profile:
         monkeypatch.setattr(unit, "_NAMESPACE_PATH", str(state_path / "absent-netns"))
-        monkeypatch.setattr(unit, "_inspect_signed_owned_namespace_load_state",
-                            lambda **kw: {"profile_loaded": loaded, "main_pid_observed": 0})
+        samples = []
+        def load_state(**kw):
+            samples.append(kw)
+            return {"profile_loaded": loaded or (
+                fault == "profile-load-observation-drift" and len(samples) == 3),
+                    "main_pid_observed": 0}
+        monkeypatch.setattr(unit, "_inspect_signed_owned_namespace_load_state", load_state)
         monkeypatch.setattr(native, "_owned_check_stages_absent", lambda *a: None)
         if fault in ("profile-load", "profile-load-repeat"):
             assert native._load_installed_committed_dedicated_profile(pins)[
@@ -4696,7 +4704,7 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
                 native._load_installed_committed_dedicated_profile(pins)
         assert calls == (["daemon-reload"] if fault in (
             "profile-load", "profile-load-drift", "profile-load-failure",
-            "profile-load-readback") else [])
+            "profile-load-readback", "profile-load-timeout") else [])
         assert (state_path / unit._NAMESPACE_PROFILE_RECEIPT).exists()
         assert not (state_path / native._OWNED_WAL).exists()
         assert not (state_path / egress._BOOT_EGRESS_RECEIPT).exists()

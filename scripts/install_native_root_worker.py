@@ -1961,6 +1961,8 @@ def _authenticated_prepared_dedicated_bridge(
                     or report.get("receipt_sha256") != recovery_pins["profile_receipt_sha256"]
                     or report.get("profile_loaded") is not True
                     or type(report.get("daemon_reloaded")) is not bool
+                    or report.get("receipt_matches_owned_dropin") is not True
+                    or report.get("authorizes_systemctl") is not False
                     or report.get("authorizes_nginx_activation") is not False
                     or report.get("authorizes_catalog_publication") is not False):
                 _reject("NATIVE_DEDICATED_RECOVERY_CHILD_REFUSED")

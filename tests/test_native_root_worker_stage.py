@@ -830,7 +830,8 @@ def test_executable_candidate_selects_retained_native_effects_lock(
                                    "profile-stage-manifest", "profile-stage-existing",
                                    "profile-stage-report", "profile-load", "profile-load-repeat",
                                    "profile-load-wal", "profile-load-boot",
-                                   "profile-load-manifest", "profile-load-report"])
+                                   "profile-load-manifest", "profile-load-report",
+                                   "profile-load-authority"])
 def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, tmp_path, fault):
     from contextlib import contextmanager
     from types import SimpleNamespace
@@ -959,6 +960,8 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
                       "executable_receipt_sha256": "c"*64,
                       "receipt_sha256": "0"*64 if fault == "profile-load-report" else "d"*64,
                       "profile_loaded": True, "daemon_reloaded": fault != "profile-load-repeat",
+                      "receipt_matches_owned_dropin": True,
+                      "authorizes_systemctl": fault == "profile-load-authority",
                       "authorizes_nginx_activation": False, "authorizes_catalog_publication": False}
         elif preparing:
             assert data["generation_manifest_sha256"] == hashlib.sha256(manifest).hexdigest()
