@@ -4478,6 +4478,7 @@ def test_installed_dedicated_recovery_refuses_source_loader_before_host_access(m
 def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, monkeypatch, fault):
     """Actual protected files and flock; loader/host/package/runtime observations simulated."""
     import fcntl
+    import subprocess
     import zipimport
     from contextlib import contextmanager
     from types import SimpleNamespace
