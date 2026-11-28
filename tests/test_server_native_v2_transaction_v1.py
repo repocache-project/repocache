@@ -4365,11 +4365,15 @@ def test_installed_dedicated_recovery_refuses_source_loader_before_host_access(m
     monkeypatch.setattr(host, "require_native_host_preconditions", forbidden)
     with pytest.raises(native.NativeV2TransactionError, match="INSTALLER_PIN_REFUSED"):
         native._recover_installed_prepared_dedicated({})
+    with pytest.raises(native.NativeV2TransactionError, match="INSTALLER_PIN_REFUSED"):
+        native._prepare_installed_committed_dedicated({})
 
 
 @pytest.mark.parametrize("fault", ["none", "lock-held", "placement", "worker-drift",
                                    "package", "vendor-drift", "wal", "executable",
-                                   "profile", "boot", "boot-drift", "result"])
+                                   "profile", "boot", "boot-drift", "result",
+                                   "prepare", "prepare-manifest", "prepare-service",
+                                   "prepare-resource-drift", "prepare-result", "prepare-mixed"])
 def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, monkeypatch, fault):
     """Actual protected files and flock; loader/host/package/runtime observations simulated."""
     import fcntl
@@ -4411,6 +4415,16 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
                 boot_receipt_sha256=hashlib.sha256(boot).hexdigest(),
                 wal_sha256="3"*64 if fault == "wal" else hashlib.sha256(wal).hexdigest())
     calls = []
+    preparing = fault.startswith("prepare")
+    manifest = b"exact committed manifest"
+    resources = {native._OWNED_MANIFEST: manifest, native._CATALOG: b"catalog"}
+    if preparing:
+        (state_path / native._OWNED_WAL).unlink()
+        (state_path / egress._BOOT_EGRESS_RECEIPT).unlink()
+        pins["generation_manifest_sha256"] = ("0"*64 if fault == "prepare-manifest"
+                                               else hashlib.sha256(manifest).hexdigest())
+        if fault != "prepare-mixed":
+            del pins["wal_sha256"], pins["boot_receipt_sha256"]
     class Loader:
         archive = worker._WORKER
     monkeypatch.setattr(zipimport, "zipimporter", Loader)
@@ -4429,6 +4443,13 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
         return "0"*64 if fault == "worker-drift" else placement["files"][segments[-1]]
     monkeypatch.setattr(worker, "_placement_file_digest", digest)
     def rpm(argv, **kw):
+        if argv[0] == native._SYSTEMCTL:
+            assert preparing and argv[2] in (native._UNIT, native._OWNED_WAL_DOMAIN)
+            assert argv[1] in ("is-active", "is-enabled")
+            if argv[1] == "is-active":
+                return SimpleNamespace(returncode=0 if fault == "prepare-service" else 3,
+                                       stdout=b"active\n" if fault == "prepare-service" else b"inactive\n")
+            return SimpleNamespace(returncode=1, stdout=b"disabled\n")
         assert argv == ("/usr/bin/rpm", "-q",
                         "--queryformat=%{NAME}-%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}",
                         "nginx-core")
@@ -4440,8 +4461,19 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
         "configuration_base64": "e30=", "state_generation": 1})
     monkeypatch.setattr(native, "_owned_socket_require_inactive_routes", lambda *a: None)
     monkeypatch.setattr(native, "parse_install_bytes", lambda *a, **kw: {
-        "deployment": {"listen": {"https_port": 443}}})
+        "deployment": {"listen": {"https_port": 443, "bind_address": "127.0.0.1"}}})
     monkeypatch.setattr(unit, "_signed_owned_unit_bytes", lambda: b"signed unit")
+    if preparing:
+        @contextmanager
+        def layout(root, state, *, recovering):
+            assert not recovering
+            yield state, 11, 12, lambda: None
+        monkeypatch.setattr(native, "_owned_layout_locked", layout)
+        monkeypatch.setattr(native, "_read_owned_resources", lambda *a: dict(resources))
+        monkeypatch.setattr(unit, "_safe_native_systemctl", lambda: None)
+        monkeypatch.setattr(unit, "inspect_signed_owned_namespace_unit", lambda **kw: {
+            "main_pid_observed": 0})
+        monkeypatch.setattr(native.pwd, "getpwnam", lambda *_: SimpleNamespace(pw_uid=987))
     monkeypatch.setattr(executable, "signed_owned_nginx_policy_candidate",
                         lambda: {"policy_sha256": "4"*64})
     def verify(directory_fd, **kw):
@@ -4485,6 +4517,42 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
                 "wal_sha256": pins["wal_sha256"], "recovery_required": False,
                 "catalog_observed": True}
     monkeypatch.setattr(native, "_recover_owned_prepared_dedicated_locked", recover)
+    if preparing:
+        def create(root, state, **kw):
+            calls.append("prepare")
+            contender = os.open(state_path / LOCK_NAME, os.O_RDONLY)
+            try:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                os.close(contender)
+            assert kw["allow_boot_rollover"] is False
+            kw["recheck_stopped_owner"]()
+            if fault == "prepare-resource-drift":
+                resources[native._CATALOG] = b"changed"
+                kw["recheck_stopped_owner"]()
+            return {"namespace_device": 31, "namespace_inode": 41,
+                    "generation_manifest_sha256": hashlib.sha256(manifest).hexdigest()}
+
+        def verify_boot(root, state, **kw):
+            calls.append("verify")
+            assert kw["allow_prepare"] is False and kw["namespace_identity"] == (31, 41)
+            kw["recheck_namespace_owner"]()
+            return {"namespace_device": 31, "namespace_inode": 41,
+                    "generation_manifest_sha256": "0"*64 if fault == "prepare-result"
+                    else hashlib.sha256(manifest).hexdigest()}
+
+        monkeypatch.setattr(native, "_create_owned_committed_boot_egress_locked", create)
+        monkeypatch.setattr(native, "_prepare_owned_committed_boot_egress_locked", verify_boot)
+        if fault == "prepare":
+            assert native._prepare_installed_committed_dedicated(pins)["namespace_inode"] == 41
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                native._prepare_installed_committed_dedicated(pins)
+        assert calls == (["prepare", "verify"] if fault in ("prepare", "prepare-result") else
+                         ["prepare"] if fault == "prepare-resource-drift" else [])
+        assert not (state_path / native._OWNED_WAL).exists()
+        return
     if fault == "none":
         assert native._recover_installed_prepared_dedicated(pins)["catalog_observed"]
         assert not (state_path / native._OWNED_WAL).exists()
