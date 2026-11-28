@@ -4473,6 +4473,16 @@ def _recover_installed_prepared_dedicated(pins: dict) -> dict:
     return _installed_dedicated_lifecycle(pins, prepare=False)
 
 
+def _stage_installed_initial_dedicated_generation(pins: dict) -> dict:
+    """Private authenticated first generation, before any profile or service effect."""
+    return _installed_dedicated_lifecycle(pins, prepare=False, initial_action="stage")
+
+
+def _restore_installed_initial_dedicated_generation(pins: dict) -> dict:
+    """Private authenticated rollback only before profile/namespace placement."""
+    return _installed_dedicated_lifecycle(pins, prepare=False, initial_action="restore")
+
+
 def _stage_installed_committed_dedicated_profile(pins: dict) -> dict:
     """Private authenticated initial fixed profile placement; no systemd effects."""
     return _installed_dedicated_lifecycle(pins, prepare=True, stage_profile=True)
@@ -4573,7 +4583,8 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
                                    load_profile: bool = False,
                                    prepare_storage: bool = False,
                                    prepare_runtime: bool = False,
-                                   pending_placement: bool = False) -> dict:
+                                   pending_placement: bool = False,
+                                   initial_action: str | None = None) -> dict:
     import zipimport
     from repocache.server_native_nginx_executable_v1 import (
         signed_owned_nginx_policy_candidate, verify_nginx_candidate_receipt,
@@ -4595,6 +4606,10 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
         {"generation_manifest_sha256"} if prepare else
         {"generation_manifest_sha256", "boot_receipt_sha256"} if start or prepare_storage or prepare_runtime else
         {"boot_receipt_sha256", "wal_sha256"})
+    if initial_action in ("stage", "restore"):
+        digests = {"worker_sha256", "placement_sha256", "archive_sha256",
+                   "native_payload_sha256", "binary_sha256", "executable_receipt_sha256",
+                   "proposal_sha256" if initial_action == "stage" else "wal_sha256"}
     if stage_profile:
         digests.remove("profile_receipt_sha256")
     if rollover:
@@ -4603,7 +4618,12 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
         digests.add("wal_sha256")
     if resume_boot:
         digests.add("boot_receipt_sha256")
-    if (type(prepare) is not bool or type(start) is not bool or type(rollover) is not bool
+    if (initial_action not in (None, "stage", "restore")
+            or (initial_action is not None and any((
+                prepare, start, rollover, pending_prepare, resume_boot, pending_start,
+                active_repeat, stage_profile, load_profile, prepare_storage, prepare_runtime,
+                pending_placement)))
+            or type(prepare) is not bool or type(start) is not bool or type(rollover) is not bool
             or type(pending_prepare) is not bool or (pending_prepare and not prepare)
             or type(resume_boot) is not bool or (resume_boot and (not prepare or rollover))
             or type(pending_start) is not bool or (pending_start and not start)
@@ -4692,6 +4712,97 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
 
         placement()
         package()
+        if initial_action is not None:
+            from repocache.server_native_nginx_effective_unit_v1 import (
+                _NAMESPACE_PROFILE_RECEIPT, _NAMESPACE_PATH, _NAMESPACE_DROPIN_DIR,
+                inspect_effective_owned_nginx_unit, _safe_native_systemctl,
+            )
+            from repocache.server_native_egress_candidate_v1 import _BOOT_EGRESS_RECEIPT
+            policy_digest = signed_owned_nginx_policy_candidate()["policy_sha256"]
+
+            def executable_proof():
+                return verify_nginx_candidate_receipt(
+                    directory, expected_receipt_sha256=pins["executable_receipt_sha256"],
+                    distribution="almalinux", package_identity=pins["package_identity"],
+                    native_payload_sha256=pins["native_payload_sha256"],
+                    authenticated_sha256=pins["binary_sha256"],
+                    release_source_sha=pins["source_sha"],
+                    release_archive_sha256=pins["archive_sha256"],
+                    dedicated_policy_sha256=policy_digest)
+
+            executable_before = executable_proof()
+            stopped = inspect_effective_owned_nginx_unit(active=False)
+            if stopped["main_pid_observed"] != 0:
+                _deny("OWNED_INITIAL_INSTALLER_STOPPED_REFUSED")
+            labels = _Labels("almalinux", dedicated=True)
+
+            def stopped_owner():
+                placement()
+                labels.finish()
+                _require_audited_native_package_for_activation(state, distribution="almalinux")
+                if executable_proof() != executable_before:
+                    _deny("OWNED_INITIAL_INSTALLER_EXECUTABLE_CHANGED")
+                _safe_native_systemctl()
+                for unit in (_UNIT, _OWNED_WAL_DOMAIN):
+                    for action, code, output in (("is-enabled", 1, b"disabled\n"),
+                                                 ("is-active", 3, b"inactive\n")):
+                        result = subprocess.run(
+                            (_SYSTEMCTL, action, unit), shell=False, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, cwd="/",
+                            env=_ENV, timeout=5, close_fds=True, start_new_session=True, check=False)
+                        if (result.returncode, result.stdout) != (code, output):
+                            _deny("OWNED_INITIAL_INSTALLER_STOPPED_REFUSED")
+                names = set(os.listdir(state))
+                if (any(name.startswith((_NAMESPACE_PROFILE_RECEIPT.removesuffix(".json"),
+                                         _BOOT_EGRESS_RECEIPT.removesuffix(".json")))
+                        for name in names)
+                        or os.path.lexists(_NAMESPACE_PATH)
+                        or os.path.lexists("/etc/systemd/system/" + _NAMESPACE_DROPIN_DIR)
+                        or inspect_effective_owned_nginx_unit(active=False) != stopped):
+                    _deny("OWNED_INITIAL_INSTALLER_PROFILE_PRESENT")
+                placement()
+                labels.finish()
+
+            stopped_owner()
+            with _owned_layout_locked(root, state, recovering=initial_action == "restore") as layout:
+                _, nginx, public, check_layout = layout
+                def boundary():
+                    check_layout()
+                    stopped_owner()
+                    check_layout()
+                boundary()
+                if initial_action == "stage":
+                    wal, candidate = _stage_owned_initial_dedicated_generation_core_locked(
+                        root, state, nginx, public, boundary,
+                        expected_proposal_sha256=pins["proposal_sha256"])
+                    status = "OWNED_INITIAL_INSTALLED_GENERATION_STAGED"
+                    report = {"proposal_sha256": _hash(candidate[V2_STATE]),
+                              "generation_manifest_sha256": _hash(candidate[_OWNED_MANIFEST]),
+                              "wal_sha256": _hash(wal), "catalog_withdrawn": True,
+                              "recovery_required": True}
+                else:
+                    wal = _read_file(state, _OWNED_WAL, 0, _MAX_WAL)
+                    if wal is None:
+                        wal = _read_file(state, _OWNED_WAL_TMP, 0, _MAX_WAL)
+                    if wal is None or _hash(wal) != pins["wal_sha256"]:
+                        _deny("OWNED_WAL_CHANGED")
+                    restored = _restore_owned_initial_dedicated_generation_core_locked(
+                        root, state, nginx, public, boundary, expected_wal=wal)
+                    if restored["status"] not in (
+                            "OWNED_INITIAL_GENERATION_FIXTURE_RESTORED",
+                            "OWNED_INITIAL_GENERATION_FIXTURE_UNPUBLISHED_DISCARDED"):
+                        _deny("OWNED_INITIAL_INSTALLER_RESTORE_REFUSED")
+                    status = "OWNED_INITIAL_INSTALLED_BOOTSTRAP_RESTORED"
+                    report = {"wal_sha256": _hash(wal), "catalog_withdrawn": True,
+                              "recovery_required": False}
+                boundary()
+                package()
+                boundary()
+                return {"status": status, **report,
+                        "executable_receipt_sha256": pins["executable_receipt_sha256"],
+                        "authorizes_systemctl": False,
+                        "authorizes_nginx_activation": False,
+                        "authorizes_catalog_publication": False}
         if pending_prepare or pending_start or pending_placement:
             wal = _read_file(state, _OWNED_WAL, 0, _MAX_WAL)
             if wal is None or hashlib.sha256(wal).hexdigest() != pins["wal_sha256"]:
@@ -5220,13 +5331,17 @@ def _write_owned_initial_dedicated_config_locked(
         root_fd: int, state_fd: int, nginx_fd: int, public_fd: int,
         check_layout, wal: bytes, expected: dict, name: str,
         after: bytes | None) -> None:
-    """Initial-generation label-preserving forward/rollback writer.
-
-    Detached rehearsal only. Use the existing v3 WAL and exact resources,
-    never adopt a committed or catalog-exposed generation. Retain the WAL
-    on uncertainty; no service, public catalog, or host operation.
-    """
+    """Detached fixture entry; the actual namespace root is always refused."""
     _refuse_actual_root_fixture_write(root_fd)
+    return _write_owned_initial_dedicated_config_core_locked(
+        root_fd, state_fd, nginx_fd, public_fd, check_layout, wal, expected, name, after)
+
+
+def _write_owned_initial_dedicated_config_core_locked(
+        root_fd: int, state_fd: int, nginx_fd: int, public_fd: int,
+        check_layout, wal: bytes, expected: dict, name: str,
+        after: bytes | None) -> None:
+    """Internal initial transaction primitive; caller retains exact ownership and lock."""
     code = "OWNED_INITIAL_DEDICATED_WRITE_REFUSED"
     if name not in (_OWNED_MAIN, _INCLUDE):
         _deny(code)
@@ -5297,12 +5412,16 @@ def _write_owned_initial_dedicated_config_locked(
 def _restore_owned_initial_dedicated_config_fixture_locked(
         root_fd: int, state_fd: int, nginx_fd: int, public_fd: int,
         check_layout, *, expected_wal: bytes) -> dict:
-    """Recover an interrupted detached initial configuration-only WAL.
-
-    This is not recovery of an installed or running generation. Retain
-    evidence on any drift; never relabel or discard a foreign stage.
-    """
+    """Detached fixture entry; the actual namespace root is always refused."""
     _refuse_actual_root_fixture_write(root_fd)
+    return _restore_owned_initial_dedicated_config_core_locked(
+        root_fd, state_fd, nginx_fd, public_fd, check_layout, expected_wal=expected_wal)
+
+
+def _restore_owned_initial_dedicated_config_core_locked(
+        root_fd: int, state_fd: int, nginx_fd: int, public_fd: int,
+        check_layout, *, expected_wal: bytes) -> dict:
+    """Internal initial transaction primitive; caller retains exact ownership and lock."""
     code = "OWNED_INITIAL_DEDICATED_RECOVERY_REFUSED"
     old, hashes = _decode_owned_wal(expected_wal, distribution="almalinux")
     if (_json(expected_wal, limit=_MAX_WAL)["version"] != 3
@@ -5398,7 +5517,7 @@ def _restore_owned_initial_dedicated_config_fixture_locked(
             or after_cleanup[0][1] != proof[0][1] or after_cleanup[1:] != proof[1:]):
         _deny(code)
     for resource in (_OWNED_MAIN, _INCLUDE):
-        _write_owned_initial_dedicated_config_locked(
+        _write_owned_initial_dedicated_config_core_locked(
             root_fd, state_fd, nginx_fd, public_fd, check_layout,
             expected_wal, current, resource, old[resource])
     if current != old:
@@ -5537,8 +5656,17 @@ def _write_owned_initial_private_fixture_locked(
         root_fd: int, state_fd: int, nginx_fd: int, public_fd: int,
         check_layout, wal: bytes, expected: dict, name: str,
         after: bytes) -> None:
-    """Publish a fresh private state/manifest, never replace an existing inode."""
+    """Detached fixture entry; the actual namespace root is always refused."""
     _refuse_actual_root_fixture_write(root_fd)
+    return _write_owned_initial_private_core_locked(
+        root_fd, state_fd, nginx_fd, public_fd, check_layout, wal, expected, name, after)
+
+
+def _write_owned_initial_private_core_locked(
+        root_fd: int, state_fd: int, nginx_fd: int, public_fd: int,
+        check_layout, wal: bytes, expected: dict, name: str,
+        after: bytes) -> None:
+    """Internal initial transaction primitive; caller retains exact ownership and lock."""
     code = "OWNED_INITIAL_PRIVATE_WRITE_REFUSED"
     if name not in _OWNED_PRIVATE or type(after) is not bytes:
         _deny(code)
@@ -5633,15 +5761,20 @@ def _write_owned_initial_private_fixture_locked(
 def _stage_owned_initial_dedicated_generation_fixture_locked(
         root_fd: int, state_fd: int, nginx_fd: int, public_fd: int,
         check_layout) -> tuple[bytes, dict]:
-    """Prepare complete generation-one bytes behind a withdrawn catalog.
-
-    The caller holds the detached root's original lock. Durable v3 WAL
-    precedes all target changes. No process or boot-policy effect, no
-    automatic compensation on uncertainty and no actual-root authority.
-    """
+    """Detached fixture entry; the actual namespace root is always refused."""
     _refuse_actual_root_fixture_write(root_fd)
+    return _stage_owned_initial_dedicated_generation_core_locked(
+        root_fd, state_fd, nginx_fd, public_fd, check_layout)
+
+
+def _stage_owned_initial_dedicated_generation_core_locked(
+        root_fd: int, state_fd: int, nginx_fd: int, public_fd: int,
+        check_layout, *, expected_proposal_sha256: str | None = None) -> tuple[bytes, dict]:
+    """Internal initial transaction primitive; caller retains exact ownership and lock."""
     old, new, report = _prepare_owned_initial_dedicated_candidate_locked(
         root_fd, state_fd, nginx_fd, public_fd, check_layout, "almalinux")
+    if expected_proposal_sha256 is not None and _hash(new[V2_STATE]) != expected_proposal_sha256:
+        _deny("CANDIDATE_CHANGED")
     snapshot = _validate_owned_resources(new, distribution="almalinux")
     _owned_socket_require_inactive_routes(snapshot)
     document = parse_install_bytes(
@@ -5677,10 +5810,10 @@ def _stage_owned_initial_dedicated_generation_fixture_locked(
                                     pre_wal, live=True)
     expected = dict(old)
     for name in (_INCLUDE, _OWNED_MAIN):
-        _write_owned_initial_dedicated_config_locked(
+        _write_owned_initial_dedicated_config_core_locked(
             root_fd, state_fd, nginx_fd, public_fd, boundary, wal, expected, name, new[name])
     for name in (V2_STATE, _OWNED_MANIFEST):
-        _write_owned_initial_private_fixture_locked(
+        _write_owned_initial_private_core_locked(
             root_fd, state_fd, nginx_fd, public_fd, boundary, wal, expected, name, new[name])
     reconstructed = _read_owned_initial_dedicated_prepared_locked(
         root_fd, state_fd, nginx_fd, public_fd, boundary, expected_wal=wal)
@@ -5692,13 +5825,16 @@ def _stage_owned_initial_dedicated_generation_fixture_locked(
 def _restore_owned_initial_dedicated_generation_fixture_locked(
         root_fd: int, state_fd: int, nginx_fd: int, public_fd: int,
         check_layout, *, expected_wal: bytes) -> dict:
-    """Detached initial rollback, including interrupted private publication.
-
-    Validate every private target/stage before removing any. Keep the
-    configuration and catalog withdrawal pinned until private reversal is
-    complete, then reuse the existing ordered configuration-only recovery.
-    """
+    """Detached fixture entry; the actual namespace root is always refused."""
     _refuse_actual_root_fixture_write(root_fd)
+    return _restore_owned_initial_dedicated_generation_core_locked(
+        root_fd, state_fd, nginx_fd, public_fd, check_layout, expected_wal=expected_wal)
+
+
+def _restore_owned_initial_dedicated_generation_core_locked(
+        root_fd: int, state_fd: int, nginx_fd: int, public_fd: int,
+        check_layout, *, expected_wal: bytes) -> dict:
+    """Internal initial transaction primitive; caller retains exact ownership and lock."""
     code = "OWNED_INITIAL_PRIVATE_RECOVERY_REFUSED"
     labels = _Labels("almalinux", dedicated=True)
     check_layout()
@@ -5742,7 +5878,7 @@ def _restore_owned_initial_dedicated_generation_fixture_locked(
             continue
         stages.append(name)
     if not stages and all(current[name] is None for name in _OWNED_PRIVATE):
-        result = _restore_owned_initial_dedicated_config_fixture_locked(
+        result = _restore_owned_initial_dedicated_config_core_locked(
             root_fd, state_fd, nginx_fd, public_fd, check_layout,
             expected_wal=expected_wal)
         return {**result, "status": "OWNED_INITIAL_GENERATION_FIXTURE_RESTORED"}
@@ -5859,7 +5995,7 @@ def _restore_owned_initial_dedicated_generation_fixture_locked(
             else:
                 current[name] = None
             exact()
-    result = _restore_owned_initial_dedicated_config_fixture_locked(
+    result = _restore_owned_initial_dedicated_config_core_locked(
         root_fd, state_fd, nginx_fd, public_fd, check_layout, expected_wal=expected_wal)
     return {**result, "status": "OWNED_INITIAL_GENERATION_FIXTURE_RESTORED"}
 
