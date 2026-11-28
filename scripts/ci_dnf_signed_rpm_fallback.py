@@ -366,6 +366,45 @@ def _probe_private_dnf4_claim(root, argv, lock, env):
         recheck()
     assert not os.path.lexists(lock)
     print("PASS: DNF4 private directory and ancestor mode drift refused; exact claim retained until fixture cleanup", flush=True)
+    # Reparent the original lock directory into a different, equally safe
+    # private ancestor. Its inode, contents and kernel lock remain exact.
+    # The retained ancestor identity must nevertheless invalidate the scope.
+    ancestor = rpm_lock.parent.parent
+    archived = ancestor.with_name(".repocache-ci-original-sysimage")
+    assert not os.path.lexists(archived)
+    claim = None
+    try:
+        with _private_dnf4_claim(root) as recheck:
+            claim = lock.stat()
+            original = rpm_lock.stat()
+            ancestor.rename(archived)
+            ancestor.mkdir(mode=stat.S_IMODE(archived.stat().st_mode))
+            (archived / "rpm").rename(ancestor / "rpm")
+            try:
+                assert rpm_lock.stat().st_ino == original.st_ino
+                try:
+                    recheck()
+                except held_locks.LockInspectionRefused:
+                    pass
+                else:
+                    raise AssertionError("Changed DNF4 ancestor accepted with original leaf")
+            finally:
+                (ancestor / "rpm").rename(archived / "rpm")
+                ancestor.rmdir()
+                archived.rename(ancestor)
+    except held_locks.LockInspectionRefused:
+        pass
+    else:
+        raise AssertionError("Reparented DNF4 scope resumed after restoration")
+    assert claim is not None
+    retained = lock.stat()
+    assert (retained.st_dev, retained.st_ino) == (claim.st_dev, claim.st_ino)
+    assert lock.read_bytes() == str(os.getpid()).encode("ascii")
+    lock.unlink()  # exact disposable claim, after restoring original ancestor
+    with _private_dnf4_claim(root) as recheck:
+        recheck()
+    assert not os.path.lexists(lock)
+    print("PASS: DNF4 same-leaf reparenting invalidated the scope; restored ancestry did not resume it", flush=True)
     print("PASS: DNF4 atomic private live-PID claim and RPMDB locks; real "
           "transaction refused while repository config remained readable", flush=True)
 
