@@ -1574,6 +1574,40 @@ with ExitStack() as stack:
 """
 
 
+# Literal installer phase table. The fixed child source is generated only
+# from these closed names, never from a socket peer or caller-provided code.
+_INITIAL_PENDING_ACTIONS = {
+    "profile": {"prepare": True, "stage_profile": True},
+    "load": {"prepare": True, "load_profile": True},
+    "boot": {"prepare": True, "pending_prepare": True},
+    "boot-resume": {"prepare": True, "pending_prepare": True, "resume_boot": True},
+    "boot-rollover": {"prepare": True, "pending_prepare": True, "rollover": True},
+    "storage": {"prepare_storage": True, "pending_placement": True},
+    "runtime": {"prepare_runtime": True, "pending_placement": True},
+    "start": {"start": True, "pending_start": True},
+    "finish": {},
+}
+_DEDICATED_INITIAL_PENDING_CHILDREN = {
+    action: _DEDICATED_RECOVERY_CHILD.replace(
+        "transaction._recover_installed_prepared_dedicated(pins)",
+        "transaction._installed_initial_dedicated_pending(pins, " + repr(action) + ")")
+    for action in _INITIAL_PENDING_ACTIONS
+}
+
+
+def _authenticated_initial_dedicated_pending(
+    assets: Path, *, commit: str, archive_sha256: str,
+    action: str, recovery_pins: dict,
+) -> dict:
+    """Private fixed-phase bridge for the initial WAL successor."""
+    if type(action) is not str or action not in _INITIAL_PENDING_ACTIONS:
+        _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
+    return _authenticated_prepared_dedicated_bridge(
+        assets, commit=commit, archive_sha256=archive_sha256,
+        recovery_pins=recovery_pins, initial_pending_action=action,
+        **_INITIAL_PENDING_ACTIONS[action])
+
+
 _DEDICATED_INITIAL_STAGE_CHILD = _DEDICATED_RECOVERY_CHILD.replace(
     "transaction._recover_installed_prepared_dedicated(pins)",
     "transaction._stage_installed_initial_dedicated_generation(pins)")
@@ -1921,7 +1955,22 @@ def _authenticated_prepared_dedicated_bridge(
     prepare_storage: bool = False, prepare_runtime: bool = False,
     pending_placement: bool = False,
     initial_action: str | None = None,
+    initial_pending_action: str | None = None,
 ) -> dict:
+    initial_pending = initial_pending_action is not None
+    if initial_pending:
+        flags = dict(prepare=prepare, start=start, rollover=rollover,
+                     pending_prepare=pending_prepare, resume_boot=resume_boot,
+                     pending_start=pending_start, stage_profile=stage_profile,
+                     load_profile=load_profile, prepare_storage=prepare_storage,
+                     prepare_runtime=prepare_runtime, pending_placement=pending_placement)
+        if (type(initial_pending_action) is not str
+                or initial_pending_action not in _INITIAL_PENDING_ACTIONS
+                or recovery_pins is None or expected_rolled_pins is not None
+                or initial_action is not None
+                or {key: value for key, value in flags.items() if value} !=
+                   _INITIAL_PENDING_ACTIONS[initial_pending_action]):
+            _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
     if (initial_action not in (None, "stage", "restore")
             or (initial_action is not None and (
                 recovery_pins is None or expected_rolled_pins is not None or any((
@@ -1964,6 +2013,8 @@ def _authenticated_prepared_dedicated_bridge(
         fields.add("wal_sha256")
     if resume_boot:
         fields.add("boot_receipt_sha256")
+    if initial_pending:
+        fields.update(("wal_sha256", "generation_manifest_sha256"))
 
     def validate_pins(pins):
         if (type(pins) is not dict or set(pins) != fields
@@ -2031,7 +2082,7 @@ def _authenticated_prepared_dedicated_bridge(
                             _reject("NATIVE_DEDICATED_RECOVERY_WAL_REFUSED")
                         if hashlib.sha256(wal if wal is not None else tmp).hexdigest() != recovery_pins["wal_sha256"]:
                             _reject("NATIVE_DEDICATED_RECOVERY_WAL_REFUSED")
-            elif prepare or start or prepare_storage or prepare_runtime:
+            elif initial_pending or prepare or start or prepare_storage or prepare_runtime:
                 from repocache.server_native_v2_transaction_v1 import (
                     _OWNED_MANIFEST, _OWNED_LIMIT, _OWNED_WAL_TMP,
                 )
@@ -2040,7 +2091,7 @@ def _authenticated_prepared_dedicated_bridge(
                 )
                 manifest = _read_file(state, _OWNED_MANIFEST, 0, _OWNED_LIMIT[_OWNED_MANIFEST])
                 wal = _read_file(state, _OWNED_WAL, 0, _MAX_WAL)
-                if pending_prepare or pending_start or pending_placement:
+                if initial_pending or pending_prepare or pending_start or pending_placement:
                     if wal is None or hashlib.sha256(wal).hexdigest() != recovery_pins["wal_sha256"]:
                         _reject("NATIVE_DEDICATED_RECOVERY_WAL_REFUSED")
                 elif wal is not None:
@@ -2098,6 +2149,7 @@ def _authenticated_prepared_dedicated_bridge(
     try:
         result = subprocess.run(
             ("/usr/bin/python3", "-IS", "-B", "-c",
+             _DEDICATED_INITIAL_PENDING_CHILDREN[initial_pending_action] if initial_pending else
              _DEDICATED_INITIAL_STAGE_CHILD if initial_action == "stage" else
              _DEDICATED_INITIAL_RESTORE_CHILD if initial_action == "restore" else
              _DEDICATED_PROFILE_CHILD if stage_profile else
@@ -2152,6 +2204,11 @@ def _authenticated_prepared_dedicated_bridge(
                 _reject("NATIVE_DEDICATED_RECOVERY_CHILD_REFUSED")
         elif stage_profile:
             if (report.get("status") != "OWNED_DEDICATED_PROFILE_STAGED"
+                    or (initial_pending and (
+                        report.get("initial_resources_verified") is not True
+                        or report.get("wal_sha256") != recovery_pins["wal_sha256"]
+                        or report.get("catalog_withdrawn") is not True
+                        or report.get("recovery_required") is not True))
                     or report.get("generation_manifest_sha256") !=
                        recovery_pins["generation_manifest_sha256"]
                     or report.get("executable_receipt_sha256") !=
@@ -2165,6 +2222,11 @@ def _authenticated_prepared_dedicated_bridge(
                 _reject("NATIVE_DEDICATED_RECOVERY_CHILD_REFUSED")
         elif load_profile:
             if (report.get("status") != "OWNED_DEDICATED_PROFILE_LOADED"
+                    or (initial_pending and (
+                        report.get("initial_resources_verified") is not True
+                        or report.get("wal_sha256") != recovery_pins["wal_sha256"]
+                        or report.get("catalog_withdrawn") is not True
+                        or report.get("recovery_required") is not True))
                     or report.get("generation_manifest_sha256") !=
                        recovery_pins["generation_manifest_sha256"]
                     or report.get("executable_receipt_sha256") !=
@@ -2183,7 +2245,8 @@ def _authenticated_prepared_dedicated_bridge(
                     recovery_pins["generation_manifest_sha256"]
                     or (not pending_prepare and report.get("committed_resources_verified") is not True)
                     or (pending_prepare and (
-                        report.get("prior_resources_verified") is not True
+                        report.get("initial_resources_verified" if initial_pending else
+                                   "prior_resources_verified") is not True
                         or report.get("recovery_required") is not True
                         or report.get("catalog_withdrawn") is not True
                         or report.get("wal_sha256") != recovery_pins["wal_sha256"]
@@ -2200,15 +2263,18 @@ def _authenticated_prepared_dedicated_bridge(
             from repocache.server_native_v2_transaction_v1 import (
                 _closed_committed_dedicated_storage_report,
             )
-            expected_status = ("OWNED_DEDICATED_PREPARED_WAL_RUNTIME_PREPARED" if prepare_runtime
+            expected_status = (("OWNED_DEDICATED_INITIAL_WAL_RUNTIME_PREPARED" if prepare_runtime
+                                else "OWNED_DEDICATED_INITIAL_WAL_STORAGE_PREPARED") if initial_pending else
+                               ("OWNED_DEDICATED_PREPARED_WAL_RUNTIME_PREPARED" if prepare_runtime
                                else "OWNED_DEDICATED_PREPARED_WAL_STORAGE_PREPARED") if pending_placement else (
                                "OWNED_DEDICATED_COMMITTED_RUNTIME_PREPARED" if prepare_runtime
-                               else "OWNED_DEDICATED_COMMITTED_STORAGE_PREPARED")
+                               else "OWNED_DEDICATED_COMMITTED_STORAGE_PREPARED"))
             if (report.get("status") != expected_status
                     or (prepare_runtime and (type(report.get("scratch_count")) is not int
                                              or report["scratch_count"] != 5))
                     or (prepare_storage and "scratch_count" in report)
                     or any(report.get(key) != recovery_pins[key] for key in fields)
+                    or (initial_pending and report.get("initial_resources_verified") is not True)
                     or (pending_placement and (
                         report.get("catalog_withdrawn") is not True or report.get("recovery_required") is not True))
                     or (not pending_placement and any(key in report for key in (
@@ -2219,7 +2285,8 @@ def _authenticated_prepared_dedicated_bridge(
                     or report.get("authorizes_catalog_publication") is not False):
                 _reject("NATIVE_DEDICATED_RECOVERY_CHILD_REFUSED")
         elif start:
-            accepted_status = ({"OWNED_DEDICATED_PREPARED_WAL_START_OBSERVED"} if pending_start
+            accepted_status = ({"OWNED_DEDICATED_INITIAL_WAL_START_OBSERVED"} if initial_pending
+                               else {"OWNED_DEDICATED_PREPARED_WAL_START_OBSERVED"} if pending_start
                                else {"OWNED_DEDICATED_COMMITTED_START_OBSERVED"})
             if rolled_start:
                 accepted_status.add("OWNED_DEDICATED_COMMITTED_ACTIVE_VERIFIED")
@@ -2235,6 +2302,14 @@ def _authenticated_prepared_dedicated_bridge(
                     or report.get("enablement_changed") is not False
                     or any(type(report.get(key)) is not int or report[key] <= 0
                            for key in ("main_pid", "listener_inode"))):
+                _reject("NATIVE_DEDICATED_RECOVERY_CHILD_REFUSED")
+        elif initial_pending:
+            if (report.get("status") != "OWNED_DEDICATED_INITIAL_WAL_COMMIT_OBSERVED"
+                    or report.get("generation") != 1
+                    or report.get("generation_manifest_sha256") != recovery_pins["generation_manifest_sha256"]
+                    or report.get("wal_sha256") != recovery_pins["wal_sha256"]
+                    or report.get("recovery_required") is not False
+                    or report.get("catalog_observed") is not True):
                 _reject("NATIVE_DEDICATED_RECOVERY_CHILD_REFUSED")
         elif (report.get("status") != "OWNED_DEDICATED_WAL_ROLLBACK_OBSERVED"
                 or report.get("wal_sha256") != wal_sha256
