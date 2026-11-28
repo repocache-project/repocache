@@ -296,25 +296,43 @@ def _dnf4_fixture_guard(root: Path) -> None:
         os.close(fd)
 
 
-def _dnf4_check_lock_directory(root: Path, directory: Path, *, pinned=None) -> None:
-    """Rewalk the fixed private directory without following symlinks."""
+def _dnf4_check_lock_directory(root: Path, directory: Path, *, pinned=None,
+                               expected_chain=None) -> tuple:
+    """Rewalk and bind every private ancestor, not merely the lock directory."""
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    def identity(info):
+        return (info.st_dev, info.st_ino, info.st_uid, info.st_gid, info.st_mode)
+
     with contextlib.ExitStack() as opened:
         current = os.open(root, flags)
         opened.callback(os.close, current)
         info = os.fstat(current)
         _require_dnf4(info.st_uid == info.st_gid == 0 and
                       stat.S_ISDIR(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o700)
+        chain = [identity(info)]
+        links = []
         for segment in directory.relative_to(root).parts:
-            current = os.open(segment, flags, dir_fd=current)
+            parent = current
+            current = os.open(segment, flags, dir_fd=parent)
             opened.callback(os.close, current)
             info = os.fstat(current)
             _require_dnf4(stat.S_ISDIR(info.st_mode) and info.st_uid == 0
                           and not info.st_mode & 0o022)
+            chain.append(identity(info))
+            links.append((parent, segment, current, chain[-1]))
+        # A moved ancestor can still contain the original leaf inode. Retain
+        # and recheck the full walk before trusting even an unchanged leaf.
+        _require_dnf4(identity(os.stat(root, follow_symlinks=False)) == chain[0])
+        for parent, segment, held, observed in links:
+            _require_dnf4(identity(os.fstat(held)) == observed and
+                          identity(os.stat(segment, dir_fd=parent,
+                                           follow_symlinks=False)) == observed)
         if pinned is not None:
-            held = os.fstat(pinned)
-            _require_dnf4((info.st_dev, info.st_ino, info.st_uid, info.st_gid, info.st_mode) ==
-                          (held.st_dev, held.st_ino, held.st_uid, held.st_gid, held.st_mode))
+            _require_dnf4(chain[-1] == identity(os.fstat(pinned)))
+        result = tuple(chain)
+        if expected_chain is not None:
+            _require_dnf4(result == expected_chain)
+        return result
 
 
 @contextlib.contextmanager
@@ -328,8 +346,9 @@ def _dnf4_private_claim(root: Path):
     _dnf4_fixture_guard(root)
     lock_dir = root / "var/lib/dnf"
     rpm_dir = root / "usr/lib/sysimage/rpm"
-    for directory in (lock_dir, rpm_dir):
-        _dnf4_check_lock_directory(root, directory)
+    lock_chain = _dnf4_check_lock_directory(root, lock_dir)
+    rpm_chain = _dnf4_check_lock_directory(root, rpm_dir)
+    _require_dnf4(lock_chain[0] == rpm_chain[0])
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
     leaf = "rpmdb_lock.pid"
     staged = ".repocache-ci-rpmdb-lock.stage"
@@ -344,8 +363,10 @@ def _dnf4_private_claim(root: Path):
         nonlocal directory_drift
         _require_dnf4(not directory_drift)
         try:
-            _dnf4_check_lock_directory(root, lock_dir, pinned=dirfd)
-            _dnf4_check_lock_directory(root, rpm_dir, pinned=rpmfd)
+            _dnf4_check_lock_directory(root, lock_dir, pinned=dirfd,
+                                       expected_chain=lock_chain)
+            _dnf4_check_lock_directory(root, rpm_dir, pinned=rpmfd,
+                                       expected_chain=rpm_chain)
         except (OSError, locks.LockInspectionRefused):
             # Never resume a scope or remove its claim after an observed
             # ownership-boundary failure, even if a caller repairs the mode.

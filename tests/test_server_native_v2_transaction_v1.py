@@ -4367,13 +4367,17 @@ def test_installed_dedicated_recovery_refuses_source_loader_before_host_access(m
         native._recover_installed_prepared_dedicated({})
     with pytest.raises(native.NativeV2TransactionError, match="INSTALLER_PIN_REFUSED"):
         native._prepare_installed_committed_dedicated({})
+    with pytest.raises(native.NativeV2TransactionError, match="INSTALLER_PIN_REFUSED"):
+        native._start_installed_committed_dedicated({})
 
 
 @pytest.mark.parametrize("fault", ["none", "lock-held", "placement", "worker-drift",
                                    "package", "vendor-drift", "wal", "executable",
                                    "profile", "boot", "boot-drift", "result",
                                    "prepare", "prepare-manifest", "prepare-service",
-                                   "prepare-resource-drift", "prepare-result", "prepare-mixed"])
+                                   "prepare-resource-drift", "prepare-result", "prepare-mixed",
+                                   "start", "start-manifest", "start-boot", "start-service",
+                                   "start-resource-drift", "start-result", "start-mixed"])
 def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, monkeypatch, fault):
     """Actual protected files and flock; loader/host/package/runtime observations simulated."""
     import fcntl
@@ -4416,6 +4420,7 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
                 wal_sha256="3"*64 if fault == "wal" else hashlib.sha256(wal).hexdigest())
     calls = []
     preparing = fault.startswith("prepare")
+    starting = fault.startswith("start")
     manifest = b"exact committed manifest"
     resources = {native._OWNED_MANIFEST: manifest, native._CATALOG: b"catalog"}
     if preparing:
@@ -4425,6 +4430,14 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
                                                else hashlib.sha256(manifest).hexdigest())
         if fault != "prepare-mixed":
             del pins["wal_sha256"], pins["boot_receipt_sha256"]
+    if starting:
+        (state_path / native._OWNED_WAL).unlink()
+        pins["generation_manifest_sha256"] = ("0"*64 if fault == "start-manifest"
+                                               else hashlib.sha256(manifest).hexdigest())
+        if fault != "start-mixed":
+            del pins["wal_sha256"]
+        if fault == "start-boot":
+            pins["boot_receipt_sha256"] = "0"*64
     class Loader:
         archive = worker._WORKER
     monkeypatch.setattr(zipimport, "zipimporter", Loader)
@@ -4444,11 +4457,12 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
     monkeypatch.setattr(worker, "_placement_file_digest", digest)
     def rpm(argv, **kw):
         if argv[0] == native._SYSTEMCTL:
-            assert preparing and argv[2] in (native._UNIT, native._OWNED_WAL_DOMAIN)
+            assert (preparing or starting) and argv[2] in (native._UNIT, native._OWNED_WAL_DOMAIN)
             assert argv[1] in ("is-active", "is-enabled")
             if argv[1] == "is-active":
-                return SimpleNamespace(returncode=0 if fault == "prepare-service" else 3,
-                                       stdout=b"active\n" if fault == "prepare-service" else b"inactive\n")
+                active = fault in ("prepare-service", "start-service")
+                return SimpleNamespace(returncode=0 if active else 3,
+                                       stdout=b"active\n" if active else b"inactive\n")
             return SimpleNamespace(returncode=1, stdout=b"disabled\n")
         assert argv == ("/usr/bin/rpm", "-q",
                         "--queryformat=%{NAME}-%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}",
@@ -4463,7 +4477,7 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
     monkeypatch.setattr(native, "parse_install_bytes", lambda *a, **kw: {
         "deployment": {"listen": {"https_port": 443, "bind_address": "127.0.0.1"}}})
     monkeypatch.setattr(unit, "_signed_owned_unit_bytes", lambda: b"signed unit")
-    if preparing:
+    if preparing or starting:
         @contextmanager
         def layout(root, state, *, recovering):
             assert not recovering
@@ -4552,6 +4566,36 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
         assert calls == (["prepare", "verify"] if fault in ("prepare", "prepare-result") else
                          ["prepare"] if fault == "prepare-resource-drift" else [])
         assert not (state_path / native._OWNED_WAL).exists()
+        return
+    if starting:
+        def start(root, state, **kw):
+            calls.append("start")
+            contender = os.open(state_path / LOCK_NAME, os.O_RDONLY)
+            try:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                os.close(contender)
+            assert kw["namespace_identity"] == (31, 41)
+            assert kw["executable_identity"] == (17, 29)
+            kw["recheck_authenticated_owner"]()
+            if fault == "start-resource-drift":
+                resources[native._CATALOG] = b"changed"
+                kw["recheck_authenticated_owner"]()
+            return {"status": "OWNED_DEDICATED_COMMITTED_START_OBSERVED",
+                    "generation": 1, "catalog_observed": True,
+                    "service_storage_mounts_verified": True,
+                    "service_scratch_mounts_verified": True,
+                    "enablement_changed": fault == "start-result"}
+        monkeypatch.setattr(native, "_start_owned_committed_dedicated_locked", start)
+        if fault == "start":
+            assert native._start_installed_committed_dedicated(pins)["catalog_observed"]
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                native._start_installed_committed_dedicated(pins)
+        assert calls == (["start"] if fault in ("start", "start-resource-drift", "start-result") else [])
+        assert not (state_path / native._OWNED_WAL).exists()
+        assert (state_path / egress._BOOT_EGRESS_RECEIPT).read_bytes() == boot
         return
     if fault == "none":
         assert native._recover_installed_prepared_dedicated(pins)["catalog_observed"]

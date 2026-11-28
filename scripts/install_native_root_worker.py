@@ -1585,14 +1585,36 @@ def _prepare_authenticated_committed_dedicated_nginx(
                            generation_manifest_sha256=generation_manifest_sha256))
 
 
+_DEDICATED_START_CHILD = _DEDICATED_RECOVERY_CHILD.replace(
+    "transaction._recover_installed_prepared_dedicated(pins)",
+    "transaction._start_installed_committed_dedicated(pins)")
+
+
+def _start_authenticated_committed_dedicated_nginx(
+    assets: Path, *, commit: str, archive_sha256: str,
+    executable_receipt_sha256: str, profile_receipt_sha256: str,
+    generation_manifest_sha256: str, boot_receipt_sha256: str,
+) -> dict:
+    """Private explicit start of an already prepared, disabled loopback service."""
+    return _authenticated_prepared_dedicated_bridge(
+        assets, commit=commit, archive_sha256=archive_sha256, start=True,
+        recovery_pins=dict(executable_receipt_sha256=executable_receipt_sha256,
+                           profile_receipt_sha256=profile_receipt_sha256,
+                           generation_manifest_sha256=generation_manifest_sha256,
+                           boot_receipt_sha256=boot_receipt_sha256))
+
+
 def _authenticated_prepared_dedicated_bridge(
     assets: Path, *, commit: str, archive_sha256: str, recovery_pins: dict | None,
-    prepare: bool = False,
+    prepare: bool = False, start: bool = False,
 ) -> dict:
-    if type(prepare) is not bool or (prepare and recovery_pins is None):
+    if (type(prepare) is not bool or type(start) is not bool or (prepare and start)
+            or ((prepare or start) and recovery_pins is None)):
         _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
     fields = {"executable_receipt_sha256", "profile_receipt_sha256"} | (
-        {"generation_manifest_sha256"} if prepare else {"boot_receipt_sha256", "wal_sha256"})
+        {"generation_manifest_sha256"} if prepare else
+        {"generation_manifest_sha256", "boot_receipt_sha256"} if start else
+        {"boot_receipt_sha256", "wal_sha256"})
 
     def validate_pins(pins):
         if (type(pins) is not dict or set(pins) != fields
@@ -1628,7 +1650,7 @@ def _authenticated_prepared_dedicated_bridge(
                 )
                 recovery_pins = _retained_rolled_dedicated_recovery_pins_locked(root, state)
             validate_pins(recovery_pins)
-            if prepare:
+            if prepare or start:
                 from repocache.server_native_v2_transaction_v1 import (
                     _OWNED_MANIFEST, _OWNED_LIMIT, _OWNED_WAL_TMP,
                 )
@@ -1640,9 +1662,14 @@ def _authenticated_prepared_dedicated_bridge(
                         recovery_pins["generation_manifest_sha256"]
                         or _read_file(state, _OWNED_WAL, 0, _MAX_WAL) is not None
                         or _read_file(state, _OWNED_WAL_TMP, 0, _MAX_WAL) is not None
-                        or _read_boot_egress_receipt(state, 0, 0) is not None
-                        or any(name.startswith(_BOOT_EGRESS_HISTORY_PREFIX)
-                               or name == _BOOT_EGRESS_ROLLOVER for name in os.listdir(state))):
+                        or _BOOT_EGRESS_ROLLOVER in os.listdir(state)):
+                    _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
+                boot = _read_boot_egress_receipt(state, 0, 0)
+                if prepare:
+                    if boot is not None or any(name.startswith(_BOOT_EGRESS_HISTORY_PREFIX)
+                                               for name in os.listdir(state)):
+                        _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
+                elif boot is None or hashlib.sha256(boot).hexdigest() != recovery_pins["boot_receipt_sha256"]:
                     _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
             else:
                 wal_sha256 = recovery_pins["wal_sha256"]
@@ -1671,7 +1698,8 @@ def _authenticated_prepared_dedicated_bridge(
     try:
         result = subprocess.run(
             ("/usr/bin/python3", "-IS", "-B", "-c",
-             _DEDICATED_PREPARE_CHILD if prepare else _DEDICATED_RECOVERY_CHILD),
+             _DEDICATED_PREPARE_CHILD if prepare else
+             _DEDICATED_START_CHILD if start else _DEDICATED_RECOVERY_CHILD),
             input=json.dumps(pins, sort_keys=True).encode("ascii"),
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd="/",
             env={"PATH": "/usr/sbin:/usr/bin:/bin", "LC_ALL": "C"},
@@ -1698,6 +1726,17 @@ def _authenticated_prepared_dedicated_bridge(
                     or report.get("authorizes_catalog_publication") is not False
                     or type(report.get("receipt_sha256")) is not str
                     or signatures.HEX64.fullmatch(report["receipt_sha256"]) is None):
+                _reject("NATIVE_DEDICATED_RECOVERY_CHILD_REFUSED")
+        elif start:
+            if (report.get("status") != "OWNED_DEDICATED_COMMITTED_START_OBSERVED"
+                    or report.get("generation_manifest_sha256") != recovery_pins["generation_manifest_sha256"]
+                    or report.get("boot_receipt_sha256") != recovery_pins["boot_receipt_sha256"]
+                    or report.get("catalog_observed") is not True
+                    or report.get("service_storage_mounts_verified") is not True
+                    or report.get("service_scratch_mounts_verified") is not True
+                    or report.get("enablement_changed") is not False
+                    or any(type(report.get(key)) is not int or report[key] <= 0
+                           for key in ("main_pid", "listener_inode"))):
                 _reject("NATIVE_DEDICATED_RECOVERY_CHILD_REFUSED")
         elif (report.get("status") != "OWNED_DEDICATED_WAL_ROLLBACK_OBSERVED"
                 or report.get("wal_sha256") != wal_sha256

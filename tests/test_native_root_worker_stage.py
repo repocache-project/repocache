@@ -809,7 +809,8 @@ def test_executable_candidate_selects_retained_native_effects_lock(
 @pytest.mark.parametrize("fault", ["invalid-pin", "debian", "release", "placement",
                                    "wal", "package", "child", "wrong-report", "none",
                                    "rolled", "rolled-refusal", "prepare", "prepare-wal",
-                                   "prepare-manifest", "prepare-boot", "prepare-report"])
+                                   "prepare-manifest", "prepare-boot", "prepare-report",
+                                   "start", "start-wal", "start-boot", "start-report"])
 def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, tmp_path, fault):
     from contextlib import contextmanager
     from types import SimpleNamespace
@@ -846,9 +847,12 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
     from repocache import server_native_v2_transaction_v1 as tx
     from repocache import server_native_egress_candidate_v1 as egress
     preparing = fault.startswith("prepare")
+    starting = fault.startswith("start")
     manifest = b"committed manifest"
+    boot = b"exact boot"
     monkeypatch.setattr(egress, "_read_boot_egress_receipt",
-                        lambda *a, **kw: b"existing boot" if fault == "prepare-boot" else None)
+                        lambda *a, **kw: b"existing boot" if fault in ("prepare-boot", "start-boot")
+                        else boot if starting else None)
     def read(fd, name, uid, limit):
         assert locked
         if name == tx._OWNED_MANIFEST:
@@ -858,7 +862,8 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
         if name == install._RUNTIME_RECEIPT:
             return b"foreign" if fault == "placement" else expected
         if name == install._OWNED_WAL:
-            return None if fault == "wal" or (preparing and fault != "prepare-wal") else wal
+            return None if (fault == "wal" or (preparing and fault != "prepare-wal")
+                            or (starting and fault != "start-wal")) else wal
         assert name == marker
         return b""
     monkeypatch.setattr(install, "_read_file", read)
@@ -879,7 +884,8 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
     def child(argv, **kw):
         assert not locked
         assert argv == ("/usr/bin/python3", "-IS", "-B", "-c",
-                        install._DEDICATED_PREPARE_CHILD if preparing else install._DEDICATED_RECOVERY_CHILD)
+                        install._DEDICATED_PREPARE_CHILD if preparing else
+                        install._DEDICATED_START_CHILD if starting else install._DEDICATED_RECOVERY_CHILD)
         compile(argv[-1], "<fixed-recovery-child>", "exec")
         assert kw["shell"] is False and kw["close_fds"] is True and "pass_fds" not in kw
         data = json.loads(kw["input"])
@@ -897,6 +903,16 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
                       "receipt_sha256": "9"*64, "committed_resources_verified": True,
                       "authorizes_nginx_activation": fault == "prepare-report",
                       "authorizes_catalog_publication": False}
+        elif starting:
+            assert data["generation_manifest_sha256"] == hashlib.sha256(manifest).hexdigest()
+            assert data["boot_receipt_sha256"] == hashlib.sha256(boot).hexdigest()
+            assert "wal_sha256" not in data
+            report = {"status": "OWNED_DEDICATED_COMMITTED_START_OBSERVED",
+                      "generation_manifest_sha256": data["generation_manifest_sha256"],
+                      "boot_receipt_sha256": data["boot_receipt_sha256"],
+                      "catalog_observed": True, "service_storage_mounts_verified": True,
+                      "service_scratch_mounts_verified": True, "enablement_changed": fault == "start-report",
+                      "main_pid": 43, "listener_inode": 47}
         else:
             assert data["boot_receipt_sha256"] == "9"*64
             report = {"status": "OWNED_DEDICATED_WAL_ROLLBACK_OBSERVED",
@@ -919,6 +935,16 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
         else:
             with pytest.raises(stage.WorkerStageError):
                 install._prepare_authenticated_committed_dedicated_nginx(tmp_path, **boot_pins)
+    elif starting:
+        start_pins = {key: value for key, value in options.items() if key != "wal_sha256"}
+        start_pins["generation_manifest_sha256"] = hashlib.sha256(manifest).hexdigest()
+        start_pins["boot_receipt_sha256"] = hashlib.sha256(boot).hexdigest()
+        if fault == "start":
+            assert install._start_authenticated_committed_dedicated_nginx(
+                tmp_path, **start_pins)["catalog_observed"]
+        else:
+            with pytest.raises(stage.WorkerStageError):
+                install._start_authenticated_committed_dedicated_nginx(tmp_path, **start_pins)
     elif fault in ("rolled", "rolled-refusal"):
         def retained(root, fd):
             assert locked
@@ -942,7 +968,8 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
             install._recover_authenticated_prepared_dedicated_nginx(tmp_path, **options)
     assert calls == ([] if fault in ("invalid-pin", "debian") else
                      ["release"] if fault in ("release", "placement", "wal",
-                                               "prepare-wal", "prepare-manifest", "prepare-boot") else
+                                               "prepare-wal", "prepare-manifest", "prepare-boot",
+                                               "start-wal", "start-boot") else
                      ["release", "rpm"] if fault == "package" else
                      ["release", "history"] if fault == "rolled-refusal" else
                      ["release", "history", "rpm", "child"] if fault == "rolled" else

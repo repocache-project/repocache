@@ -2993,7 +2993,33 @@ finally:
             require_prior_resources()
             assert signed("verify") == result
             try:
-                started = signed("recover-dedicated-start-fault" if finalize else "start-committed")
+                if pending:
+                    started = signed("recover-dedicated-start-fault" if finalize else "start-committed")
+                else:
+                    start_pins = dict(
+                        **pins, executable_receipt_sha256=executable_proof["receipt_sha256"],
+                        profile_receipt_sha256=prior["profile"]["receipt_sha256"],
+                        generation_manifest_sha256=result["generation_manifest_sha256"],
+                        boot_receipt_sha256=result["receipt_sha256"])
+                    for field in ("boot_receipt_sha256", "generation_manifest_sha256"):
+                        try:
+                            native._start_authenticated_committed_dedicated_nginx(
+                                assets, **{**start_pins, field: "0"*64})
+                        except native.stage.WorkerStageError:
+                            pass
+                        else:
+                            raise AssertionError("Foreign committed start pin accepted")
+                        require_status(OWN, False, False)
+                        require_prior_resources()
+                    started = native._start_authenticated_committed_dedicated_nginx(assets, **start_pins)
+                    try:
+                        native._start_authenticated_committed_dedicated_nginx(assets, **start_pins)
+                    except native.stage.WorkerStageError:
+                        pass
+                    else:
+                        raise AssertionError("Running committed dedicated service adopted")
+                    assert signed("verify-committed-active")["main_pid"] == started["main_pid"]
+                    print("PASS: authenticated installer starts exact committed dedicated profile; foreign pins and active replay refused", flush=True)
             except Exception:
                 print(run("/usr/bin/journalctl", "-u", OWN, "-n", "20", "--no-pager").stdout[-4000:], flush=True)
                 raise

@@ -1570,3 +1570,22 @@ service start, enablement, policy loading, storage migration, public
 CLI or new socket authority is introduced. The booted enforcing
 fixture uses this path for the committed first-boot namespace, including
 wrong-generation and repeat refusal, before the existing reboot witness.
+
+### Authenticated explicit start of the prepared committed profile
+
+The private signed installer handoff can now start an already prepared
+committed loopback generation, with independent manifest, boot,
+executable and profile receipt pins. The fixed installed child takes a
+fresh exclusive lock; it refuses a pending WAL or changed committed
+resources, rechecks the signed placement and RPM executable, and
+requires the vendor unit disabled/inactive and owned unit disabled.
+The existing dedicated start primitive still owns syntax validation,
+stopped-unit checks, live master/listener/TLS/catalog/SELinux and mount
+verification, and exact-owner failure compensation. The bridge reports
+the pinned manifest and boot identities, does not enable the service
+and cannot adopt an already running master. A failed or lost child
+reply does not establish service state; inspect authoritative evidence
+before retry. The enforcing VM uses the actual authenticated start
+after reboot rollover and tests foreign pins and active replay.
+No public CLI or socket operation, automatic boot, active route,
+ingress, migration or production activation is added.
