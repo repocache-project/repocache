@@ -802,7 +802,13 @@ def prepare_and_interrupt_live_wal(distribution: str, native, assets, pins) -> N
         # This existing legacy bootstrap is genuinely active. The new
         # installer-only stopped transaction must not stop, relabel, adopt
         # or mutate it even with an authenticated release and correct proposal.
-        before = live_wal_resource_hashes()
+        def bootstrap_resources():
+            paths = (STATE / "state-v2.json", STATE / ".state-v2-owned-nginx.manifest",
+                     OWN_CONFIG, OWN_CONFIG.parent / "repocache-managed.conf",
+                     Path("/var/lib/repocache/public/catalog.json"))
+            return {str(path): (hashlib.sha256(path.read_bytes()).hexdigest()
+                                if path.exists() else None) for path in paths}
+        before = bootstrap_resources()
         pid = native._own_service_observation(active=True)["main_pid_observed"]
         before_intake = hashlib.sha256((STATE / ".admin-candidate-v2.json").read_bytes()).hexdigest()
         try:
@@ -813,7 +819,7 @@ def prepare_and_interrupt_live_wal(distribution: str, native, assets, pins) -> N
             pass
         else:
             raise AssertionError("Active bootstrap adopted by stopped initial installer")
-        assert live_wal_resource_hashes() == before
+        assert bootstrap_resources() == before
         assert hashlib.sha256((STATE / ".admin-candidate-v2.json").read_bytes()).hexdigest() == before_intake
         assert native._own_service_observation(active=True)["main_pid_observed"] == pid
         assert not (STATE / ".state-v2-owned-nginx.pending").exists()
