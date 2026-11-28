@@ -1574,6 +1574,23 @@ _DEDICATED_PREPARE_CHILD = _DEDICATED_RECOVERY_CHILD.replace(
     "transaction._prepare_installed_committed_dedicated(pins)")
 
 
+_DEDICATED_PROFILE_CHILD = _DEDICATED_RECOVERY_CHILD.replace(
+    "transaction._recover_installed_prepared_dedicated(pins)",
+    "transaction._stage_installed_committed_dedicated_profile(pins)")
+
+
+def _stage_authenticated_committed_dedicated_profile(
+    assets: Path, *, commit: str, archive_sha256: str,
+    executable_receipt_sha256: str, generation_manifest_sha256: str,
+) -> dict:
+    """Place only a fresh fixed profile for an authenticated stopped generation."""
+    return _authenticated_prepared_dedicated_bridge(
+        assets, commit=commit, archive_sha256=archive_sha256,
+        prepare=True, stage_profile=True,
+        recovery_pins=dict(executable_receipt_sha256=executable_receipt_sha256,
+                           generation_manifest_sha256=generation_manifest_sha256))
+
+
 def _prepare_authenticated_committed_dedicated_nginx(
     assets: Path, *, commit: str, archive_sha256: str,
     executable_receipt_sha256: str, profile_receipt_sha256: str,
@@ -1737,12 +1754,15 @@ def _authenticated_prepared_dedicated_bridge(
     prepare: bool = False, start: bool = False, rollover: bool = False,
     pending_prepare: bool = False, resume_boot: bool = False,
     pending_start: bool = False, expected_rolled_pins: dict | None = None,
+    stage_profile: bool = False,
 ) -> dict:
     if (expected_rolled_pins is not None and recovery_pins is not None
             or type(prepare) is not bool or type(start) is not bool or type(rollover) is not bool
             or type(pending_prepare) is not bool or (pending_prepare and not prepare)
             or type(resume_boot) is not bool or (resume_boot and (not prepare or rollover))
             or type(pending_start) is not bool or (pending_start and not start)
+            or type(stage_profile) is not bool or (stage_profile and (
+                not prepare or rollover or pending_prepare or resume_boot))
             or (prepare and start) or (rollover and not prepare)
             or (prepare and recovery_pins is None)
             or (start and recovery_pins is None and
@@ -1753,6 +1773,8 @@ def _authenticated_prepared_dedicated_bridge(
         {"generation_manifest_sha256"} if prepare else
         {"generation_manifest_sha256", "boot_receipt_sha256"} if start else
         {"boot_receipt_sha256", "wal_sha256"})
+    if stage_profile:
+        fields.remove("profile_receipt_sha256")
     if rollover:
         fields.add("previous_boot_receipt_sha256")
     if pending_prepare or pending_start:
@@ -1821,6 +1843,13 @@ def _authenticated_prepared_dedicated_bridge(
                         or _BOOT_EGRESS_ROLLOVER in os.listdir(state)):
                     _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
                 boot = _read_boot_egress_receipt(state, 0, 0)
+                if stage_profile:
+                    from repocache.server_native_nginx_effective_unit_v1 import (
+                        _NAMESPACE_PROFILE_RECEIPT,
+                    )
+                    if any(name.startswith(_NAMESPACE_PROFILE_RECEIPT.removesuffix(".json"))
+                           for name in os.listdir(state)):
+                        _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
                 if rollover:
                     if (boot is None or hashlib.sha256(boot).hexdigest() !=
                             recovery_pins["previous_boot_receipt_sha256"]):
@@ -1861,6 +1890,7 @@ def _authenticated_prepared_dedicated_bridge(
     try:
         result = subprocess.run(
             ("/usr/bin/python3", "-IS", "-B", "-c",
+             _DEDICATED_PROFILE_CHILD if stage_profile else
              _DEDICATED_PENDING_RESUME_CHILD if resume_boot and pending_prepare else
              _DEDICATED_COMMITTED_RESUME_CHILD if resume_boot else
              _DEDICATED_PENDING_ROLLOVER_CHILD if pending_prepare and rollover else
@@ -1887,7 +1917,20 @@ def _authenticated_prepared_dedicated_bridge(
         report = json.loads(result.stdout)
         if type(report) is not dict:
             _reject("NATIVE_DEDICATED_RECOVERY_CHILD_REFUSED")
-        if prepare:
+        if stage_profile:
+            if (report.get("status") != "OWNED_DEDICATED_PROFILE_STAGED"
+                    or report.get("generation_manifest_sha256") !=
+                       recovery_pins["generation_manifest_sha256"]
+                    or report.get("executable_receipt_sha256") !=
+                       recovery_pins["executable_receipt_sha256"]
+                    or type(report.get("receipt_sha256")) is not str
+                    or signatures.HEX64.fullmatch(report["receipt_sha256"]) is None
+                    or report.get("receipt_matches_owned_dropin") is not True
+                    or report.get("authorizes_systemctl") is not False
+                    or report.get("authorizes_nginx_activation") is not False
+                    or report.get("authorizes_catalog_publication") is not False):
+                _reject("NATIVE_DEDICATED_RECOVERY_CHILD_REFUSED")
+        elif prepare:
             if (report.get("status") != "NATIVE_EGRESS_BOOT_RECEIPT_VERIFIED"
                     or report.get("generation_manifest_sha256") !=
                     recovery_pins["generation_manifest_sha256"]

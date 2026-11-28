@@ -4441,6 +4441,8 @@ def test_installed_dedicated_recovery_refuses_source_loader_before_host_access(m
         native._start_installed_prepared_wal_dedicated({})
     with pytest.raises(native.NativeV2TransactionError, match="INSTALLER_PIN_REFUSED"):
         native._start_or_verify_installed_committed_dedicated({})
+    with pytest.raises(native.NativeV2TransactionError, match="INSTALLER_PIN_REFUSED"):
+        native._stage_installed_committed_dedicated_profile({})
 
 
 @pytest.mark.parametrize("fault", ["none", "lock-held", "placement", "worker-drift",
@@ -4464,7 +4466,9 @@ def test_installed_dedicated_recovery_refuses_source_loader_before_host_access(m
                                    "committed-resume", "committed-resume-boot",
                                    "committed-resume-drift", "committed-resume-result",
                                    "start-repeat", "start-repeat-wal", "start-repeat-boot",
-                                   "start-repeat-result"])
+                                   "start-repeat-result", "profile-stage", "profile-stage-manifest",
+                                   "profile-stage-existing", "profile-stage-service",
+                                   "profile-stage-drift", "profile-stage-result"])
 def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, monkeypatch, fault):
     """Actual protected files and flock; loader/host/package/runtime observations simulated."""
     import fcntl
@@ -4516,7 +4520,8 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
                 boot_receipt_sha256=hashlib.sha256(boot).hexdigest(),
                 wal_sha256="3"*64 if fault == "wal" else hashlib.sha256(wal).hexdigest())
     calls = []
-    preparing = fault.startswith("prepare") or rolling or pending_first or resuming
+    staging_profile = fault.startswith("profile-stage")
+    preparing = fault.startswith("prepare") or rolling or pending_first or resuming or staging_profile
     starting = fault.startswith("start") or pending_start
     active_repeat = fault.startswith("start-repeat")
     manifest = b"exact committed manifest"
@@ -4530,6 +4535,12 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
                                                else hashlib.sha256(manifest).hexdigest())
         if fault != "prepare-mixed":
             del pins["wal_sha256"], pins["boot_receipt_sha256"]
+        if staging_profile:
+            del pins["profile_receipt_sha256"]
+            if fault == "profile-stage-manifest":
+                pins["generation_manifest_sha256"] = "0"*64
+            if fault == "profile-stage-existing":
+                (state_path / unit._NAMESPACE_PROFILE_RECEIPT).touch()
         if rolling:
             pins["previous_boot_receipt_sha256"] = ("0"*64 if fault == "rollover-pin"
                                                     else hashlib.sha256(boot).hexdigest())
@@ -4575,7 +4586,7 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
             assert (preparing or starting) and argv[2] in (native._UNIT, native._OWNED_WAL_DOMAIN)
             assert argv[1] in ("is-active", "is-enabled")
             if argv[1] == "is-active":
-                active = fault in ("prepare-service", "start-service")
+                active = fault in ("prepare-service", "start-service", "profile-stage-service")
                 return SimpleNamespace(returncode=0 if active else 3,
                                        stdout=b"active\n" if active else b"inactive\n")
             return SimpleNamespace(returncode=1, stdout=b"disabled\n")
@@ -4630,9 +4641,43 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
         return {"executable_identity": (17, 29)}
     monkeypatch.setattr(executable, "verify_nginx_candidate_receipt", verify)
     def profile(*a, **kw):
+        if staging_profile:
+            calls.append("place" if kw["allow_create"] else "profile-read")
+            if kw["allow_create"]:
+                contender = os.open(state_path / LOCK_NAME, os.O_RDONLY)
+                try:
+                    with pytest.raises(BlockingIOError):
+                        fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                finally:
+                    os.close(contender)
+                (state_path / unit._NAMESPACE_PROFILE_RECEIPT).touch()
+                if fault == "profile-stage-drift":
+                    resources[native._CATALOG] = b"changed"
+            return {"receipt_sha256": "2"*64, "receipt_matches_owned_dropin": True,
+                    "authorizes_systemctl": fault == "profile-stage-result",
+                    "authorizes_nginx_activation": False}
         assert kw["allow_create"] is False
         return {"receipt_sha256": "0"*64 if fault == "profile" else pins["profile_receipt_sha256"]}
     monkeypatch.setattr(unit, "_stage_namespace_dropin_under_lock", profile)
+    if staging_profile:
+        monkeypatch.setattr(unit, "_NAMESPACE_PATH", str(state_path / "absent-netns"))
+        monkeypatch.setattr(unit, "inspect_effective_owned_nginx_unit",
+                            lambda **kw: {"main_pid_observed": 0})
+        monkeypatch.setattr(native, "_owned_check_stages_absent", lambda *a: None)
+        if fault == "profile-stage":
+            assert native._stage_installed_committed_dedicated_profile(pins)[
+                "receipt_matches_owned_dropin"]
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                native._stage_installed_committed_dedicated_profile(pins)
+        assert calls == (["place", "profile-read"] if fault in (
+            "profile-stage", "profile-stage-result") else ["place"] if
+            fault == "profile-stage-drift" else [])
+        assert not (state_path / native._OWNED_WAL).exists()
+        assert not (state_path / egress._BOOT_EGRESS_RECEIPT).exists()
+        with real_locked(rootfd, 0):
+            pass
+        return
     @contextmanager
     def namespace():
         yield 11, (31, 41), lambda: None

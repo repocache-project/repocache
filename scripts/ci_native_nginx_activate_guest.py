@@ -2826,7 +2826,40 @@ finally:
             prepared = signed("restore")
             assert prepared["wal_sha256"] == wal_hash
             require_prior_resources()
-        profile = signed("place")
+        if pending:
+            profile = signed("place")
+        else:
+            profile_pins = dict(
+                **pins, executable_receipt_sha256=executable_proof["receipt_sha256"],
+                generation_manifest_sha256=state_before[str(STATE / ".state-v2-owned-nginx.manifest")])
+            for field in ("executable_receipt_sha256", "generation_manifest_sha256"):
+                try:
+                    native._stage_authenticated_committed_dedicated_profile(
+                        assets, **{**profile_pins, field: "0"*64})
+                except native.stage.WorkerStageError:
+                    pass
+                else:
+                    raise AssertionError("Foreign profile placement pin accepted")
+                assert not os.path.lexists(dropdir) and not os.path.lexists(profile_receipt)
+                require_prior_resources()
+                require_status(OWN, False, False)
+            profile = native._stage_authenticated_committed_dedicated_profile(assets, **profile_pins)
+            assert profile["status"] == "OWNED_DEDICATED_PROFILE_STAGED"
+            assert not profile["authorizes_systemctl"] and not profile["authorizes_nginx_activation"]
+            assert not profile["authorizes_catalog_publication"]
+            saved_profile = profile_receipt.read_bytes()
+            assert digest(profile_receipt) == profile["receipt_sha256"]
+            try:
+                native._stage_authenticated_committed_dedicated_profile(assets, **profile_pins)
+            except native.stage.WorkerStageError:
+                pass
+            else:
+                raise AssertionError("Existing profile placement adopted")
+            assert profile_receipt.read_bytes() == saved_profile
+            assert not os.path.lexists(ns) and not os.path.lexists(boot_receipt)
+            require_prior_resources()
+            require_status(OWN, False, False)
+            print("PASS: authenticated installer stages fixed committed profile; foreign pins and repeat refused without activation", flush=True)
         require("/usr/bin/systemctl", "daemon-reload")
         if pending and finalize:
             # Real fixture fault injection leaves a durable intent but no

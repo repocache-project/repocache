@@ -825,7 +825,10 @@ def test_executable_candidate_selects_retained_native_effects_lock(
                                    "committed-resume", "committed-resume-boot",
                                    "committed-resume-wal", "committed-resume-digest",
                                    "rolled-start", "rolled-start-changed", "rolled-start-wal",
-                                   "rolled-start-active", "rolled-start-active-report"])
+                                   "rolled-start-active", "rolled-start-active-report",
+                                   "profile-stage", "profile-stage-wal", "profile-stage-boot",
+                                   "profile-stage-manifest", "profile-stage-existing",
+                                   "profile-stage-report"])
 def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, tmp_path, fault):
     from contextlib import contextmanager
     from types import SimpleNamespace
@@ -868,18 +871,22 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
     resuming = fault.startswith("pending-resume") or committed_resume
     pending_start = fault.startswith("pending-start")
     pending = pending_first or pending_rolling or (resuming and not committed_resume) or pending_start
-    preparing = fault.startswith("prepare") or rolling or pending_first or resuming
+    staging_profile = fault.startswith("profile-stage")
+    preparing = fault.startswith("prepare") or rolling or pending_first or resuming or staging_profile
+    if fault == "profile-stage-existing":
+        from repocache.server_native_nginx_effective_unit_v1 import _NAMESPACE_PROFILE_RECEIPT
+        (state / _NAMESPACE_PROFILE_RECEIPT).touch()
     rolled_start = fault.startswith("rolled-start")
     starting = fault.startswith("start") or pending_start or rolled_start
     manifest = b"committed manifest"
     boot = b"exact boot"
     monkeypatch.setattr(egress, "_read_boot_egress_receipt",
-                        lambda *a, **kw: b"existing boot" if fault in ("prepare-boot", "start-boot", "rollover-boot", "pending-prepare-boot", "pending-resume-boot", "pending-start-boot", "committed-resume-boot")
+                        lambda *a, **kw: b"existing boot" if fault in ("prepare-boot", "start-boot", "rollover-boot", "pending-prepare-boot", "pending-resume-boot", "pending-start-boot", "committed-resume-boot", "profile-stage-boot")
                         else boot if starting or rolling or resuming else None)
     def read(fd, name, uid, limit):
         assert locked
         if name == tx._OWNED_MANIFEST:
-            return b"foreign" if fault == "prepare-manifest" else manifest
+            return b"foreign" if fault in ("prepare-manifest", "profile-stage-manifest") else manifest
         if name == tx._OWNED_WAL_TMP:
             return None
         if name == install._RUNTIME_RECEIPT:
@@ -888,7 +895,7 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
             if pending:
                 return (None if fault.endswith("-missing-wal") else
                         b"foreign WAL" if fault.endswith("-wal") else wal)
-            return None if (fault == "wal" or (preparing and fault not in ("prepare-wal", "rollover-wal", "committed-resume-wal"))
+            return None if (fault == "wal" or (preparing and fault not in ("prepare-wal", "rollover-wal", "committed-resume-wal", "profile-stage-wal"))
                             or (starting and fault not in ("start-wal", "rolled-start-wal"))) else wal
         assert name == marker
         return b""
@@ -910,6 +917,7 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
     def child(argv, **kw):
         assert not locked
         assert argv == ("/usr/bin/python3", "-IS", "-B", "-c",
+                        install._DEDICATED_PROFILE_CHILD if staging_profile else
                         install._DEDICATED_COMMITTED_RESUME_CHILD if committed_resume else
                         install._DEDICATED_PENDING_RESUME_CHILD if resuming else
                         install._DEDICATED_PENDING_ROLLOVER_CHILD if pending_rolling else
@@ -926,9 +934,19 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
         assert data["placement_sha256"] == hashlib.sha256(expected).hexdigest()
         assert data["native_payload_sha256"] == "e"*64 and data["binary_sha256"] == "f"*64
         assert data["executable_receipt_sha256"] == "c"*64
-        assert data["profile_receipt_sha256"] == "d"*64
+        if staging_profile:
+            assert "profile_receipt_sha256" not in data
+        else:
+            assert data["profile_receipt_sha256"] == "d"*64
         calls.append("child")
-        if preparing:
+        if staging_profile:
+            report = {"status": "OWNED_DEDICATED_PROFILE_STAGED",
+                      "generation_manifest_sha256": hashlib.sha256(manifest).hexdigest(),
+                      "executable_receipt_sha256": "c"*64, "receipt_sha256": "d"*64,
+                      "receipt_matches_owned_dropin": True, "authorizes_systemctl": False,
+                      "authorizes_nginx_activation": False,
+                      "authorizes_catalog_publication": fault == "profile-stage-report"}
+        elif preparing:
             assert data["generation_manifest_sha256"] == hashlib.sha256(manifest).hexdigest()
             if resuming:
                 assert data["boot_receipt_sha256"] == hashlib.sha256(boot).hexdigest()
@@ -998,13 +1016,18 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
             boot_pins["wal_sha256"] = hashlib.sha256(wal).hexdigest()
         if resuming:
             boot_pins["boot_receipt_sha256"] = hashlib.sha256(boot).hexdigest()
-        invoke = (install._resume_authenticated_committed_dedicated_nginx if committed_resume
+        if staging_profile:
+            del boot_pins["profile_receipt_sha256"]
+        invoke = (install._stage_authenticated_committed_dedicated_profile if staging_profile
+                  else install._resume_authenticated_committed_dedicated_nginx if committed_resume
                   else install._resume_authenticated_prepared_wal_dedicated_nginx if resuming
                   else install._rollover_authenticated_prepared_wal_dedicated_nginx if pending_rolling
                   else install._prepare_authenticated_prepared_wal_dedicated_nginx if pending_first
                   else install._rollover_authenticated_committed_dedicated_nginx if rolling
                   else install._prepare_authenticated_committed_dedicated_nginx)
-        if fault in ("prepare", "rollover", "pending-rollover", "pending-prepare", "pending-resume",
+        if fault == "profile-stage":
+            assert invoke(tmp_path, **boot_pins)["receipt_matches_owned_dropin"]
+        elif fault in ("prepare", "rollover", "pending-rollover", "pending-prepare", "pending-resume",
                      "committed-resume"):
             assert invoke(tmp_path, **boot_pins)[
                 "prior_resources_verified" if pending else "committed_resources_verified"]
@@ -1078,7 +1101,9 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
                                                "pending-resume-wal", "pending-resume-boot",
                                                "pending-start-wal", "pending-start-boot",
                                                "pending-start-missing-wal",
-                                               "committed-resume-boot", "committed-resume-wal") else
+                                               "committed-resume-boot", "committed-resume-wal",
+                                               "profile-stage-wal", "profile-stage-boot",
+                                               "profile-stage-manifest", "profile-stage-existing") else
                      ["release", "rpm"] if fault == "package" else
                      ["release", "history"] if fault in ("rolled-refusal", "rolled-pins-changed",
                                                            "rolled-start-changed", "rolled-start-wal") else

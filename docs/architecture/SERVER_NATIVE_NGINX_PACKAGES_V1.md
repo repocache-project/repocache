@@ -1728,3 +1728,19 @@ successful WAL finalization and compare exact process/listener identity,
 resources and enablement. Negative tests exercise failed observations without
 stopping the pre-existing process. First-boot and automatic namespace
 provisioning remain separate prerequisites.
+
+### Authenticated initial committed profile placement
+
+The private signed installer can place the fixed dedicated namespace drop-in
+for an already committed loopback-only generation. It requires independently
+pinned manifest and executable receipts, authenticates the installed worker,
+source, native package and dedicated executable, and reacquires the worker
+lock. Both services must be disabled and stopped, the effective original unit
+must match, and no boot intent, history, namespace, pending WAL or existing
+profile receipt may be adopted. After the existing atomic profile publication,
+read back the exact fixed drop-in and recheck the unchanged generation and
+service state. No daemon reload, service start, enablement, namespace creation,
+catalog mutation or public operation is introduced. An uncertain or already
+present profile is refused, not adopted; its subsequent recovery remains a
+separate lifecycle prerequisite. The booted committed fixture uses this
+signed installer path and exercises foreign pins and repeated placement refusal.

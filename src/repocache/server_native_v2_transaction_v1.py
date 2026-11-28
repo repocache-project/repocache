@@ -3921,6 +3921,11 @@ def _recover_installed_prepared_dedicated(pins: dict) -> dict:
     return _installed_dedicated_lifecycle(pins, prepare=False)
 
 
+def _stage_installed_committed_dedicated_profile(pins: dict) -> dict:
+    """Private authenticated initial fixed profile placement; no systemd effects."""
+    return _installed_dedicated_lifecycle(pins, prepare=True, stage_profile=True)
+
+
 def _prepare_installed_committed_dedicated(pins: dict) -> dict:
     """Private signed-installer first-boot namespace preparation; no service start."""
     return _installed_dedicated_lifecycle(pins, prepare=True)
@@ -3972,7 +3977,8 @@ def _start_installed_prepared_wal_dedicated(pins: dict) -> dict:
 def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = False,
                                    rollover: bool = False, pending_prepare: bool = False,
                                    resume_boot: bool = False,
-                                   pending_start: bool = False, active_repeat: bool = False) -> dict:
+                                   pending_start: bool = False, active_repeat: bool = False,
+                                   stage_profile: bool = False) -> dict:
     import zipimport
     from repocache.server_native_nginx_executable_v1 import (
         signed_owned_nginx_policy_candidate, verify_nginx_candidate_receipt,
@@ -3994,6 +4000,8 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
         {"generation_manifest_sha256"} if prepare else
         {"generation_manifest_sha256", "boot_receipt_sha256"} if start else
         {"boot_receipt_sha256", "wal_sha256"})
+    if stage_profile:
+        digests.remove("profile_receipt_sha256")
     if rollover:
         digests.add("previous_boot_receipt_sha256")
     if pending_prepare or pending_start:
@@ -4005,6 +4013,8 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
             or type(resume_boot) is not bool or (resume_boot and (not prepare or rollover))
             or type(pending_start) is not bool or (pending_start and not start)
             or type(active_repeat) is not bool or (active_repeat and (not start or pending_start))
+            or type(stage_profile) is not bool or (stage_profile and (
+                not prepare or rollover or pending_prepare or resume_boot))
             or (prepare and start) or (rollover and not prepare)
             or not isinstance(__loader__, zipimport.zipimporter)
             or __loader__.archive != worker or not sys.flags.isolated
@@ -4130,7 +4140,6 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
             return report
 
         executable_before = executable()
-        profile_before = profile()
 
         def require_disabled_unit(unit, *, inactive):
             from repocache.server_native_nginx_effective_unit_v1 import _safe_native_systemctl
@@ -4158,6 +4167,66 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
                 elif _read_owned_resources(*layout[:3]) != old:
                     _deny("OWNED_LIVE_RESOURCE_DRIFT")
 
+        if stage_profile:
+            from repocache.server_native_nginx_effective_unit_v1 import (
+                _NAMESPACE_PROFILE_RECEIPT, _NAMESPACE_PATH,
+                inspect_effective_owned_nginx_unit,
+            )
+            from repocache.server_native_egress_candidate_v1 import (
+                _BOOT_EGRESS_RECEIPT, _BOOT_EGRESS_HISTORY_PREFIX, _BOOT_EGRESS_ROLLOVER,
+            )
+            if doc["deployment"]["listen"]["bind_address"] != "127.0.0.1":
+                _deny("OWNED_DEDICATED_INSTALLER_PIN_REFUSED")
+
+            def fresh_boundary(*, placed):
+                placement()
+                package()
+                if executable() != executable_before:
+                    _deny("OWNED_DEDICATED_INSTALLER_PROFILE_REFUSED")
+                require_disabled_unit(_UNIT, inactive=True)
+                require_disabled_unit(_OWNED_WAL_DOMAIN, inactive=True)
+                names = set(os.listdir(state))
+                prefix = _NAMESPACE_PROFILE_RECEIPT.removesuffix(".json")
+                expected = {_NAMESPACE_PROFILE_RECEIPT} if placed else set()
+                if ({name for name in names if name.startswith(prefix)} != expected
+                        or any(name.startswith(_BOOT_EGRESS_HISTORY_PREFIX) for name in names)
+                        or _BOOT_EGRESS_RECEIPT in names or _BOOT_EGRESS_ROLLOVER in names
+                        or os.path.lexists(_NAMESPACE_PATH)):
+                    _deny("OWNED_DEDICATED_INSTALLER_BOOT_REFUSED")
+                with _owned_layout_locked(root, state, recovering=False) as layout:
+                    state_dir, nginx, public, check_layout = layout
+                    check_layout()
+                    _no_conflicting_owned_wal_pending(state_dir)
+                    _owned_check_stages_absent(state_dir, nginx, public)
+                    if _read_owned_resources(state_dir, nginx, public) != old:
+                        _deny("OWNED_LIVE_RESOURCE_DRIFT")
+                    check_layout()
+
+            fresh_boundary(placed=False)
+            stopped = inspect_effective_owned_nginx_unit(active=False)
+            fresh_boundary(placed=False)
+            if (stopped["main_pid_observed"] != 0
+                    or inspect_effective_owned_nginx_unit(active=False) != stopped):
+                _deny("OWNED_DEDICATED_RECOVERY_SERVICE_REFUSED")
+            staged = _stage_namespace_dropin_under_lock(
+                root, state, signed_unit, https_port=port, owner_uid=0,
+                owner_gid=0, allow_create=True)
+            fresh_boundary(placed=True)
+            observed = _stage_namespace_dropin_under_lock(
+                root, state, signed_unit, https_port=port, owner_uid=0,
+                owner_gid=0, allow_create=False)
+            if (observed != staged or not _valid_sha(staged.get("receipt_sha256"))
+                    or staged.get("receipt_matches_owned_dropin") is not True
+                    or staged.get("authorizes_systemctl") is not False
+                    or staged.get("authorizes_nginx_activation") is not False):
+                _deny("OWNED_DEDICATED_INSTALLER_RESULT_REFUSED")
+            fresh_boundary(placed=True)
+            return {**observed, "status": "OWNED_DEDICATED_PROFILE_STAGED",
+                    "generation_manifest_sha256": pins["generation_manifest_sha256"],
+                    "executable_receipt_sha256": pins["executable_receipt_sha256"],
+                    "authorizes_catalog_publication": False}
+
+        profile_before = profile()
         if prepare:
             from repocache.server_native_nginx_effective_unit_v1 import (
                 inspect_signed_owned_namespace_unit,
