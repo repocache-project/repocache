@@ -4539,6 +4539,24 @@ def _recover_installed_prepared_dedicated(pins: dict) -> dict:
     return _installed_dedicated_lifecycle(pins, prepare=False)
 
 
+def _installed_initial_dedicated_pending(pins: dict, action: str) -> dict:
+    """Fixed signed-installer phase selector, never exposed to socket or CLI."""
+    actions = {
+        "profile": {"prepare": True, "stage_profile": True},
+        "load": {"prepare": True, "load_profile": True},
+        "boot": {"prepare": True, "pending_prepare": True},
+        "boot-resume": {"prepare": True, "pending_prepare": True, "resume_boot": True},
+        "boot-rollover": {"prepare": True, "pending_prepare": True, "rollover": True},
+        "storage": {"prepare": False, "prepare_storage": True, "pending_placement": True},
+        "runtime": {"prepare": False, "prepare_runtime": True, "pending_placement": True},
+        "start": {"prepare": False, "start": True, "pending_start": True},
+        "finish": {"prepare": False},
+    }
+    if type(action) is not str or action not in actions:
+        _deny("OWNED_DEDICATED_INSTALLER_PIN_REFUSED")
+    return _installed_dedicated_lifecycle(pins, initial_pending=True, **actions[action])
+
+
 def _stage_installed_initial_dedicated_generation(pins: dict) -> dict:
     """Private authenticated first generation, before any profile or service effect."""
     return _installed_dedicated_lifecycle(pins, prepare=False, initial_action="stage")
@@ -4650,7 +4668,8 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
                                    prepare_storage: bool = False,
                                    prepare_runtime: bool = False,
                                    pending_placement: bool = False,
-                                   initial_action: str | None = None) -> dict:
+                                   initial_action: str | None = None,
+                                   initial_pending: bool = False) -> dict:
     import zipimport
     from repocache.server_native_nginx_executable_v1 import (
         signed_owned_nginx_policy_candidate, verify_nginx_candidate_receipt,
@@ -4672,6 +4691,12 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
         {"generation_manifest_sha256"} if prepare else
         {"generation_manifest_sha256", "boot_receipt_sha256"} if start or prepare_storage or prepare_runtime else
         {"boot_receipt_sha256", "wal_sha256"})
+    if (type(initial_pending) is not bool or (initial_pending and (
+            initial_action is not None or active_repeat
+            or (prepare and not (stage_profile or load_profile or pending_prepare))
+            or (start and not pending_start)
+            or ((prepare_storage or prepare_runtime) and not pending_placement)))):
+        _deny("OWNED_DEDICATED_INSTALLER_PIN_REFUSED")
     if initial_action not in (None, "stage", "restore") or (
             initial_action is not None and any((
                 prepare, start, rollover, pending_prepare, resume_boot, pending_start,
@@ -4690,6 +4715,8 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
         digests.add("wal_sha256")
     if resume_boot:
         digests.add("boot_receipt_sha256")
+    if initial_pending:
+        digests.update(("wal_sha256", "generation_manifest_sha256"))
     if (type(prepare) is not bool or type(start) is not bool or type(rollover) is not bool
             or type(pending_prepare) is not bool or (pending_prepare and not prepare)
             or type(resume_boot) is not bool or (resume_boot and (not prepare or rollover))
@@ -4870,7 +4897,17 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
                         "authorizes_systemctl": False,
                         "authorizes_nginx_activation": False,
                         "authorizes_catalog_publication": False}
-        if pending_prepare or pending_start or pending_placement:
+        if initial_pending:
+            wal = _read_file(state, _OWNED_WAL, 0, _MAX_WAL)
+            if wal is None or hashlib.sha256(wal).hexdigest() != pins["wal_sha256"]:
+                _deny("OWNED_WAL_CHANGED")
+            with _owned_layout_locked(root, state, recovering=True) as layout:
+                old = _read_owned_initial_dedicated_prepared_locked(
+                    root, *layout, expected_wal=wal,
+                    allow_published=not (prepare or start or prepare_storage or prepare_runtime))
+            if _hash(old[_OWNED_MANIFEST]) != pins["generation_manifest_sha256"]:
+                _deny("OWNED_DEDICATED_INSTALLER_PIN_REFUSED")
+        elif pending_prepare or pending_start or pending_placement:
             wal = _read_file(state, _OWNED_WAL, 0, _MAX_WAL)
             if wal is None or hashlib.sha256(wal).hexdigest() != pins["wal_sha256"]:
                 _deny("OWNED_WAL_CHANGED")
@@ -4934,9 +4971,28 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
                 if (observed.returncode, observed.stdout) != (code, output):
                     _deny("OWNED_DEDICATED_RECOVERY_SERVICE_REFUSED")
 
+        initial_identity = None
+        if initial_pending and (prepare or start or prepare_storage or prepare_runtime):
+            with _owned_layout_locked(root, state, recovering=True) as layout:
+                labels = _Labels("almalinux", dedicated=True)
+                def initial_proof(state_dir, nginx_dir, public_dir, boundary):
+                    candidate = _read_owned_initial_dedicated_prepared_locked(
+                        root, state_dir, nginx_dir, public_dir, boundary, expected_wal=wal)
+                    if candidate != old:
+                        _deny("OWNED_LIVE_RESOURCE_DRIFT")
+                    private = _owned_initial_private_targets_proof(
+                        state_dir, {**old, _CATALOG: None}, labels)
+                    return (_dedicated_readonly_config_labels(
+                                nginx_dir, public_dir, catalog_present=False),
+                            private[0][:6], private[1:], _dedicated_readonly_tls_labels(root, doc))
+                initial_identity = initial_proof(*layout)
+
         def prepared_resources():
-            with _owned_layout_locked(root, state, recovering=pending_prepare or pending_start or pending_placement) as layout:
-                if pending_prepare or pending_start or pending_placement:
+            with _owned_layout_locked(root, state, recovering=initial_pending or pending_prepare or pending_start or pending_placement) as layout:
+                if initial_pending:
+                    if initial_identity is None or initial_proof(*layout) != initial_identity:
+                        _deny("OWNED_LIVE_RESOURCE_DRIFT")
+                elif pending_prepare or pending_start or pending_placement:
                     state_dir, nginx, public, check_layout = layout
                     _owned_live_guard(state_dir, nginx, public, check_layout,
                                       wal, {**old, _CATALOG: None})
@@ -4973,15 +5029,22 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
                                for name in names)
                         or os.path.lexists(_NAMESPACE_PATH)):
                     _deny("OWNED_DEDICATED_INSTALLER_BOOT_REFUSED")
-                with _owned_layout_locked(root, state, recovering=False) as layout:
-                    state_dir, nginx, public, check_layout = layout
-                    check_layout()
-                    _no_conflicting_owned_wal_pending(state_dir)
-                    _owned_check_stages_absent(state_dir, nginx, public)
-                    if _read_owned_resources(state_dir, nginx, public) != old:
-                        _deny("OWNED_LIVE_RESOURCE_DRIFT")
-                    check_layout()
+                if initial_pending:
+                    prepared_resources()
+                else:
+                    with _owned_layout_locked(root, state, recovering=False) as layout:
+                        state_dir, nginx, public, check_layout = layout
+                        check_layout()
+                        _no_conflicting_owned_wal_pending(state_dir)
+                        _owned_check_stages_absent(state_dir, nginx, public)
+                        if _read_owned_resources(state_dir, nginx, public) != old:
+                            _deny("OWNED_LIVE_RESOURCE_DRIFT")
+                        check_layout()
 
+            initial_report = ({"wal_sha256": pins["wal_sha256"],
+                               "initial_resources_verified": True,
+                               "catalog_withdrawn": True, "recovery_required": True}
+                              if initial_pending else {})
             if load_profile:
                 # Existing receipt and generation pins are independently
                 # authenticated. A reload failure never starts or compensates
@@ -5036,6 +5099,7 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
                         "profile_loaded": True, "daemon_reloaded": reloaded,
                         "generation_manifest_sha256": pins["generation_manifest_sha256"],
                         "executable_receipt_sha256": pins["executable_receipt_sha256"],
+                        **initial_report,
                         "authorizes_nginx_activation": False,
                         "authorizes_catalog_publication": False}
 
@@ -5061,6 +5125,7 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
             return {**observed, "status": "OWNED_DEDICATED_PROFILE_STAGED",
                     "generation_manifest_sha256": pins["generation_manifest_sha256"],
                     "executable_receipt_sha256": pins["executable_receipt_sha256"],
+                    **initial_report,
                     "authorizes_catalog_publication": False}
 
         profile_before = profile()
@@ -5119,7 +5184,8 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
                 if pending_prepare:
                     result = _resume_owned_prepared_wal_boot_egress_locked(
                         root, state, **options, namespace_identity=identity,
-                        expected_wal=wal, recheck_stopped_owner=resume_owner)
+                        expected_wal=wal, recheck_stopped_owner=resume_owner,
+                        **({"initial_generation": True} if initial_pending else {}))
                 else:
                     result = _prepare_owned_committed_boot_egress_locked(
                         root, state, **options, namespace_identity=identity,
@@ -5130,7 +5196,8 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
                 if pending_prepare:
                     observed = _verify_owned_prepared_wal_boot_egress_locked(
                         root, state, **options, namespace_identity=identity,
-                        expected_wal=wal, recheck_stopped_owner=resume_owner)
+                        expected_wal=wal, recheck_stopped_owner=resume_owner,
+                        **({"initial_generation": True} if initial_pending else {}))
                 else:
                     observed = _prepare_owned_committed_boot_egress_locked(
                         root, state, **options, namespace_identity=identity,
@@ -5145,7 +5212,8 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
             if pending_prepare:
                 result = _create_owned_prepared_wal_boot_egress_locked(
                     root, state, **options, expected_wal=wal, recheck_stopped_owner=stopped_owner,
-                    allow_boot_rollover=rollover, **previous_pin)
+                    allow_boot_rollover=rollover, **previous_pin,
+                    **({"initial_generation": True} if initial_pending else {}))
             else:
                 result = _create_owned_committed_boot_egress_locked(
                     root, state, **options, recheck_stopped_owner=stopped_owner,
@@ -5156,7 +5224,8 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
             if pending_prepare:
                 observed = _verify_owned_prepared_wal_boot_egress_locked(
                     root, state, **options, namespace_identity=identity,
-                    expected_wal=wal, recheck_stopped_owner=stopped_owner)
+                    expected_wal=wal, recheck_stopped_owner=stopped_owner,
+                    **({"initial_generation": True} if initial_pending else {}))
             else:
                 observed = _prepare_owned_committed_boot_egress_locked(
                     root, state, **options, namespace_identity=identity,
@@ -5232,7 +5301,8 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
                                executable_receipt_sha256=pins["executable_receipt_sha256"])
                 if pending_placement:
                     result = _verify_owned_prepared_wal_boot_egress_locked(
-                        root, state, **options, expected_wal=wal, recheck_stopped_owner=storage_owner)
+                        root, state, **options, expected_wal=wal, recheck_stopped_owner=storage_owner,
+                        **({"initial_generation": True} if initial_pending else {}))
                 else:
                     result = _prepare_owned_committed_boot_egress_locked(
                         root, state, **options, recheck_namespace_owner=storage_owner, allow_prepare=False)
@@ -5240,7 +5310,8 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
                         or result.get("generation_manifest_sha256") != pins["generation_manifest_sha256"]
                         or (not pending_placement and result.get("committed_resources_verified") is not True)
                         or (pending_placement and (
-                            result.get("prior_resources_verified") is not True
+                            result.get("initial_resources_verified" if initial_pending else
+                                       "prior_resources_verified") is not True
                             or result.get("wal_sha256") != pins["wal_sha256"]
                             or result.get("catalog_withdrawn") is not True
                             or result.get("recovery_required") is not True
@@ -5258,6 +5329,8 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
             if pending_placement:
                 report_pins.update(wal_sha256=pins["wal_sha256"], catalog_withdrawn=True,
                                    recovery_required=True)
+                if initial_pending:
+                    report_pins["initial_resources_verified"] = True
             if prepare_runtime:
                 # Persistent dedicated storage must already exist. Never
                 # create or migrate it as a side effect of runtime placement.
@@ -5275,7 +5348,8 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
                         or len(scratch[1]) != 5):
                     _deny("OWNED_DEDICATED_INSTALLER_RESULT_REFUSED")
                 storage_owner()
-                return {"status": ("OWNED_DEDICATED_PREPARED_WAL_RUNTIME_PREPARED" if pending_placement
+                return {"status": ("OWNED_DEDICATED_INITIAL_WAL_RUNTIME_PREPARED" if initial_pending
+                                   else "OWNED_DEDICATED_PREPARED_WAL_RUNTIME_PREPARED" if pending_placement
                                    else "OWNED_DEDICATED_COMMITTED_RUNTIME_PREPARED"),
                         "scratch_count": 5, "storage": readback, **report_pins,
                         "authorizes_systemctl": False, "authorizes_nginx_activation": False,
@@ -5289,7 +5363,8 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
                     or readback != created or storage_policy() != before):
                 _deny("OWNED_DEDICATED_INSTALLER_RESULT_REFUSED")
             storage_owner()
-            return {"status": ("OWNED_DEDICATED_PREPARED_WAL_STORAGE_PREPARED" if pending_placement
+            return {"status": ("OWNED_DEDICATED_INITIAL_WAL_STORAGE_PREPARED" if initial_pending
+                               else "OWNED_DEDICATED_PREPARED_WAL_STORAGE_PREPARED" if pending_placement
                                else "OWNED_DEDICATED_COMMITTED_STORAGE_PREPARED"),
                     "storage": created, **report_pins,
                     "authorizes_systemctl": False, "authorizes_nginx_activation": False,
@@ -5310,6 +5385,7 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
             result = entry(
                 root, state, namespace_identity=namespace_identity,
                 **({"expected_wal": wal} if pending_start else {}),
+                **({"initial_generation": True} if initial_pending else {}),
                 executable_identity=executable_before["executable_identity"][:2],
                 profile_receipt_sha256=pins["profile_receipt_sha256"],
                 executable_receipt_sha256=pins["executable_receipt_sha256"],
@@ -5317,7 +5393,8 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
             committed_owner()
             package()
             committed_owner()
-            accepted_status = ({"OWNED_DEDICATED_PREPARED_WAL_START_OBSERVED"} if pending_start
+            accepted_status = ({"OWNED_DEDICATED_INITIAL_WAL_START_OBSERVED"} if initial_pending
+                               else {"OWNED_DEDICATED_PREPARED_WAL_START_OBSERVED"} if pending_start
                                else {"OWNED_DEDICATED_COMMITTED_START_OBSERVED"})
             if active_repeat:
                 accepted_status.add("OWNED_DEDICATED_COMMITTED_ACTIVE_VERIFIED")
@@ -5340,16 +5417,19 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
             executable_identity=executable_before["executable_identity"][:2],
             profile_receipt_sha256=pins["profile_receipt_sha256"],
             executable_receipt_sha256=pins["executable_receipt_sha256"],
-            expected_wal=wal, recheck_authenticated_owner=guard)
+            expected_wal=wal, recheck_authenticated_owner=guard,
+            **({"initial_generation": True} if initial_pending else {}))
         guard()
         package()
         if (_read_file(state, _OWNED_WAL, 0, _MAX_WAL) is not None
-                or result.get("status") != "OWNED_DEDICATED_WAL_ROLLBACK_OBSERVED"
+                or result.get("status") != ("OWNED_DEDICATED_INITIAL_WAL_COMMIT_OBSERVED" if initial_pending
+                                            else "OWNED_DEDICATED_WAL_ROLLBACK_OBSERVED")
                 or result.get("wal_sha256") != pins["wal_sha256"]
                 or result.get("recovery_required") is not False
                 or result.get("catalog_observed") is not True):
             _deny("OWNED_DEDICATED_INSTALLER_RESULT_REFUSED")
-        return result
+        return {**result, **({"generation_manifest_sha256": pins["generation_manifest_sha256"]}
+                              if initial_pending else {})}
 
 
 def _owned_live_wait_generation(root_fd: int, identity: tuple, context: tuple) -> None:
