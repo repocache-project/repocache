@@ -2003,3 +2003,11 @@ and private-state stages. Restore main before removing the include and
 clear the WAL only after exact labelled bootstrap readback. This cleanup
 is restricted to the detached configuration-only rehearsal, never live
 service recovery; the real host path still requires health evidence.
+
+The existing enforcing signed-worker detached-root scenario now executes
+both initial configuration write/reversal and a deliberate pre-rename
+interruption, verifies the retained completed stage, refuses its foreign
+label without effects, restores only the disposable fixture label and
+recovers the inert predecessor. The initial TLS and intake fixture copies
+are exclusively created in mode 0600 before any payload write. The
+scenario does not start a service in the detached root or publish a catalog.

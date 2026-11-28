@@ -2277,6 +2277,71 @@ try:
                 finally:
                     os.setxattr(key,"security.selinux",label)
                 assert prepare()==(old,new,report)
+                wal=tx._publish_owned_wal_locked(state,nginx,pub,old,new,boundary,live=True)
+                expected=dict(old)
+                def write(name,after,check_boundary=boundary):
+                    tx._write_owned_initial_dedicated_config_locked(
+                        fd,state,nginx,pub,check_boundary,wal,expected,name,after)
+                write(tx._INCLUDE,new[tx._INCLUDE])
+                include=config/tx._INCLUDE
+                assert include.read_bytes()==new[tx._INCLUDE]
+                assert os.getxattr(include,"security.selinux").rstrip(b"\\0")==tx._DEDICATED_PUBLIC_CONTEXT
+                inc_identity=tx._identity(include.lstat())
+                main_before=tx._identity(main.lstat())
+                stage=config/tx._OWNED_STAGES[tx._OWNED_MAIN]
+                def interrupt():
+                    boundary()
+                    if stage.exists():
+                        raise tx.NativeV2TransactionError("fixture pre-rename interruption")
+                try:
+                    write(tx._OWNED_MAIN,new[tx._OWNED_MAIN],interrupt)
+                except tx.NativeV2TransactionError:
+                    pass
+                else:
+                    raise AssertionError("Interruption did not retain the stage")
+                assert stage.read_bytes()==new[tx._OWNED_MAIN]
+                assert stat.S_IMODE(stage.stat().st_mode)==0o644
+                assert tx._identity(main.lstat())==main_before
+                assert tx._identity(include.lstat())==inc_identity
+                stage_label=os.getxattr(stage,"security.selinux")
+                assert stage_label.rstrip(b"\\0")==tx._DEDICATED_PUBLIC_CONTEXT
+                def restore():
+                    return tx._restore_owned_initial_dedicated_config_fixture_locked(
+                        fd,state,nginx,pub,boundary,expected_wal=wal)
+                os.setxattr(stage,"security.selinux",os.getxattr(root/"etc/nginx","security.selinux"))
+                try:
+                    try:
+                        restore()
+                    except tx.NativeV2TransactionError:
+                        pass
+                    else:
+                        raise AssertionError("Foreign stage label accepted")
+                    assert stage.read_bytes()==new[tx._OWNED_MAIN]
+                    assert tx._read_owned_resources(state,nginx,pub)==expected
+                    tx._owned_require_exact_wal(state,wal)
+                finally:
+                    os.setxattr(stage,"security.selinux",stage_label)
+                assert restore()["status"]=="OWNED_INITIAL_CONFIG_FIXTURE_RESTORED"
+                assert tx._read_owned_resources(state,nginx,pub)==old
+                assert not stage.exists() and not include.exists()
+                assert not (root/"var/lib/repocache/server"/tx._OWNED_WAL).exists()
+                assert tx._identity(main.lstat())==main_before
+                assert prepare()==(old,new,report)
+                wal=tx._publish_owned_wal_locked(state,nginx,pub,old,new,boundary,live=True)
+                expected=dict(old)
+                write(tx._INCLUDE,new[tx._INCLUDE])
+                write(tx._OWNED_MAIN,new[tx._OWNED_MAIN])
+                assert main.read_bytes()==new[tx._OWNED_MAIN]
+                for path in (main,include):
+                    assert os.getxattr(path,"security.selinux").rstrip(b"\\0")==tx._DEDICATED_PUBLIC_CONTEXT
+                    assert stat.S_IMODE(path.stat().st_mode)==0o644
+                assert not os.listdir(pub)
+                assert restore()["status"]=="OWNED_INITIAL_CONFIG_FIXTURE_RESTORED"
+                assert tx._read_owned_resources(state,nginx,pub)==old
+                assert not include.exists() and not stage.exists()
+                assert not (root/"var/lib/repocache/server"/tx._OWNED_WAL).exists()
+                assert prepare()==(old,new,report)
+                original=(main.stat().st_dev,main.stat().st_ino)
         # Change only a disposable fixture label. Never repair it.
         foreign=os.getxattr(root/"etc/nginx","security.selinux")
         assert foreign.rstrip(b"\\0")!=tx._DEDICATED_PUBLIC_CONTEXT
@@ -2332,12 +2397,14 @@ finally:
             for name, mode in (("example-chain.pem", 0o644), ("example-key.pem", 0o600)):
                 source = Path("/etc/repocache/tls") / name
                 target = tls / name
-                with target.open("xb") as out:
+                with os.fdopen(os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                                       | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600), "wb") as out:
                     os.fchmod(out.fileno(), mode)
                     out.write(source.read_bytes())
                     os.setxattr(out.fileno(), "security.selinux", _DEDICATED_PUBLIC_CONTEXT + b"\0")
             intake = state / ".admin-candidate-v2.json"
-            with intake.open("xb") as out:
+            with os.fdopen(os.open(intake, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                                   | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600), "wb") as out:
                 os.fchmod(out.fileno(), 0o600)
                 out.write((STATE / intake.name).read_bytes())
         subprocess.run(["/usr/bin/python3", "-IS", "-B", "-c", code, str(root),
@@ -2349,6 +2416,7 @@ finally:
     print("PASS: authenticated fresh worker placement creates labelled public directory before any config effect", flush=True)
     if initial:
         print("PASS: enforcing signed worker generation-one read-only CAS and TLS preflight, exact repeat and foreign-key-label refusal", flush=True)
+        print("PASS: signed detached initial configuration WAL, labelled replacement, interrupted stage recovery and foreign-label refusal", flush=True)
 
 
 def verify_fixed_executable_candidate(native, assets, pins, distribution):
