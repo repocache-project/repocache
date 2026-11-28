@@ -5566,3 +5566,80 @@ def test_dedicated_recovery_config_identity_across_catalog_phases(tmp_path, monk
     finally:
         os.close(nfd)
         os.close(pfd)
+
+
+@pytest.mark.parametrize("name", [native._OWNED_MAIN, native._CATALOG])
+@pytest.mark.parametrize("fault", ["none", "foreign-target", "foreign-stage", "parent-label",
+                                   "stage-label-write", "target-race", "stage-drift"])
+def test_dedicated_fresh_public_noreplace_and_label(tmp_path, monkeypatch, name, fault):
+    parent = tmp_path / "public"
+    parent.mkdir(mode=0o755)
+    target, staged = parent / name, parent / native._OWNED_STAGES[name]
+    raw = native._OWNED_BOOTSTRAP_CONFIG if name == native._OWNED_MAIN else b"catalog fixture"
+    root_label = native._DEDICATED_PUBLIC_CONTEXT + b"\0"
+    labels = {parent.stat().st_ino: root_label}
+    writes = []
+    if fault == "parent-label":
+        labels[parent.stat().st_ino] = b"system_u:object_r:var_lib_t:s0\0"
+    if fault == "foreign-target":
+        target.write_bytes(raw)
+        target.chmod(0o644)
+    if fault == "foreign-stage":
+        staged.write_bytes(b"foreign")
+        staged.chmod(0o600)
+    monkeypatch.setattr(os, "listxattr", lambda fd: ["security.selinux"])
+    monkeypatch.setattr(os, "getxattr", lambda fd, name: labels.get(
+        os.fstat(fd).st_ino, b"system_u:object_r:var_lib_t:s0\0"))
+
+    def set_label(fd, name, value):
+        assert stat.S_IMODE(os.fstat(fd).st_mode) == 0o600
+        assert os.fstat(fd).st_ino == staged.stat().st_ino
+        assert not target.exists()
+        writes.append(os.fstat(fd).st_ino)
+        if fault == "stage-label-write":
+            raise OSError("simulated label assignment refusal")
+        labels[os.fstat(fd).st_ino] = value
+        if fault == "stage-drift":
+            replacement = parent / "replacement"
+            replacement.write_bytes(b"foreign")
+            replacement.chmod(0o600)
+            os.replace(replacement, staged)
+
+    monkeypatch.setattr(os, "setxattr", set_label)
+    actual_rename = native._rename_directory_noreplace
+
+    def publish(*args):
+        if fault == "target-race":
+            target.write_bytes(b"foreign target")
+            target.chmod(0o644)
+        return actual_rename(*args)
+
+    monkeypatch.setattr(native, "_rename_directory_noreplace", publish)
+    fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        if fault == "none":
+            native._write_dedicated_fresh_public(fd, name, raw)
+            assert target.read_bytes() == raw and not staged.exists()
+            assert target.stat().st_nlink == 1 and stat.S_IMODE(target.stat().st_mode) == 0o644
+            assert writes == [target.stat().st_ino]
+            before = target.stat()
+            with pytest.raises(native.NativeV2TransactionError):
+                native._write_dedicated_fresh_public(fd, name, raw)
+            assert target.stat().st_ino == before.st_ino and writes == [before.st_ino]
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                native._write_dedicated_fresh_public(fd, name, raw)
+            if fault == "foreign-target":
+                assert target.read_bytes() == raw and not writes and not staged.exists()
+            elif fault == "foreign-stage":
+                assert staged.read_bytes() == b"foreign" and not writes and not target.exists()
+            elif fault == "target-race":
+                assert target.read_bytes() == b"foreign target" and staged.read_bytes() == raw
+            elif fault == "stage-drift":
+                assert staged.read_bytes() == b"foreign" and not target.exists()
+            elif fault == "parent-label":
+                assert not staged.exists() and not target.exists() and not writes
+            else:
+                assert staged.exists() and not target.exists()
+    finally:
+        os.close(fd)

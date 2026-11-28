@@ -1874,3 +1874,24 @@ Runtime placement still requires already verified persistent storage.
 Both pending native guest phases now exercise the authenticated selectors,
 including foreign WAL/boot/profile pins, legacy and partial-root refusal,
 and exact-inode read-only repeats, replacing direct fixture-only placement.
+
+### Fresh read-only namespace and publication primitives
+
+Private fresh dedicated namespace preparation assigns the fixed read-only
+context to a newly created public directory before making its mode
+0755; existing complete directories are verified without relabeling.
+Root-owned descriptor ancestry, mount continuity, exact public inode
+and lock are checked, and incomplete or legacy-labelled directories are
+refused without cleanup. The trusted caller must independently verify
+the enforcing host and the authenticated loaded policy; this primitive
+does not authorize a host installation.
+
+Fresh dedicated catalog publication now uses a single retained staging
+descriptor, exact mode/owner/link/mount/label and byte checks, durable
+private staging and Linux atomic no-replace rename. A foreign target
+appearing at the final publication boundary is preserved, with the stage
+retained for existing WAL recovery or explicit diagnosis. The same
+primitive accepts only the fixed signed inert main bootstrap bytes for
+future fresh configuration placement. Legacy writes and replacement
+semantics remain unchanged. No existing object is relabelled, and no
+new service, policy, migration or public command authority is introduced.

@@ -208,3 +208,86 @@ def test_no_package_nginx_or_privileged_host_interface():
         assert prohibited not in source
     assert 'authorizes_installation": False' in source
     assert 'authorizes_state_write": False' in source
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="dedicated root-owned fixture")
+@pytest.mark.parametrize("fault", ["none", "foreign-label", "legacy", "ancestor-acl",
+                                   "label-write", "partial", "wrong-mount"])
+def test_dedicated_public_namespace_is_fresh_only(isolated_root, monkeypatch, fault):
+    import stat
+    from repocache import server_protected_namespace_bootstrap_v1 as bootstrap
+    root_fd, _, lib, uid = isolated_root
+    public = lib / "repocache/public"
+    labels = {}
+    writes = []
+    real_mount = bootstrap._mount
+
+    def attrs(fd):
+        if fault == "ancestor-acl" and os.fstat(fd).st_ino == lib.stat().st_ino:
+            return ["security.selinux", "system.posix_acl_access"]
+        return ["security.selinux"]
+
+    def get(fd, name):
+        assert name == "security.selinux"
+        return labels.get(os.fstat(fd).st_ino, b"system_u:object_r:var_lib_t:s0\0")
+
+    def set_label(fd, name, value):
+        assert name == "security.selinux"
+        assert stat.S_IMODE(os.fstat(fd).st_mode) == 0o700
+        assert os.fstat(fd).st_ino == public.stat().st_ino
+        writes.append(os.fstat(fd).st_ino)
+        if fault == "label-write":
+            raise OSError("simulated label failure")
+        labels[os.fstat(fd).st_ino] = value
+
+    monkeypatch.setattr(os, "listxattr", attrs)
+    monkeypatch.setattr(os, "getxattr", get)
+    monkeypatch.setattr(os, "setxattr", set_label)
+    monkeypatch.setattr(bootstrap, "_mount", lambda fd: (
+        "foreign" if fault == "wrong-mount" and public.exists()
+        and os.fstat(fd).st_ino == public.stat().st_ino else real_mount(fd)))
+    def dedicated(**kwargs):
+        return provision(root_fd, uid, public_catalog=True, _dedicated_public=True, **kwargs)
+    if fault == "legacy":
+        provision(root_fd, uid, public_catalog=True)
+        original = public.stat().st_ino
+        with pytest.raises(ProtectedBootstrapError):
+            dedicated()
+        assert public.stat().st_ino == original and not writes
+    elif fault in ("ancestor-acl", "label-write", "wrong-mount"):
+        with pytest.raises(ProtectedBootstrapError):
+            dedicated()
+        if fault == "ancestor-acl":
+            assert not (lib / "repocache").exists()
+        else:
+            original = public.stat().st_ino
+            assert stat.S_IMODE(public.stat().st_mode) == 0o700
+            with pytest.raises(ProtectedBootstrapError):
+                dedicated()
+            assert public.stat().st_ino == original
+    elif fault == "partial":
+        def interrupt(step):
+            if step == "state_dir_durable":
+                raise RuntimeError("interrupted")
+        with pytest.raises(RuntimeError):
+            dedicated(inject_fault=interrupt)
+        with pytest.raises(ProtectedBootstrapError):
+            dedicated()
+        assert not public.exists() and not writes
+    else:
+        first = dedicated()
+        assert first["dedicated_public_label_verified"] and first["state_directory_created"]
+        original = public.stat()
+        lock = public.parent / "server" / LOCK_NAME
+        lock_inode = lock.stat().st_ino
+        assert stat.S_IMODE(original.st_mode) == 0o755
+        assert writes == [original.st_ino]
+        if fault == "foreign-label":
+            labels[original.st_ino] = b"system_u:object_r:var_lib_t:s0\0"
+            with pytest.raises(ProtectedBootstrapError):
+                dedicated()
+        else:
+            second = dedicated()
+            assert second["dedicated_public_label_verified"] and not second["state_directory_created"]
+        assert writes == [original.st_ino] and public.stat().st_ino == original.st_ino
+        assert lock.stat().st_ino == lock_inode

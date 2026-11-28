@@ -17,6 +17,7 @@ from repocache.server_protected_state_inspect_v1 import (
     _DIRECTORY_FLAGS, _identity, _recheck, _safe_directory, _walk,
 )
 from repocache.server_protected_state_store_v1 import LOCK_NAME, _locked
+from repocache.server_native_installed_storage_v1 import _mount
 
 _PARENT = ("var", "lib")
 _ROOT_NAME = "repocache"
@@ -26,6 +27,7 @@ _DIRECTORY_MODE = 0o700
 _PUBLIC_PARENT_MODE = 0o711
 _PUBLIC_DIRECTORY_MODE = 0o755
 _LOCK_MODE = 0o600
+_DEDICATED_PUBLIC_CONTEXT = b"system_u:object_r:repocache_nginx_ro_t:s0"
 _CREATE_LOCK = (os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
                 | getattr(os, "O_CLOEXEC", 0))
 
@@ -80,10 +82,44 @@ def _lock_identity(directory_fd: int, uid: int) -> tuple[int, ...]:
         os.close(fd)
 
 
+def _dedicated_public_directory(fd: int, *, fresh: bool = False) -> None:
+    """Fixed read-only context; only an exclusively created inode is labelled."""
+    info = os.fstat(fd)
+    if (not stat.S_ISDIR(info.st_mode) or (info.st_uid, info.st_gid) != (0, 0)
+            or stat.S_IMODE(info.st_mode) != (0o700 if fresh else 0o755)
+            or set(os.listxattr(fd)) != {"security.selinux"}):
+        _deny("DEDICATED_PUBLIC_METADATA_UNVERIFIED")
+    if fresh:
+        if os.listdir(fd):
+            _deny("DEDICATED_PUBLIC_NOT_EMPTY")
+        if os.getxattr(fd, "security.selinux").rstrip(b"\0") != _DEDICATED_PUBLIC_CONTEXT:
+            os.setxattr(fd, "security.selinux", _DEDICATED_PUBLIC_CONTEXT + b"\0")
+    if (set(os.listxattr(fd)) != {"security.selinux"}
+            or os.getxattr(fd, "security.selinux").rstrip(b"\0") != _DEDICATED_PUBLIC_CONTEXT):
+        _deny("DEDICATED_PUBLIC_LABEL_UNVERIFIED")
+
+
+def _dedicated_ancestry(root_fd: int, chain) -> None:
+    for fd in (root_fd, *(child for _, _, child, _ in chain)):
+        info = os.fstat(fd)
+        if (not stat.S_ISDIR(info.st_mode) or (info.st_uid, info.st_gid) != (0, 0)
+                or info.st_mode & 0o022 or set(os.listxattr(fd)) != {"security.selinux"}
+                or _mount(fd) != _mount(root_fd)):
+            _deny("DEDICATED_PUBLIC_ANCESTRY_UNVERIFIED")
+
+
 def _publish_directory_mode(parent: int, name: str, owner: int,
-                            stack: ExitStack, *, mode: int) -> None:
+                            stack: ExitStack, *, mode: int,
+                            dedicated_public: bool = False) -> None:
     os.mkdir(name, mode=_DIRECTORY_MODE, dir_fd=parent)
-    fd, _ = _verified_directory(parent, name, owner, stack, mode=_DIRECTORY_MODE)
+    fd, original = _verified_directory(parent, name, owner, stack, mode=_DIRECTORY_MODE)
+    if dedicated_public:
+        if name != _PUBLIC_NAME or _mount(fd) != _mount(parent):
+            _deny("DEDICATED_PUBLIC_ANCESTRY_UNVERIFIED")
+        _dedicated_public_directory(fd, fresh=True)
+        if (_structural(os.fstat(fd)) != original
+                or _structural(os.stat(name, dir_fd=parent, follow_symlinks=False)) != original):
+            _deny("DEDICATED_PUBLIC_CHANGED")
     os.fchmod(fd, mode)
     os.fsync(fd)
     os.fsync(parent)
@@ -92,6 +128,7 @@ def _publish_directory_mode(parent: int, name: str, owner: int,
 def bootstrap_protected_namespace_under_root(
     root_fd: int, *, owner_uid: int,
     public_catalog: bool = False,
+    _dedicated_public: bool = False,
     inject_fault: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Create ONLY /var/lib/repocache/server and its fixed lock in a fixture.
@@ -100,16 +137,24 @@ def bootstrap_protected_namespace_under_root(
     *incomplete* installation is refused, not silently adopted or cleaned.
     Caller-provided root FDs and UIDs are not proof of root or approval.
     The v0.6 layout optionally reserves an empty public catalog directory.
+    Private dedicated mode is for a separately authenticated enforcing
+    AlmaLinux candidate whose exact policy was already verified by its
+    caller. It labels only a newly created public directory, never an
+    existing inode. Neither mode establishes host or policy authority.
     No OS package, server state, NGINX, service, cache or TLS is modified.
     """
     if (type(root_fd) is not int or root_fd < 0
             or type(owner_uid) is not int or not 0 <= owner_uid <= 2**32 - 2
             or type(public_catalog) is not bool
+            or type(_dedicated_public) is not bool
+            or (_dedicated_public and (owner_uid != 0 or not public_catalog))
             or (inject_fault is not None and not callable(inject_fault))):
         _deny("ARGUMENT_INVALID")
     try:
         with ExitStack() as stack:
             lib_fd, chain = _walk(root_fd, _PARENT, stack, owner_uid)
+            if _dedicated_public:
+                _dedicated_ancestry(root_fd, chain)
             # Existing /var/lib is an owned, non-world-writable native anchor.
             lib_before = _structural(_safe_directory(lib_fd, owner_uid))
             anchor_mode = _PUBLIC_PARENT_MODE if public_catalog else _DIRECTORY_MODE
@@ -125,6 +170,8 @@ def bootstrap_protected_namespace_under_root(
             repocache_fd, _ = _verified_directory(
                 lib_fd, _ROOT_NAME, owner_uid, stack, mode=anchor_mode,
             )
+            if _dedicated_public:
+                _dedicated_ancestry(root_fd, [*chain, (lib_fd, _ROOT_NAME, repocache_fd, ())])
             if fresh:
                 # A concurrent parent or preexisting child never becomes
                 # an implicit third-party adoption.
@@ -138,9 +185,14 @@ def bootstrap_protected_namespace_under_root(
             if public_catalog:
                 if fresh:
                     _publish_directory_mode(repocache_fd, _PUBLIC_NAME,
-                                            owner_uid, stack, mode=_PUBLIC_DIRECTORY_MODE)
-                _verified_directory(repocache_fd, _PUBLIC_NAME, owner_uid, stack,
-                                    mode=_PUBLIC_DIRECTORY_MODE)
+                                            owner_uid, stack, mode=_PUBLIC_DIRECTORY_MODE,
+                                            dedicated_public=_dedicated_public)
+                public_fd, public_identity = _verified_directory(
+                    repocache_fd, _PUBLIC_NAME, owner_uid, stack, mode=_PUBLIC_DIRECTORY_MODE)
+                if _dedicated_public:
+                    if _mount(public_fd) != _mount(repocache_fd):
+                        _deny("DEDICATED_PUBLIC_ANCESTRY_UNVERIFIED")
+                    _dedicated_public_directory(public_fd)
             if fresh:
                 fd = os.open(LOCK_NAME, _CREATE_LOCK, _LOCK_MODE, dir_fd=state_fd)
                 try:
@@ -168,12 +220,22 @@ def bootstrap_protected_namespace_under_root(
             with _locked(root_fd, owner_uid):
                 if _lock_identity(state_fd, owner_uid) != lock:
                     _deny("LOCK_CHANGED")
+                if _dedicated_public:
+                    _dedicated_ancestry(root_fd, [*chain, (lib_fd, _ROOT_NAME, repocache_fd, ()),
+                                                 (repocache_fd, _STATE_NAME, state_fd, ())])
+                    if (_mount(public_fd) != _mount(repocache_fd)
+                            or _structural(os.fstat(public_fd)) != public_identity
+                            or _structural(os.stat(_PUBLIC_NAME, dir_fd=repocache_fd,
+                                                   follow_symlinks=False)) != public_identity):
+                        _deny("DEDICATED_PUBLIC_CHANGED")
+                    _dedicated_public_directory(public_fd)
             return {
                 "schema_version": 1,
                 "status": ("FRESH_PROTECTED_LOCK_DURABLE"
                            if fresh else "EXISTING_PROTECTED_LOCK_VALIDATED"),
                 "state_directory_created": fresh,
                 "state_lock_validated": True,
+                **({"dedicated_public_label_verified": True} if _dedicated_public else {}),
                 "host_root_provenance_authenticated": False,
                 "operator_authorization_authenticated": False,
                 "installed_release_authenticated": False,

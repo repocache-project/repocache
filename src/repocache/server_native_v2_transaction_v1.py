@@ -54,7 +54,9 @@ from repocache.server_native_nginx_effective_unit_v1 import (
 )
 from repocache.server_native_installed_storage_v1 import (
     InstalledStorageError, verify_control_storage, verify_service_storage_mounts, _mount, _Labels,
+    _rename_directory_noreplace,
 )
+from repocache.server_protected_namespace_bootstrap_v1 import _DEDICATED_PUBLIC_CONTEXT
 from repocache.server_native_nginx_package_journal_v1 import (
     _read_completed_native_install_under_lock, NativePackageJournalError,
 )
@@ -468,9 +470,6 @@ def _read_public(parent: int, name: str, maximum: int) -> bytes | None:
         os.close(fd)
 
 
-_DEDICATED_PUBLIC_CONTEXT = b"system_u:object_r:repocache_nginx_ro_t:s0"
-
-
 def _require_dedicated_public_label(fd: int) -> None:
     if (set(os.listxattr(fd)) != {"security.selinux"}
             or os.getxattr(fd, "security.selinux").rstrip(b"\0") != _DEDICATED_PUBLIC_CONTEXT):
@@ -560,14 +559,105 @@ def _require_dedicated_catalog_label(parent: int) -> None:
         os.close(fd)
 
 
+def _write_dedicated_fresh_public(parent: int, name: str, raw: bytes) -> None:
+    """Publish only a fixed fresh read-only leaf, with no-replace semantics.
+
+    Caller retains the authenticated ownership lock and independently pins
+    the parent. The only accepted main bytes are the signed inert bootstrap.
+    No existing inode is relabelled, replaced or removed here.
+    """
+    code = "OWNED_DEDICATED_FRESH_PUBLIC_REFUSED"
+    if (name not in (_CATALOG, _OWNED_MAIN) or type(raw) is not bytes
+            or not 1 <= len(raw) <= _OWNED_LIMIT[name]
+            or (name == _OWNED_MAIN and raw != _OWNED_BOOTSTRAP_CONFIG)):
+        _deny(code)
+    stage = _OWNED_STAGES[name]
+    try:
+        before = _identity(os.fstat(parent))[:6]
+        mount = _mount(parent)
+
+        def check_parent():
+            info = os.fstat(parent)
+            if (not stat.S_ISDIR(info.st_mode)
+                    or (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) != (0, 0, 0o755)
+                    or _identity(info)[:6] != before or _mount(parent) != mount
+                    or os.fstatvfs(parent).f_flag & os.ST_RDONLY):
+                _deny(code)
+            _require_dedicated_public_label(parent)
+
+        check_parent()
+        _owned_require_absent(parent, name)
+        _owned_require_absent(parent, stage)
+        fd = os.open(stage, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                     | os.O_CLOEXEC, 0o600, dir_fd=parent)
+        try:
+            def check_stage(mode, size):
+                info = os.fstat(fd)
+                if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                        or (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode), info.st_size)
+                           != (0, 0, mode, size)
+                        or _mount(fd) != mount
+                        or _identity(os.stat(stage, dir_fd=parent, follow_symlinks=False)) != _identity(info)
+                        or set(os.listxattr(fd)) != {"security.selinux"}):
+                    _deny(code)
+                return _identity(info)
+
+            check_parent()
+            check_stage(0o600, 0)
+            if os.getxattr(fd, "security.selinux").rstrip(b"\0") != _DEDICATED_PUBLIC_CONTEXT:
+                os.setxattr(fd, "security.selinux", _DEDICATED_PUBLIC_CONTEXT + b"\0")
+            _require_dedicated_public_label(fd)
+            position = 0
+            while position < len(raw):
+                count = os.write(fd, raw[position:])
+                if count <= 0:
+                    _deny(code)
+                position += count
+            os.fsync(fd)
+            check_stage(0o600, len(raw))
+            os.fchmod(fd, 0o644)
+            os.fsync(fd)
+            identity = check_stage(0o644, len(raw))
+            _require_dedicated_public_label(fd)
+            if os.pread(fd, len(raw) + 1, 0) != raw:
+                _deny(code)
+            check_parent()
+            if check_stage(0o644, len(raw)) != identity:
+                _deny(code)
+            # A concurrent target after the absence check is not replaced,
+            # even when byte-identical. Preserve stage for WAL/diagnosis.
+            _rename_directory_noreplace(parent, stage, parent, name)
+            os.fsync(parent)
+            current = _identity(os.fstat(fd))
+            # Rename may advance ctime; every other field remains pinned.
+            if (current[:-1] != identity[:-1]
+                    or _identity(os.stat(name, dir_fd=parent, follow_symlinks=False)) != current
+                    or _mount(fd) != mount or os.pread(fd, len(raw) + 1, 0) != raw):
+                _deny(code)
+            _require_dedicated_public_label(fd)
+            check_parent()
+            _owned_require_absent(parent, stage)
+            if (_read_public(parent, name, _OWNED_LIMIT[name]) != raw
+                    or _identity(os.fstat(fd)) != current):
+                _deny(code)
+        finally:
+            os.close(fd)
+    except NativeV2TransactionError:
+        raise
+    except (OSError, ValueError, TypeError, InstalledStorageError):
+        _deny(code)
+
+
 def _write_public(parent: int, name: str, before: bytes | None,
                   after: bytes | None, maximum: int, *, stage: str = _STAGE,
                   dedicated_catalog: bool = False) -> None:
     """Atomic same-parent replacement, fsynced; no foreign target takeover."""
     if dedicated_catalog:
-        if name != _CATALOG or before is not None or after is None:
+        if (name != _CATALOG or before is not None or after is None
+                or stage != _OWNED_STAGES[_CATALOG] or maximum != _OWNED_LIMIT[_CATALOG]):
             _deny("OWNED_DEDICATED_CATALOG_LABEL_UNVERIFIED")
-        _require_dedicated_public_label(parent)
+        _write_dedicated_fresh_public(parent, name, after)
+        return
     if _read_public(parent, name, maximum) != before:
         _deny("RESOURCE_DRIFT")
     if after is None:
@@ -600,15 +690,6 @@ def _write_public(parent: int, name: str, before: bytes | None,
                 if count <= 0:
                     _deny("STAGE_WRITE_FAILED")
                 position += count
-            if dedicated_catalog:
-                # SELinux may inherit the type but select a different user
-                # component. Set the fixed context only on our fresh 0600
-                # stage, before making any catalog visible.
-                if set(os.listxattr(fd)) != {"security.selinux"}:
-                    _deny("OWNED_DEDICATED_CATALOG_LABEL_UNVERIFIED")
-                if os.getxattr(fd, "security.selinux").rstrip(b"\0") != _DEDICATED_PUBLIC_CONTEXT:
-                    os.setxattr(fd, "security.selinux", _DEDICATED_PUBLIC_CONTEXT + b"\0")
-                _require_dedicated_public_label(fd)
             os.fsync(fd)
             os.fchmod(fd, 0o644)
             os.fsync(fd)
@@ -627,8 +708,6 @@ def _write_public(parent: int, name: str, before: bytes | None,
         _deny("RESOURCE_WRITE_FAILED")
     if _read_public(parent, name, maximum) != after:
         _deny("RESOURCE_CHANGED")
-    if dedicated_catalog:
-        _require_dedicated_catalog_label(parent)
 
 
 def _write_private(parent: int, name: str, stage: str,
