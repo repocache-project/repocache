@@ -6122,3 +6122,79 @@ def test_initial_dedicated_config_wal_writer(filesystem, monkeypatch, fault):
             assert not paths[native._INCLUDE].exists()
             assert paths[native._OWNED_MAIN].read_bytes() == old[native._OWNED_MAIN]
         assert not filesystem[-1]
+
+
+@pytest.mark.parametrize("fault", [
+    "clean", "partial-include", "complete-include", "partial-main",
+    "complete-main", "wrong-label", "wrong-bytes", "symlink", "hardlink",
+    "two-stages", "private-stage", "foreign-target", "wal-drift",
+])
+def test_initial_dedicated_config_interrupted_stage_recovery(filesystem, monkeypatch, fault):
+    old = _owned_bootstrap_resources()
+    new = _owned_generation(active=False, distribution="almalinux")
+    paths = _owned_fixture_paths(filesystem, old)
+    root_fd, state = filesystem[:2]
+    label = native._DEDICATED_PUBLIC_CONTEXT + b"\0"
+    bad_inodes = set()
+    monkeypatch.setattr(os, "listxattr", lambda fd: ["security.selinux"])
+    monkeypatch.setattr(os, "getxattr", lambda fd, name: (
+        b"foreign" if os.fstat(fd).st_ino in bad_inodes else label))
+    monkeypatch.setattr(os, "setxattr", lambda *a: pytest.fail("never relabel"))
+    monkeypatch.setattr(native._Labels, "_command", staticmethod(lambda *a: b"Enforcing"))
+    with native._owned_fixture_layout(root_fd, recovering=False) as layout:
+        wal = native._publish_owned_wal_locked(*layout[:3], old, new, layout[3], live=True)
+        expected = dict(old)
+        if fault in ("partial-main", "complete-main", "clean"):
+            native._write_owned_initial_dedicated_config_locked(
+                root_fd, *layout, wal, expected, native._INCLUDE, new[native._INCLUDE])
+        if fault == "clean":
+            native._write_owned_initial_dedicated_config_locked(
+                root_fd, *layout, wal, expected, native._OWNED_MAIN, new[native._OWNED_MAIN])
+    name = native._OWNED_MAIN if fault.endswith("-main") else native._INCLUDE
+    stage_path = paths[name].parent / native._OWNED_STAGES[name]
+    if fault in ("partial-include", "partial-main"):
+        stage_path.write_bytes(new[name][:7])
+        stage_path.chmod(0o600)
+    elif fault in ("complete-include", "complete-main", "wrong-label", "wrong-bytes", "hardlink", "two-stages"):
+        stage_path.write_bytes(b"foreign" if fault == "wrong-bytes" else new[name])
+        stage_path.chmod(0o644)
+        if fault == "wrong-label":
+            bad_inodes.add(stage_path.stat().st_ino)
+        elif fault == "hardlink":
+            os.link(stage_path, state / "foreign-link")
+        elif fault == "two-stages":
+            other = paths[native._OWNED_MAIN].parent / native._OWNED_STAGES[native._OWNED_MAIN]
+            other.touch(mode=0o600)
+    elif fault == "symlink":
+        stage_path.symlink_to(paths[native._OWNED_MAIN])
+    elif fault == "private-stage":
+        stage_path = state / native._OWNED_STAGES[V2_STATE]
+        stage_path.touch(mode=0o600)
+    elif fault == "foreign-target":
+        paths[native._OWNED_MAIN].write_bytes(b"foreign")
+    elif fault == "wal-drift":
+        (state / native._OWNED_WAL).write_bytes(b"foreign")
+    positive = fault in ("clean", "partial-include", "complete-include", "partial-main", "complete-main")
+    before = _fixture_resource_bytes(paths)
+    stage_before = stage_path.lstat() if stage_path.exists() or stage_path.is_symlink() else None
+    with native._owned_fixture_layout(root_fd, recovering=True) as layout:
+        def restore():
+            return native._restore_owned_initial_dedicated_config_fixture_locked(
+                root_fd, *layout, expected_wal=wal)
+        if positive:
+            report = restore()
+            assert report == {"status": "OWNED_INITIAL_CONFIG_FIXTURE_RESTORED",
+                              "fixture_only": True, "authorizes_nginx_activation": False,
+                              "authorizes_catalog_publication": False}
+        else:
+            with pytest.raises((native.NativeV2TransactionError, OSError)):
+                restore()
+    if positive:
+        assert _fixture_resource_bytes(paths) == old
+        _assert_owned_fixture_clean(filesystem, paths)
+    else:
+        assert _fixture_resource_bytes(paths) == before
+        assert (state / native._OWNED_WAL).exists()
+        if stage_before is not None:
+            assert native._identity(stage_path.lstat()) == native._identity(stage_before)
+    assert not filesystem[-1]

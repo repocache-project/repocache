@@ -5294,6 +5294,128 @@ def _write_owned_initial_dedicated_config_locked(
         _deny(code)
 
 
+def _restore_owned_initial_dedicated_config_fixture_locked(
+        root_fd: int, state_fd: int, nginx_fd: int, public_fd: int,
+        check_layout, *, expected_wal: bytes) -> dict:
+    """Recover an interrupted detached initial configuration-only WAL.
+
+    This is not recovery of an installed or running generation. Retain
+    evidence on any drift; never relabel or discard a foreign stage.
+    """
+    _refuse_actual_root_fixture_write(root_fd)
+    code = "OWNED_INITIAL_DEDICATED_RECOVERY_REFUSED"
+    old, hashes = _decode_owned_wal(expected_wal, distribution="almalinux")
+    if (_json(expected_wal, limit=_MAX_WAL)["version"] != 3
+            or _validate_owned_resources(old, distribution="almalinux") is not None):
+        _deny(code)
+    labels = _Labels("almalinux", dedicated=True)
+    check_layout()
+    _owned_require_exact_wal(state_fd, expected_wal)
+    current = _read_owned_resources(state_fd, nginx_fd, public_fd)
+    if (any(current[name] is not None for name in (V2_STATE, _CATALOG, _OWNED_MANIFEST))
+            or (current[_OWNED_MAIN] != old[_OWNED_MAIN] and current[_INCLUDE] is None)):
+        _deny(code)
+    _owned_wal_resource_drift(old, hashes, current, unpublished=False)
+
+    stages = []
+    for name in _OWNED_ORDER:
+        parent = _owned_resource_parent(name, state_fd, nginx_fd, public_fd)
+        stage = _OWNED_STAGES[name]
+        try:
+            os.stat(stage, dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        if name not in (_OWNED_MAIN, _INCLUDE):
+            _deny(code)
+        stages.append(name)
+    if len(stages) > 1:
+        _deny(code)
+    name = stages[0] if stages else None
+    if ((name == _OWNED_MAIN and current[_INCLUDE] is None)
+            or (name == _INCLUDE and (current[_INCLUDE] is not None
+                                    or current[_OWNED_MAIN] != old[_OWNED_MAIN]))):
+        _deny(code)
+
+    def guard():
+        _owned_live_guard(state_fd, nginx_fd, public_fd, check_layout,
+                          expected_wal, current)
+        _owned_wal_resource_drift(old, hashes, current, unpublished=False)
+        labels.finish()
+        for other in _OWNED_ORDER:
+            if other != name:
+                parent = _owned_resource_parent(other, state_fd, nginx_fd, public_fd)
+                _owned_require_absent(parent, _OWNED_STAGES[other])
+        # For no-stage recovery, pass the fixed main name only to obtain
+        # the strict closed-namespace proof; its absence is checked above.
+        return _dedicated_readonly_config_labels(
+            nginx_fd, public_fd, catalog_present=False,
+            bootstrap=current[_INCLUDE] is None,
+            allowed_stage=_OWNED_STAGES[name or _OWNED_MAIN])
+
+    proof = guard()
+    if name is not None:
+        stage = _OWNED_STAGES[name]
+        fd = os.open(stage, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                     | os.O_CLOEXEC, dir_fd=nginx_fd)
+        try:
+            identity = _identity(os.fstat(fd))
+            mount = _mount(nginx_fd)
+
+            def verify_stage():
+                info = os.fstat(fd)
+                mode = stat.S_IMODE(info.st_mode)
+                if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                        or (info.st_uid, info.st_gid) != (0, 0)
+                        or mode not in (0o600, 0o644)
+                        or not 0 <= info.st_size <= _OWNED_LIMIT[name]
+                        or _mount(fd) != mount or _identity(info) != identity
+                        or _identity(os.stat(stage, dir_fd=nginx_fd,
+                                             follow_symlinks=False)) != identity):
+                    _deny(code)
+                _require_dedicated_public_label(fd)
+                if mode == 0o644:
+                    raw = _read_public(nginx_fd, stage, _OWNED_LIMIT[name])
+                    if (_hash(raw) not in (hashes[name], _hash(old[name]))
+                            or raw == current[name]):
+                        _deny(code)
+                if (_identity(os.fstat(fd)) != identity
+                        or _identity(os.stat(stage, dir_fd=nginx_fd,
+                                             follow_symlinks=False)) != identity):
+                    _deny(code)
+
+            verify_stage()
+            if guard() != proof:
+                _deny(code)
+            verify_stage()
+            os.unlink(stage, dir_fd=nginx_fd)
+            os.fsync(nginx_fd)
+            _owned_require_absent(nginx_fd, stage)
+        finally:
+            os.close(fd)
+    _owned_check_stages_absent(state_fd, nginx_fd, public_fd)
+    after_cleanup = guard()
+    if (after_cleanup[0][0][:6] != proof[0][0][:6]
+            or after_cleanup[0][1] != proof[0][1] or after_cleanup[1:] != proof[1:]):
+        _deny(code)
+    for resource in (_OWNED_MAIN, _INCLUDE):
+        _write_owned_initial_dedicated_config_locked(
+            root_fd, state_fd, nginx_fd, public_fd, check_layout,
+            expected_wal, current, resource, old[resource])
+    if current != old:
+        _deny(code)
+    _owned_live_guard(state_fd, nginx_fd, public_fd, check_layout, expected_wal, old)
+    _owned_check_stages_absent(state_fd, nginx_fd, public_fd)
+    _dedicated_readonly_config_labels(
+        nginx_fd, public_fd, catalog_present=False, bootstrap=True)
+    labels.finish()
+    # Only a detached configuration-only rehearsal can clear this WAL
+    # without a runtime health observation.
+    _unlink_known(state_fd, _OWNED_WAL, expected_wal, 0, _MAX_WAL)
+    return {"status": "OWNED_INITIAL_CONFIG_FIXTURE_RESTORED",
+            "fixture_only": True, "authorizes_nginx_activation": False,
+            "authorizes_catalog_publication": False}
+
+
 def _owned_live_finish(state_fd: int, nginx_fd: int, public_fd: int,
                        check_layout, wal: bytes, expected: dict) -> None:
     _owned_live_guard(state_fd, nginx_fd, public_fd, check_layout, wal, expected)

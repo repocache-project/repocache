@@ -1991,3 +1991,15 @@ journal even after successful detached reversal. Interrupted or foreign
 stages are retained, not guessed or relabelled. This is an executable
 filesystem component; initial installed orchestration, safe stage recovery,
 real service health and final publication remain separate prerequisites.
+
+Detached initial configuration-only recovery accepts only a published v3
+WAL with the inert predecessor, no proposed state, manifest or catalog,
+and a reachable configuration phase. At most one fixed NGINX stage may
+exist. Retain its descriptor; verify root ownership, mount, link, exact
+label, stable identity and mode, and for completed stages the WAL hash.
+A partial private-mode stage is never interpreted as committed bytes.
+Refuse wrong labels, foreign stages, multiple stages, unexpected phases
+and private-state stages. Restore main before removing the include and
+clear the WAL only after exact labelled bootstrap readback. This cleanup
+is restricted to the detached configuration-only rehearsal, never live
+service recovery; the real host path still requires health evidence.
