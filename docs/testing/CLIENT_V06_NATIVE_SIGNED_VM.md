@@ -120,8 +120,13 @@ existing whole-endpoint HTTP 503 and still-healthy former-cache cases,
 the HTTPS origin stays healthy while the exact private route directory
 is moved out of its document root and its catalog mapping is withdrawn.
 A fresh verified TLS metadata request must return HTTP 404; the earlier
-reader must request the withdrawn path but retrieve the exact RPM only
-from upstream, with SHA-256 and native trusted RPM signature verification.
+reader must receive a recorded metadata 404 from that path and retrieve
+the exact RPM only from upstream, with SHA-256 and native trusted RPM
+signature verification. DNF may retry a package URL on the withdrawn
+mirror even after metadata fallback; such requests must return 404, not
+serve package bytes. The backend records actual HTTP response codes
+separately from attempted requests; require upstream RPM GET 200 and
+refuse any non-404 response on the withdrawn route.
 The fixture restores its own directory and catalog afterward; host source
 and installed-package inventories must remain unchanged. This is evidence
 of client fallback against a controlled route-level 404, not proof of

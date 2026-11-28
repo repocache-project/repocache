@@ -777,6 +777,17 @@ def _withdrawn_fixture_route(base: Path, mapped: Path, route: str, certificate: 
         retained.rename(mapped)
 
 
+def _require_withdrawn_dnf4_transfer(primary, upstream):
+    """Distinguish failed mirror attempts from successful package responses."""
+    route = "/__repocache/repos/approved/"
+    assert ("GET", route + "repodata/repomd.xml", 404) in primary.responses
+    assert all(path.startswith(route) and code == 404
+               for _, path, code in primary.responses), primary.responses
+    assert any(method == "GET" and path.startswith("/repo/")
+               and path.endswith("/" + _RPM_NAME) and code == 200
+               for method, path, code in upstream.responses), upstream.responses
+
+
 def _probe_dnf4_catalog_stale_reader(base, key, certificate, foreign, primary,
                                     upstream, expected_bytes, rpmdb):
     """Real TLS catalog consent + marked DNF4 journal + pre-parsed native readers."""
@@ -991,11 +1002,14 @@ def _probe_dnf4_catalog_stale_reader(base, key, certificate, foreign, primary,
                                 with _withdrawn_fixture_route(base, mapped, route, certificate):
                                     primary.hits.clear()
                                     upstream.hits.clear()
+                                    primary.responses.clear()
+                                    upstream.responses.clear()
                                     _complete_stale_dnf4_reader(withdrawn, expected_bytes, rpmdb)
-                                    assert any("/__repocache/repos/approved/repodata/repomd.xml" in hit
-                                               for hit in primary.hits)
-                                    assert not any(_RPM_NAME in hit for hit in primary.hits)
-                                    assert any(_RPM_NAME in hit for hit in upstream.hits)
+                                    _require_withdrawn_dnf4_transfer(primary, upstream)
+                                    print("Observed withdrawn route response codes:",
+                                          sorted(set(code for _, _, code in primary.responses)),
+                                          "RPM requests to withdrawn route:",
+                                          sum(_RPM_NAME in hit for hit in primary.hits), flush=True)
                                     assert _snapshot(source) == restored
                             finally:
                                 publish(active)

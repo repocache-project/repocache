@@ -45,6 +45,7 @@ class HTTPBackend:
                  key: Path | None = None):
         self.mode = "healthy"
         self.hits: list[str] = []
+        self.responses: list[tuple[str, str, int]] = []
         self.release_stalled_requests = threading.Event()
         self.stall_deadline_elapsed = False
 
@@ -67,6 +68,10 @@ class HTTPBackend:
                     super().do_GET()
                 else:
                     super().do_HEAD()
+
+            def send_response(handler, code, message=None):
+                super().send_response(code, message)
+                self.responses.append((handler.command, handler.path, code))
 
             def do_GET(handler):
                 handler._respond("GET")

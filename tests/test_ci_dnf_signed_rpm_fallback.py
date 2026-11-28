@@ -302,3 +302,45 @@ def test_withdrawn_fixture_route_refuses_non_404_and_restores(tmp_path, monkeypa
         with rpm_probe._withdrawn_fixture_route(tmp_path, mapped, "https://example.invalid/", tmp_path / "ca"):
             pytest.fail("non-404 accepted")
     assert mapped.stat().st_ino == inode
+
+@pytest.mark.parametrize("mode", ["fallback", "rpm-retry", "cache-200", "cache-503",
+                                  "no-metadata-404", "upstream-404"])
+def test_withdrawn_transfer_distinguishes_attempt_from_response(mode):
+    from types import SimpleNamespace
+    prefix = "/__repocache/repos/approved/"
+    name = rpm_probe._RPM_NAME
+    primary = [("GET", prefix + "repodata/repomd.xml", 404)]
+    if mode == "rpm-retry":
+        primary.append(("GET", prefix + name, 404))
+    if mode in ("cache-200", "cache-503"):
+        primary.append(("GET", prefix + name, 200 if mode == "cache-200" else 503))
+    if mode == "no-metadata-404":
+        primary = [("GET", prefix + name, 404)]
+    upstream = [("GET", "/repo/" + name, 404 if mode == "upstream-404" else 200)]
+    args = (SimpleNamespace(responses=primary), SimpleNamespace(responses=upstream))
+    if mode in ("fallback", "rpm-retry"):
+        rpm_probe._require_withdrawn_dnf4_transfer(*args)
+    else:
+        with pytest.raises(AssertionError):
+            rpm_probe._require_withdrawn_dnf4_transfer(*args)
+
+
+def test_http_backend_records_actual_response_status(tmp_path):
+    from urllib.request import urlopen
+    from urllib.error import HTTPError
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    (repository / rpm_probe._RPM_NAME).write_bytes(b"fixture")
+    backend = rpm_probe.native.HTTPBackend(tmp_path)
+    try:
+        with urlopen(backend.origin + rpm_probe._RPM_NAME, timeout=5) as response:
+            assert response.read() == b"fixture"
+        with pytest.raises(HTTPError) as exc:
+            urlopen(backend.origin + "withdrawn", timeout=5)
+        assert exc.value.code == 404
+        exc.value.close()
+        assert backend.responses == [
+            ("GET", "/repo/" + rpm_probe._RPM_NAME, 200),
+            ("GET", "/repo/withdrawn", 404)]
+    finally:
+        backend.close()
