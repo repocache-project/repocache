@@ -2011,3 +2011,16 @@ label without effects, restores only the disposable fixture label and
 recovers the inert predecessor. The initial TLS and intake fixture copies
 are exclusively created in mode 0600 before any payload write. The
 scenario does not start a service in the detached root or publish a catalog.
+
+### Withdrawn initial-generation reconstruction
+
+A read-only helper reconstructs the full generation-one resource set from
+exact durable state, labelled main/include and manifest with the catalog
+absent. Require the published v3 WAL's inert predecessor and every new
+resource digest; deterministically re-render only inactive routes with
+empty pins, recompute the catalog and manifest and require the entire
+canonical WAL to match. No DNS, mutable intake or TLS health inference.
+Retain the closed configuration and TLS identities and recheck exact
+resources and absence of stages. This supplies the candidate identity for
+future authenticated boot-policy/start/finalization composition, not the
+writer, service start or public-catalog authorization itself.

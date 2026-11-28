@@ -6198,3 +6198,67 @@ def test_initial_dedicated_config_interrupted_stage_recovery(filesystem, monkeyp
         if stage_before is not None:
             assert native._identity(stage_path.lstat()) == native._identity(stage_before)
     assert not filesystem[-1]
+
+
+@pytest.mark.parametrize("fault", [
+    "none", "state", "manifest", "catalog", "include", "active",
+    "wrong-wal", "private-stage", "foreign-public", "tls-drift", "config-drift",
+])
+def test_reconstruct_initial_withdrawn_generation(filesystem, monkeypatch, fault):
+    old = _owned_bootstrap_resources()
+    new = _owned_generation(active=fault == "active", distribution="almalinux")
+    paths = _owned_fixture_paths(filesystem, old)
+    root_fd, state = filesystem[:2]
+    label = native._DEDICATED_PUBLIC_CONTEXT + b"\0"
+    monkeypatch.setattr(os, "listxattr", lambda fd: ["security.selinux"])
+    monkeypatch.setattr(os, "getxattr", lambda fd, name: label)
+    monkeypatch.setattr(os, "setxattr", lambda *a: pytest.fail("unexpected relabel"))
+    monkeypatch.setattr(native._Labels, "_command", staticmethod(lambda *a: b"Enforcing"))
+    monkeypatch.setattr(native, "_resolve_pins", lambda *a: pytest.fail("unexpected DNS"))
+    monkeypatch.setattr(native, "_load_private_under_root", lambda *a, **kw: pytest.fail("unexpected intake"))
+    tls_calls = []
+    def tls(*args):
+        tls_calls.append(1)
+        return ("tls", len(tls_calls) if fault == "tls-drift" else 1)
+    monkeypatch.setattr(native, "_dedicated_readonly_tls_labels", tls)
+    with native._owned_fixture_layout(root_fd, recovering=False) as layout:
+        wal = native._publish_owned_wal_locked(*layout[:3], old, new, layout[3], live=True)
+    for name in native._OWNED_ORDER:
+        if name != native._CATALOG:
+            paths[name].write_bytes(new[name])
+            paths[name].chmod(0o600 if name in native._OWNED_PRIVATE else 0o644)
+    if fault in ("state", "manifest", "include"):
+        paths[{"state": V2_STATE, "manifest": native._OWNED_MANIFEST,
+               "include": native._INCLUDE}[fault]].write_bytes(b"foreign")
+    elif fault == "catalog":
+        paths[native._CATALOG].write_bytes(new[native._CATALOG])
+        paths[native._CATALOG].chmod(0o644)
+    elif fault == "wrong-wal":
+        (state / native._OWNED_WAL).write_bytes(b"foreign")
+    elif fault == "private-stage":
+        (state / native._OWNED_STAGES[V2_STATE]).touch(mode=0o600)
+    elif fault == "foreign-public":
+        (paths[native._CATALOG].parent / "foreign").touch()
+    elif fault == "config-drift":
+        real = native._dedicated_readonly_config_labels
+        calls = []
+        def drift(*args, **kwargs):
+            calls.append(1)
+            result = real(*args, **kwargs)
+            return (*result, len(calls))
+        monkeypatch.setattr(native, "_dedicated_readonly_config_labels", drift)
+    before = _fixture_resource_bytes(paths)
+    with native._owned_fixture_layout(root_fd, recovering=True) as layout:
+        def reconstruct():
+            return native._read_owned_initial_dedicated_prepared_locked(
+                root_fd, *layout, expected_wal=wal)
+        if fault == "none":
+            assert reconstruct() == new
+            assert reconstruct() == new
+            assert len(tls_calls) == 4
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                reconstruct()
+    assert _fixture_resource_bytes(paths) == before
+    assert (state / native._OWNED_WAL).exists()
+    assert not filesystem[-1]

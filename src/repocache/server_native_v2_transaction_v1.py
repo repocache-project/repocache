@@ -5416,6 +5416,68 @@ def _restore_owned_initial_dedicated_config_fixture_locked(
             "authorizes_catalog_publication": False}
 
 
+def _read_owned_initial_dedicated_prepared_locked(
+        root_fd: int, state_fd: int, nginx_fd: int, public_fd: int,
+        check_layout, *, expected_wal: bytes) -> dict:
+    """Reconstruct a withdrawn initial generation from its durable WAL.
+
+    This is read-only, not start, boot-policy or publication authority.
+    Re-render only an inactive generation-one snapshot with empty pins;
+    no DNS or proposal re-intake is permitted during reconstruction.
+    """
+    code = "OWNED_INITIAL_DEDICATED_PREPARED_REFUSED"
+    labels = _Labels("almalinux", dedicated=True)
+    check_layout()
+    _owned_require_exact_wal(state_fd, expected_wal)
+    old, hashes = _decode_owned_wal(expected_wal, distribution="almalinux")
+    if (_json(expected_wal, limit=_MAX_WAL)["version"] != 3
+            or _validate_owned_resources(old, distribution="almalinux") is not None):
+        _deny(code)
+    current = _read_owned_resources(state_fd, nginx_fd, public_fd)
+    if (current[_CATALOG] is not None
+            or any(current[name] is None or _hash(current[name]) != hashes[name]
+                   for name in _OWNED_ORDER if name != _CATALOG)):
+        _deny(code)
+
+    def proof():
+        _owned_live_guard(state_fd, nginx_fd, public_fd, check_layout,
+                          expected_wal, current)
+        _owned_check_stages_absent(state_fd, nginx_fd, public_fd)
+        labels.finish()
+        return _dedicated_readonly_config_labels(
+            nginx_fd, public_fd, catalog_present=False,
+            allowed_stage=_OWNED_STAGES[_OWNED_MAIN])
+
+    before = proof()
+    try:
+        snapshot = _json(current[V2_STATE], limit=_LIMIT[V2_STATE])
+        _owned_socket_require_inactive_routes(snapshot)
+        if snapshot["state_generation"] != 1:
+            _deny(code)
+        document = parse_install_bytes(
+            base64.b64decode(snapshot["configuration_base64"], validate=True),
+            for_apply=True)
+        tls = _dedicated_readonly_tls_labels(root_fd, document)
+        main, include, catalog = _render_owned_managed_candidate(
+            document, 1, "almalinux", {})
+        reconstructed = {
+            V2_STATE: current[V2_STATE], _OWNED_MAIN: main,
+            _INCLUDE: include, _CATALOG: catalog,
+            _OWNED_MANIFEST: _owned_manifest_for(current[V2_STATE], main, include, catalog),
+        }
+        if ({**reconstructed, _CATALOG: None} != current
+                or _owned_wal_record(old, reconstructed, live=True) != expected_wal
+                or _validate_owned_resources(reconstructed, distribution="almalinux") != snapshot
+                or proof() != before
+                or _dedicated_readonly_tls_labels(root_fd, document) != tls):
+            _deny(code)
+    except NativeV2TransactionError:
+        raise
+    except (ValueError, TypeError, KeyError, OverflowError):
+        _deny(code)
+    return reconstructed
+
+
 def _owned_live_finish(state_fd: int, nginx_fd: int, public_fd: int,
                        check_layout, wal: bytes, expected: dict) -> None:
     _owned_live_guard(state_fd, nginx_fd, public_fd, check_layout, wal, expected)
