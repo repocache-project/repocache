@@ -5973,4 +5973,3 @@ def test_initial_dedicated_candidate_readonly(filesystem, monkeypatch, fault):
                 assert calls["verify"] == 0
     assert _fixture_resource_bytes(paths) == old
     _assert_owned_fixture_clean(filesystem, paths)
-
