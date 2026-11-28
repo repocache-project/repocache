@@ -1,0 +1,130 @@
+name: Isolated VM performance experiment (#19)
+on:
+  push:
+    branches: [perf/experimental-vm-benchmark]
+    paths: ['.github/workflows/experimental-vm-benchmark.yml', 'experiment/**']
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: experimental-vm-benchmark-only
+  cancel-in-progress: false
+env:
+  SOURCE_SHA: 1c69839978b5326d42f37492406d164576215369
+  PR237_PLATFORM: almalinux10
+  PR237_IMAGE_URL: https://repo.almalinux.org/almalinux/10/cloud/x86_64/images/AlmaLinux-10-GenericCloud-10.3-20261116.0.x86_64.qcow2
+  PR237_IMAGE_SHA256: 845d3a4e41fde973bdbf9763b62a88538c1a1fadc2332a89f6ea01e2c17c78ee
+  PR237_IMAGE_SHA512: ''
+  PR237_SCENARIO: native-activation
+jobs:
+  control:
+    name: A — origin / 3 vCPU / 6 GiB
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      BENCH_PROFILE: current
+      BENCH_DELIVERY: origin
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          path: experiment-code
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ env.SOURCE_SHA }}
+          path: source
+      - name: Prepare exact host-only harness and QEMU
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          python3 -B ../experiment-code/experiment/prepare.py
+          bash -n scripts/ci_pr237_experimental_vm.sh
+          mkdir -m 700 "$RUNNER_TEMP/benchmark-image"
+          echo "BENCH_IMAGE=$RUNNER_TEMP/benchmark-image/base.qcow2" >> "$GITHUB_ENV"
+          start=$SECONDS
+          python3 -B scripts/ci_prepare_qemu_runner.py
+          echo "QEMU preparation: $((SECONDS-start)) s"
+      - name: Full unchanged native activation scenario
+        working-directory: source
+        run: bash scripts/ci_pr237_experimental_vm.sh
+      - name: Verify pristine image before temporary publication
+        run: |
+          set -Eeuo pipefail
+          printf '%s  %s\n' "$PR237_IMAGE_SHA256" "$BENCH_IMAGE" | sha256sum -c -
+      - name: Store only verified pristine image for this run
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: benchmark-only-alma-845d3a4e-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/benchmark-image/base.qcow2
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+      - name: Upload experiment evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: benchmark-control-evidence-${{ github.run_attempt }}
+          path: source/pr237-vm-evidence/
+          if-no-files-found: warn
+          retention-days: 7
+  comparison:
+    needs: control
+    name: Comparison / ${{ matrix.profile }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        profile: [current, two-four, three-four, two-eight]
+    env:
+      BENCH_PROFILE: ${{ matrix.profile }}
+      BENCH_DELIVERY: artifact
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          path: experiment-code
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ env.SOURCE_SHA }}
+          path: source
+      - name: Prepare exact host-only harness and QEMU
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          python3 -B ../experiment-code/experiment/prepare.py
+          bash -n scripts/ci_pr237_experimental_vm.sh
+          mkdir -m 700 "$RUNNER_TEMP/benchmark-image"
+          echo "BENCH_IMAGE=$RUNNER_TEMP/benchmark-image/base.qcow2" >> "$GITHUB_ENV"
+          start=$SECONDS
+          python3 -B scripts/ci_prepare_qemu_runner.py
+          echo "QEMU preparation: $((SECONDS-start)) s"
+      - name: Fetch and verify run-local image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          start=$SECONDS
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "benchmark-only-alma-845d3a4e-$GITHUB_RUN_ATTEMPT" --dir "$RUNNER_TEMP/benchmark-image"
+          test -f "$BENCH_IMAGE" && test ! -L "$BENCH_IMAGE"
+          printf '%s  %s\n' "$PR237_IMAGE_SHA256" "$BENCH_IMAGE" | sha256sum -c -
+          chmod 0444 "$BENCH_IMAGE"
+          echo "Artifact download + verification: $((SECONDS-start)) s"
+      - name: Full unchanged native activation scenario
+        working-directory: source
+        run: bash scripts/ci_pr237_experimental_vm.sh
+      - name: Upload experiment evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: benchmark-${{ matrix.profile }}-evidence-${{ github.run_attempt }}
+          path: source/pr237-vm-evidence/
+          if-no-files-found: warn
+          retention-days: 7
