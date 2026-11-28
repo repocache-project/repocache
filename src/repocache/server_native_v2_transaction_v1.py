@@ -4448,14 +4448,8 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
                     _owned_check_stages_absent(state_dir, nginx, public)
                     _owned_live_guard(state_dir, nginx, public, check_layout,
                                       wal, {**old, _CATALOG: None})
-                else:
-                    state_dir, nginx, public, check_layout = layout
-                    check_layout()
-                    _no_conflicting_owned_wal_pending(state_dir)
-                    _owned_check_stages_absent(state_dir, nginx, public)
-                    if _read_owned_resources(state_dir, nginx, public) != old:
-                        _deny("OWNED_LIVE_RESOURCE_DRIFT")
-                    check_layout()
+                elif _read_owned_resources(*layout[:3]) != old:
+                    _deny("OWNED_LIVE_RESOURCE_DRIFT")
 
         if stage_profile or load_profile:
             from repocache.server_native_nginx_effective_unit_v1 import (
@@ -4712,7 +4706,17 @@ def _installed_dedicated_lifecycle(pins: dict, *, prepare: bool, start: bool = F
                     package()
                 require_disabled_unit(_UNIT, inactive=True)
                 require_disabled_unit(_OWNED_WAL_DOMAIN, inactive=True)
-                prepared_resources()
+                if pending_placement:
+                    prepared_resources()
+                else:
+                    with _owned_layout_locked(root, state, recovering=False) as layout:
+                        state_dir, nginx, public, check_layout = layout
+                        check_layout()
+                        _no_conflicting_owned_wal_pending(state_dir)
+                        _owned_check_stages_absent(state_dir, nginx, public)
+                        if _read_owned_resources(state_dir, nginx, public) != old:
+                            _deny("OWNED_LIVE_RESOURCE_DRIFT")
+                        check_layout()
                 guard()
 
             stopped_storage_owner()

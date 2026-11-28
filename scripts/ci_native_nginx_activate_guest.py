@@ -3289,7 +3289,7 @@ finally:
             # The authenticated storage path must not reinterpret legacy
             # roots as dedicated, even with otherwise valid pins.
             try:
-                native._prepare_authenticated_committed_dedicated_storage(assets, **storage_pins)
+                prepare_storage(assets, **storage_pins)
             except native.stage.WorkerStageError:
                 pass
             else:
@@ -3337,7 +3337,7 @@ finally:
             runtime.mkdir(mode=0o700)
             partial_identity = file_identity(runtime)
             try:
-                native._prepare_authenticated_committed_dedicated_runtime(assets, **storage_pins)
+                prepare_runtime(assets, **storage_pins)
             except native.stage.WorkerStageError:
                 pass
             else:
