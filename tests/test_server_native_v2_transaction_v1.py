@@ -1682,13 +1682,13 @@ def _owned_bootstrap_resources():
     }
 
 
-def _owned_generation(generation=1, previous=None, *, active=True):
+def _owned_generation(generation=1, previous=None, *, active=True, distribution="debian"):
     cfg = document(1, generation=generation)
     cfg["deployment"]["paths"]["generated_include"] = native._OWNED_INCLUDE_PATH
     cfg["repositories"][0]["desired_state"] = "active" if active else "disabled"
     state = _canon(snapshot(generation=generation, previous=previous, doc=cfg))
     main, include, catalog = native._render_owned_managed_candidate(
-        cfg, generation, "debian",
+        cfg, generation, distribution,
         {"repo-0": {"mirror0.example.invalid": ["8.8.8.8"]}} if active else {},
     )
     return {
@@ -5973,3 +5973,144 @@ def test_initial_dedicated_candidate_readonly(filesystem, monkeypatch, fault):
                 assert calls["verify"] == 0
     assert _fixture_resource_bytes(paths) == old
     _assert_owned_fixture_clean(filesystem, paths)
+
+
+@pytest.mark.parametrize("fault", ["none", "foreign-label", "foreign-mount",
+                                   "same-byte-replacement", "guard-drift",
+                                   "late-target", "remove-include", "remove-drift"])
+def test_dedicated_labelled_leaf_replacement(tmp_path, monkeypatch, fault):
+    parent = tmp_path / "owned"
+    parent.mkdir(mode=0o755)
+    include = fault in ("late-target", "remove-include", "remove-drift")
+    name = native._INCLUDE if include else native._OWNED_MAIN
+    target, stage_path = parent / name, parent / native._OWNED_STAGES[name]
+    prior = None if fault == "late-target" else b"previous"
+    after = None if fault.startswith("remove-") else b"next"
+    label = native._DEDICATED_PUBLIC_CONTEXT + b"\0"
+    labels = {parent.stat().st_ino: label}
+    if prior is not None:
+        target.write_bytes(prior)
+        target.chmod(0o644)
+        labels[target.stat().st_ino] = label
+    original = target.stat().st_ino if target.exists() else None
+    calls = []
+    relabelled = []
+    monkeypatch.setattr(os, "listxattr", lambda fd: ["security.selinux"])
+    monkeypatch.setattr(os, "getxattr", lambda fd, name: (
+        b"foreign" if fault == "foreign-label" and os.fstat(fd).st_ino == original
+        else labels.get(os.fstat(fd).st_ino, b"unassigned")))
+    def set_label(fd, name, value):
+        assert stat.S_IMODE(os.fstat(fd).st_mode) == 0o600
+        assert os.fstat(fd).st_ino != original
+        labels[os.fstat(fd).st_ino] = value
+        relabelled.append(os.fstat(fd).st_ino)
+    monkeypatch.setattr(os, "setxattr", set_label)
+    real_mount = native._mount
+    monkeypatch.setattr(native, "_mount", lambda fd: (
+        "foreign" if fault == "foreign-mount" and os.fstat(fd).st_ino == original
+        else real_mount(fd)))
+    def guard():
+        calls.append(1)
+        if len(calls) == 2:
+            if fault in ("same-byte-replacement", "remove-drift"):
+                replacement = parent / "replacement"
+                replacement.write_bytes(prior)
+                replacement.chmod(0o644)
+                labels[replacement.stat().st_ino] = label
+                os.replace(replacement, target)
+            if fault == "guard-drift":
+                raise native.NativeV2TransactionError("guard drift")
+            if fault == "late-target":
+                target.write_bytes(b"foreign")
+                target.chmod(0o644)
+    fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        if fault in ("none", "remove-include"):
+            native._write_dedicated_public_leaf(fd, name, prior, after, recheck=guard)
+            assert not stage_path.exists()
+            if after is None:
+                assert not target.exists() and not relabelled
+            else:
+                assert target.read_bytes() == after and target.stat().st_ino != original
+                assert relabelled == [target.stat().st_ino]
+                assert labels[target.stat().st_ino] == label
+        else:
+            with pytest.raises(native.NativeV2TransactionError):
+                native._write_dedicated_public_leaf(fd, name, prior, after, recheck=guard)
+            assert target.read_bytes() == (b"foreign" if fault == "late-target" else prior)
+            if fault in ("foreign-label", "foreign-mount", "remove-drift"):
+                assert not stage_path.exists() and not relabelled
+            else:
+                assert stage_path.read_bytes() == after
+        assert original not in relabelled
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("fault", ["none", "wal-drift", "unpublished", "foreign-after",
+                                   "catalog", "actual-root", "main-first",
+                                   "remove-first", "foreign-other-label", "orphan-stage"])
+def test_initial_dedicated_config_wal_writer(filesystem, monkeypatch, fault):
+    old = _owned_bootstrap_resources()
+    new = _owned_generation(active=False, distribution="almalinux")
+    paths = _owned_fixture_paths(filesystem, old)
+    root_fd, state = filesystem[:2]
+    label = native._DEDICATED_PUBLIC_CONTEXT + b"\0"
+    monkeypatch.setattr(os, "listxattr", lambda fd: ["security.selinux"])
+    main_inode = paths[native._OWNED_MAIN].stat().st_ino
+    monkeypatch.setattr(os, "getxattr", lambda fd, name: (
+        b"foreign" if fault == "foreign-other-label" and os.fstat(fd).st_ino == main_inode
+        else label))
+    monkeypatch.setattr(os, "setxattr", lambda *a: pytest.fail("already labelled"))
+    monkeypatch.setattr(native._Labels, "_command", staticmethod(lambda *a: b"Enforcing"))
+    with native._owned_fixture_layout(root_fd, recovering=False) as layout:
+        sfd, nfd, pfd, check = layout
+        wal = native._publish_owned_wal_locked(*layout[:3], old, new, check, live=True)
+        expected = dict(old)
+        wal_path = state / native._OWNED_WAL
+        if fault == "unpublished":
+            wal_path.rename(state / native._OWNED_WAL_TMP)
+        if fault == "wal-drift":
+            wal_path.write_bytes(b"foreign")
+        if fault == "orphan-stage":
+            (state / native._OWNED_STAGES[V2_STATE]).touch(mode=0o600)
+        if fault == "catalog":
+            paths[native._CATALOG].write_bytes(new[native._CATALOG])
+            paths[native._CATALOG].chmod(0o644)
+            expected[native._CATALOG] = new[native._CATALOG]
+        def write(name, after, root=root_fd):
+            native._write_owned_initial_dedicated_config_locked(
+                root, *layout, wal, expected, name, after)
+        if fault == "none":
+            write(native._INCLUDE, new[native._INCLUDE])
+            write(native._OWNED_MAIN, new[native._OWNED_MAIN])
+            assert expected == {**old, native._INCLUDE: new[native._INCLUDE],
+                                native._OWNED_MAIN: new[native._OWNED_MAIN]}
+            assert _fixture_resource_bytes(paths) == expected
+            write(native._OWNED_MAIN, old[native._OWNED_MAIN])
+            write(native._INCLUDE, None)
+            assert expected == old and _fixture_resource_bytes(paths) == old
+            assert wal_path.read_bytes() == wal
+        elif fault == "remove-first":
+            write(native._INCLUDE, new[native._INCLUDE])
+            write(native._OWNED_MAIN, new[native._OWNED_MAIN])
+            with pytest.raises(native.NativeV2TransactionError):
+                write(native._INCLUDE, None)
+            assert _fixture_resource_bytes(paths) == expected
+            assert wal_path.read_bytes() == wal
+        else:
+            with pytest.raises((native.NativeV2TransactionError, ValueError)):
+                if fault == "main-first":
+                    write(native._OWNED_MAIN, new[native._OWNED_MAIN])
+                elif fault == "actual-root":
+                    real_root = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+                    try:
+                        write(native._INCLUDE, new[native._INCLUDE], real_root)
+                    finally:
+                        os.close(real_root)
+                else:
+                    write(native._INCLUDE, b"foreign" if fault == "foreign-after"
+                          else new[native._INCLUDE])
+            assert not paths[native._INCLUDE].exists()
+            assert paths[native._OWNED_MAIN].read_bytes() == old[native._OWNED_MAIN]
+        assert not filesystem[-1]

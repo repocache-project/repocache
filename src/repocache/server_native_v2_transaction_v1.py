@@ -479,11 +479,14 @@ def _require_dedicated_public_label(fd: int) -> None:
 
 
 def _dedicated_readonly_config_labels(nginx: int, public: int, *, catalog_present: bool,
-                                      bootstrap: bool = False) -> tuple:
+                                      bootstrap: bool = False,
+                                      allowed_stage: str | None = None) -> tuple:
     """Read-only exact label/identity proof for the retained owned layout."""
     code = "OWNED_DEDICATED_READONLY_LABEL_UNVERIFIED"
     if (type(catalog_present) is not bool or type(bootstrap) is not bool
-            or (bootstrap and catalog_present)):
+            or (bootstrap and catalog_present)
+            or (allowed_stage is not None and (catalog_present or allowed_stage not in (
+                _OWNED_STAGES[_OWNED_MAIN], _OWNED_STAGES[_INCLUDE])))):
         _deny(code)
     try:
         with ExitStack() as stack:
@@ -521,8 +524,10 @@ def _dedicated_readonly_config_labels(nginx: int, public: int, *, catalog_presen
                         or _identity(os.stat(name, dir_fd=parent, follow_symlinks=False)) != identity
                         or _mount(fd) != _mount(parent)):
                     _deny(code)
-            if bootstrap:
-                if set(os.listdir(nginx)) != {_OWNED_MAIN} or os.listdir(public):
+            if bootstrap or allowed_stage is not None:
+                expected_names = {name for parent, name in names if parent == nginx}
+                permitted = (expected_names, expected_names | {allowed_stage})
+                if set(os.listdir(nginx)) not in permitted or os.listdir(public):
                     _deny(code)
             if not catalog_present:
                 try:
@@ -580,23 +585,80 @@ def _write_dedicated_fresh_public(parent: int, name: str, raw: bytes) -> None:
             or not 1 <= len(raw) <= _OWNED_LIMIT[name]
             or (name == _OWNED_MAIN and raw != _OWNED_BOOTSTRAP_CONFIG)):
         _deny(code)
+    _write_dedicated_public_leaf(parent, name, None, raw, recheck=lambda: None)
+
+
+def _write_dedicated_public_leaf(parent: int, name: str, prior: bytes | None,
+                                 raw: bytes | None, *, recheck) -> None:
+    """Labelled fresh staging and exact-target replacement under a trusted lock.
+
+    No existing inode is relabelled. Only initial configuration rollback may
+    remove a managed include. Existing-file replacement assumes the original
+    root-only ownership boundary and cooperating state lock, not hostile root.
+    """
+    code = ("OWNED_DEDICATED_FRESH_PUBLIC_REFUSED" if prior is None
+            and name in (_CATALOG, _OWNED_MAIN) else "OWNED_DEDICATED_PUBLIC_WRITE_REFUSED")
+    if (name not in (_CATALOG, _OWNED_MAIN, _INCLUDE)
+            or not callable(recheck) or prior == raw
+            or (raw is None and name != _INCLUDE)
+            or (name == _CATALOG and prior is not None)
+            or any(value is not None and
+                   (type(value) is not bytes or not 1 <= len(value) <= _OWNED_LIMIT[name])
+                   for value in (prior, raw))):
+        _deny(code)
     stage = _OWNED_STAGES[name]
+    target = None
     try:
-        before = _identity(os.fstat(parent))[:6]
+        parent_identity = _identity(os.fstat(parent))[:6]
         mount = _mount(parent)
 
         def check_parent():
             info = os.fstat(parent)
             if (not stat.S_ISDIR(info.st_mode)
                     or (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) != (0, 0, 0o755)
-                    or _identity(info)[:6] != before or _mount(parent) != mount
+                    or _identity(info)[:6] != parent_identity or _mount(parent) != mount
                     or os.fstatvfs(parent).f_flag & os.ST_RDONLY):
                 _deny(code)
             _require_dedicated_public_label(parent)
 
+        recheck()
         check_parent()
-        _owned_require_absent(parent, name)
+        target_identity = None
+        if prior is not None:
+            target = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                             | os.O_CLOEXEC, dir_fd=parent)
+            target_identity = _identity(os.fstat(target))
+
+        def check_target():
+            if prior is None:
+                _owned_require_absent(parent, name)
+                return
+            info = os.fstat(target)
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                    or (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) != (0, 0, 0o644)
+                    or _mount(target) != mount or info.st_size != len(prior)
+                    or _identity(info) != target_identity
+                    or _identity(os.stat(name, dir_fd=parent, follow_symlinks=False)) != target_identity):
+                _deny(code)
+            _require_dedicated_public_label(target)
+            if (os.pread(target, len(prior) + 1, 0) != prior
+                    or _identity(os.fstat(target)) != target_identity
+                    or _identity(os.stat(name, dir_fd=parent, follow_symlinks=False)) != target_identity):
+                _deny(code)
+
+        check_target()
         _owned_require_absent(parent, stage)
+        if raw is None:
+            recheck()
+            check_parent()
+            check_target()
+            _owned_require_absent(parent, stage)
+            os.unlink(name, dir_fd=parent)
+            os.fsync(parent)
+            check_parent()
+            _owned_require_absent(parent, name)
+            return
+
         fd = os.open(stage, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
                      | os.O_CLOEXEC, 0o600, dir_fd=parent)
         try:
@@ -630,12 +692,20 @@ def _write_dedicated_fresh_public(parent: int, name: str, raw: bytes) -> None:
             _require_dedicated_public_label(fd)
             if os.pread(fd, len(raw) + 1, 0) != raw:
                 _deny(code)
+            recheck()
             check_parent()
             if check_stage(0o644, len(raw)) != identity:
                 _deny(code)
-            # A concurrent target after the absence check is not replaced,
-            # even when byte-identical. Preserve stage for WAL/diagnosis.
-            _rename_directory_noreplace(parent, stage, parent, name)
+            _require_dedicated_public_label(fd)
+            check_target()
+            if check_stage(0o644, len(raw)) != identity:
+                _deny(code)
+            _require_dedicated_public_label(fd)
+            if prior is None:
+                # Preserve a late-arriving foreign target, even identical bytes.
+                _rename_directory_noreplace(parent, stage, parent, name)
+            else:
+                os.replace(stage, name, src_dir_fd=parent, dst_dir_fd=parent)
             os.fsync(parent)
             current = _identity(os.fstat(fd))
             # Rename may advance ctime; every other field remains pinned.
@@ -655,6 +725,9 @@ def _write_dedicated_fresh_public(parent: int, name: str, raw: bytes) -> None:
         raise
     except (OSError, ValueError, TypeError, InstalledStorageError):
         _deny(code)
+    finally:
+        if target is not None:
+            os.close(target)
 
 
 def _write_public(parent: int, name: str, before: bytes | None,
@@ -5141,6 +5214,80 @@ def _owned_live_write(state_fd: int, nginx_fd: int, public_fd: int,
         _owned_write_resource(state_fd, nginx_fd, public_fd, name, expected[name], after)
     expected[name] = after
     _owned_live_guard(state_fd, nginx_fd, public_fd, check_layout, wal, expected)
+
+
+def _write_owned_initial_dedicated_config_locked(
+        root_fd: int, state_fd: int, nginx_fd: int, public_fd: int,
+        check_layout, wal: bytes, expected: dict, name: str,
+        after: bytes | None) -> None:
+    """Initial-generation label-preserving forward/rollback writer.
+
+    Detached rehearsal only. Use the existing v3 WAL and exact resources,
+    never adopt a committed or catalog-exposed generation. Retain the WAL
+    on uncertainty; no service, public catalog, or host operation.
+    """
+    _refuse_actual_root_fixture_write(root_fd)
+    code = "OWNED_INITIAL_DEDICATED_WRITE_REFUSED"
+    if name not in (_OWNED_MAIN, _INCLUDE):
+        _deny(code)
+    old, hashes = _decode_owned_wal(wal, distribution="almalinux")
+    if (_json(wal, limit=_MAX_WAL)["version"] != 3
+            or _validate_owned_resources(old, distribution="almalinux") is not None
+            or expected[_CATALOG] is not None or expected[_OWNED_MANIFEST] is not None
+            or _hash(after) not in (_hash(old[name]), hashes[name])):
+        _deny(code)
+    if ((name == _OWNED_MAIN and after != old[name]
+            and _hash(expected[_INCLUDE]) != hashes[_INCLUDE])
+            or (name == _INCLUDE and after is None
+                and expected[_OWNED_MAIN] != old[_OWNED_MAIN])):
+        _deny(code)
+    labels = _Labels("almalinux", dedicated=True)
+
+    def boundary():
+        _owned_live_guard(state_fd, nginx_fd, public_fd, check_layout, wal, expected)
+        _owned_wal_resource_drift(old, hashes, expected, unpublished=False)
+        labels.finish()
+
+    def proof(*, allow_stage=False):
+        return _dedicated_readonly_config_labels(
+            nginx_fd, public_fd, catalog_present=False,
+            bootstrap=expected[_INCLUDE] is None,
+            allowed_stage=_OWNED_STAGES[name] if allow_stage else None)
+
+    def unchanged(proven):
+        parents, mounts, files = proven
+        # Creation of our own regular staging file may change the NGINX
+        # directory size/times, but never its inode, links, owner or mount.
+        return (parents[0][:6], parents[1], mounts, files)
+
+    boundary()
+    _owned_check_stages_absent(state_fd, nginx_fd, public_fd)
+    before = proof()
+    if expected[name] == after:
+        return
+
+    def guard():
+        boundary()
+        for other in _OWNED_ORDER:
+            if other != name:
+                parent = _owned_resource_parent(other, state_fd, nginx_fd, public_fd)
+                _owned_require_absent(parent, _OWNED_STAGES[other])
+        if unchanged(proof(allow_stage=True)) != unchanged(before):
+            _deny(code)
+
+    _write_dedicated_public_leaf(nginx_fd, name, expected[name], after, recheck=guard)
+    expected[name] = after
+    boundary()
+    _owned_check_stages_absent(state_fd, nginx_fd, public_fd)
+    final = proof()
+    if unchanged(final)[:3] != unchanged(before)[:3]:
+        _deny(code)
+    # Main is always first in the proof. The unaffected config leaf must
+    # keep its complete identity across the operation, not merely its bytes.
+    if name == _INCLUDE and final[2][0] != before[2][0]:
+        _deny(code)
+    if name == _OWNED_MAIN and final[2][1:] != before[2][1:]:
+        _deny(code)
 
 
 def _owned_live_finish(state_fd: int, nginx_fd: int, public_fd: int,

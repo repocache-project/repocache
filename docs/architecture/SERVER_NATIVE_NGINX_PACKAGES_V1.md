@@ -1969,3 +1969,25 @@ from the existing test fixture. It checks repeated exact preparation,
 unchanged resource identities and absent WAL/catalog, then refuses a
 foreign label on the disposable key before restoring that fixture only.
 No host service activation or production trust claim follows.
+
+### Initial-generation labelled configuration WAL writer
+
+The existing fresh public publisher now shares its retained-descriptor
+staging implementation with a guarded initial configuration writer. A
+fresh include uses no-replace publication; the inert main is replaced only
+after checking its exact bytes, inode, mount, mode, ownership and read-only
+label immediately before rename. Only the fresh stage may receive a label.
+The rollback path restores the original main before removing only the exact
+WAL-owned include. Reject main-first and include-removal-first transitions,
+check all other stages are absent, and retain the unaffected configuration
+leaf's complete identity across every guarded write. A retained root-only
+namespace and cooperating state lock
+are required; the replacement does not claim atomic CAS against hostile root.
+
+The private initial writer requires the unchanged published v3 WAL, an inert
+predecessor, exact candidate hashes, no catalog/manifest, enforcing state and
+unchanged ownership checks. It refuses the actual host root and retains the
+journal even after successful detached reversal. Interrupted or foreign
+stages are retained, not guessed or relabelled. This is an executable
+filesystem component; initial installed orchestration, safe stage recovery,
+real service health and final publication remain separate prerequisites.
