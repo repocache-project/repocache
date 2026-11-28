@@ -1954,7 +1954,10 @@ rejects any include, catalog, stage or foreign public entry. Before and
 after the existing deterministic root-intake CAS renderer, verify exact
 operator TLS labels and inode identities, unchanged bootstrap resources
 and the same intake report and bytes. Refuse active repositories and stale
-or changing inputs before returning a candidate. No WAL, catalog, service,
+or changing inputs before returning a candidate. Bind the initially inspected
+intake to the shared renderer before TLS verification or DNS resolution, so
+a changed active-route proposal cannot reach the renderer's effects.
+No WAL, catalog, service,
 policy or host installation effect is permitted by this helper; the
 initial authenticated transaction and health-gated publication remain
 separate prerequisites. Existing committed and recovery proofs are unchanged.

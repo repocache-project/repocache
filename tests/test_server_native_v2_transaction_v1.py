@@ -5920,7 +5920,8 @@ def test_initial_dedicated_config_label_proof(tmp_path, monkeypatch, fault):
 
 
 @pytest.mark.parametrize("fault", [
-    "none", "stale", "active", "config-drift", "tls-drift", "intake-drift", "distro",
+    "none", "stale", "active", "config-drift", "tls-drift", "intake-drift",
+    "active-intake-drift", "distro",
 ])
 def test_initial_dedicated_candidate_readonly(filesystem, monkeypatch, fault):
     old = _owned_bootstrap_resources()
@@ -5930,10 +5931,13 @@ def test_initial_dedicated_candidate_readonly(filesystem, monkeypatch, fault):
     report = {"expected_generation": 1 if fault == "stale" else 0,
               "expected_state_sha256": None}
     calls = {"intake": 0, "config": 0, "tls": 0, "verify": 0}
+    active_candidate = _owned_generation(active=True)[V2_STATE]
 
     def intake(*args, **kwargs):
         calls["intake"] += 1
         raw = b"changed" if fault == "intake-drift" and calls["intake"] == 4 else candidate
+        if fault == "active-intake-drift" and calls["intake"] == 2:
+            raw = active_candidate
         return report, raw
 
     def proof(key):
@@ -5965,7 +5969,7 @@ def test_initial_dedicated_candidate_readonly(filesystem, monkeypatch, fault):
         else:
             with pytest.raises(native.NativeV2TransactionError):
                 prepare()
-            if fault in ("stale", "active", "distro"):
+            if fault in ("stale", "active", "active-intake-drift", "distro"):
                 assert calls["verify"] == 0
     assert _fixture_resource_bytes(paths) == old
     _assert_owned_fixture_clean(filesystem, paths)

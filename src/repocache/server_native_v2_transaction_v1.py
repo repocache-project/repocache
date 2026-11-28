@@ -5431,7 +5431,9 @@ def _apply_owned_live_locked(root_fd: int, state_fd: int, nginx_fd: int,
 
 def _prepare_owned_live_candidate_locked(root_fd: int, state_fd: int,
                                          nginx_fd: int, public_fd: int,
-                                         distribution: str) -> tuple[dict, dict, dict]:
+                                         distribution: str, *,
+                                         expected_intake: tuple[dict, bytes] | None = None
+                                         ) -> tuple[dict, dict, dict]:
     """Read only the fixed root intake; never accept bytes from a socket peer.
 
     Returns the old/new exact resource sets and intake report. A future
@@ -5443,6 +5445,8 @@ def _prepare_owned_live_candidate_locked(root_fd: int, state_fd: int,
     previous = _validate_owned_resources(old, distribution=distribution)
     generation = 0 if previous is None else previous["state_generation"]
     report, candidate = _load_private_under_root(root_fd, owner_uid=0, owner_gid=0)
+    if expected_intake is not None and (report, candidate) != expected_intake:
+        _deny("CANDIDATE_CHANGED")
     if (report["expected_generation"] != generation
             or report["expected_state_sha256"] != _hash(old[V2_STATE])):
         _deny("STATE_STALE")
@@ -5512,7 +5516,8 @@ def _prepare_owned_initial_dedicated_candidate_locked(
     )
     tls = _dedicated_readonly_tls_labels(root_fd, document)
     previous, new, prepared = _prepare_owned_live_candidate_locked(
-        root_fd, state_fd, nginx_fd, public_fd, distribution)
+        root_fd, state_fd, nginx_fd, public_fd, distribution,
+        expected_intake=(report, candidate))
     labels.finish()
     check_layout()
     again, raw = _load_private_under_root(root_fd, owner_uid=0, owner_gid=0)
