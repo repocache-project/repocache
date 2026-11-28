@@ -2116,3 +2116,12 @@ authenticated SELinux policy and fresh ownership boundary are established.
 The existing detached-root witness and stopped-worker entrypoints do not prove
 that a fresh installed host completes the whole lifecycle. No CLI or socket
 activation route is added by these private phases.
+
+The installer now owns the fixed compiled-policy readback observation used
+by the disposable native fixture. It requires AlmaLinux, the standalone
+native-root preconditions, enforcing SELinux, a single enabled priority-400
+HLL module and unchanged full and enabled inventories around descriptor-bound
+extraction. Only fixed readback commands and a temporary root-only workspace
+are used. The observed compiled digest does not authenticate the source
+compilation, attest the whole kernel policy or authorize placement or
+activation. Fresh actual-root dedicated placement remains refused.

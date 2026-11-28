@@ -256,39 +256,24 @@ def _fixed_policy_inventory():
 
 
 def verify_fixed_loaded_policy(expected_sha256):
-    """Read the exact stored HLL module, without installing/rebuilding policy.
-
-    This VM-only observation pins module bytes and enabled priority, not
-    the whole active kernel policy or a general production trust token.
-    """
+    """Exercise the installer readback in the marked disposable VM."""
     guard()
-    assert re.fullmatch(r"[0-9a-f]{64}", expected_sha256)
-    before = _fixed_policy_inventory()
-    assert {row for row in before if row[1] == FIXED_MODULE} == {("400", FIXED_MODULE, "pp")}
-    assert FIXED_MODULE in {line.split()[0] for line in installed_modules().splitlines() if line}
+    from scripts import install_native_root_worker as native
     from scripts import stage_native_root_worker as stage
-    with tempfile.TemporaryDirectory(prefix="repocache-policy-readback-", dir="/var/tmp") as place:
-        # semodule extracts HLL into cwd; the fixed local module name is
-        # never derived from a request. The private directory is new.
-        command("/usr/sbin/semodule", "-X", "400", "--hll", "-E", FIXED_MODULE,
-                cwd=place, timeout=120)
-        root = Path(place)
-        leaf = FIXED_MODULE + ".pp"
-        assert {p.name for p in root.iterdir()} == {leaf}
-        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            info = os.stat(leaf, dir_fd=fd, follow_symlinks=False)
-            assert (stat.S_ISREG(info.st_mode) and info.st_uid == info.st_gid == 0
-                    and not info.st_mode & 0o022 and info.st_nlink == 1)
-            raw = stage._asset_bytes(fd, leaf, 4 * 1024 * 1024,
-                                     installed_mode=stat.S_IMODE(info.st_mode))
-            after = os.stat(leaf, dir_fd=fd, follow_symlinks=False)
-            assert (after.st_dev, after.st_ino, after.st_ctime_ns) == (
-                info.st_dev, info.st_ino, info.st_ctime_ns)
-        finally:
-            os.close(fd)
-    assert hashlib.sha256(raw).hexdigest() == expected_sha256
-    assert _fixed_policy_inventory() == before
+    try:
+        report = native._observe_fixed_dedicated_policy(expected_sha256)
+    except stage.WorkerStageError as exc:
+        raise AssertionError("Fixed policy observation refused") from exc
+    assert report == {
+        "compiled_policy_sha256": expected_sha256,
+        "stored_hll_verified": True,
+        "enabled_priority": 400,
+        "signed_source_compilation_verified": False,
+        "runtime_selinux_policy_verified": False,
+        "authorizes_policy_installation": False,
+        "authorizes_host_installation": False,
+        "authorizes_nginx_activation": False,
+    }
     guard()
     return expected_sha256
 

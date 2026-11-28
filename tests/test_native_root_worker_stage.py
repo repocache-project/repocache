@@ -1454,3 +1454,85 @@ def test_initial_pending_installer_pins_phase_and_successor(monkeypatch, tmp_pat
         with pytest.raises(stage.WorkerStageError):
             invoke()
     assert calls == ([action] if fault in ("none", "child-report") else [])
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="requires disposable root-owned workspace")
+@pytest.mark.parametrize("fault", [
+    "none", "invalid-digest", "debian", "disabled", "alternate-priority",
+    "missing-enabled", "duplicate", "digest", "extra", "symlink", "writable",
+    "inventory-drift", "failed-command", "timeout", "label-drift",
+])
+def test_installer_compiled_policy_observation_is_readonly_and_exact(monkeypatch, fault):
+    from types import SimpleNamespace
+
+    raw = b"compiled module fixture"
+    digest = hashlib.sha256(raw).hexdigest()
+    calls = []
+    hosts = []
+    monkeypatch.setattr(install, "_native_distro",
+                        lambda: "debian" if fault == "debian" else "almalinux")
+    monkeypatch.setattr(install, "require_native_host_preconditions", lambda: hosts.append(True))
+
+    class Labels:
+        def __init__(self, distribution, *, dedicated):
+            assert (distribution, dedicated) == ("almalinux", True)
+
+        def finish(self):
+            if fault == "label-drift":
+                raise stage.WorkerStageError("fixture label drift")
+
+    monkeypatch.setattr(install, "_Labels", Labels)
+
+    def run(argv, **kw):
+        assert argv[0] == "/usr/sbin/semodule"
+        assert kw["timeout"] == 120 and kw["env"]["LC_ALL"] == "C"
+        args = argv[1:]
+        calls.append(args)
+        output = b""
+        if args == ("-lfull",):
+            output = b"100 base pp\n400 repocache_nginx pp\n"
+            if fault == "disabled":
+                output = output.rstrip() + b" disabled\n"
+            elif fault == "alternate-priority":
+                output += b"100 repocache_nginx pp\n"
+            elif fault == "duplicate":
+                output += b"400 repocache_nginx pp\n"
+            elif fault == "inventory-drift" and calls.count(args) > 1:
+                output += b"100 other pp\n"
+        elif args == ("-l",):
+            output = b"base\nrepocache_nginx\n" if fault != "missing-enabled" else b"base\n"
+        else:
+            assert args == ("-X", "400", "--hll", "-E", "repocache_nginx")
+            path = Path(kw["cwd"])
+            assert stat.S_IMODE(path.stat().st_mode) == 0o700 and not list(path.iterdir())
+            leaf = path / "repocache_nginx.pp"
+            if fault == "symlink":
+                leaf.symlink_to("/etc/passwd")
+            else:
+                leaf.write_bytes(b"wrong" if fault == "digest" else raw)
+                leaf.chmod(0o666 if fault == "writable" else 0o600)
+            if fault == "extra":
+                (path / "foreign").touch()
+        if fault == "timeout":
+            raise subprocess.TimeoutExpired(argv, 120)
+        return SimpleNamespace(stdout=output, returncode=1 if fault == "failed-command" else 0)
+
+    monkeypatch.setattr(install.subprocess, "run", run)
+    if fault == "none":
+        report = install._observe_fixed_dedicated_policy(digest)
+        assert report["stored_hll_verified"] is True
+        assert report["compiled_policy_sha256"] == digest and report["enabled_priority"] == 400
+        assert all(value is False for key, value in report.items()
+                   if key.startswith("authorizes_") or key in (
+                       "signed_source_compilation_verified", "runtime_selinux_policy_verified"))
+        assert hosts == [True, True]
+        assert calls == [("-lfull",), ("-l",),
+                         ("-X", "400", "--hll", "-E", "repocache_nginx"),
+                         ("-lfull",), ("-l",)]
+    else:
+        with pytest.raises(stage.WorkerStageError):
+            install._observe_fixed_dedicated_policy("bad" if fault == "invalid-digest" else digest)
+        if fault in ("invalid-digest", "debian"):
+            assert not calls and not hosts
+        elif fault in ("disabled", "alternate-priority", "missing-enabled", "duplicate"):
+            assert not any("-E" in args for args in calls)
+

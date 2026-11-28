@@ -393,6 +393,106 @@ def _place_worker_files(
             check_public()
 
 
+def _observe_fixed_dedicated_policy(expected_sha256: str) -> dict:
+    """Observe an exact compiled HLL module; never load or authorize policy.
+
+    The digest must come from an independently authenticated compilation
+    of the signed source. This observation alone proves neither that
+    provenance nor the entire effective kernel policy.
+    """
+    if (type(expected_sha256) is not str
+            or signatures.HEX64.fullmatch(expected_sha256) is None):
+        _reject("DEDICATED_POLICY_DIGEST_REFUSED")
+    if _native_distro() != "almalinux":
+        _reject("DEDICATED_POLICY_TARGET_REFUSED")
+    require_native_host_preconditions()
+    labels = _Labels("almalinux", dedicated=True)
+    module = "repocache_nginx"
+    leaf = module + ".pp"
+
+    def observe(*args, cwd="/"):
+        try:
+            result = subprocess.run(
+                ("/usr/sbin/semodule", *args), stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"},
+                cwd=cwd, timeout=120, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            _reject("DEDICATED_POLICY_OBSERVATION_FAILED")
+        if (result.returncode or type(result.stdout) is not bytes
+                or len(result.stdout) > 1024 * 1024):
+            _reject("DEDICATED_POLICY_OBSERVATION_FAILED")
+        return result.stdout
+
+    def inventory():
+        try:
+            full = [tuple(line.split()) for line in
+                    observe("-lfull").decode("ascii").splitlines() if line.strip()]
+            enabled = [tuple(line.split()) for line in
+                       observe("-l").decode("ascii").splitlines() if line.strip()]
+        except UnicodeError:
+            _reject("DEDICATED_POLICY_INVENTORY_REFUSED")
+        if (not full or not enabled
+                or any(len(row) < 3 or not row[0].isascii()
+                       or not row[0].isdecimal() for row in full)
+                or len(full) != len(set(full))
+                or len(enabled) != len(set(enabled))
+                or {row for row in full if row[1] == module}
+                   != {("400", module, "pp")}
+                or sum(row[0] == module for row in enabled) != 1):
+            _reject("DEDICATED_POLICY_INVENTORY_REFUSED")
+        return frozenset(full), frozenset(enabled)
+
+    before = inventory()
+    try:
+        # Fixed local name and a newly created root-only directory. No
+        # semodule install, enable, disable, reload or rebuild operation.
+        with tempfile.TemporaryDirectory(prefix="repocache-policy-readback-", dir="/var/tmp") as place:
+            with ExitStack() as stack:
+                directory = os.open(place, stage._DIRECTORY)
+                stack.callback(os.close, directory)
+                original = os.fstat(directory)
+                if (original.st_uid != 0 or original.st_gid != 0
+                        or stat.S_IMODE(original.st_mode) != 0o700
+                        or os.listdir(directory)):
+                    _reject("DEDICATED_POLICY_WORKSPACE_REFUSED")
+                observe("-X", "400", "--hll", "-E", module, cwd=place)
+                if (os.listdir(directory) != [leaf]
+                        or _identity(os.lstat(place)) != _identity(original)
+                        or stat.S_IMODE(os.fstat(directory).st_mode) != 0o700):
+                    _reject("DEDICATED_POLICY_WORKSPACE_REFUSED")
+                info = os.stat(leaf, dir_fd=directory, follow_symlinks=False)
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
+                        or info.st_gid != 0 or info.st_mode & 0o022
+                        or info.st_nlink != 1):
+                    _reject("DEDICATED_POLICY_MODULE_REFUSED")
+                raw = stage._asset_bytes(directory, leaf, 4 * 1024 * 1024,
+                                         installed_mode=stat.S_IMODE(info.st_mode))
+                after = os.stat(leaf, dir_fd=directory, follow_symlinks=False)
+                if (_identity(after) != _identity(info) or after.st_ctime_ns != info.st_ctime_ns
+                        or os.listdir(directory) != [leaf]
+                        or _identity(os.lstat(place)) != _identity(original)
+                        or hashlib.sha256(raw).hexdigest() != expected_sha256):
+                    _reject("DEDICATED_POLICY_MODULE_REFUSED")
+    except OSError:
+        _reject("DEDICATED_POLICY_OBSERVATION_FAILED")
+    if inventory() != before:
+        _reject("DEDICATED_POLICY_INVENTORY_CHANGED")
+    labels.finish()
+    require_native_host_preconditions()
+    return {
+        "compiled_policy_sha256": expected_sha256,
+        "stored_hll_verified": True,
+        "enabled_priority": 400,
+        "signed_source_compilation_verified": False,
+        "runtime_selinux_policy_verified": False,
+        "authorizes_policy_installation": False,
+        "authorizes_host_installation": False,
+        "authorizes_nginx_activation": False,
+    }
+
+
 def install_authenticated_worker(
     assets: Path, *, commit: str, archive_sha256: str,
 ) -> dict:
