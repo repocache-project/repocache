@@ -292,6 +292,15 @@ def load_fixed_candidate_policy():
     from scripts import install_native_root_worker as native
     root = Path("/root/pr237-synthetic-fixture")
     pins = json.loads((root / "pins.json").read_bytes())
+    tool_snapshot = native._fixed_policy_tool_snapshot()
+    tool_proof = native._authenticate_fixed_policy_tools()
+    assert tool_proof["native_fixed_tool_payloads_verified"]
+    assert not tool_proof["native_toolchain_provenance_verified"]
+    assert not tool_proof["authorizes_policy_installation"]
+    assert not tool_proof["authorizes_host_installation"]
+    assert not tool_proof["authorizes_nginx_activation"]
+    assert set(tool_proof["packages"]) == native._FIXED_POLICY_PACKAGES
+    assert native._fixed_policy_tool_snapshot() == tool_snapshot
     compiled_bytes, compilation = native._compile_authenticated_fixed_dedicated_policy(
         root / "assets", **pins)
     digest = hashlib.sha256(compiled_bytes).hexdigest()
@@ -319,6 +328,8 @@ def load_fixed_candidate_policy():
         assert hashlib.sha256(compiled.read_bytes()).hexdigest() == digest
     assert _fixed_policy_inventory() == before_full | {("400", FIXED_MODULE, "pp")}
     assert verify_fixed_loaded_policy(digest) == digest
+    assert native._fixed_policy_tool_snapshot() == tool_snapshot
+    print("PASS: exact fixed SELinux compiler, Makefile and semodule match signed native RPM members", flush=True)
     try:
         verify_fixed_loaded_policy("0" * 64)
     except AssertionError:

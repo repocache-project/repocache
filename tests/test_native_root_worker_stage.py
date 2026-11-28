@@ -1664,3 +1664,111 @@ def test_authenticated_policy_compilation_pins_native_inputs_and_output(monkeypa
         assert not calls
     else:
         assert len(calls) == 1 and not calls[0].exists()
+
+@pytest.mark.parametrize("package,identity,valid", [
+    ("nginx-core", "nginx-core-0:1.28.0-2.el10.x86_64", True),
+    ("make", "make-1:4.4.1-9.el10.x86_64", True),
+    ("selinux-policy-devel", "selinux-policy-devel-0:42.1-1.el10.noarch", True),
+    ("policycoreutils", "policycoreutils-0:3.8-1.el10.x86_64", True),
+    ("selinux-policy-devel", "selinux-policy-devel-0:42.1-1.el10.x86_64", False),
+    ("make", "make-0:4.4-1.el10.x86_64\nmake-0:4.5-1.el10.x86_64", False),
+    ("make", "--installroot=/tmp", False),
+    ("policycoreutils", "foreign-0:1-1.x86_64", False),
+    ("foreign", "foreign-0:1-1.x86_64", False),
+])
+def test_fixed_native_rpm_identity_and_member_scope(package, identity, valid):
+    if valid:
+        install._fixed_alma_rpm_identity(package, identity)
+        member = install._FIXED_ALMA_RPM_MEMBERS[package][0]
+        assert install._fixed_alma_rpm_member_digest(
+            package, "/foreign\t" + "f"*64 + "\n" + member + "\t" + "a"*64) == "a"*64
+    else:
+        with pytest.raises(stage.WorkerStageError):
+            install._fixed_alma_rpm_identity(package, identity)
+
+
+@pytest.mark.parametrize("fault", ["missing", "duplicate", "bad-digest", "foreign-path", "oversize"])
+def test_fixed_native_rpm_member_refuses_ambiguous_or_foreign_digest(fault):
+    member = "/usr/share/selinux/devel/Makefile\t" + "a"*64
+    rows = {
+        "missing": "", "duplicate": member + "\n" + member,
+        "bad-digest": member[:-1] + "G",
+        "foreign-path": "/tmp" + member, "oversize": member + "\n" + "x"*65536,
+    }[fault]
+    with pytest.raises(stage.WorkerStageError):
+        install._fixed_alma_rpm_member_digest("selinux-policy-devel", rows)
+
+
+@pytest.mark.parametrize("fault", ["partial", "foreign", "invalid-identity"])
+def test_native_rpm_candidate_scope_refuses_before_metadata_refresh(monkeypatch, tmp_path, fault):
+    from repocache import server_native_package_trust_v1 as trust
+    monkeypatch.setattr(trust, "_dnf_commands", lambda *args: pytest.fail("DNF reached"))
+    identities = {"make": "make-0:4.4-1.x86_64"} if fault == "partial" else (
+        {"foreign": "foreign-0:1-1.x86_64"} if fault == "foreign" else
+        {"nginx-core": "nginx-core-0:1-1.noarch"})
+    with pytest.raises(stage.WorkerStageError):
+        install._authenticate_fixed_alma_rpm_members(tmp_path, identities)
+
+
+@pytest.mark.parametrize("fault", ["none", "debian", "owner", "owner-drift", "file-drift",
+                                   "digest", "missing-package", "signature"])
+def test_fixed_policy_native_tool_proof_binds_all_three_members(monkeypatch, tmp_path, fault):
+    from types import SimpleNamespace
+    packages = install._FIXED_POLICY_PACKAGES
+    identities = {package: package + "-0:1.0-1.el10." + install._FIXED_ALMA_RPM_MEMBERS[package][1]
+                  for package in packages}
+    observed = {package: ((1, number), hashlib.sha256(package.encode()).hexdigest())
+                for number, package in enumerate(sorted(packages))}
+    calls = []
+    snapshots = []
+    monkeypatch.setattr(install, "_native_distro", lambda: "debian" if fault == "debian" else "almalinux")
+    monkeypatch.setattr(install, "require_native_host_preconditions", lambda: None)
+    monkeypatch.setattr(install, "_Labels", lambda *args, **kw: SimpleNamespace(finish=lambda: None))
+    monkeypatch.setattr(install, "_native_workspace_is_root_owned", lambda work: True)
+
+    def snapshot():
+        snapshots.append(True)
+        if fault == "file-drift" and len(snapshots) > 1:
+            return {**observed, "make": ((1, 999), observed["make"][1])}
+        return observed.copy()
+
+    monkeypatch.setattr(install, "_fixed_policy_tool_snapshot", snapshot)
+
+    def command(argv, work):
+        assert argv[:2] == ["/usr/bin/rpm", "-qf"] and len(argv) == 4
+        package = next(key for key in packages if install._FIXED_ALMA_RPM_MEMBERS[key][0] == argv[-1])
+        calls.append(package)
+        if fault == "owner" or (fault == "owner-drift" and len(calls) > 3):
+            return "foreign-0:1-1.x86_64"
+        return identities[package]
+
+    monkeypatch.setattr(install, "_native_package_command", command)
+    authenticated = []
+
+    def authenticate(work, pins):
+        assert pins == identities
+        authenticated.append(True)
+        if fault == "signature":
+            raise stage.WorkerStageError("fixture signature refusal")
+        result = {package: ("a"*64, observed[package][1]) for package in packages}
+        if fault == "digest":
+            result["make"] = ("a"*64, "0"*64)
+        if fault == "missing-package":
+            del result["make"]
+        return result
+
+    monkeypatch.setattr(install, "_authenticate_fixed_alma_rpm_members", authenticate)
+    if fault == "none":
+        report = install._authenticate_fixed_policy_tools()
+        assert report["native_fixed_tool_payloads_verified"] is True
+        assert not report["native_toolchain_provenance_verified"]
+        assert all(value is False for key, value in report.items() if key.startswith("authorizes_"))
+        assert set(report["packages"]) == packages
+        assert len(calls) == 6 and len(snapshots) == 2 and authenticated == [True]
+    else:
+        with pytest.raises(stage.WorkerStageError):
+            install._authenticate_fixed_policy_tools()
+        if fault == "debian":
+            assert not calls and not snapshots and not authenticated
+        elif fault == "owner":
+            assert len(calls) == 1 and not authenticated

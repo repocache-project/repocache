@@ -2135,3 +2135,15 @@ existing disposable guard, then exercises the separate exact HLL readback.
 The compiler result does not attest all native toolchain dependencies, load a
 policy, authorize host placement or permit activation. Those gates remain
 separate; no stock labels or global SELinux policy are changed by compilation.
+
+The AlmaLinux candidate also verifies the exact installed top-level
+compiler, SELinux development Makefile and semodule bytes against their
+independently authenticated distro RPM members. The fixed-member verifier
+reuses the NGINX candidate's HTTPS repository, OS trust-anchor and isolated
+RPMDB checks; a single scratch metadata view and RPMDB serve the three
+fixed tool packages. It refuses ambiguous or wrong package identities,
+wrong member digests and observed local drift. The native disposable
+campaign compares the observed fixed tool file identities around actual
+compilation and policy loading. This proves only those fixed tool payloads,
+not every transitive tool or dependency, nor the active kernel policy or
+authority to install/activate on a real host.
