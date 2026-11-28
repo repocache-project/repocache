@@ -3014,11 +3014,11 @@ finally:
                         **pins, executable_receipt_sha256=executable_proof["receipt_sha256"],
                         profile_receipt_sha256=prior["profile"]["receipt_sha256"],
                         boot_receipt_sha256=result["receipt_sha256"], wal_sha256=wal_hash)
-                    # Exercise the actual installer handoff, not a fixture
-                    # dispatcher. The parent authenticates source/RPM; the
-                    # fixed installed child independently holds the lock.
-                    finished = native._recover_authenticated_prepared_dedicated_nginx(
-                        assets, **recovery_pins)
+                    # Select from durable prior-boot intent without fixture
+                    # receipt digests; the signed child independently verifies
+                    # the recovered pins and retains its own exclusive lock.
+                    finished = native._recover_authenticated_rolled_dedicated_nginx(
+                        assets, **pins)
                     assert finished["status"] == "OWNED_DEDICATED_WAL_ROLLBACK_OBSERVED"
                     try:
                         native._recover_authenticated_prepared_dedicated_nginx(

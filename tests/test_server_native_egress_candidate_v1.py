@@ -933,3 +933,54 @@ def test_fresh_boot_intent_refuses_nonloopback_or_upstream_before_state_read(
             -1, rules, generation=1, generation_manifest_sha256="a"*64,
             profile_receipt_sha256="b"*64, executable_receipt_sha256="c"*64,
             allow_boot_rollover=False)
+
+
+
+@pytest.mark.parametrize("fault", ["none", "missing", "same-boot", "wrong-name",
+                                    "different-pin", "wrong-generation", "wrong-policy",
+                                    "noncanonical", "duplicate", "active"])
+def test_reconstruct_rolled_intent_requires_independent_history(fault):
+    from repocache import server_native_egress_candidate_v1 as egress
+    from repocache.server_protected_state_store_v1 import _canonical, _json
+
+    rules = egress.render_bootstrap_egress_candidate(worker_uid=987)["nft_candidate"]
+    current_boot = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    old_boot = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    other_boot = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+    prior = dict(schema_version=1, boot_id=old_boot, namespace_device=1,
+                 namespace_inode=2, generation=1, generation_manifest_sha256="d"*64,
+                 profile_receipt_sha256="e"*64, executable_receipt_sha256="f"*64,
+                 ruleset_sha256=hashlib.sha256(
+                     egress._canonical_ruleset(rules).encode("ascii")).hexdigest(),
+                 authorizes_nginx_activation=False)
+    other = dict(prior, boot_id=other_boot, namespace_inode=3)
+    if fault == "same-boot":
+        prior["boot_id"] = current_boot
+        old_boot = current_boot
+    elif fault == "different-pin":
+        other["executable_receipt_sha256"] = "0"*64
+    elif fault == "wrong-generation":
+        prior["generation"] = 2
+    elif fault == "wrong-policy":
+        prior["ruleset_sha256"] = "0"*64
+    elif fault == "wrong-name":
+        old_boot = "dddddddd-dddd-dddd-dddd-dddddddddddd"
+    elif fault == "active":
+        rules = egress._render_closed_output_rules("127.0.0.1", 8008, (("1.1.1.1", 443),), 987)
+    prefix = egress._BOOT_EGRESS_HISTORY_PREFIX
+    raw = _canonical(prior, limit=4096)
+    history = ((prefix + old_boot, raw if fault != "noncanonical" else raw + b" "),
+               (prefix + other_boot, _canonical(other, limit=4096)))
+    if fault == "missing":
+        history = ()
+    elif fault == "duplicate":
+        history += (history[0],)
+    options = dict(boot=current_boot, namespace_identity=(7, 8), generation=1,
+                   generation_manifest_sha256="d"*64)
+    if fault != "none":
+        with pytest.raises(ValueError):
+            egress._reconstruct_rolled_boot_receipt(history, rules, **options)
+    else:
+        receipt = egress._reconstruct_rolled_boot_receipt(history, rules, **options)
+        assert _json(receipt, limit=4096) == dict(
+            prior, boot_id=current_boot, namespace_device=7, namespace_inode=8)

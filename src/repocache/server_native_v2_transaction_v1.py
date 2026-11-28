@@ -3736,6 +3736,69 @@ def _recover_owned_prepared_dedicated_locked(
         expected_listener=listener)
 
 
+def _retained_rolled_dedicated_recovery_pins_locked(root_fd: int, state_fd: int) -> dict:
+    """Resolve only already prepared post-reboot recovery; no writes or effects."""
+    from repocache.server_native_egress_candidate_v1 import (
+        _BOOT_EGRESS_HISTORY_PREFIX, _BOOT_EGRESS_ROLLOVER, _BOOT_EGRESS_RECEIPT_MAX,
+        _current_boot_id, _fixed_namespace_scope, _read_namespace_rules,
+        _reconstruct_rolled_boot_receipt, verify_namespace_egress_readback,
+    )
+
+    _verify_current_root_fd(root_fd)
+    with _owned_layout_locked(root_fd, state_fd, recovering=True) as layout:
+        state, nginx, public, check_layout = layout
+        wal = _read_file(state, _OWNED_WAL, 0, _MAX_WAL)
+        if wal is None or _json(wal, limit=_MAX_WAL).get("version") != 3:
+            _deny("OWNED_WAL_CHANGED")
+        old, _ = _decode_owned_wal(wal, distribution="almalinux")
+        snapshot = _validate_owned_resources(old, distribution="almalinux")
+        if snapshot is None:
+            _deny("OWNED_DEDICATED_FINISH_MANAGED_REQUIRED")
+        _owned_socket_require_inactive_routes(snapshot)
+        current = _read_owned_resources(state, nginx, public)
+        if current not in (old, {**old, _CATALOG: None}):
+            _deny("OWNED_LIVE_RESOURCE_DRIFT")
+        plan = _owned_boot_egress_plan(
+            old, distribution="almalinux", worker_uid=pwd.getpwnam("nginx").pw_uid)
+
+        def history():
+            names = sorted(name for name in os.listdir(state)
+                           if name.startswith(_BOOT_EGRESS_HISTORY_PREFIX))
+            if not 1 <= len(names) <= 64 or _read_boot_egress_receipt(
+                    state, 0, 0, name=_BOOT_EGRESS_ROLLOVER) is not None:
+                _deny("OWNED_DEDICATED_INSTALLER_BOOT_REFUSED")
+            return tuple((name, _read_boot_egress_receipt(state, 0, 0, name=name))
+                         for name in names)
+
+        with _fixed_namespace_scope() as (net, identity, recheck_namespace):
+            boot = _current_boot_id()
+            retained = history()
+            expected = _reconstruct_rolled_boot_receipt(
+                retained, plan["nft_candidate"], boot=boot, namespace_identity=identity,
+                generation=plan["generation"],
+                generation_manifest_sha256=plan["generation_manifest_sha256"])
+
+            def guard():
+                _owned_live_guard(state, nginx, public, check_layout, wal, current)
+                _owned_check_stages_absent(state, nginx, public)
+                recheck_namespace()
+                if (_current_boot_id() != boot or history() != retained
+                        or _read_boot_egress_receipt(state, 0, 0) != expected):
+                    _deny("OWNED_DEDICATED_INSTALLER_BOOT_REFUSED")
+
+            for _ in range(2):
+                guard()
+                verify_namespace_egress_readback(
+                    plan["nft_candidate"], _read_namespace_rules(net))
+            guard()
+            record = _json(expected, limit=_BOOT_EGRESS_RECEIPT_MAX)
+            return {key: record[key] for key in
+                    ("profile_receipt_sha256", "executable_receipt_sha256")} | {
+                "boot_receipt_sha256": hashlib.sha256(expected).hexdigest(),
+                "wal_sha256": hashlib.sha256(wal).hexdigest(),
+            }
+
+
 def _recover_installed_prepared_dedicated(pins: dict) -> dict:
     """Private root installer handoff, not the socket dispatcher.
 

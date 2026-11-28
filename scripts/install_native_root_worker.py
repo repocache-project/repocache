@@ -1552,9 +1552,35 @@ def _recover_authenticated_prepared_dedicated_nginx(
     Authenticate in a read-only phase (private package scratch only);
     the installed child acquires its own lock and rechecks every pin.
     """
-    if (any(type(value) is not str or signatures.HEX64.fullmatch(value) is None
-            for value in (archive_sha256, executable_receipt_sha256,
-                          profile_receipt_sha256, boot_receipt_sha256, wal_sha256))
+    return _authenticated_prepared_dedicated_bridge(
+        assets, commit=commit, archive_sha256=archive_sha256,
+        recovery_pins=dict(executable_receipt_sha256=executable_receipt_sha256,
+                           profile_receipt_sha256=profile_receipt_sha256,
+                           boot_receipt_sha256=boot_receipt_sha256, wal_sha256=wal_sha256))
+
+
+def _recover_authenticated_rolled_dedicated_nginx(
+    assets: Path, *, commit: str, archive_sha256: str,
+) -> dict:
+    """Select already prepared recovery from protected prior-boot intent."""
+    return _authenticated_prepared_dedicated_bridge(
+        assets, commit=commit, archive_sha256=archive_sha256, recovery_pins=None)
+
+
+def _authenticated_prepared_dedicated_bridge(
+    assets: Path, *, commit: str, archive_sha256: str, recovery_pins: dict | None,
+) -> dict:
+    def validate_pins(pins):
+        if (type(pins) is not dict or set(pins) != {
+                "executable_receipt_sha256", "profile_receipt_sha256",
+                "boot_receipt_sha256", "wal_sha256"}
+                or any(type(value) is not str or signatures.HEX64.fullmatch(value) is None
+                       for value in pins.values())):
+            _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
+
+    if recovery_pins is not None:
+        validate_pins(recovery_pins)
+    if (type(archive_sha256) is not str or signatures.HEX64.fullmatch(archive_sha256) is None
             or type(commit) is not str or signatures.HEX40.fullmatch(commit) is None
             or _native_distro() != "almalinux"):
         _reject("NATIVE_DEDICATED_RECOVERY_PIN_REFUSED")
@@ -1574,6 +1600,13 @@ def _recover_authenticated_prepared_dedicated_nginx(
                        != {_MARKER + "complete-" + placement_sha}
                     or _read_file(state, _MARKER + "complete-" + placement_sha, 0, 0) != b""):
                 _reject("NATIVE_DEDICATED_RECOVERY_PLACEMENT_REFUSED")
+            if recovery_pins is None:
+                from repocache.server_native_v2_transaction_v1 import (
+                    _retained_rolled_dedicated_recovery_pins_locked,
+                )
+                recovery_pins = _retained_rolled_dedicated_recovery_pins_locked(root, state)
+            validate_pins(recovery_pins)
+            wal_sha256 = recovery_pins["wal_sha256"]
             wal = _read_file(state, _OWNED_WAL, 0, _MAX_WAL)
             if wal is None or hashlib.sha256(wal).hexdigest() != wal_sha256:
                 _reject("NATIVE_DEDICATED_RECOVERY_WAL_REFUSED")
@@ -1595,9 +1628,7 @@ def _recover_authenticated_prepared_dedicated_nginx(
                 worker_sha256=hashlib.sha256(payloads[stage.WORKER]).hexdigest(),
                 placement_sha256=placement_sha, package_identity=package,
                 native_payload_sha256=native_digest, binary_sha256=binary_digest,
-                executable_receipt_sha256=executable_receipt_sha256,
-                profile_receipt_sha256=profile_receipt_sha256,
-                boot_receipt_sha256=boot_receipt_sha256, wal_sha256=wal_sha256)
+                **recovery_pins)
     try:
         result = subprocess.run(
             ("/usr/bin/python3", "-IS", "-B", "-c", _DEDICATED_RECOVERY_CHILD),

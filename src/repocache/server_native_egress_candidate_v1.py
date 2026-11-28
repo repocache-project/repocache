@@ -753,6 +753,62 @@ def _require_prior_boot_bindings(previous, current) -> None:
         raise NativeEgressCandidateError("NATIVE_EGRESS_BOOT_ROLLOVER_REFUSED")
 
 
+def _reconstruct_rolled_boot_receipt(history: tuple, proposed: str, *,
+                                     boot: str, namespace_identity: tuple[int, int],
+                                     generation: int, generation_manifest_sha256: str) -> bytes:
+    """Reconstruct current intent using independent retained prior-boot pins.
+
+    History is protected installation-local evidence, not a release signature.
+    The installer must still authenticate the package, worker and both receipts.
+    This read-only selection is limited to already rolled, inactive-route policy.
+    """
+    from repocache.server_protected_state_store_v1 import _canonical, _json
+
+    if (type(history) is not tuple or not 1 <= len(history) <= 64
+            or type(boot) is not str or _BOOT_ID.fullmatch(boot) is None
+            or type(namespace_identity) is not tuple or len(namespace_identity) != 2
+            or any(type(x) is not int or x <= 0 for x in namespace_identity)
+            or type(generation) is not int or not 1 <= generation <= MAX_INT
+            or type(generation_manifest_sha256) is not str
+            or _SHA256.fullmatch(generation_manifest_sha256) is None):
+        raise NativeEgressCandidateError("NATIVE_EGRESS_ROLLED_INTENT_REFUSED")
+    canonical = _canonical_ruleset(proposed)
+    health, rules = _closed_ruleset(canonical)
+    if rules or not ipaddress.ip_address(health[0]).is_loopback:
+        raise NativeEgressCandidateError("NATIVE_EGRESS_ROLLED_INTENT_REFUSED")
+    expected = None
+    seen = set()
+    for row in history:
+        if type(row) is not tuple or len(row) != 2:
+            raise NativeEgressCandidateError("NATIVE_EGRESS_ROLLED_INTENT_REFUSED")
+        name, raw = row
+        if (type(name) is not str or not name.startswith(_BOOT_EGRESS_HISTORY_PREFIX)
+                or name in seen or type(raw) is not bytes):
+            raise NativeEgressCandidateError("NATIVE_EGRESS_ROLLED_INTENT_REFUSED")
+        seen.add(name)
+        previous = _json(raw, limit=_BOOT_EGRESS_RECEIPT_MAX)
+        if (type(previous) is not dict
+                or previous.get("boot_id") != name[len(_BOOT_EGRESS_HISTORY_PREFIX):]
+                or _canonical(previous, limit=_BOOT_EGRESS_RECEIPT_MAX) != raw):
+            raise NativeEgressCandidateError("NATIVE_EGRESS_ROLLED_INTENT_REFUSED")
+        if expected is None:
+            pins = {key: previous.get(key) for key in
+                    ("profile_receipt_sha256", "executable_receipt_sha256")}
+            if any(type(value) is not str or _SHA256.fullmatch(value) is None
+                   for value in pins.values()):
+                raise NativeEgressCandidateError("NATIVE_EGRESS_ROLLED_INTENT_REFUSED")
+            expected = {
+                "schema_version": 1, "boot_id": boot,
+                "namespace_device": namespace_identity[0],
+                "namespace_inode": namespace_identity[1], "generation": generation,
+                "generation_manifest_sha256": generation_manifest_sha256,
+                **pins, "ruleset_sha256": hashlib.sha256(canonical.encode("ascii")).hexdigest(),
+                "authorizes_nginx_activation": False,
+            }
+        _require_prior_boot_bindings(previous, expected)
+    return _canonical(expected, limit=_BOOT_EGRESS_RECEIPT_MAX)
+
+
 def _fresh_boot_egress_intent_locked(
     state_fd: int, proposed: str, *, generation: int,
     generation_manifest_sha256: str, profile_receipt_sha256: str,

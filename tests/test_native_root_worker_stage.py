@@ -807,7 +807,8 @@ def test_executable_candidate_selects_retained_native_effects_lock(
 
 
 @pytest.mark.parametrize("fault", ["invalid-pin", "debian", "release", "placement",
-                                   "wal", "package", "child", "wrong-report", "none"])
+                                   "wal", "package", "child", "wrong-report", "none",
+                                   "rolled", "rolled-refusal"])
 def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, tmp_path, fault):
     from contextlib import contextmanager
     from types import SimpleNamespace
@@ -886,7 +887,24 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
                    executable_receipt_sha256="invalid" if fault == "invalid-pin" else "c"*64,
                    profile_receipt_sha256="d"*64, boot_receipt_sha256="9"*64,
                    wal_sha256=hashlib.sha256(wal).hexdigest())
-    if fault == "none":
+    if fault in ("rolled", "rolled-refusal"):
+        from repocache import server_native_v2_transaction_v1 as tx
+        def retained(root, fd):
+            assert locked
+            calls.append("history")
+            if fault == "rolled-refusal":
+                raise stage.WorkerStageError("HISTORY_REFUSED")
+            return {key: value for key, value in options.items()
+                    if key not in ("commit", "archive_sha256")}
+        monkeypatch.setattr(tx, "_retained_rolled_dedicated_recovery_pins_locked", retained)
+        release = {key: options[key] for key in ("commit", "archive_sha256")}
+        if fault == "rolled":
+            assert install._recover_authenticated_rolled_dedicated_nginx(
+                tmp_path, **release)["catalog_observed"]
+        else:
+            with pytest.raises(stage.WorkerStageError):
+                install._recover_authenticated_rolled_dedicated_nginx(tmp_path, **release)
+    elif fault == "none":
         assert install._recover_authenticated_prepared_dedicated_nginx(tmp_path, **options)["catalog_observed"]
     else:
         with pytest.raises(stage.WorkerStageError):
@@ -894,5 +912,7 @@ def test_prepared_dedicated_installer_bridge_uses_fresh_child_lock(monkeypatch, 
     assert calls == ([] if fault in ("invalid-pin", "debian") else
                      ["release"] if fault in ("release", "placement", "wal") else
                      ["release", "rpm"] if fault == "package" else
+                     ["release", "history"] if fault == "rolled-refusal" else
+                     ["release", "history", "rpm", "child"] if fault == "rolled" else
                      ["release", "rpm", "child"])
     assert not locked
