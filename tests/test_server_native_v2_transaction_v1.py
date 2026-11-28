@@ -4393,7 +4393,7 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
     from repocache import server_native_egress_candidate_v1 as egress
     from repocache import server_root_control_host_preflight_v1 as host
     from repocache import server_root_control_worker_v1 as worker
-    from repocache.server_protected_state_store_v1 import ProtectedStateStoreError
+    from repocache.server_protected_state_store_v1 import ProtectedStateStoreError, _canonical
 
     rootfd, state_path, _, _, _ = filesystem
     directory = state_path.parents[3] / "usr/libexec/repocache"
@@ -4402,7 +4402,7 @@ def test_installed_dedicated_recovery_rechecks_pins_under_real_lock(filesystem, 
     rolling = fault.startswith("rollover")
     prior_boot_id = "11111111-1111-1111-1111-111111111111"
     new_boot_id = "22222222-2222-2222-2222-222222222222"
-    boot = ((json.dumps({"boot_id": prior_boot_id}, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+    boot = (_canonical({"boot_id": prior_boot_id}, limit=8192)
             if rolling else b"exact boot intent")
     placement = {
         "schema_version": 1, "status": "AUTHENTICATED_WORKER_STAGED", "version": "0.6.0",
