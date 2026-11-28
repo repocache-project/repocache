@@ -28,7 +28,6 @@ jobs:
       PR237_PLATFORM: ${{ matrix.platform }}
       PR237_IMAGE_SHA512: ${{ matrix.image_sha512 }}
       PR237_IMAGE_SHA256: ${{ matrix.image_sha256 }}
-      BENCH_IMAGE: ${{ runner.temp }}/benchmark-image/base.qcow2
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -37,7 +36,9 @@ jobs:
         run: |
           set -Eeuo pipefail
           mkdir -m 700 "$RUNNER_TEMP/benchmark-image"
+          BENCH_IMAGE="$RUNNER_TEMP/benchmark-image/base.qcow2"
           test ! -e "$BENCH_IMAGE" && test ! -L "$BENCH_IMAGE"
+          echo "BENCH_IMAGE=$BENCH_IMAGE" >> "$GITHUB_ENV"
           echo "CACHE_START=$(date +%s)" >> "$GITHUB_ENV"
       - name: Restore previously saved exact digest without writing
         id: cache
